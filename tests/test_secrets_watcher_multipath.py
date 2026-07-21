@@ -13,7 +13,15 @@ flow machinery:
   delete and only the copies carrying the imported content are removed,
 * a foreign account and an unidentifiable file always survive,
 * an aborted/failed flow leaving every file in place,
-* a missing extra path being a strict no-op.
+* a missing extra path being a strict no-op,
+* the *timing* of the delete (P2): the confirmed discovery flow only STAGES the
+  delete in ``hass.data`` and the file survives the step, because
+  ``ConfigFlow.async_create_entry`` merely builds a FlowResult while Home
+  Assistant stores the entry afterwards in
+  ``ConfigEntriesFlowManager.async_finish_flow``. The staged job is executed
+  once by the runner ``async_setup_entry`` calls, survives a failing delete,
+  and is not repeated on a reload. The discovery *update* case keeps its inline
+  delete (``async_update_entry`` persists synchronously).
 """
 
 from __future__ import annotations
@@ -26,10 +34,18 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from homeassistant.helpers import frame
 
 from custom_components.googlefindmy import config_flow, discovery
 from custom_components.googlefindmy.const import DOMAIN, SECRETS_EXTRA_WATCH_PATHS
+from custom_components.googlefindmy.email_utils import unique_account_id
 from tests.helpers.config_entries_stub import make_config_entry
+from tests.helpers.config_flow import (
+    ConfigEntriesDomainUniqueIdLookupMixin,
+    attach_config_entries_flow_manager,
+    prepare_flow_hass_config_entries,
+    set_config_flow_unique_id,
+)
 
 pytestmark = pytest.mark.asyncio
 
@@ -752,3 +768,307 @@ async def test_payload_digest_matches_on_disk_digest_across_normalization(
 
     assert config_flow._digest_for_discovery_payload(payload) == on_disk.digest
     assert config_flow._stable_key_for_discovery_payload(payload) == on_disk.stable_key
+
+
+# ---------------------------------------------------------------------------
+# Deferred delete (P2): staged in the flow, executed in async_setup_entry
+#
+# ``ConfigFlow.async_create_entry`` only builds a FlowResult -- Home Assistant
+# creates and stores the entry afterwards in
+# ``ConfigEntriesFlowManager.async_finish_flow`` (``await
+# self.config_entries.async_add(entry)``). Deleting the imported secrets files
+# inside the step would therefore destroy the credentials while the entry may
+# still fail to materialise. The flow stages the delete in ``hass.data``
+# (in-memory only, never HA storage) and ``async_setup_entry`` runs it.
+# ---------------------------------------------------------------------------
+
+
+def _importable_bundle(email: str, token: str) -> dict[str, Any]:
+    """A bundle that passes the discovery single-key gate (needs a shared_key)."""
+
+    return {
+        "google_email": email,
+        "oauth_token": token,
+        "shared_key": "DDEEFF",
+    }
+
+
+def _staged_cleanup(hass: Any) -> dict[str, list[Any]]:
+    """Return the in-memory staging area the flow writes its cleanup jobs to."""
+
+    bucket = hass.data.get(DOMAIN) or {}
+    staged = bucket.get(config_flow.PENDING_CONTAINER_CLEANUP_KEY) or {}
+    assert isinstance(staged, dict)
+    return staged
+
+
+async def test_discovery_confirm_stages_delete_instead_of_running_it(
+    tmp_path: Path,
+) -> None:
+    """The confirmed discovery flow stages the delete; the file survives the step.
+
+    Pins the actual regression: a ``CREATE_ENTRY`` FlowResult is a promise, not
+    a stored entry, so the watched copies must still be on disk when the step
+    returns. Only the staged job is observable.
+    """
+
+    hass = _FakeHass()
+    watched = tmp_path / "data" / "secrets.json"
+    bundle = _importable_bundle("user@example.com", "aas_et/CONFIRMED")
+    watched.parent.mkdir(parents=True, exist_ok=True)
+    watched.write_text(json.dumps(bundle), encoding="utf-8")
+    hass.data[DOMAIN] = {"discovery_manager": SimpleNamespace(watch_paths=(watched,))}
+
+    on_disk = discovery.read_secrets_bundle(watched)
+    assert on_disk is not None
+
+    payload = config_flow._normalize_and_validate_discovery_payload(
+        {"google_email": "user@example.com", "secrets_json": dict(bundle)}
+    )
+
+    flow = config_flow.ConfigFlow()
+    flow.hass = hass  # type: ignore[assignment]
+    flow.context = {}
+    flow._discovery_confirm_pending = True  # type: ignore[attr-defined]
+    flow._pending_discovery_payload = payload  # type: ignore[attr-defined]
+    flow._pending_discovery_updates = None  # type: ignore[attr-defined]
+
+    async def _fake_device_selection() -> dict[str, Any]:
+        return {"type": config_flow.data_entry_flow.FlowResultType.CREATE_ENTRY}
+
+    flow.async_step_device_selection = _fake_device_selection  # type: ignore[assignment]
+
+    result = await flow.async_step_discovery({})
+    assert result["type"] == config_flow.data_entry_flow.FlowResultType.CREATE_ENTRY
+
+    # NOT deleted yet: the entry does not exist at this point.
+    assert watched.exists()
+
+    # Staged instead, under the fallback bucket because this synthetic flow
+    # never set a unique id.
+    staged = _staged_cleanup(hass)
+    jobs = staged[config_flow._PENDING_CLEANUP_UNKNOWN_ACCOUNT]
+    assert len(jobs) == 1
+    # The staged identity is the one of the file that must eventually go.
+    assert jobs[0].imported_stable_key == on_disk.stable_key
+    assert jobs[0].imported_digest == on_disk.digest
+    # A pure delete job carries no container ack.
+    assert jobs[0].ack is None
+
+
+async def test_aborted_discovery_confirm_stages_nothing(tmp_path: Path) -> None:
+    """Device selection that does not create an entry stages no delete."""
+
+    hass = _FakeHass()
+    watched = tmp_path / "data" / "secrets.json"
+    bundle = _importable_bundle("user@example.com", "aas_et/ABORTED_TOKEN_VALUE")
+    watched.parent.mkdir(parents=True, exist_ok=True)
+    watched.write_text(json.dumps(bundle), encoding="utf-8")
+    hass.data[DOMAIN] = {"discovery_manager": SimpleNamespace(watch_paths=(watched,))}
+
+    payload = config_flow._normalize_and_validate_discovery_payload(
+        {"google_email": "user@example.com", "secrets_json": dict(bundle)}
+    )
+
+    flow = config_flow.ConfigFlow()
+    flow.hass = hass  # type: ignore[assignment]
+    flow.context = {}
+    flow._discovery_confirm_pending = True  # type: ignore[attr-defined]
+    flow._pending_discovery_payload = payload  # type: ignore[attr-defined]
+    flow._pending_discovery_updates = None  # type: ignore[attr-defined]
+
+    async def _fake_device_selection() -> dict[str, Any]:
+        return {"type": "form", "step_id": "device_selection"}
+
+    flow.async_step_device_selection = _fake_device_selection  # type: ignore[assignment]
+
+    result = await flow.async_step_discovery({})
+    assert result["type"] == "form"
+    assert watched.exists()
+    assert _staged_cleanup(hass) == {}
+
+
+async def test_staged_delete_runs_once_when_setup_entry_claims_it(
+    tmp_path: Path,
+) -> None:
+    """The runner deletes the consumed copies, and only for the first claim.
+
+    The second run stands in for a reload: ``async_setup_entry`` executes again
+    on every reload, so a re-created bundle (the watcher's next import) must NOT
+    be swept away by a job that already ran.
+    """
+
+    hass = _FakeHass()
+    watched = tmp_path / "data" / "secrets.json"
+    _write_secrets(watched, "user@example.com", token="aas_et/DEFERRED")
+    hass.data[DOMAIN] = {"discovery_manager": SimpleNamespace(watch_paths=(watched,))}
+
+    config_flow._async_stage_container_cleanup(
+        hass,
+        unique_id="user@example.com",
+        job=config_flow.PendingContainerCleanup(
+            imported_stable_key=_stable_key_for("user@example.com", "aas_et/DEFERRED"),
+            imported_digest=_digest_for("user@example.com", "aas_et/DEFERRED"),
+        ),
+    )
+    assert watched.exists()
+
+    await config_flow.async_run_pending_container_cleanup(
+        hass, unique_id="user@example.com"
+    )
+    assert not watched.exists()
+    assert _staged_cleanup(hass) == {}
+
+    # Reload with a freshly written bundle: the job was consumed, so nothing
+    # touches the new file.
+    _write_secrets(watched, "user@example.com", token="aas_et/DEFERRED")
+    await config_flow.async_run_pending_container_cleanup(
+        hass, unique_id="user@example.com"
+    )
+    assert watched.exists()
+
+
+async def test_staged_delete_failure_never_propagates(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A delete that blows up must not surface in ``async_setup_entry``.
+
+    The credential file simply stays put and the watcher re-imports it on its
+    next scan, which is strictly better than failing an otherwise good setup.
+    """
+
+    hass = _FakeHass()
+    watched = tmp_path / "data" / "secrets.json"
+    _write_secrets(watched, "user@example.com", token="aas_et/BOOM")
+    hass.data[DOMAIN] = {"discovery_manager": SimpleNamespace(watch_paths=(watched,))}
+
+    async def _boom(*_args: Any, **_kwargs: Any) -> None:
+        raise RuntimeError("delete exploded")
+
+    monkeypatch.setattr(config_flow, "_async_delete_watched_secrets", _boom)
+
+    config_flow._async_stage_container_cleanup(
+        hass,
+        unique_id="user@example.com",
+        job=config_flow.PendingContainerCleanup(
+            imported_stable_key=_stable_key_for("user@example.com", "aas_et/BOOM"),
+            imported_digest=_digest_for("user@example.com", "aas_et/BOOM"),
+        ),
+    )
+
+    # Must not raise.
+    await config_flow.async_run_pending_container_cleanup(
+        hass, unique_id="user@example.com"
+    )
+    assert watched.exists()
+
+
+class _UpdateFlowHass:
+    """Hass double for the discovery-*update* flow (existing entry present).
+
+    Richer than :class:`_FakeHass`: the update path resolves an existing entry,
+    writes it through ``async_update_entry`` and schedules a reload, so the
+    ``config_entries`` double needs the lookup/update/reload surface on top of
+    the executor hop the delete hook uses.
+    """
+
+    def __init__(self, entry: Any) -> None:
+        self.data: dict[str, Any] = {}
+        self._entry = entry
+
+        class _ConfigEntries(ConfigEntriesDomainUniqueIdLookupMixin):
+            def __init__(self) -> None:
+                self.updated: list[tuple[Any, dict[str, Any]]] = []
+                self.reloaded: list[str] = []
+                attach_config_entries_flow_manager(self)
+
+            def async_entries(self, domain: str) -> list[Any]:
+                return [entry] if domain == DOMAIN else []
+
+            def async_get_entry(self, entry_id: str) -> Any | None:
+                return entry if entry_id == entry.entry_id else None
+
+            def async_update_entry(self, target: Any, **updates: Any) -> None:
+                self.updated.append((target, updates))
+                if "data" in updates:
+                    target.data = updates["data"]
+
+            def async_reload(self, entry_id: str) -> None:
+                self.reloaded.append(entry_id)
+
+        prepare_flow_hass_config_entries(self, _ConfigEntries, frame_module=frame)
+        self.config = SimpleNamespace(
+            language="en", components=set(), top_level_components=set()
+        )
+
+    async def async_add_executor_job(self, func: Any, *args: Any) -> Any:
+        return func(*args)
+
+    def async_create_task(self, coro: Any, *_args: Any, **_kwargs: Any) -> Any:
+        return asyncio.ensure_future(coro)
+
+
+async def test_discovery_update_case_still_deletes_inline(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Regression guard: the REAL persist point keeps its inline delete.
+
+    ``hass.config_entries.async_update_entry`` writes through synchronously, so
+    the update case may delete immediately. Only the create case had to be
+    deferred; nothing may be staged here.
+
+    Drives the *production* step (``async_step_discovery_update_info`` with an
+    existing entry), not the delete helper: calling the helper directly would
+    keep passing even if the step lost its inline delete altogether. Only the
+    credential ingestion is mocked out, because that one talks to Google.
+    """
+
+    watched = tmp_path / "data" / "secrets.json"
+    bundle = _importable_bundle("user@example.com", "aas_et/INLINE_UPDATE_TOKEN")
+    watched.parent.mkdir(parents=True, exist_ok=True)
+    watched.write_text(json.dumps(bundle), encoding="utf-8")
+
+    entry = make_config_entry(
+        entry_id="entry-update-inline",
+        data={"google_email": "user@example.com", "oauth_token": "aas_et/OLD"},
+        unique_id=unique_account_id("user@example.com"),
+        subentries={},
+    )
+    hass = _UpdateFlowHass(entry)
+    hass.data[DOMAIN] = {"discovery_manager": SimpleNamespace(watch_paths=(watched,))}
+
+    ingested: list[Any] = []
+
+    async def _fake_ingest(
+        _flow: Any, normalized: Any, *, existing_entry: Any | None = None
+    ) -> tuple[dict[str, Any], dict[str, Any] | None]:
+        # The real ingest validates the token against Google; the delete
+        # identity comes from ``normalized``, which is built for real above.
+        ingested.append(normalized)
+        return ({}, {"data": {"oauth_token": "aas_et/INLINE_UPDATE_TOKEN"}})
+
+    monkeypatch.setattr(config_flow, "_ingest_discovery_credentials", _fake_ingest)
+
+    flow = config_flow.ConfigFlow()
+    flow.hass = hass  # type: ignore[assignment]
+    flow.context = {"source": config_flow.DISCOVERY_UPDATE_SOURCE}
+    flow._async_current_entries = lambda **_: [entry]  # type: ignore[assignment]
+
+    async def _set_unique_id(value: str, *, raise_on_progress: bool = False) -> None:
+        set_config_flow_unique_id(flow, value)
+
+    flow.async_set_unique_id = _set_unique_id  # type: ignore[assignment]
+
+    result = await flow.async_step_discovery_update_info(
+        {"google_email": "user@example.com", "secrets_json": dict(bundle)}
+    )
+
+    assert result["type"] == "abort"
+    assert result["reason"] == "already_configured"
+    assert ingested, "the update path never reached the credential ingest"
+    # The entry really was written through before the delete.
+    assert [target for target, _ in hass.config_entries.updated] == [entry]
+    # Deleted inline, in the step itself.
+    assert not watched.exists()
+    # ... and therefore nothing left for async_setup_entry to redo.
+    assert _staged_cleanup(hass) == {}

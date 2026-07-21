@@ -29,10 +29,23 @@ Covered (config-flow surfaces, client monkeypatched):
   ``CONTAINER_TOKEN_PORT`` (7901) and the ``novnc_url`` placeholder targets the
   noVNC port (``:7900``).
 * Two-phase-delete timing (F4): ``container_login`` STAGES the ack instead of
-  sending it; the ack fires only when the entry is actually created (the
-  ``_async_flush_container_ack`` helper that ``device_selection`` calls right
-  after ``async_create_entry``). An abort before that flush keeps the bundle and
-  sends no ack.
+  sending it; an abort before the entry exists keeps the bundle and sends no
+  ack.
+* Two-phase-delete timing, second hop (P2): reaching ``async_create_entry`` is
+  still NOT the persist point -- it only builds a FlowResult, and Home
+  Assistant creates and stores the entry afterwards in
+  ``ConfigEntriesFlowManager.async_finish_flow``. ``device_selection``
+  therefore hands the ack over to ``async_setup_entry`` through
+  ``hass.data[DOMAIN]["pending_container_cleanup"]`` (in-memory only, never HA
+  storage, and stripped of the credential payload). The runner sends it exactly
+  once, ignores jobs staged for other accounts, and a reload does not re-ack.
+  The inline flush of the REAL persist points (reconfigure/options, where
+  ``async_update_entry`` writes through synchronously) is unchanged and pinned
+  by regression tests that drive those production branches, not the helpers.
+* Ack log-level grading: because the deferred ack only fires at the end of
+  ``async_setup_entry``, the container's ``CONTAINER_TOKEN_TTL`` regularly wins
+  the race and deletes the same file first. An unreachable container *after*
+  that TTL is therefore logged at debug; anything else keeps its warning.
 * Happy path reauth and options container branches (fetch mocked, persist +
   ack observed).
 * Error mapping: ``ContainerUnreachableError`` -> ``container_unreachable``;
@@ -78,6 +91,7 @@ from __future__ import annotations
 import inspect
 import json
 import logging
+import time
 from typing import Any
 
 import aiohttp
@@ -92,6 +106,7 @@ from custom_components.googlefindmy.const import (
     CONTAINER_NONCE_MIN_LEN,
     CONTAINER_NOVNC_PORT,
     CONTAINER_TOKEN_PORT,
+    CONTAINER_TOKEN_TTL,
     DATA_SECRET_BUNDLE,
 )
 from tests.helpers.config_entries_stub import make_config_entry
@@ -234,6 +249,9 @@ def _build_hass(entries: list[Any]) -> Any:
 
     class _FlowHass:
         def __init__(self) -> None:
+            # ``hass.data`` is canonical on HomeAssistant and is where the flow
+            # stages its deferred cleanup jobs, so the double must carry it.
+            self.data: dict[str, Any] = {}
             prepare_flow_hass_config_entries(
                 self,
                 _ConfigEntries,
@@ -455,6 +473,397 @@ async def test_aborted_flow_before_entry_keeps_bundle_no_ack(
     # The credential is staged but the container was NOT told to delete it.
     assert flow._container_pending_ack is not None
     assert recorder.ack_calls == []
+
+
+def _staged_cleanup(hass: Any) -> dict[str, list[Any]]:
+    """Return the in-memory staging area the flow writes its cleanup jobs to."""
+
+    bucket = hass.data.get(config_flow.DOMAIN) or {}
+    staged = bucket.get(config_flow.PENDING_CONTAINER_CLEANUP_KEY) or {}
+    assert isinstance(staged, dict)
+    return staged
+
+
+async def test_create_entry_stages_ack_instead_of_sending_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """P2: reaching CREATE_ENTRY stages the ack, it does NOT send it.
+
+    ``ConfigFlow.async_create_entry`` only builds a FlowResult -- Home Assistant
+    creates and stores the entry afterwards in
+    ``ConfigEntriesFlowManager.async_finish_flow`` (``await
+    self.config_entries.async_add(entry)``). Acking here would tell the login
+    container to drop the only remaining copy of the credentials while the
+    entry may still fail to materialise, so the ack is handed to
+    ``async_setup_entry`` through ``hass.data`` instead.
+
+    Drives the *real* ``device_selection`` step to CREATE_ENTRY, so the staging
+    is observed at the actual call site rather than through a stub.
+    """
+
+    recorder = _Recorder()
+    _install_container_client(monkeypatch, recorder)
+    hass = _build_hass([])
+    flow = config_flow.ConfigFlow()
+    flow.hass = hass  # type: ignore[assignment]
+    flow.context = {}
+    flow._available_devices = [("Device", "device-id")]  # type: ignore[attr-defined]
+    flow._abort_if_unique_id_configured = lambda **_: None  # type: ignore[attr-defined]
+
+    # container_login -> real device_selection form (no entry yet).
+    form = await _maybe_await(
+        flow.async_step_container_login(
+            {
+                "host": "127.0.0.1",
+                "port": CONTAINER_TOKEN_PORT,
+                "pairing_code": _PAIRING_CODE,
+            }
+        )
+    )
+    assert isinstance(form, dict)
+    assert form.get("step_id") == "device_selection"
+    assert recorder.ack_calls == []
+    assert _staged_cleanup(hass) == {}
+
+    # Submitting the form reaches async_create_entry.
+    created = await _maybe_await(flow.async_step_device_selection({}))
+    assert isinstance(created, dict)
+    assert created.get("type") == "create_entry"
+
+    # Still no ack: the container keeps its copy until the entry exists.
+    assert recorder.ack_calls == []
+    # The flow-local slot is cleared (no double staging on a retry) and the job
+    # is parked under the flow's unique id, which Home Assistant copies onto the
+    # new entry verbatim.
+    assert flow._container_pending_ack is None
+    staged = _staged_cleanup(hass)
+    assert list(staged) == [flow.unique_id]
+    jobs = staged[flow.unique_id]
+    assert len(jobs) == 1
+    assert isinstance(jobs[0], config_flow.PendingContainerCleanup)
+
+    # The staged job addresses the ack but carries no credentials: only the
+    # container coordinates plus the one-shot delete authorisation.
+    job = jobs[0]
+    assert job.imported_stable_key is None
+    assert job.imported_digest is None
+    ack = job.ack
+    assert ack is not None
+    assert (ack.host, ack.port, ack.pairing_code, ack.delete_token) == (
+        "127.0.0.1",
+        CONTAINER_TOKEN_PORT,
+        _PAIRING_CODE,
+        _DELETE_TOKEN,
+    )
+    # The only extra passenger is the fetch timestamp, which merely grades the
+    # log level of a failed ack (TTL race vs. real error); no credentials.
+    assert isinstance(ack.fetched_monotonic, float)
+    assert not hasattr(ack, "parsed")
+    assert not hasattr(ack, "token")
+
+
+async def test_staged_ack_is_sent_by_the_cleanup_runner_exactly_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The runner ``async_setup_entry`` calls sends the staged ack once.
+
+    ``async_setup_entry`` re-runs on every reload, so the runner must consume
+    (``pop``) the staged jobs. A second run must stay silent.
+    """
+
+    recorder = _Recorder()
+    _install_container_client(monkeypatch, recorder)
+    hass = _build_hass([])
+    flow = config_flow.ConfigFlow()
+    flow.hass = hass  # type: ignore[assignment]
+    flow.context = {}
+    flow._available_devices = [("Device", "device-id")]  # type: ignore[attr-defined]
+    flow._abort_if_unique_id_configured = lambda **_: None  # type: ignore[attr-defined]
+
+    await _maybe_await(
+        flow.async_step_container_login(
+            {
+                "host": "127.0.0.1",
+                "port": CONTAINER_TOKEN_PORT,
+                "pairing_code": _PAIRING_CODE,
+            }
+        )
+    )
+    await _maybe_await(flow.async_step_device_selection({}))
+    assert recorder.ack_calls == []
+
+    unique_id = flow.unique_id
+    await config_flow.async_run_pending_container_cleanup(hass, unique_id=unique_id)
+    assert len(recorder.ack_calls) == 1
+    assert recorder.ack_calls[0]["delete_token"] == _DELETE_TOKEN
+    assert _staged_cleanup(hass) == {}
+
+    # Reload: nothing left to do, so no second ack.
+    await config_flow.async_run_pending_container_cleanup(hass, unique_id=unique_id)
+    assert len(recorder.ack_calls) == 1
+
+
+async def test_cleanup_runner_ignores_jobs_of_other_accounts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A job staged for account A must not be executed by account B's setup.
+
+    Multi-account setups run one ``async_setup_entry`` per entry; resolving the
+    staged jobs by unique id keeps a second account's entry from acking a
+    container login that is still waiting for its own entry.
+    """
+
+    recorder = _Recorder()
+    _install_container_client(monkeypatch, recorder)
+    hass = _build_hass([])
+
+    config_flow._async_stage_container_cleanup(
+        hass,
+        unique_id="account-a@example.com",
+        job=config_flow.PendingContainerCleanup(
+            ack=config_flow._ContainerAckTarget(
+                host="127.0.0.1",
+                port=CONTAINER_TOKEN_PORT,
+                pairing_code=_PAIRING_CODE,
+                delete_token=_DELETE_TOKEN,
+            )
+        ),
+    )
+
+    await config_flow.async_run_pending_container_cleanup(
+        hass, unique_id="account-b@example.com"
+    )
+    assert recorder.ack_calls == []
+    assert list(_staged_cleanup(hass)) == ["account-a@example.com"]
+
+    await config_flow.async_run_pending_container_cleanup(
+        hass, unique_id="account-a@example.com"
+    )
+    assert len(recorder.ack_calls) == 1
+
+
+async def test_cleanup_runner_is_a_noop_without_staged_jobs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An entry that never went through a container login acks nothing."""
+
+    recorder = _Recorder()
+    _install_container_client(monkeypatch, recorder)
+    hass = _build_hass([])
+
+    # No hass.data[DOMAIN] bucket at all.
+    await config_flow.async_run_pending_container_cleanup(hass, unique_id=_EMAIL)
+    # Bucket present but no staging area.
+    hass.data[config_flow.DOMAIN] = {}
+    await config_flow.async_run_pending_container_cleanup(hass, unique_id=_EMAIL)
+    assert recorder.ack_calls == []
+
+
+async def test_failing_ack_is_logged_and_never_raises(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A container that refuses the ack degrades to its TTL delete, silently.
+
+    The ack is the *second* phase of the delete: the credentials are already in
+    the config entry, so a failed ack costs nothing but an orphaned file that
+    the container drops on its own TTL. Raising here would break an otherwise
+    completed flow, and the log must not leak the nonce or the delete token.
+    """
+
+    recorder = _Recorder()
+    _install_container_client(monkeypatch, recorder)
+
+    async def _failing_ack(*_args: Any, **_kwargs: Any) -> None:
+        raise config_flow.ContainerUnreachableError("container gone")
+
+    monkeypatch.setattr(config_flow, "ack_consumed", _failing_ack)
+
+    hass = _build_hass([])
+    config_flow._async_stage_container_cleanup(
+        hass,
+        unique_id=_EMAIL,
+        job=config_flow.PendingContainerCleanup(
+            ack=config_flow._ContainerAckTarget(
+                host="127.0.0.1",
+                port=CONTAINER_TOKEN_PORT,
+                pairing_code=_PAIRING_CODE,
+                delete_token=_DELETE_TOKEN,
+            )
+        ),
+    )
+
+    with caplog.at_level(logging.WARNING):
+        await config_flow.async_run_pending_container_cleanup(hass, unique_id=_EMAIL)
+
+    assert "ContainerUnreachableError" in caplog.text
+    assert _PAIRING_CODE not in caplog.text
+    assert _DELETE_TOKEN not in caplog.text
+    # Consumed regardless: the container's TTL fallback owns it from here.
+    assert _staged_cleanup(hass) == {}
+
+
+@pytest.mark.parametrize(
+    ("age_offset", "expect_warning"),
+    [
+        # Older than the container's TTL: the endpoint is gone because the TTL
+        # deleted the secret and shut the server down. Expected ending, not an
+        # error.
+        (CONTAINER_TOKEN_TTL + 1, False),
+        # Still inside the TTL: the endpoint should be up, so an unreachable
+        # container is a genuine problem and stays a warning.
+        (1, True),
+    ],
+)
+async def test_ack_after_ttl_expiry_logs_at_debug_not_warning(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    age_offset: float,
+    expect_warning: bool,
+) -> None:
+    """A lost race against the container TTL is normal and must not warn.
+
+    The ack fires at the very end of ``async_setup_entry`` (after the coordinator
+    refresh, the FCM registration and the platform forward), while the container
+    deletes its copy ``CONTAINER_TOKEN_TTL`` seconds after *its* start no matter
+    what. On a slow instance the TTL therefore wins routinely. It deletes the
+    same file the ack would have asked for, so the outcome is identical and a
+    warning would be misleading noise.
+    """
+
+    recorder = _Recorder()
+    _install_container_client(monkeypatch, recorder)
+
+    async def _failing_ack(*_args: Any, **_kwargs: Any) -> None:
+        raise config_flow.ContainerUnreachableError("container gone")
+
+    monkeypatch.setattr(config_flow, "ack_consumed", _failing_ack)
+
+    hass = _build_hass([])
+    config_flow._async_stage_container_cleanup(
+        hass,
+        unique_id=_EMAIL,
+        job=config_flow.PendingContainerCleanup(
+            ack=config_flow._ContainerAckTarget(
+                host="127.0.0.1",
+                port=CONTAINER_TOKEN_PORT,
+                pairing_code=_PAIRING_CODE,
+                delete_token=_DELETE_TOKEN,
+                fetched_monotonic=time.monotonic() - age_offset,
+            )
+        ),
+    )
+
+    with caplog.at_level(logging.DEBUG, logger=config_flow._LOGGER.name):
+        await config_flow.async_run_pending_container_cleanup(hass, unique_id=_EMAIL)
+
+    warnings = [
+        record for record in caplog.records if record.levelno >= logging.WARNING
+    ]
+    assert bool(warnings) is expect_warning
+    # Either way the failure is reported somewhere and stays free of secrets.
+    assert "ContainerUnreachableError" in caplog.text
+    assert _PAIRING_CODE not in caplog.text
+    assert _DELETE_TOKEN not in caplog.text
+
+
+async def test_staging_without_hass_is_a_noop() -> None:
+    """Staging before the flow is bound to hass must not raise.
+
+    Fail-safe direction: with nowhere to park the job the cleanup simply never
+    happens, which leaves the credential file in place for the next import.
+    """
+
+    config_flow._async_stage_container_cleanup(
+        None,
+        unique_id=_EMAIL,
+        job=config_flow.PendingContainerCleanup(imported_digest="deadbeef"),
+    )
+
+
+async def test_stage_container_ack_without_pending_result_is_a_noop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A flow that never used the container login stages nothing on create."""
+
+    recorder = _Recorder()
+    _install_container_client(monkeypatch, recorder)
+    hass = _build_hass([])
+    flow = config_flow.ConfigFlow()
+    flow.hass = hass  # type: ignore[assignment]
+    flow.context = {}
+
+    assert flow._container_pending_ack is None
+    flow._async_stage_container_ack()
+    assert _staged_cleanup(hass) == {}
+    assert recorder.ack_calls == []
+
+
+async def test_reconfigure_persist_still_acks_inline_and_stages_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression guard for the REAL persist points (unchanged behaviour).
+
+    ``hass.config_entries.async_update_entry`` writes the entry inline, so the
+    reconfigure path may ack immediately. Only the ``async_create_entry`` path
+    had to be deferred; this pins that the inline flush was not deferred along
+    with it.
+
+    Drives the *production* branch, not the helper: a container login followed
+    by ``async_step_device_selection`` with ``is_reconfigure`` in the flow
+    context, which is the only caller of
+    ``ConfigFlow._async_flush_container_ack``. Calling that helper directly
+    would keep passing even if the branch stopped calling it.
+    """
+
+    recorder = _Recorder()
+    _install_container_client(monkeypatch, recorder)
+
+    entry = make_config_entry(
+        entry_id="entry-reconfigure-inline",
+        data={CONF_GOOGLE_EMAIL: _EMAIL},
+        options={},
+        unique_id=_EMAIL,
+        # The reconfigure branch walks the entry's subentries; an empty mapping
+        # is the "nothing to sync" case and keeps the test on its subject.
+        subentries={},
+    )
+    hass = _build_hass([entry])
+
+    flow = config_flow.ConfigFlow()
+    flow.hass = hass  # type: ignore[assignment]
+    # Home Assistant sets this context when the user reconfigures an existing
+    # entry; it is what selects the inline-persist branch further down.
+    flow.context = {"is_reconfigure": True, "entry_id": entry.entry_id}
+    # A probe would need a live API; the device list is not what is under test.
+    flow._available_devices = [("Device", "device-id")]  # type: ignore[attr-defined]
+
+    await _maybe_await(
+        flow.async_step_container_login(
+            {
+                "host": "127.0.0.1",
+                "port": CONTAINER_TOKEN_PORT,
+                "pairing_code": _PAIRING_CODE,
+            }
+        )
+    )
+    # The fetch stages the ack on the flow; nothing has been sent yet.
+    assert flow._container_pending_ack is not None
+    assert recorder.ack_calls == []
+
+    # Finish through the reconfigure branch of the real step.
+    result = await _maybe_await(flow.async_step_device_selection({}))
+
+    assert isinstance(result, dict)
+    assert result.get("type") == "abort"
+    assert result.get("reason") == "reconfigure_successful"
+    # The entry was written through synchronously by this branch.
+    assert any(update["entry"] is entry for update in hass.config_entries.updated)
+    # Acked inline, right after that write.
+    assert len(recorder.ack_calls) == 1
+    assert recorder.ack_calls[0]["delete_token"] == _DELETE_TOKEN
+    assert flow._container_pending_ack is None
+    # Sent, not staged: nothing is left for async_setup_entry to do.
+    assert _staged_cleanup(hass) == {}
 
 
 # ---------------------------------------------------------------------------
@@ -976,6 +1385,59 @@ async def test_options_handler_inherits_container_helpers(
     # update_entry -> ack), so exactly one of each ran.
     assert len(recorder.fetch_calls) == 1
     assert len(recorder.ack_calls) == 1
+
+
+async def test_options_container_persist_acks_inline_and_stages_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression guard for the options persist point (unchanged behaviour).
+
+    The options branch writes through ``hass.config_entries.async_update_entry``
+    and never returns ``async_create_entry``, so its entry exists the moment the
+    ack is sent. Deferring it to ``async_setup_entry`` would be wrong here (the
+    reload happens *after* the ack), and the P2 change must not have leaked into
+    this path.
+    """
+
+    recorder = _Recorder()
+    _install_container_client(monkeypatch, recorder)
+
+    entry = make_config_entry(
+        entry_id="entry-options-inline",
+        data={CONF_GOOGLE_EMAIL: _EMAIL},
+        options={},
+    )
+    hass = _build_hass([entry])
+
+    flow = config_flow.OptionsFlowHandler()
+    flow.hass = hass  # type: ignore[assignment]
+    flow.config_entry = entry  # type: ignore[attr-defined]
+
+    async def _clear_cached_aas_token(_entry: Any) -> None:
+        return None
+
+    def _abort(*, reason: str, **_: Any) -> dict[str, Any]:
+        return {"type": "abort", "reason": reason}
+
+    flow._async_clear_cached_aas_token = _clear_cached_aas_token  # type: ignore[attr-defined]
+    flow.async_abort = _abort  # type: ignore[assignment]
+
+    errors: dict[str, str] = {}
+    result = await flow._async_options_container_persist(
+        entry=entry,
+        selected_option=None,
+        user_input={
+            "container_host": "127.0.0.1",
+            "container_port": CONTAINER_TOKEN_PORT,
+            "pairing_code": _PAIRING_CODE,
+        },
+        errors=errors,
+    )
+    assert isinstance(result, dict)
+    assert result.get("reason") == "reconfigure_successful"
+    assert len(recorder.ack_calls) == 1
+    # Acked inline, so nothing is left for async_setup_entry to redo.
+    assert _staged_cleanup(hass) == {}
 
 
 # --- F-N3: builtin TimeoutError (total timeout) mapping -----------------------

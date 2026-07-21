@@ -19,7 +19,10 @@ Security model:
 * **Container-internal wildcard bind, host-loopback publish.** The server binds
   to ``0.0.0.0`` *inside the login container*. This is deliberate and is NOT the
   security boundary: under Docker's default bridge network, a published port
-  (``docker-compose.yml`` publishes ``127.0.0.1:7901:7901``) is DNAT'd onto the
+  (the opt-in overlay ``docker-compose.oneclick.yml`` publishes
+  ``127.0.0.1:7901:7901``; the base ``docker-compose.yml`` deliberately
+  publishes nothing for this port, so a host that already uses 7901 can still
+  run the file and clear-text handoffs) is DNAT'd onto the
   container's ``eth0`` interface, not onto the container's loopback. A bind to
   the container's ``127.0.0.1`` would therefore make the published port
   unreachable and break the whole handoff. The "no LAN exposure" guarantee is
@@ -96,8 +99,9 @@ _LOGGER = logging.getLogger("gfmy.token_server")
 # Bind to ALL container interfaces. Under Docker's bridge network a published
 # port is DNAT'd onto the container's eth0, not its loopback, so a 127.0.0.1
 # bind here would make the published 127.0.0.1:7901 host port unreachable. The
-# loopback (no-LAN) boundary lives in docker-compose.yml as the HOST publish
-# `127.0.0.1:7901:7901`, NOT here. `network_mode: host` is unsupported (README).
+# loopback (no-LAN) boundary lives in docker-compose.oneclick.yml as the HOST
+# publish `127.0.0.1:7901:7901`, NOT here (the base docker-compose.yml does not
+# publish this port at all). `network_mode: host` is unsupported (README).
 # The bandit suppression below therefore stays. Keep its marker bare (id only,
 # no trailing prose, and do not repeat the marker itself in prose): bandit parses
 # every word after it as a further test id and warns "Test in comment: ... is not
@@ -380,7 +384,8 @@ async def _run(nonce: str, secrets_path: Path) -> None:
     await runner.setup()
     # Bind all container interfaces (0.0.0.0): the Docker bridge DNATs the
     # published host port onto eth0, so a container-loopback bind would be
-    # unreachable. The no-LAN boundary is the host publish (docker-compose.yml).
+    # unreachable. The no-LAN boundary is the host publish, which lives in the
+    # opt-in overlay docker-compose.oneclick.yml, not in the base compose file.
     site = web.TCPSite(runner, _BIND_HOST, _TOKEN_PORT)
     await site.start()
     _LOGGER.info(

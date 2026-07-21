@@ -32,9 +32,9 @@ importorskip(
 
 from homeassistant.config_entries import ConfigEntryState, ConfigSubentry
 from homeassistant.const import Platform
-from homeassistant.exceptions import ServiceValidationError
+from homeassistant.exceptions import ConfigEntryNotReady, ServiceValidationError
 
-from custom_components.googlefindmy import _platform_value
+from custom_components.googlefindmy import _platform_value, config_flow
 from custom_components.googlefindmy.const import (
     ATTR_MODE,
     CONF_GOOGLE_EMAIL,
@@ -98,6 +98,12 @@ class _StubConfigEntry:
 
     def __init__(self) -> None:
         self.entry_id: str = "entry-test"
+        # ``ConfigEntry.unique_id`` is ``str | None``; Home Assistant copies the
+        # flow's unique id onto the entry verbatim
+        # (``ConfigEntry(unique_id=flow.unique_id)`` in
+        # ``ConfigEntriesFlowManager.async_finish_flow``). The integration uses
+        # a normalized Google address, so the stub mirrors its own entry data.
+        self.unique_id: str | None = "user@example.com"
         self.data: dict[str, Any] = {
             DATA_SECRET_BUNDLE: {"username": "user@example.com"},
             CONF_GOOGLE_EMAIL: "user@example.com",
@@ -576,6 +582,350 @@ async def test_async_setup_entry_leaves_modern_entries_intact(
         harness.cache.values.get(integration.username_string)
         == entry.data[CONF_GOOGLE_EMAIL]
     )
+
+
+# ---------------------------------------------------------------------------
+# Deferred container-login cleanup (P2)
+#
+# ``ConfigFlow.async_create_entry`` only builds a FlowResult; Home Assistant
+# creates and stores the entry afterwards in
+# ``ConfigEntriesFlowManager.async_finish_flow`` (``await
+# self.config_entries.async_add(entry)``). The flow therefore only *stages* the
+# irreversible cleanups in ``hass.data[DOMAIN]["pending_container_cleanup"]``
+# (in-memory, never HA storage) and ``async_setup_entry`` executes them.
+# ---------------------------------------------------------------------------
+
+
+def _install_ack_recorder(monkeypatch: pytest.MonkeyPatch, recorded: list[str]) -> None:
+    """Record every container ack the deferred cleanup sends."""
+
+    async def _fake_ack(
+        _session: Any,
+        _host: str,
+        _port: int,
+        _nonce: str,
+        delete_token: str,
+        *,
+        timeout: float,
+    ) -> None:
+        recorded.append(delete_token)
+
+    monkeypatch.setattr(config_flow, "ack_consumed", _fake_ack)
+    monkeypatch.setattr(config_flow, "async_get_clientsession", lambda _hass: object())
+
+
+def _stage_ack_cleanup(hass: Any, unique_id: str | None, token: str) -> None:
+    """Stage one ack-only cleanup job exactly as the config flow does."""
+
+    config_flow._async_stage_container_cleanup(
+        hass,
+        unique_id=unique_id,
+        job=config_flow.PendingContainerCleanup(
+            ack=config_flow._ContainerAckTarget(
+                host="127.0.0.1",
+                port=7901,
+                pairing_code="pairing-code-abcdef0123456789",
+                delete_token=token,
+            )
+        ),
+    )
+
+
+@pytest.mark.asyncio
+async def test_async_setup_entry_runs_staged_container_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+    stub_coordinator_factory: Callable[..., type[Any]],
+) -> None:
+    """A job staged under the entry's unique id runs once setup succeeded."""
+
+    loop = asyncio.get_running_loop()
+    harness = _prepare_async_setup_entry_harness(
+        monkeypatch, stub_coordinator_factory, loop
+    )
+    integration = harness.integration
+    entry = harness.entry
+    hass = harness.hass
+
+    acked: list[str] = []
+    _install_ack_recorder(monkeypatch, acked)
+
+    entry.data[DATA_SECRET_BUNDLE] = {"username": "user@example.com"}
+    harness.cache.values = {integration.username_string: "user@example.com"}
+
+    _stage_ack_cleanup(hass, entry.unique_id, "delete-token-xyz")
+    # Still staged, not executed, before setup runs.
+    assert acked == []
+
+    assert await integration.async_setup(hass, {}) is True
+    assert await integration.async_setup_entry(hass, entry) is True
+
+    assert acked == ["delete-token-xyz"]
+    # The staging area is drained, so nothing lingers in hass.data.
+    assert config_flow.PENDING_CONTAINER_CLEANUP_KEY not in hass.data[DOMAIN]
+
+
+@pytest.mark.asyncio
+async def test_async_setup_entry_reload_does_not_repeat_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+    stub_coordinator_factory: Callable[..., type[Any]],
+) -> None:
+    """A reload must not re-run an already executed cleanup (pop, not get).
+
+    ``async_setup_entry`` runs again on every reload (an options change alone
+    triggers one), so reading the staged jobs must consume them. Otherwise a
+    single container login would ack on every reload for the rest of the
+    Home Assistant process lifetime.
+    """
+
+    loop = asyncio.get_running_loop()
+    harness = _prepare_async_setup_entry_harness(
+        monkeypatch, stub_coordinator_factory, loop
+    )
+    integration = harness.integration
+    entry = harness.entry
+    hass = harness.hass
+
+    acked: list[str] = []
+    _install_ack_recorder(monkeypatch, acked)
+
+    entry.data[DATA_SECRET_BUNDLE] = {"username": "user@example.com"}
+    harness.cache.values = {integration.username_string: "user@example.com"}
+
+    _stage_ack_cleanup(hass, entry.unique_id, "delete-token-xyz")
+
+    assert await integration.async_setup(hass, {}) is True
+    assert await integration.async_setup_entry(hass, entry) is True
+    assert acked == ["delete-token-xyz"]
+
+    # Second setup (reload): no job left, so no second ack.
+    assert await integration.async_setup_entry(hass, entry) is True
+    assert acked == ["delete-token-xyz"]
+
+
+@pytest.mark.asyncio
+async def test_async_setup_entry_survives_failing_cleanup_job(
+    monkeypatch: pytest.MonkeyPatch,
+    stub_coordinator_factory: Callable[..., type[Any]],
+) -> None:
+    """A cleanup job that raises must not turn a good setup into a failed one.
+
+    The login container falls back to its TTL delete and the secrets watcher
+    re-imports a surviving file, so a failed cleanup is recoverable while a
+    failed setup is not.
+    """
+
+    loop = asyncio.get_running_loop()
+    harness = _prepare_async_setup_entry_harness(
+        monkeypatch, stub_coordinator_factory, loop
+    )
+    integration = harness.integration
+    entry = harness.entry
+    hass = harness.hass
+
+    async def _boom(*_args: Any, **_kwargs: Any) -> None:
+        raise RuntimeError("ack exploded")
+
+    monkeypatch.setattr(config_flow, "ack_consumed", _boom)
+    monkeypatch.setattr(config_flow, "async_get_clientsession", lambda _hass: object())
+
+    entry.data[DATA_SECRET_BUNDLE] = {"username": "user@example.com"}
+    harness.cache.values = {integration.username_string: "user@example.com"}
+
+    _stage_ack_cleanup(hass, entry.unique_id, "delete-token-xyz")
+
+    assert await integration.async_setup(hass, {}) is True
+    assert await integration.async_setup_entry(hass, entry) is True
+    # Consumed despite the failure: retrying an ack forever would be worse than
+    # letting the container's TTL fallback handle it.
+    assert config_flow.PENDING_CONTAINER_CLEANUP_KEY not in hass.data[DOMAIN]
+
+
+@pytest.mark.asyncio
+async def test_async_setup_entry_survives_failing_cleanup_runner(
+    monkeypatch: pytest.MonkeyPatch,
+    stub_coordinator_factory: Callable[..., type[Any]],
+) -> None:
+    """Even a broken cleanup runner must leave ``async_setup_entry`` at True."""
+
+    loop = asyncio.get_running_loop()
+    harness = _prepare_async_setup_entry_harness(
+        monkeypatch, stub_coordinator_factory, loop
+    )
+    integration = harness.integration
+    entry = harness.entry
+    hass = harness.hass
+
+    async def _boom(*_args: Any, **_kwargs: Any) -> None:
+        raise RuntimeError("runner exploded")
+
+    monkeypatch.setattr(config_flow, "async_run_pending_container_cleanup", _boom)
+
+    entry.data[DATA_SECRET_BUNDLE] = {"username": "user@example.com"}
+    harness.cache.values = {integration.username_string: "user@example.com"}
+
+    assert await integration.async_setup(hass, {}) is True
+    assert await integration.async_setup_entry(hass, entry) is True
+
+
+@pytest.mark.asyncio
+async def test_async_setup_entry_drains_unknown_account_bucket(
+    monkeypatch: pytest.MonkeyPatch,
+    stub_coordinator_factory: Callable[..., type[Any]],
+) -> None:
+    """A job staged without a unique id is drained too, never stranded.
+
+    The flow sets its unique id before creating the entry, so this is the
+    defensive branch: the fallback bucket must not accumulate jobs that no
+    setup ever claims. The cleanup itself is self-validating (the delete
+    re-checks account and content, the ack is bound to its own delete token),
+    so running it on the next setup is safe.
+    """
+
+    loop = asyncio.get_running_loop()
+    harness = _prepare_async_setup_entry_harness(
+        monkeypatch, stub_coordinator_factory, loop
+    )
+    integration = harness.integration
+    entry = harness.entry
+    hass = harness.hass
+
+    acked: list[str] = []
+    _install_ack_recorder(monkeypatch, acked)
+
+    entry.data[DATA_SECRET_BUNDLE] = {"username": "user@example.com"}
+    harness.cache.values = {integration.username_string: "user@example.com"}
+
+    _stage_ack_cleanup(hass, None, "orphan-delete-token")
+    assert (
+        config_flow._PENDING_CLEANUP_UNKNOWN_ACCOUNT
+        in (hass.data[DOMAIN][config_flow.PENDING_CONTAINER_CLEANUP_KEY])
+    )
+
+    assert await integration.async_setup(hass, {}) is True
+    assert await integration.async_setup_entry(hass, entry) is True
+
+    assert acked == ["orphan-delete-token"]
+    assert config_flow.PENDING_CONTAINER_CLEANUP_KEY not in hass.data[DOMAIN]
+
+
+@pytest.mark.asyncio
+async def test_duplicate_account_abort_discards_staged_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+    stub_coordinator_factory: Callable[..., type[Any]],
+    tmp_path: Path,
+) -> None:
+    """The duplicate-account abort drops the staged job instead of leaking it.
+
+    That branch leaves ``async_setup_entry`` with a *final* ``return False``,
+    far above the cleanup runner at the end of the function, and Home Assistant
+    does not retry it. Without an explicit discard the job would sit in
+    ``hass.data`` for the rest of the process lifetime, holding a pairing nonce
+    and a delete token, and the bucket could grow without bound.
+
+    Discarded, not executed: nothing about this account was set up, so the
+    fail-safe direction applies. The watched credential file stays on disk (the
+    secrets watcher re-imports it on its next scan) and the login container is
+    left to its own TTL delete rather than being acked.
+    """
+
+    loop = asyncio.get_running_loop()
+    harness = _prepare_async_setup_entry_harness(
+        monkeypatch, stub_coordinator_factory, loop
+    )
+    integration = harness.integration
+    entry = harness.entry
+    hass = harness.hass
+
+    acked: list[str] = []
+    _install_ack_recorder(monkeypatch, acked)
+
+    watched = tmp_path / "data" / "secrets.json"
+    watched.parent.mkdir(parents=True, exist_ok=True)
+    watched.write_text(
+        json.dumps({"google_email": "user@example.com", "shared_key": "DDEEFF"}),
+        encoding="utf-8",
+    )
+    hass.data.setdefault(DOMAIN, {})["discovery_manager"] = SimpleNamespace(
+        watch_paths=(watched,)
+    )
+
+    # A job with both halves: an ack AND a delete of the imported copy.
+    config_flow._async_stage_container_cleanup(
+        hass,
+        unique_id=entry.unique_id,
+        job=config_flow.PendingContainerCleanup(
+            imported_stable_key="email:user@example.com",
+            imported_digest="deadbeef",
+            ack=config_flow._ContainerAckTarget(
+                host="127.0.0.1",
+                port=7901,
+                pairing_code="pairing-code-abcdef0123456789",
+                delete_token="duplicate-delete-token",
+            ),
+        ),
+    )
+
+    # This entry duplicates an account that is already configured.
+    monkeypatch.setattr(
+        integration,
+        "_ensure_post_migration_consistency",
+        AsyncMock(return_value=(False, "user@example.com")),
+    )
+
+    assert await integration.async_setup(hass, {}) is True
+    assert await integration.async_setup_entry(hass, entry) is False
+
+    # Nothing was executed on the way out.
+    assert acked == []
+    assert watched.exists()
+    # ... but the bucket is empty, so the nonce/token do not linger.
+    assert config_flow.PENDING_CONTAINER_CLEANUP_KEY not in hass.data[DOMAIN]
+
+
+@pytest.mark.asyncio
+async def test_config_entry_not_ready_keeps_staged_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+    stub_coordinator_factory: Callable[..., type[Any]],
+) -> None:
+    """A retryable setup failure must leave the staged job alone.
+
+    The counterpart of the duplicate-account discard: ``ConfigEntryNotReady``
+    means Home Assistant will try this entry again, so the job has to survive
+    until a setup actually succeeds. Consuming it here would silently drop the
+    ack and the delete for good.
+    """
+
+    loop = asyncio.get_running_loop()
+    harness = _prepare_async_setup_entry_harness(
+        monkeypatch, stub_coordinator_factory, loop
+    )
+    integration = harness.integration
+    entry = harness.entry
+    hass = harness.hass
+
+    acked: list[str] = []
+    _install_ack_recorder(monkeypatch, acked)
+
+    entry.data[DATA_SECRET_BUNDLE] = {"username": "user@example.com"}
+    harness.cache.values = {integration.username_string: "user@example.com"}
+
+    _stage_ack_cleanup(hass, entry.unique_id, "retry-delete-token")
+
+    async def _not_ready(*_args: Any, **_kwargs: Any) -> None:
+        raise ConfigEntryNotReady("try again later")
+
+    # Fails inside the setup core, i.e. before the cleanup runner at the end.
+    monkeypatch.setattr(integration, "_async_refresh_device_urls", _not_ready)
+
+    assert await integration.async_setup(hass, {}) is True
+    with pytest.raises(ConfigEntryNotReady):
+        await integration.async_setup_entry(hass, entry)
+
+    assert acked == []
+    staged = hass.data[DOMAIN][config_flow.PENDING_CONTAINER_CLEANUP_KEY]
+    assert [job.ack.delete_token for job in staged[entry.unique_id]] == [
+        "retry-delete-token"
+    ]
 
 
 def test_service_stats_unique_id_migration_prefers_service_subentry(

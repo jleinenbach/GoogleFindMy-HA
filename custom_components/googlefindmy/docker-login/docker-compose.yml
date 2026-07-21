@@ -33,7 +33,9 @@ services:
       # behaviour is unchanged unless you opt in). They are independent switches.
       #   GFMY_ONECLICK=1  -> after login, serve the bundle to Home Assistant on
       #                       a one-shot, nonce-authenticated LOOPBACK endpoint
-      #                       (127.0.0.1:7901). Needs the 7901 port publish below.
+      #                       (host 127.0.0.1, port 7901). The matching host
+      #                       publish is NOT in this file: it lives in the opt-in
+      #                       overlay docker-compose.oneclick.yml (see `ports:`).
       #   GFMY_CLEARTEXT=1 -> after login, print secrets.json in the terminal for
       #                       manual copy/paste (no port opened) and delete it.
       # NOTE: the pairing code is generated at RUNTIME and printed by the
@@ -50,21 +52,36 @@ services:
       # machine, use an SSH tunnel (recommended) or set GFMY_NOVNC_BIND=0.0.0.0
       # (README → Remote access) to opt into a LAN bind on a trusted network.
       - "${GFMY_NOVNC_BIND:-127.0.0.1}:7900:7900"
-      # One-click token endpoint (GFMY_ONECLICK=1). Published to HOST LOOPBACK
-      # ONLY and HARD-CODED to 127.0.0.1: this carries the freshly minted tokens
-      # in the clear, so it must never be exposed to the LAN/Internet. This host
-      # publish IS the security boundary. There is deliberately no LAN opt-in for
-      # this port (unlike noVNC 7900). To reach it from another machine, use an
-      # SSH tunnel to host loopback:
+      # The one-click token endpoint (port 7901) is deliberately NOT published
+      # here. Its publish lives in the opt-in overlay file
+      # `docker-compose.oneclick.yml`, which the launchers add only when
+      # GFMY_ONECLICK=1:
+      #   docker compose -f docker-compose.yml -f docker-compose.oneclick.yml \
+      #     run --build --service-ports --rm googlefindmy-login
+      #
+      # WHY THE SPLIT: both launchers always start this service with
+      # `--service-ports`, so EVERY entry in this list is published on EVERY run.
+      # An unconditional 7901 entry therefore made the whole container fail to
+      # start whenever port 7901 was already taken on the host (another service,
+      # a leftover container), and that also killed the two handoff tracks that
+      # never touch the port: the file handoff through ./data, and the
+      # GFMY_CLEARTEXT=1 terminal output. Compose cannot drop a `ports:` entry
+      # conditionally, so the conditional part moves into a second file.
+      #
+      # WHY IT STAYS ON LOOPBACK when it IS published: the overlay pins it to
+      # 127.0.0.1 and nothing else, because that endpoint hands out the freshly
+      # minted tokens in the clear. That host publish IS the security boundary,
+      # and there is deliberately NO LAN opt-in for this port (unlike
+      # GFMY_NOVNC_BIND for noVNC above). From another machine, tunnel instead:
       #   ssh -L 7901:127.0.0.1:7901 <docker-host>
       # NOTE on the in-container bind: token_server.py binds 0.0.0.0 *inside* the
-      # container ON PURPOSE. Under the default bridge network Docker DNATs this
+      # container ON PURPOSE. Under the default bridge network Docker DNATs the
       # published port onto the container's eth0, NOT its loopback, so a
-      # container-127.0.0.1 bind would make this port unreachable. The no-LAN
-      # guarantee is enforced here by the 127.0.0.1 host publish, not by the
-      # container bind. Do NOT run this service with `network_mode: host`: that
-      # collapses the bridge and would make the 0.0.0.0 bind LAN-visible (README).
-      - "127.0.0.1:7901:7901"
+      # container-127.0.0.1 bind would make the port unreachable. The no-LAN
+      # guarantee is enforced by the loopback host publish `127.0.0.1:7901:7901`
+      # in the overlay, not by the container bind. Do NOT run this service with
+      # `network_mode: host`: that collapses the bridge and would make the
+      # 0.0.0.0 bind LAN-visible (README).
     volumes:
       # M2 runtime mount of the integration code, READ-ONLY, at a FLAT path.
       # `..` is the integration package dir, so main.py lands at /app/gfmy/main.py

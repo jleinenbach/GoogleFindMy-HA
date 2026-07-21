@@ -153,6 +153,13 @@ if [ "${_rc}" -eq 0 ] && [ "${GFMY_ONECLICK:-}" = "1" ] && [ -f "${_secrets_path
   echo "[entrypoint]     host: 127.0.0.1   port: 7901"
   echo "[entrypoint]     pairing code: ${GFMY_PAIRING_CODE}"
   echo "[entrypoint] (From another machine, tunnel: ssh -L 7901:127.0.0.1:7901 <host>)"
+  echo "[entrypoint]"
+  echo "[entrypoint] If Home Assistant cannot reach the port, the host publish is"
+  echo "[entrypoint] missing: 7901 is an OPT-IN overlay so that a busy port never"
+  echo "[entrypoint] blocks the file/cleartext tracks. The launcher adds it for you"
+  echo "[entrypoint] (GFMY_ONECLICK=1 ./login.sh); a manual run needs it spelled out:"
+  echo "[entrypoint]   docker compose -f docker-compose.yml -f docker-compose.oneclick.yml \\"
+  echo "[entrypoint]     run --build --service-ports --rm googlefindmy-login"
   echo "=================================================================="
   echo ""
   # Foreground: this blocks until one of three things happens, then returns and

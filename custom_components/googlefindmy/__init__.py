@@ -338,6 +338,7 @@ if TYPE_CHECKING:
         unregister_fcm_receiver_provider as ApiUnregisterFcmProviderType,
     )
     from .Auth.fcm_receiver_ha import FcmReceiverHA as FcmReceiverHAType
+    from .config_flow import PendingContainerCleanup
     from .coordinator import GoogleFindMyCoordinator as GoogleFindMyCoordinatorType
     from .discovery import (
         DiscoveryManager as DiscoveryManagerType,
@@ -2397,6 +2398,11 @@ class GoogleFindMyDomainData(TypedDict, total=False):
     _subentry_setup_history: dict[str, set[str]]
     pending_reconfigure_device_list_refresh: set[str]
     recent_reconfigure_markers: dict[str, float]
+    # In-memory only, NEVER persisted: post-create cleanup jobs staged by the
+    # config flow (watched-secrets delete, login-container ack), keyed by the
+    # flow's unique id. ``async_setup_entry`` pops and runs them once the entry
+    # actually exists. See ``config_flow.PendingContainerCleanup``.
+    pending_container_cleanup: dict[str, list[PendingContainerCleanup]]
 
 
 # Typed hass.data key for the global domain bucket (HA 2024.6+ HassKey).
@@ -7121,6 +7127,34 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
             entry.entry_id,
             _mask_email_for_logs(normalized_email),
         )
+        # Final abort (not a retryable ConfigEntryNotReady): this return never
+        # reaches the cleanup runner at the end of the function, so any job the
+        # config flow staged for this account would linger in hass.data for the
+        # whole process lifetime, holding a pairing nonce and a delete token.
+        # Discard it instead of running it: the entry is not set up, so the
+        # credentials must stay put. The secrets watcher re-imports the file on
+        # its next scan and the un-acked login container drops its copy on its
+        # own TTL.
+        try:
+            from .config_flow import (  # noqa: PLC0415 - lazy, avoids an import cycle
+                async_discard_pending_container_cleanup,
+            )
+
+            discarded = async_discard_pending_container_cleanup(
+                hass, unique_id=getattr(entry, "unique_id", None)
+            )
+            if discarded:
+                _LOGGER.debug(
+                    "[%s] Discarded %s staged container-login cleanup job(s) after the duplicate-account abort; credential files are kept on disk",
+                    entry.entry_id,
+                    discarded,
+                )
+        except Exception as err:  # noqa: BLE001 - housekeeping must never raise
+            _LOGGER.debug(
+                "[%s] Could not discard staged container-login cleanup: %s",
+                entry.entry_id,
+                err,
+            )
         return False
 
     pm_setup_start = time.monotonic()
@@ -7764,6 +7798,32 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
 
     await _async_normalize_device_names(hass)
     await _async_refresh_device_urls(hass)
+
+    # Post-persist cleanup (P2): the config flow can only *stage* irreversible
+    # cleanups (deleting the imported secrets.json copies, acking the login
+    # container so it drops its copy), because `ConfigFlow.async_create_entry`
+    # merely builds a FlowResult -- Home Assistant creates and stores the entry
+    # afterwards in `ConfigEntriesFlowManager.async_finish_flow`. This is the
+    # first point at which the entry provably exists, so it is where those jobs
+    # run. Deliberately behind the whole setup core: every `ConfigEntryNotReady`
+    # above must leave the credentials on disk for the next attempt.
+    #
+    # Best effort in both directions: the runner isolates each job, and this
+    # guard makes sure a cleanup failure can never turn a successful setup into
+    # a failed one (the container falls back to its TTL delete, and the secrets
+    # watcher re-imports a surviving file on its next scan).
+    try:
+        from .config_flow import (  # noqa: PLC0415 - lazy, avoids an import cycle
+            async_run_pending_container_cleanup,
+        )
+
+        await async_run_pending_container_cleanup(
+            hass, unique_id=getattr(entry, "unique_id", None)
+        )
+    except Exception as err:  # noqa: BLE001 - cleanup must never fail setup
+        _LOGGER.warning(
+            "[%s] Deferred container-login cleanup failed: %s", entry.entry_id, err
+        )
 
     return True
 

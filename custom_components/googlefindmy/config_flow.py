@@ -9,8 +9,17 @@ Key design decisions (Best Practice):
   If validation fails, no entry is created, the form is shown again with an error.
 - Early unique_id: We set the config entry unique ID (normalized Google email)
   as soon as it is known, to avoid duplicate flows and duplicate entries.
-- No persistence during the flow: We never write tokens/secrets to disk before
-  `async_create_entry`. All flow-time validation uses ephemeral clients only.
+- No persistence during the flow: We never write tokens/secrets to disk during
+  the flow. All flow-time validation uses ephemeral clients only.
+- No irreversible cleanup on the *create* path: `async_create_entry` only
+  *builds* a FlowResult; Home Assistant stores the entry afterwards in
+  `ConfigEntriesFlowManager.async_finish_flow`. Deleting imported secrets files
+  or acking the login container is therefore staged in memory
+  (`hass.data[DOMAIN]["pending_container_cleanup"]`) and executed by
+  `async_setup_entry`, once the entry provably exists. The paths that update an
+  *existing* entry (`async_update_entry` in the discovery-update, reconfigure
+  and options flows) keep their inline cleanup: there the entry already exists,
+  so there is nothing to wait for.
 - Duplicate protection: If a config entry for the same Google account already
   exists, we abort the flow using `_abort_if_unique_id_configured()`.
 - Guard handling: If the API raises a "multiple config entries" guard (e.g.,
@@ -23,7 +32,9 @@ Key design decisions (Best Practice):
 
 Security & privacy:
 - No secrets in logs or exceptions; messages are redacted and bounded.
-- No secrets are persisted before `async_create_entry`.
+- No secrets are written to disk or to Home Assistant storage by the flow. The
+  staged cleanup jobs live in `hass.data` only (in-memory): they carry a
+  pairing nonce and a delete token, which must never reach persistent storage.
 - Email addresses are normalized (lowercased) before being used as unique IDs.
 
 Docstring & comments:
@@ -42,7 +53,7 @@ import os
 import re
 import sys
 import time
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, MutableMapping
 from collections.abc import Iterable as CollIterable
 from collections.abc import Mapping as CollMapping
 from contextlib import suppress
@@ -86,6 +97,7 @@ from .const import (
     CONTAINER_NONCE_MIN_LEN,
     CONTAINER_NOVNC_PORT,
     CONTAINER_TOKEN_PORT,
+    CONTAINER_TOKEN_TTL,
     CONTRIBUTOR_MODE_HIGH_TRAFFIC,
     CONTRIBUTOR_MODE_IN_ALL_AREAS,
     DATA_AAS_TOKEN,
@@ -790,8 +802,17 @@ async def _async_delete_watched_secrets(
 
     Mirrors the legacy ``Auth/secrets.json`` cleanup (``Auth/token_cache.py``):
     once the bundle has been persisted into the config entry the on-disk copies
-    are transient secrets and must not linger. Two things make that unsafe to do
-    blindly, so the hook is both *account-aware* and *content-aware*:
+    are transient secrets and must not linger.
+
+    **When this runs.** Only after the entry is provably stored: either right
+    after a synchronous ``async_update_entry`` (discovery update case), or from
+    ``async_setup_entry`` via :func:`async_run_pending_container_cleanup` for
+    the create case, where the flow can only *stage* the job (a
+    ``CREATE_ENTRY`` FlowResult is not yet an entry). Never call this directly
+    from a step that ends in ``async_create_entry``.
+
+    Two things make the deletion unsafe to do blindly, so the hook is both
+    *account-aware* and *content-aware*:
 
     * :data:`SECRETS_EXTRA_WATCH_PATHS` may point at bundles of **different**
       Google accounts, and the account key of an identified bundle collapses to
@@ -1645,6 +1666,30 @@ def _container_login_schema(
     )
 
 
+@dataclass(frozen=True, slots=True)
+class _ContainerAckTarget:
+    """Everything (and only what) the second phase of the delete needs.
+
+    Split out of :class:`_ContainerFetchResult` so a *deferred* ack can be
+    staged without carrying the credential payload (``parsed``/``token``)
+    along with it: the ack is a pure "you may drop your copy now" message to
+    the login container, addressed by host/port and authorised by the pairing
+    nonce plus the one-shot delete token.
+    """
+
+    host: str
+    port: int
+    pairing_code: str
+    delete_token: str
+    fetched_monotonic: float | None = None
+    """``time.monotonic()`` of the fetch, or ``None`` when unknown.
+
+    Used only to grade the log level of a failed ack (see
+    :func:`_container_ttl_certainly_elapsed`), never for a decision that
+    changes behaviour.
+    """
+
+
 @dataclass(slots=True)
 class _ContainerFetchResult:
     """Outcome of a successful container-login fetch + token validation."""
@@ -1656,6 +1701,258 @@ class _ContainerFetchResult:
     port: int
     pairing_code: str
     delete_token: str
+    fetched_monotonic: float | None = None
+
+    @property
+    def ack_target(self) -> _ContainerAckTarget:
+        """Return the ack addressing/authorisation data without the credentials."""
+
+        return _ContainerAckTarget(
+            host=self.host,
+            port=self.port,
+            pairing_code=self.pairing_code,
+            delete_token=self.delete_token,
+            fetched_monotonic=self.fetched_monotonic,
+        )
+
+
+def _container_ttl_certainly_elapsed(target: _ContainerAckTarget) -> bool:
+    """Report whether the container's token TTL has provably run out by now.
+
+    The login container deletes its copy and shuts the endpoint down
+    :data:`CONTAINER_TOKEN_TTL` seconds after the *server* started, regardless of
+    whether anyone fetched or acked (``docker-login/token_server.py``). The ack
+    fires at the very end of ``async_setup_entry``, i.e. after credential
+    validation, the first coordinator refresh, FCM registration and the platform
+    forward, so on a slow instance the TTL routinely wins the race. That is a
+    normal, harmless ending: the TTL deletes exactly the same file the ack would
+    have deleted, and the bundle is already in the config entry.
+
+    The elapsed time is measured from the *fetch*, which happens after the
+    server started, so this is a lower bound on the server's age: when it says
+    the TTL has passed, it has. ``None`` (age unknown, e.g. a job staged by an
+    older version) is reported as "not certain" so the noisier log level wins.
+    """
+
+    if target.fetched_monotonic is None:
+        return False
+    return (time.monotonic() - target.fetched_monotonic) >= CONTAINER_TOKEN_TTL
+
+
+async def _async_send_container_ack(
+    hass: HomeAssistant, target: _ContainerAckTarget
+) -> None:
+    """Send the second phase of the two-phase delete (best effort).
+
+    Module-level so both the flow-bound mixin helper and the deferred cleanup
+    runner (:func:`async_run_pending_container_cleanup`, executed from
+    ``async_setup_entry``) share one implementation instead of two copies of
+    the same error handling.
+
+    Note that a *successful* ack includes HTTP 410 ("already gone"), which
+    ``ack_consumed`` deliberately treats as success on this path: the on-disk
+    secret is confirmed absent, which is all the ack ever wanted.
+    """
+
+    session = async_get_clientsession(hass)
+    try:
+        await ack_consumed(
+            session,
+            target.host,
+            target.port,
+            target.pairing_code,
+            target.delete_token,
+            timeout=CONTAINER_FETCH_TIMEOUT,
+        )
+    except ContainerLoginError as exc:
+        # Non-fatal either way: the container deletes on its own TTL fallback,
+        # and the bundle is already in the config entry. Never log the nonce or
+        # the delete token.
+        #
+        # Two very different situations reach this branch, so they get two log
+        # levels. An unreachable/timed-out endpoint *after* the TTL has provably
+        # run out is simply the TTL fallback having won the race: the container
+        # deleted the same file and shut down, nothing is wrong and there is
+        # nothing for the user to do, so debug. Everything else (an auth
+        # failure, or an endpoint that is unreachable while it should still be
+        # up) points at a real problem and stays a warning.
+        expected_ttl_shutdown = isinstance(
+            exc, (ContainerUnreachableError, ContainerTimeoutError)
+        ) and _container_ttl_certainly_elapsed(target)
+        if expected_ttl_shutdown:
+            _LOGGER.debug(
+                "Container ack skipped (%s): the %ds token TTL had already "
+                "elapsed, so the container deleted its copy itself",
+                type(exc).__name__,
+                CONTAINER_TOKEN_TTL,
+            )
+        else:
+            _LOGGER.warning(
+                "Container ack failed (%s); container will fall back to TTL delete",
+                type(exc).__name__,
+            )
+
+
+PENDING_CONTAINER_CLEANUP_KEY = "pending_container_cleanup"
+"""``hass.data[DOMAIN]`` key holding the staged, in-memory cleanup jobs."""
+
+_PENDING_CLEANUP_UNKNOWN_ACCOUNT = ""
+"""Bucket key for jobs staged by a flow that had no ``unique_id`` yet.
+
+A config entry unique id is a normalized Google account identifier and is
+never the empty string, so this sentinel cannot collide with a real one.
+"""
+
+
+@dataclass(frozen=True, slots=True)
+class PendingContainerCleanup:
+    """One irreversible post-persist cleanup, staged in memory by the flow.
+
+    The flow cannot run these actions itself: ``ConfigFlow.async_create_entry``
+    only *builds* a ``FlowResult``: Home Assistant creates and stores the entry
+    afterwards in ``ConfigEntriesFlowManager.async_finish_flow`` (see
+    ``homeassistant/config_entries.py``, ``await self.config_entries.async_add(
+    entry)``), i.e. after the step has already returned. Deleting the on-disk
+    credentials or acking the login container from inside the step would
+    therefore destroy the only remaining copy while the entry may still fail to
+    materialise.
+
+    So the flow stages the job here and ``async_setup_entry`` executes it once
+    the entry provably exists. The staging area is deliberately **in-memory
+    only** (``hass.data``) and is never written to Home Assistant storage: it
+    carries a pairing nonce and a delete token. Losing it on a crash is the
+    *desired* failure direction: the job is gone, the credential file is still
+    there, and the secrets watcher re-imports it on its next scan.
+    """
+
+    imported_stable_key: str | None = None
+    imported_digest: str | None = None
+    ack: _ContainerAckTarget | None = None
+
+
+@_typed_callback
+def _async_stage_container_cleanup(
+    hass: HomeAssistant | None,
+    *,
+    unique_id: str | None,
+    job: PendingContainerCleanup,
+) -> None:
+    """Stage ``job`` under ``unique_id`` for the upcoming ``async_setup_entry``.
+
+    ``unique_id`` is the flow's unique id, which Home Assistant copies verbatim
+    onto the new entry (``ConfigEntry(unique_id=flow.unique_id)``), so the
+    setup side can resolve the job unambiguously. Flows without a unique id
+    land in the :data:`_PENDING_CLEANUP_UNKNOWN_ACCOUNT` bucket, which every
+    setup drains as well so a job can never be stranded.
+    """
+
+    if hass is None:
+        return
+    bucket = cast(MutableMapping[str, Any], hass.data.setdefault(DOMAIN, {}))
+    pending = cast(
+        MutableMapping[str, list[PendingContainerCleanup]],
+        bucket.setdefault(PENDING_CONTAINER_CLEANUP_KEY, {}),
+    )
+    pending.setdefault(unique_id or _PENDING_CLEANUP_UNKNOWN_ACCOUNT, []).append(job)
+
+
+@_typed_callback
+def _async_pop_pending_container_cleanup(
+    hass: HomeAssistant, unique_id: str | None
+) -> list[PendingContainerCleanup]:
+    """Remove and return the jobs staged for ``unique_id``.
+
+    Uses ``pop``, never ``get``: ``async_setup_entry`` runs again on every
+    reload, and an irreversible cleanup must fire exactly once per staged job.
+    """
+
+    bucket = hass.data.get(DOMAIN)
+    if not isinstance(bucket, MutableMapping):
+        return []
+    pending = bucket.get(PENDING_CONTAINER_CLEANUP_KEY)
+    if not isinstance(pending, MutableMapping):
+        return []
+
+    keys = [_PENDING_CLEANUP_UNKNOWN_ACCOUNT]
+    if unique_id:
+        keys.insert(0, unique_id)
+
+    jobs: list[PendingContainerCleanup] = []
+    for key in keys:
+        staged = pending.pop(key, None)
+        if isinstance(staged, list):
+            jobs.extend(
+                item for item in staged if isinstance(item, PendingContainerCleanup)
+            )
+    if not pending:
+        bucket.pop(PENDING_CONTAINER_CLEANUP_KEY, None)
+    return jobs
+
+
+async def async_run_pending_container_cleanup(
+    hass: HomeAssistant, *, unique_id: str | None
+) -> None:
+    """Execute the cleanup jobs staged for this entry (exactly once, best effort).
+
+    Called from ``async_setup_entry`` after the setup core succeeded, which is
+    the first moment at which the config entry provably exists. Every job is
+    isolated: a failing delete must not skip the ack of the next job, and no
+    failure here may turn a working setup into a failed one, because the login
+    container has a TTL fallback and the watcher re-imports a surviving file.
+    """
+
+    jobs = _async_pop_pending_container_cleanup(hass, unique_id)
+    for job in jobs:
+        if job.imported_stable_key is not None or job.imported_digest is not None:
+            try:
+                await _async_delete_watched_secrets(
+                    hass,
+                    imported_stable_key=job.imported_stable_key,
+                    imported_digest=job.imported_digest,
+                )
+            except Exception as err:  # noqa: BLE001 - cleanup must never fail setup
+                _LOGGER.warning("Deferred watched-secrets cleanup failed: %s", err)
+        if job.ack is not None:
+            try:
+                await _async_send_container_ack(hass, job.ack)
+            except Exception as err:  # noqa: BLE001 - cleanup must never fail setup
+                _LOGGER.warning("Deferred container ack failed: %s", err)
+
+
+@_typed_callback
+def async_discard_pending_container_cleanup(
+    hass: HomeAssistant, *, unique_id: str | None
+) -> int:
+    """Drop the staged cleanup jobs of an entry *without* executing them.
+
+    For setup paths that end in a **final** ``return False`` (currently the
+    duplicate-account guard in ``async_setup_entry``), which never reach the
+    cleanup runner at the end of the function. Without this the staged job would
+    sit in ``hass.data`` for the whole process lifetime, holding a pairing nonce
+    and a delete token, and the bucket could grow without bound.
+
+    Discarding, not running, is the deliberate choice: the entry is not being
+    set up, so the credentials must stay where they are. The watched
+    ``secrets.json`` copies are kept on disk (the secrets watcher re-imports
+    them on its next scan) and the login container is not acked, so it drops its
+    own copy on its TTL.
+
+    This must NOT be called for a retryable abort such as
+    ``ConfigEntryNotReady``: Home Assistant retries that setup, and the job has
+    to survive until the retry succeeds.
+
+    Args:
+        hass: The Home Assistant instance holding the staging bucket.
+        unique_id: The unique id of the entry whose jobs are dropped.
+
+    Returns:
+        The number of discarded jobs (0 when nothing was staged).
+    """
+
+    # Reuses the pop helper on purpose: the bucket/sentinel bookkeeping (the
+    # unknown-account bucket, dropping the empty container) lives there and must
+    # not be duplicated.
+    return len(_async_pop_pending_container_cleanup(hass, unique_id))
 
 
 def _secrets_key_status(parsed: dict[str, Any]) -> tuple[bool, bool]:
@@ -2355,6 +2652,10 @@ class _ContainerLoginMixin:
             return None
 
         session = async_get_clientsession(self.hass)
+        # Age reference for the ack log level only (the container's TTL runs from
+        # its own start, so this is a lower bound); see
+        # _container_ttl_certainly_elapsed.
+        fetched_monotonic = time.monotonic()
         try:
             raw_bundle, delete_token = await fetch_secrets_from_container(
                 session,
@@ -2415,28 +2716,19 @@ class _ContainerLoginMixin:
             port=port,
             pairing_code=pairing_code,
             delete_token=delete_token,
+            fetched_monotonic=fetched_monotonic,
         )
 
     async def _async_container_ack(self, result: _ContainerFetchResult) -> None:
-        """Best-effort second phase of the two-phase delete after persist."""
+        """Best-effort second phase of the two-phase delete after persist.
 
-        session = async_get_clientsession(self.hass)
-        try:
-            await ack_consumed(
-                session,
-                result.host,
-                result.port,
-                result.pairing_code,
-                result.delete_token,
-                timeout=CONTAINER_FETCH_TIMEOUT,
-            )
-        except ContainerLoginError as exc:
-            # Non-fatal: the container deletes on its own TTL fallback. Never
-            # log the nonce or delete token.
-            _LOGGER.warning(
-                "Container ack failed (%s); container will fall back to TTL delete",
-                type(exc).__name__,
-            )
+        Only for call sites that have *already* persisted synchronously
+        (``async_update_entry`` in the reconfigure and options paths). A path
+        that ends in ``async_create_entry`` must stage the ack instead, because
+        the entry does not exist yet at that point.
+        """
+
+        await _async_send_container_ack(self.hass, result.ack_target)
 
 
 # ---------------------------
@@ -3040,24 +3332,33 @@ class ConfigFlow(
                     return self.async_abort(reason="already_configured")
 
                 result = await self.async_step_device_selection()
-                # Delete-after-import: only once the entry is actually created
-                # (the user confirmed). Aborted device selection leaves the
-                # watched bundles in place so the flow can be retried. Only the
-                # copies the import actually consumed are removed (see the hook
-                # docstring): a co-located bundle of a different account and a
-                # same-account bundle that got fresher while the user was
-                # confirming both survive.
+                # Delete-after-import: STAGED here, executed in
+                # async_setup_entry. A CREATE_ENTRY FlowResult is only a
+                # promise: Home Assistant adds the entry afterwards in
+                # ConfigEntriesFlowManager.async_finish_flow, so deleting the
+                # on-disk copies here would drop the credentials before they
+                # are persisted. Aborted device selection stages nothing and
+                # leaves the watched bundles in place so the flow can be
+                # retried. Only the copies the import actually consumed are
+                # removed (see the hook docstring): a co-located bundle of a
+                # different account and a same-account bundle that got fresher
+                # while the user was confirming both survive.
                 if (
                     isinstance(result, Mapping)
                     and result.get("type")
                     == data_entry_flow.FlowResultType.CREATE_ENTRY
                 ):
-                    await _async_delete_watched_secrets(
+                    _async_stage_container_cleanup(
                         getattr(self, "hass", None),
-                        imported_stable_key=_stable_key_for_discovery_payload(
-                            pending_payload
+                        unique_id=self.unique_id,
+                        job=PendingContainerCleanup(
+                            imported_stable_key=_stable_key_for_discovery_payload(
+                                pending_payload
+                            ),
+                            imported_digest=_digest_for_discovery_payload(
+                                pending_payload
+                            ),
                         ),
-                        imported_digest=_digest_for_discovery_payload(pending_payload),
                     )
                 return result
 
@@ -3557,12 +3858,18 @@ class ConfigFlow(
         )
 
     async def _async_flush_container_ack(self) -> None:
-        """Send + clear a deferred container ack after a successful persist (F4).
+        """Send + clear a deferred container ack after a *synchronous* persist (F4).
 
         A no-op unless a container-login fetch staged a result in
         ``self._container_pending_ack``. The pending result is cleared *before*
         the ack call so a caller cannot double-ack, and the ack itself is
         best-effort (its own errors fall back to the container's TTL delete).
+
+        Only valid where the entry has already been written through
+        ``hass.config_entries.async_update_entry``, which persists inline (the
+        reconfigure path). After ``async_create_entry`` the entry does not
+        exist yet, so that path must use
+        :meth:`_async_stage_container_ack` instead.
         """
 
         pending = self._container_pending_ack
@@ -3570,6 +3877,29 @@ class ConfigFlow(
             return
         self._container_pending_ack = None
         await self._async_container_ack(pending)
+
+    @_typed_callback
+    def _async_stage_container_ack(self) -> None:
+        """Hand a deferred container ack over to ``async_setup_entry`` (P2).
+
+        The counterpart of :meth:`_async_flush_container_ack` for the
+        ``async_create_entry`` path, where the entry is only created *after*
+        this step returns (``ConfigEntriesFlowManager.async_finish_flow`` ->
+        ``async_add``). Sending the ack here would tell the login container to
+        drop its copy of the credentials while Home Assistant might still fail
+        to store them. Clearing ``self._container_pending_ack`` keeps the
+        no-double-ack guarantee of the flush helper.
+        """
+
+        pending = self._container_pending_ack
+        if pending is None:
+            return
+        self._container_pending_ack = None
+        _async_stage_container_cleanup(
+            getattr(self, "hass", None),
+            unique_id=self.unique_id,
+            job=PendingContainerCleanup(ack=pending.ack_target),
+        )
 
     async def async_step_container_login(
         self, user_input: dict[str, Any] | None = None
@@ -3904,8 +4234,9 @@ class ConfigFlow(
                     or "Google Find My Device",
                     data=shadow,
                 )
-            # Entry created: fire the deferred container ack (two-phase delete, F4).
-            await self._async_flush_container_ack()
+            # Entry *promised*, not yet stored: hand the deferred ack over to
+            # async_setup_entry (two-phase delete, F4/P2).
+            self._async_stage_container_ack()
             return created
 
         return self.async_show_form(

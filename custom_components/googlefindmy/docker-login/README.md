@@ -86,14 +86,22 @@ Then follow [First run (Google login)](#first-run-google-login-required) from
 step 3.
 
 The launcher runs a single command:
-`docker compose run --build --service-ports --rm googlefindmy-login`. `run`
-builds (if needed) **and** starts a fresh one-shot container in the foreground
-with your terminal attached (so the "Press Enter" prompt reaches Python);
-`--rm` removes it on exit, so repeated logins never stack containers; and
-`--service-ports` publishes the noVNC port declared in `docker-compose.yml`.
+`docker compose -f docker-compose.yml run --build --service-ports --rm googlefindmy-login`.
+`run` builds (if needed) **and** starts a fresh one-shot container in the
+foreground with your terminal attached (so the "Press Enter" prompt reaches
+Python); `--rm` removes it on exit, so repeated logins never stack containers;
+and `--service-ports` publishes the ports declared by the selected compose
+files, which in this default case is only **noVNC on 7900**.
 On Linux/QNAP the launcher also exports your `GFMY_HOST_UID`/`GFMY_HOST_GID` so
 the finished `secrets.json` is handed back to you (see
 [Using `secrets.json`](#using-secretsjson-in-home-assistant)).
+
+Only if you ask for the one-click handoff (`GFMY_ONECLICK=1`) does the launcher
+add a second compose file, `docker-compose.oneclick.yml`, which publishes the
+token endpoint on `127.0.0.1:7901`. Without that opt-in **no 7901 port is
+published at all**, so a host that already uses port 7901 cannot stop the login
+container from starting (see
+[One-click handoff](#one-click-handoff-optional-no-manual-copy)).
 
 ### Manual alternative (`docker compose`)
 
@@ -104,6 +112,10 @@ cd config/custom_components/googlefindmy/docker-login
 mkdir -p data
 docker compose run --build --service-ports --rm googlefindmy-login
 ```
+
+This publishes noVNC only; the one-click token port stays closed unless you add
+the overlay file shown under
+[One-click handoff](#one-click-handoff-optional-no-manual-copy).
 
 No host `chmod` is needed: the container takes ownership of `./data` for the run
 (it has passwordless `sudo` in the selenium base image) and writes
@@ -204,8 +216,19 @@ opt in, and neither changes the classic file behaviour.
 
 After a successful login the container serves the freshly minted bundle on a
 one-shot, nonce-authenticated endpoint that is reachable **only on the Docker
-host's loopback** (`127.0.0.1:7901`), then deletes the file once Home Assistant
-confirms it (or after a short timeout).
+host's loopback** (`127.0.0.1:7901`). The file is then deleted on whichever of
+two equally normal outcomes comes first: Home Assistant confirms the bundle, or
+the 300 s TTL of the endpoint elapses. Both delete the same file, so both are a
+correct ending.
+
+Which one you see is mostly a matter of timing, and the TTL branch is common by
+design: Home Assistant only confirms **after** the config entry has been set up
+end to end (credential validation, coordinator refresh, FCM registration,
+platform setup), and on a slow or busy instance that takes longer than the TTL.
+The TTL is deliberately the fallback guarantee: the secret disappears from the
+container even if Home Assistant never gets around to confirming (aborted setup,
+restart, network hiccup). A TTL delete is therefore not an error and needs no
+action from you; the bundle already lives in the config entry at that point.
 
 The endpoint is strictly single-use: once the bundle has been handed out, every
 further request is refused, and repeated wrong pairing codes lock it out. A
@@ -218,7 +241,8 @@ clear-text output (Track C), or simply run the container again for a fresh code.
 > container's loopback, so the server inside the container binds `0.0.0.0` (all
 > container interfaces) on purpose — otherwise the published port would be
 > unreachable. The "no LAN exposure" boundary is the **host-side publish**
-> `127.0.0.1:7901:7901` in `docker-compose.yml`, which is pinned to loopback.
+> `127.0.0.1:7901:7901` in `docker-compose.oneclick.yml`, which is pinned to
+> loopback and has, deliberately, no LAN opt-in switch.
 >
 > **`network_mode: host` is NOT supported for this service.** In host networking
 > there is no bridge and no publish indirection: the `0.0.0.0` bind would then be
@@ -229,6 +253,27 @@ clear-text output (Track C), or simply run the container again for a fresh code.
 ```bash
 GFMY_ONECLICK=1 ./login.sh
 ```
+
+On Windows, run the two lines `set GFMY_ONECLICK=1` and `login.cmd`.
+
+**The 7901 publish is opt-in.** Compose cannot leave a `ports:` entry out
+conditionally, so the token-port publish lives in a separate overlay file,
+`docker-compose.oneclick.yml`, which the launcher adds **only** when
+`GFMY_ONECLICK=1`. Every other run (file handoff, `GFMY_CLEARTEXT=1`) starts
+with no 7901 publish at all and therefore also starts on a host where port 7901
+is already taken. By hand, the one-click start is:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.oneclick.yml \
+  run --build --service-ports --rm googlefindmy-login
+```
+
+The overlay switches `GFMY_ONECLICK` on by default, so that command needs no
+extra environment variable. Note that passing any `-f` disables Compose's
+implicit auto-load of a `docker-compose.override.yml`; if you keep such a file,
+list it explicitly as a further `-f` (the launchers do this for you). The
+overlay pins the publish to `127.0.0.1:7901:7901`; there is no supported way to
+put this port on the LAN.
 
 The container prints a **pairing code** (generated at runtime — there is no
 default). In Home Assistant, choose the *Container login* auth method and enter
@@ -269,8 +314,14 @@ is the SSH tunnel above.
 >    b. Start it **with** the service alias instead of using `login.sh`:
 >
 >    ```bash
->    docker compose run --use-aliases --build --service-ports --rm googlefindmy-login
+>    GFMY_ONECLICK=1 docker compose run --use-aliases --build --service-ports --rm googlefindmy-login
 >    ```
+>
+>    This route needs **no** `docker-compose.oneclick.yml`: Home Assistant talks
+>    to the container directly over the shared network, so no host port has to be
+>    published at all. Leaving the overlay out of this command also keeps
+>    Compose's automatic pickup of the `docker-compose.override.yml` you just
+>    created (an explicit `-f` would switch that off).
 >
 >    Then enter `googlefindmy-login` (the **service** name, which `--use-aliases`
 >    turns into a resolvable DNS alias, not the generated container name) as the
@@ -340,6 +391,12 @@ there is no separate image to rebuild for code changes.
   foreground with stdin attached.
 - **noVNC page won't load:** give the container a few seconds; check
   `docker compose logs` for `[entrypoint] Display ready.`
+- **`port is already allocated` on 7900 or 7901:** another process on the Docker
+  host holds that port. Port 7901 is only requested when you opt into the
+  one-click handoff, so plain logins, the file handoff, and `GFMY_CLEARTEXT=1`
+  are unaffected by a busy 7901; just start without `GFMY_ONECLICK=1`. For a
+  busy 7900, stop the conflicting process (a leftover login container:
+  `docker compose ps` / `docker compose down`).
 - **noVNC password:** it is `secret` — a fixed default of the base image.
 - **`SessionNotCreatedException` / chromedriver version mismatch:** set
   `GOOGLEFINDMY_CHROME_VERSION` to the container's Chrome major version

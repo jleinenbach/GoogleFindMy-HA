@@ -42,17 +42,35 @@ Codex review finding on PR #1208:
   a non-interactive script otherwise gives an async child ``/dev/null`` stdin (the
   ``input()`` login prompt hits EOF) and hard-ignores SIGINT (Python drops Ctrl-C),
   both regressions of the backgrounding fix above.
+* The one-click token port (7901) must be an OPT-IN publish. The launchers always
+  pass ``--service-ports``, so anything declared in ``docker-compose.yml`` is
+  published on EVERY run; an unconditional 7901 entry made the container fail to
+  start on a host where that port was already taken, which also broke the file
+  handoff (``./data``) and the ``GFMY_CLEARTEXT=1`` output, neither of which uses
+  the port. The publish therefore lives in the opt-in overlay
+  ``docker-compose.oneclick.yml`` that the launchers add only for
+  ``GFMY_ONECLICK=1`` (Codex P2 on PR #1211). When it IS published it stays pinned
+  to ``127.0.0.1:7901:7901``: that host publish is the security boundary for an
+  endpoint serving clear-text tokens, and there is deliberately no LAN opt-in for
+  it (unlike ``GFMY_NOVNC_BIND`` for noVNC 7900).
 """
 
 from __future__ import annotations
 
+import re
+import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
+import yaml
 
 DOCKER_LOGIN = Path("custom_components/googlefindmy/docker-login")
 # Build context root for the login image (docker-compose.yml `build.context: ..`).
 BUILD_CONTEXT = DOCKER_LOGIN.parent
+LOGIN_SERVICE = "googlefindmy-login"
+# Opt-in overlay carrying the one-click token-port publish (Codex P2, PR #1211).
+ONECLICK_COMPOSE = "docker-compose.oneclick.yml"
 
 
 def _read(name: str) -> str:
@@ -90,8 +108,12 @@ def test_launcher_uses_compose_run_not_up(launcher: str) -> None:
     """Launchers must use interactive ``compose run`` so the Enter prompt reaches Python."""
 
     text = _read(launcher)
-    assert "docker compose run" in text, (
-        f"{launcher} must start the container with `docker compose run` "
+    # `docker compose [-f ...] run`: the launchers now select their compose files
+    # explicitly (base always, the one-click overlay only on opt-in), so the
+    # invocation carries flags between `compose` and `run`. The subcommand must
+    # still be `run` -- match it as a word, not the bare literal string.
+    assert re.search(r"docker compose\s+(?:\S+\s+)*run\b", text), (
+        f"{launcher} must start the container with `docker compose [-f ...] run` "
         "(stdin attached), not `docker compose up`."
     )
     assert "--rm" in text, (
@@ -132,6 +154,251 @@ def test_compose_binds_novnc_to_loopback_by_default() -> None:
     assert "127.0.0.1" in compose, (
         "docker-compose.yml must bind the fixed-password noVNC port to loopback by default"
     )
+
+
+def _compose_service_ports(compose_file: str) -> list[str]:
+    """Return the login service's declared port publishes from ``compose_file``.
+
+    Parsed from YAML (not grepped) so the extensive *comments* about port 7901 in
+    both files cannot make a guard pass or fail by accident: only real ``ports:``
+    entries count.
+    """
+
+    parsed = yaml.safe_load(_read(compose_file))
+    service = parsed["services"][LOGIN_SERVICE]
+    return [str(entry) for entry in service.get("ports", [])]
+
+
+def test_base_compose_does_not_publish_the_oneclick_token_port() -> None:
+    """The base compose must publish noVNC only, never the one-click token port.
+
+    Both launchers start the service with ``--service-ports``, so every entry in
+    the base file's ``ports:`` list is published on EVERY run. With 7901 declared
+    unconditionally, a host that already used that port (another service, a
+    leftover container) made the container fail to start altogether -- taking down
+    the two handoff tracks that never touch the port: the file handoff through
+    ``./data`` and the ``GFMY_CLEARTEXT=1`` terminal output. Compose cannot drop a
+    single ``ports:`` entry conditionally, so the publish moved into the opt-in
+    overlay asserted below (Codex P2 on PR #1211).
+    """
+
+    ports = _compose_service_ports("docker-compose.yml")
+
+    assert not [p for p in ports if "7901" in p], (
+        "docker-compose.yml must NOT declare a publish for the one-click token "
+        f"port 7901 (found {ports!r}); it belongs in {ONECLICK_COMPOSE}, which the "
+        "launchers add only for GFMY_ONECLICK=1. Otherwise a busy host port 7901 "
+        "blocks the file-handoff and clear-text tracks that do not need it."
+    )
+    # noVNC stays published in every track (it is how you perform the login).
+    assert any("7900" in p for p in ports), (
+        "docker-compose.yml must keep publishing the noVNC viewer port 7900 for "
+        f"all tracks (found {ports!r})."
+    )
+
+
+def test_oneclick_overlay_publishes_token_port_on_host_loopback_only() -> None:
+    """The overlay must publish 7901 exclusively as ``127.0.0.1:7901:7901``.
+
+    The endpoint serves the freshly minted tokens in the clear, so the host-side
+    loopback publish IS the security boundary (the in-container bind is ``0.0.0.0``
+    on purpose, because Docker's bridge DNATs the published port onto eth0 rather
+    than onto container loopback). A wildcard publish (``0.0.0.0:7901:7901``) or a
+    bare ``7901:7901`` would put clear-text credentials on the LAN.
+    """
+
+    overlay = DOCKER_LOGIN / ONECLICK_COMPOSE
+    assert overlay.is_file(), (
+        f"{ONECLICK_COMPOSE} must exist next to docker-compose.yml: it carries the "
+        "opt-in one-click token-port publish that the launchers add on demand."
+    )
+
+    ports = _compose_service_ports(ONECLICK_COMPOSE)
+    token_ports = [p for p in ports if "7901" in p]
+    assert token_ports == ["127.0.0.1:7901:7901"], (
+        f"{ONECLICK_COMPOSE} must publish the token port exactly as "
+        f"'127.0.0.1:7901:7901' (found {ports!r}). Anything else exposes clear-text "
+        "tokens beyond host loopback."
+    )
+    # The overlay must not silently take over other ports (noVNC is merged in from
+    # the base file, including its GFMY_NOVNC_BIND behaviour).
+    assert ports == token_ports, (
+        f"{ONECLICK_COMPOSE} must only add the token port; noVNC's publish (and its "
+        f"GFMY_NOVNC_BIND handling) stays in docker-compose.yml. Found {ports!r}."
+    )
+
+    overlay_yaml = yaml.safe_load(_read(ONECLICK_COMPOSE))
+    assert "network_mode" not in overlay_yaml["services"][LOGIN_SERVICE], (
+        f"{ONECLICK_COMPOSE} must not set network_mode: `host` removes the bridge "
+        "and the publish indirection, so the container's 0.0.0.0 bind would land on "
+        "the host's LAN interfaces."
+    )
+
+
+@pytest.mark.parametrize("compose_file", ["docker-compose.yml", ONECLICK_COMPOSE])
+def test_no_lan_opt_in_exists_for_the_token_port(compose_file: str) -> None:
+    """No compose file may offer a LAN bind for 7901, not even via a variable.
+
+    noVNC deliberately has one (``GFMY_NOVNC_BIND``); the token port deliberately
+    has none, because it hands out credentials in the clear. This guard travels
+    with the publish: it now covers the overlay as strictly as it covered the base
+    file before the split.
+    """
+
+    for entry in _compose_service_ports(compose_file):
+        if "7901" not in entry:
+            continue
+        assert entry == "127.0.0.1:7901:7901", (
+            f"{compose_file} publishes the token port as {entry!r}. It must be the "
+            "hard-coded loopback publish '127.0.0.1:7901:7901' -- no wildcard, no "
+            "bare mapping, and no variable-driven host bind (there is no LAN opt-in "
+            "for this port by design; use an SSH tunnel instead)."
+        )
+
+    text = _read(compose_file)
+    assert "0.0.0.0:7901" not in text, (
+        f"{compose_file} must never bind the token port to all interfaces."
+    )
+    # A bare `7901:7901` (optionally quoted, no host-IP prefix) publishes on
+    # 0.0.0.0. The loopback form is preceded by a dot-separated IP, so it does not
+    # match this pattern.
+    assert re.search(r'(^|[\s"\'])7901:7901\b', text) is None, (
+        f"{compose_file} must not publish the token port without an explicit "
+        "127.0.0.1 host prefix; a bare mapping binds all interfaces."
+    )
+
+
+@pytest.mark.parametrize("launcher", ["login.sh", "login.cmd"])
+def test_launcher_selects_base_compose_explicitly(launcher: str) -> None:
+    """Both launchers must name the base compose file when they select files.
+
+    Once any ``-f`` is passed, Compose stops auto-discovering, so the base file has
+    to be listed too; otherwise the overlay alone would be an incomplete project.
+    """
+
+    text = _read(launcher)
+    assert "-f docker-compose.yml" in text, (
+        f"{launcher} must pass `-f docker-compose.yml` explicitly, because adding "
+        "the one-click overlay with -f disables Compose's implicit file discovery."
+    )
+
+
+@pytest.mark.parametrize("launcher", ["login.sh", "login.cmd"])
+def test_launcher_adds_oneclick_overlay_only_behind_the_oneclick_gate(
+    launcher: str,
+) -> None:
+    """The overlay (and thus the 7901 publish) may only be added for GFMY_ONECLICK=1.
+
+    If a launcher pulled the overlay in unconditionally the fix would be undone:
+    the file-handoff and clear-text tracks would again fail to start on a host
+    where port 7901 is taken.
+    """
+
+    text = _read(launcher)
+    assert ONECLICK_COMPOSE in text, (
+        f"{launcher} must be able to add {ONECLICK_COMPOSE} for the one-click track."
+    )
+
+    # Every line that actually passes the overlay to Compose must sit behind an
+    # explicit GFMY_ONECLICK check (same line for cmd, enclosing `if` for bash).
+    adding_lines = [
+        line
+        for line in text.splitlines()
+        if f"-f {ONECLICK_COMPOSE}" in line
+        and not line.lstrip().startswith(("#", "rem ", "REM "))
+    ]
+    assert adding_lines, (
+        f"{launcher} must contain an executable line adding `-f {ONECLICK_COMPOSE}`"
+    )
+
+    if launcher == "login.cmd":
+        for line in adding_lines:
+            assert 'if "%GFMY_ONECLICK%"=="1"' in line, (
+                "login.cmd must gate the overlay on the same line: "
+                f"found an unguarded {line!r}"
+            )
+        return
+
+    # bash: the add must live inside the `if [ "${GFMY_ONECLICK:-}" = "1" ]` block.
+    lines = text.splitlines()
+    gate = next(
+        i for i, line in enumerate(lines) if '"${GFMY_ONECLICK:-}" = "1"' in line
+    )
+    add = next(i for i, line in enumerate(lines) if line in adding_lines)
+    closing = next(
+        i for i, line in enumerate(lines[gate:], gate) if line.strip() == "fi"
+    )
+    assert gate < add < closing, (
+        "login.sh must add the one-click overlay INSIDE the GFMY_ONECLICK gate "
+        f"(gate at line {gate + 1}, add at line {add + 1}, fi at line {closing + 1})."
+    )
+
+
+@pytest.mark.parametrize(
+    ("oneclick", "expect_overlay"),
+    [(None, False), ("", False), ("0", False), ("1", True)],
+)
+def test_login_sh_behaviourally_selects_compose_files(
+    tmp_path: Path, oneclick: str | None, expect_overlay: bool
+) -> None:
+    """Behavioural proof: run the REAL login.sh against a stub ``docker``.
+
+    Text guards can be fooled by a stale string elsewhere in the file; this test
+    executes ``login.sh`` with a fake ``docker`` on ``PATH`` that only echoes its
+    arguments, and asserts the ACTUAL command line. It therefore proves the
+    property that matters: without ``GFMY_ONECLICK=1`` nothing pulls in the 7901
+    publish, so a busy host port cannot block the file-handoff/clear-text tracks;
+    with it, the overlay is selected. The launcher's gate mirrors entrypoint.sh,
+    which also treats only the literal ``1`` as "on".
+    """
+
+    bash = shutil.which("bash")
+    if bash is None:  # pragma: no cover - CI images all ship bash
+        pytest.skip("bash is required to run the launcher")
+
+    work = tmp_path / "docker-login"
+    work.mkdir()
+    for name in ("login.sh", "docker-compose.yml", ONECLICK_COMPOSE):
+        shutil.copy(DOCKER_LOGIN / name, work / name)
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    stub = bin_dir / "docker"
+    stub.write_text('#!/usr/bin/env bash\nprintf "DOCKER_ARGS: %s\\n" "$*"\n', "utf-8")
+    stub.chmod(0o755)
+
+    env = {"PATH": f"{bin_dir}:/usr/bin:/bin", "HOME": str(tmp_path)}
+    if oneclick is not None:
+        env["GFMY_ONECLICK"] = oneclick
+
+    proc = subprocess.run(
+        [bash, str(work / "login.sh")],
+        capture_output=True,
+        timeout=60,
+        check=False,
+        env=env,
+    )
+    assert proc.returncode == 0, proc.stderr.decode()
+    argline = next(
+        line
+        for line in proc.stdout.decode().splitlines()
+        if line.startswith("DOCKER_ARGS: ")
+    )
+
+    assert "-f docker-compose.yml" in argline, (
+        f"login.sh must always select the base compose file; got {argline!r}"
+    )
+    assert "--service-ports" in argline and " run " in argline
+    if expect_overlay:
+        assert f"-f {ONECLICK_COMPOSE}" in argline, (
+            f"GFMY_ONECLICK={oneclick!r} must pull in the one-click overlay; "
+            f"got {argline!r}"
+        )
+    else:
+        assert ONECLICK_COMPOSE not in argline, (
+            f"GFMY_ONECLICK={oneclick!r} must NOT publish the token port: the "
+            f"overlay may not be selected. got {argline!r}"
+        )
 
 
 def _dockerignore_rules() -> list[str]:

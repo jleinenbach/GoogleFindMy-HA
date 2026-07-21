@@ -37,9 +37,14 @@ exercising the security contract documented in the module docstring:
   against ``const.py``, the source of truth, not against literals.
 * Host-publish loopback boundary: the container-internal bind is ``0.0.0.0`` on
   purpose (Docker bridge DNATs the published port onto eth0, not container
-  loopback), and the *no-LAN* guarantee is asserted against the HOST publish in
-  ``docker-compose.yml`` (``127.0.0.1:7901:7901`` present, no ``0.0.0.0:7901``
-  publish, no ``network_mode``), NOT against the container bind.
+  loopback), and the *no-LAN* guarantee is asserted against the HOST publish,
+  NOT against the container bind. Since the token port became an opt-in overlay
+  (Track A/C must start even when 7901 is taken on the host), that publish lives
+  in ``docker-compose.oneclick.yml``; the base ``docker-compose.yml`` must not
+  publish 7901 at all. Both files are asserted, on parsed YAML rather than raw
+  text, because both carry ``127.0.0.1:7901:7901`` and ``network_mode: host`` in
+  explanatory comments that a text match would happily mistake for the real
+  thing.
 
 Collection hardening (Audit HOCH-3): ``docker-login/`` is NOT a Python package
 and its basename is not importable via ``import``. The module is loaded with
@@ -84,6 +89,9 @@ _DOCKER_LOGIN_DIR = (
 )
 _TOKEN_SERVER_PATH = _DOCKER_LOGIN_DIR / "token_server.py"
 _COMPOSE_PATH = _DOCKER_LOGIN_DIR / "docker-compose.yml"
+# The token port is an opt-in overlay: the base compose publishes noVNC only, so
+# Track A (file handoff) and Track C (cleartext) still start when 7901 is busy.
+_ONECLICK_COMPOSE_PATH = _DOCKER_LOGIN_DIR / "docker-compose.oneclick.yml"
 
 
 def _load_token_server() -> ModuleType:
@@ -229,39 +237,65 @@ def test_container_bind_is_wildcard_for_bridge_dnat() -> None:
     assert token_server._BIND_HOST == "0.0.0.0"
 
 
-def test_host_publish_is_loopback_only_no_lan_exposure() -> None:
-    """The security boundary: docker-compose publishes 7901 on host loopback only.
+def _published_ports(path: Path) -> list[str]:
+    """Return every ``ports:`` entry of every service in a compose file.
 
-    The no-LAN guarantee lives in the host-side publish, not in the container
-    bind. Require the loopback publish ``127.0.0.1:7901:7901`` and forbid any
-    wildcard publish of the token port (``0.0.0.0:7901`` / a bare ``7901:7901``).
+    Parsed from YAML on purpose: both compose files carry ``127.0.0.1:7901:7901``
+    inside explanatory comments, so a raw-text match would pass even if the real
+    publish were removed or widened.
     """
 
-    compose = _COMPOSE_PATH.read_text(encoding="utf-8")
-    # The loopback host publish for the token port must be present verbatim.
-    assert "127.0.0.1:7901:7901" in compose
-    # No wildcard/all-interfaces publish of the token port.
-    assert "0.0.0.0:7901" not in compose
-    # No bare (all-interfaces) publish of the token port either. A bare
-    # "7901:7901" (optionally quoted) with no host-IP prefix binds 0.0.0.0.
-    import re
-
-    bare_publish = re.compile(r'(^|[\s"\'])7901:7901(\b)')
-    assert bare_publish.search(compose) is None
+    compose = yaml.safe_load(path.read_text(encoding="utf-8"))
+    services: dict[str, Any] = compose["services"]
+    return [
+        str(port) for service in services.values() for port in service.get("ports", [])
+    ]
 
 
-def test_compose_does_not_set_network_mode() -> None:
+def test_base_compose_does_not_publish_the_token_port() -> None:
+    """The base compose publishes noVNC only, never the token port.
+
+    Publishing 7901 unconditionally made the whole container fail to start when
+    the port was already taken on the host, which also broke Track A (file
+    handoff) and Track C (cleartext) that never touch that port. The token port
+    therefore moved into an opt-in overlay.
+    """
+
+    ports = _published_ports(_COMPOSE_PATH)
+    assert [port for port in ports if "7901" in port] == []
+    # noVNC stays published in every track.
+    assert any("7900" in port for port in ports)
+
+
+def test_host_publish_is_loopback_only_no_lan_exposure() -> None:
+    """The security boundary: the overlay publishes 7901 on host loopback only.
+
+    The no-LAN guarantee lives in the host-side publish, not in the container
+    bind. The overlay must publish the token port exactly as
+    ``127.0.0.1:7901:7901``: no wildcard publish (``0.0.0.0:7901``), no bare
+    ``7901:7901`` (which binds all interfaces), and no variable-driven host bind
+    (there is deliberately no LAN opt-in for this port, unlike noVNC 7900).
+    """
+
+    token_ports = [
+        port for port in _published_ports(_ONECLICK_COMPOSE_PATH) if "7901" in port
+    ]
+    assert token_ports == ["127.0.0.1:7901:7901"]
+
+
+@pytest.mark.parametrize("compose_path", [_COMPOSE_PATH, _ONECLICK_COMPOSE_PATH])
+def test_compose_does_not_set_network_mode(compose_path: Path) -> None:
     """No service may set ``network_mode``; ``host`` would collapse the boundary.
 
     The two-layer guarantee is "wildcard bind inside the container, loopback
     publish on the host". ``network_mode: host`` removes the bridge and with it
     the publish, so the container's ``0.0.0.0:7901`` bind would land directly on
     the host's interfaces and expose the cleartext token endpoint to the LAN.
-    The compose file *mentions* ``network_mode: host`` in a warning comment, so
+    Both compose files *mention* ``network_mode: host`` in a warning comment, so
     this is asserted on the parsed YAML rather than on the raw text.
     """
 
-    compose = yaml.safe_load(_COMPOSE_PATH.read_text(encoding="utf-8"))
+    compose = yaml.safe_load(compose_path.read_text(encoding="utf-8"))
     services: dict[str, Any] = compose["services"]
     offenders = sorted(
         name for name, service in services.items() if "network_mode" in service
