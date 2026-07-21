@@ -748,7 +748,19 @@ async def test_ack_nonce_failures_lock_the_endpoint(tmp_path: Path) -> None:
             json={"delete_token": state.delete_token},
         )
         assert after_ack.status == 410
-        assert (await after_ack.json())["error"] == "locked"
+        # Asserted against the CLIENT's marker, not a literal: since the ack
+        # path can no longer decide 410 from the status alone, the client tells
+        # "already deleted" (success) from "locked" (secret still on disk) by
+        # this very string. Renaming it server-side without touching the client
+        # would silently turn every lockout into a confirmed delete, and the
+        # operator would never hear about the credential left behind.
+        #
+        # Imported inside the test, like the const parity check above: the
+        # module under test must not need the integration package at
+        # import/collection time.
+        from custom_components.googlefindmy import container_login  # noqa: PLC0415
+
+        assert (await after_ack.json())["error"] == container_login._LOCKED_MARKER
         # A lockout must never destroy the credential (see the ``_run`` test).
         assert state.deleted is False
         assert state.secrets_path.is_file()
@@ -774,6 +786,11 @@ async def test_ack_idempotent_second_ack_returns_410(tmp_path: Path) -> None:
             json={"delete_token": state.delete_token},
         )
         assert first.status == 200
+        from custom_components.googlefindmy import container_login  # noqa: PLC0415
+
+        # The client accepts a 200 only with a confirming marker, so the very
+        # first ack is part of the same contract.
+        assert (await first.json())["status"] in container_login._ACK_DELETED_MARKERS
 
         second = await client.post(
             "/ack",
@@ -781,7 +798,9 @@ async def test_ack_idempotent_second_ack_returns_410(tmp_path: Path) -> None:
             json={"delete_token": state.delete_token},
         )
         assert second.status == 410
-        assert (await second.json())["status"] == "already_deleted"
+        # Client-side marker again (see the lockout test): a rename here that
+        # skipped the client would make every successful ack look unconfirmed.
+        assert (await second.json())["status"] in container_login._ACK_DELETED_MARKERS
     finally:
         await client.close()
 

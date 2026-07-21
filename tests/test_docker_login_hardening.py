@@ -53,13 +53,22 @@ Codex review finding on PR #1208:
   to ``127.0.0.1:7901:7901``: that host publish is the security boundary for an
   endpoint serving clear-text tokens, and there is deliberately no LAN opt-in for
   it (unlike ``GFMY_NOVNC_BIND`` for noVNC 7900).
+* ``GFMY_ONECLICK`` and ``GFMY_CLEARTEXT`` are documented (compose + README) as
+  INDEPENDENT switches, but the clear-text track hung off the one-click branch as
+  an ``elif``, so with both set it was never evaluated -- in the documented lockout
+  case the token server deliberately KEEPS ``secrets.json``, yet the requested
+  clear-text fallback stayed silent. The tracks are now two separate ``if``s, each
+  re-testing ``-f "${_secrets_path}"`` so an acked/TTL-consumed (deleted) bundle
+  still prints nothing (Codex P2 on PR #1211).
 """
 
 from __future__ import annotations
 
+import os
 import re
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -826,4 +835,254 @@ def test_readme_container_station_does_not_present_compose_up_first_login() -> N
     assert "compose up" in bullet and "forward" in bullet, (
         "Container Station bullet must warn that the app-import/compose-up path does "
         "not forward a terminal, so the first-login prompt stalls."
+    )
+
+
+# The post-login track dispatch of entrypoint.sh: from the resolved secrets path
+# down to (but excluding) the final `exit "${_rc}"`. The behavioural test below
+# runs this section VERBATIM (only the token-server program is swapped for a
+# stub), so it exercises the real branch structure instead of a paraphrase and
+# cannot be satisfied by a comment that merely claims the tracks are independent.
+_HANDOFF_START = '_secrets_path="${GOOGLEFINDMY_SECRETS_PATH:-/data/secrets.json}"'
+_HANDOFF_END = 'exit "${_rc}"'
+_TOKEN_SERVER_PATH = "/app/gfmy/docker-login/token_server.py"
+
+
+def _extract_handoff_section(entrypoint: str) -> str:
+    """Return the post-login track dispatch of ``entrypoint.sh``."""
+
+    start = entrypoint.find(_HANDOFF_START)
+    assert start != -1, (
+        "could not locate the `_secrets_path=` anchor that starts the post-login "
+        "handoff section in entrypoint.sh"
+    )
+    end = entrypoint.find(_HANDOFF_END, start)
+    assert end != -1, (
+        'could not locate the trailing `exit "${_rc}"` that ends the post-login '
+        "handoff section in entrypoint.sh"
+    )
+    return entrypoint[start:end]
+
+
+def _as_elif_chain(section: str) -> str:
+    """Re-create the pre-fix if/elif chain (mutation control for the guard below)."""
+
+    chained = section.replace(
+        'if [ "${_rc}" -eq 0 ] && [ "${GFMY_CLEARTEXT:-}" = "1" ]',
+        'elif [ "${_rc}" -eq 0 ] && [ "${GFMY_CLEARTEXT:-}" = "1" ]',
+        1,
+    )
+    assert chained != section, "clear-text condition not found; control is stale"
+    chained = chained.replace("|| true\nfi\n", "|| true\n", 1)
+    assert chained.count("\nfi\n") == 1, (
+        "control must leave exactly the chain-closing `fi`; got "
+        f"{chained.count(chr(10) + 'fi' + chr(10))}"
+    )
+    return chained
+
+
+def _run_handoff_section(
+    section: str,
+    *,
+    tmp_path: Path,
+    oneclick: bool,
+    cleartext: bool,
+    server_consumes_secret: bool,
+) -> tuple[str, bool]:
+    """Execute the track dispatch with a stubbed token server.
+
+    ``server_consumes_secret`` models the two token-server outcomes that matter
+    here: ``True`` = ack/TTL (the server deleted ``secrets.json``), ``False`` =
+    lockout (the server deliberately KEPT the file). Returns the captured stdout
+    and whether the secrets file still exists afterwards.
+    """
+
+    secrets_file = tmp_path / "secrets.json"
+    secrets_file.write_text('{"token": "SECRET-BUNDLE-MARKER"}\n', encoding="utf-8")
+
+    server_stub = tmp_path / "token_server_stub.py"
+    server_stub.write_text(
+        "import os\n"
+        "if os.environ['STUB_CONSUMES_SECRET'] == '1':\n"
+        "    os.remove(os.environ['GOOGLEFINDMY_SECRETS_PATH'])\n"
+        "print('[stub] token server returned')\n",
+        encoding="utf-8",
+    )
+
+    script = section.replace(_TOKEN_SERVER_PATH, str(server_stub)).replace(
+        "python3", sys.executable
+    )
+    proc = subprocess.run(
+        ["bash", "-c", "set -e\n_rc=0\n" + script],
+        env={
+            **os.environ,
+            "GFMY_ONECLICK": "1" if oneclick else "",
+            "GFMY_CLEARTEXT": "1" if cleartext else "",
+            "GOOGLEFINDMY_SECRETS_PATH": str(secrets_file),
+            "STUB_CONSUMES_SECRET": "1" if server_consumes_secret else "0",
+        },
+        capture_output=True,
+        timeout=60,
+        check=False,
+    )
+    assert proc.returncode == 0, (
+        f"handoff section exited {proc.returncode}: {proc.stderr.decode()!r}"
+    )
+    return proc.stdout.decode(), secrets_file.exists()
+
+
+def test_cleartext_track_runs_after_the_oneclick_server_even_with_both_switches(
+    tmp_path: Path,
+) -> None:
+    """``GFMY_ONECLICK=1`` must not swallow ``GFMY_CLEARTEXT=1`` (Codex P2, PR #1211).
+
+    The two switches are documented as independent in ``docker-compose.yml`` and
+    ``README.md``. While the clear-text track hung off the one-click branch as an
+    ``elif``, setting both selected one-click and the ``elif`` was never evaluated:
+    in the documented LOCKOUT case the token server keeps ``secrets.json`` on
+    purpose precisely so the fallbacks still work, yet Track C printed nothing and
+    the user lost the fallback they asked for.
+
+    This is a behavioural guard: it takes the REAL dispatch out of
+    ``entrypoint.sh``, stubs only the token server, and asserts the printed output
+    for the three outcomes. The mutation control re-creates the ``elif`` chain and
+    must fail to print the block -- so the test discriminates on the structure, not
+    on the comment next to it.
+    """
+
+    section = _extract_handoff_section(_read("entrypoint.sh"))
+
+    # 1) Both switches, LOCKOUT: the server kept the file, so Track C must print it
+    #    and then remove it (the file is not left lying around).
+    out, still_there = _run_handoff_section(
+        section,
+        tmp_path=tmp_path,
+        oneclick=True,
+        cleartext=True,
+        server_consumes_secret=False,
+    )
+    assert "ONE-CLICK login ready" in out, (
+        f"one-click track did not run with GFMY_ONECLICK=1; got: {out!r}"
+    )
+    assert "BEGIN secrets.json (copy)" in out and "SECRET-BUNDLE-MARKER" in out, (
+        "with GFMY_ONECLICK=1 AND GFMY_CLEARTEXT=1 the clear-text fallback must "
+        "still print the bundle the server kept after a lockout; got: " + repr(out)
+    )
+    assert not still_there, (
+        "Track C must remove the printed secrets.json so nothing lingers on disk"
+    )
+
+    # 2) Both switches, ACK/TTL: the server consumed (deleted) the bundle, so there
+    #    is nothing left to print -- no empty/misleading block.
+    out, still_there = _run_handoff_section(
+        section,
+        tmp_path=tmp_path,
+        oneclick=True,
+        cleartext=True,
+        server_consumes_secret=True,
+    )
+    assert "ONE-CLICK login ready" in out
+    assert "BEGIN secrets.json (copy)" not in out, (
+        "after the server consumed (deleted) secrets.json the clear-text block must "
+        f"NOT be printed; got: {out!r}"
+    )
+    assert not still_there
+
+    # 3) Clear-text alone: the historical path is unchanged (print, then remove).
+    out, still_there = _run_handoff_section(
+        section,
+        tmp_path=tmp_path,
+        oneclick=False,
+        cleartext=True,
+        server_consumes_secret=False,
+    )
+    assert "ONE-CLICK login ready" not in out
+    assert "SECRET-BUNDLE-MARKER" in out
+    assert not still_there
+
+    # 4) Mutation control: with the pre-fix ``elif`` chain the same lockout scenario
+    #    prints the one-click banner but NOT the clear-text block -- proving the
+    #    assertion in (1) fails on a regressed script instead of passing anyway.
+    control_out, control_still_there = _run_handoff_section(
+        _as_elif_chain(section),
+        tmp_path=tmp_path,
+        oneclick=True,
+        cleartext=True,
+        server_consumes_secret=False,
+    )
+    assert "ONE-CLICK login ready" in control_out, (
+        "control did not even reach the one-click branch; it proves nothing. "
+        f"got: {control_out!r}"
+    )
+    assert "BEGIN secrets.json (copy)" not in control_out, (
+        "sanity: the pre-fix elif chain must SKIP the clear-text track, otherwise "
+        f"this guard would pass without the fix. got: {control_out!r}"
+    )
+    assert control_still_there, (
+        "sanity: with the elif chain nothing prints or removes the kept bundle"
+    )
+
+
+def _entrypoint_code_lines() -> list[str]:
+    """Return ``entrypoint.sh`` without comment-only and blank lines.
+
+    Structural assertions run on this projection so a guard can never be satisfied
+    by prose in a comment that describes the intended shape.
+    """
+
+    return [
+        line
+        for line in _read("entrypoint.sh").splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+
+
+def test_entrypoint_keeps_one_clear_text_block_in_its_own_if(tmp_path: Path) -> None:
+    """The clear-text track is one block, in its own ``if``, after the one-click one.
+
+    Structural companion to the behavioural guard above: it pins the two properties
+    that behaviour alone cannot show -- that the fix was not implemented by
+    DUPLICATING the print block into both branches (the block must exist exactly
+    once and be reachable from both paths), and that the clear-text condition is a
+    top-level ``if`` placed after the one-click block was closed with ``fi``.
+    """
+
+    del tmp_path  # structural guard: no filesystem scenario needed
+
+    code = _entrypoint_code_lines()
+
+    cleartext_conditions = [
+        i for i, line in enumerate(code) if "GFMY_CLEARTEXT" in line
+    ]
+    assert len(cleartext_conditions) == 1, (
+        "expected exactly one GFMY_CLEARTEXT condition in entrypoint.sh; got "
+        f"{[code[i] for i in cleartext_conditions]}"
+    )
+    cleartext_idx = cleartext_conditions[0]
+    assert code[cleartext_idx].startswith("if "), (
+        "the clear-text track must be its OWN top-level `if`, not an `elif` chained "
+        f"to the one-click branch; got: {code[cleartext_idx]!r}"
+    )
+
+    # It comes AFTER the one-click server call, and that branch is closed first.
+    server_idx = next(
+        i
+        for i, line in enumerate(code)
+        if _TOKEN_SERVER_PATH.rsplit("/", 1)[-1] in line
+    )
+    assert server_idx < cleartext_idx, (
+        "the clear-text track must be evaluated AFTER the token server returned"
+    )
+    assert any(line.strip() == "fi" for line in code[server_idx:cleartext_idx]), (
+        "the one-click branch must be closed with `fi` before the clear-text `if`"
+    )
+
+    # DRY: exactly one clear-text print block, and it re-tests the file's existence.
+    assert sum("BEGIN secrets.json" in line for line in code) == 1, (
+        "the clear-text block must exist exactly ONCE and be reachable from both "
+        "paths; duplicating it into the one-click branch is not the fix."
+    )
+    assert '[ -f "${_secrets_path}" ]' in code[cleartext_idx], (
+        "the clear-text condition must re-test the secrets file, so an acked or "
+        "TTL-consumed (deleted) bundle prints nothing."
     )

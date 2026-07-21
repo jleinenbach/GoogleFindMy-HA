@@ -67,8 +67,29 @@ Covered (real ``container_login`` client, fake session, F-A2/F-N3):
   ``ContainerAuthError`` (code expired/locked out, or the one-shot bundle was
   already collected) and additionally sets ``code_used=True`` so the config
   flow can offer "restart the container" instead of "check your code"; on the
-  *ack* path 410 stays a **success** ("already gone", the two-phase delete
-  landed), and 401/403 are auth failures with ``code_used=False`` on both.
+  *ack* path 410 is decided by the **body**, and 401/403 are auth failures with
+  ``code_used=False`` on both.
+* ACK outcome classification (F-C2): the deletion is confirmed by the response
+  *body* (``{"status": "deleted"}`` on 200, ``{"status": "already_deleted"}`` on
+  410), never by the status alone. The server sends that same 410 with
+  ``{"error": "locked"}`` after a five-attempt lockout and then deliberately
+  *keeps* ``secrets.json``, so that case raises (``ContainerAuthError``), as
+  does any body that cannot be classified, on either accepted status
+  (``ContainerUnreachableError``). Pinned end-to-end through
+  ``async_run_pending_container_cleanup`` with the real client: the lockout must
+  reach the log as a warning, the idempotent 410 must stay silent.
+* The retention discriminator: only the lockout body sets
+  ``ContainerLoginError.secret_retained``, and only that flag (never the error
+  *class*) may trigger the "the container kept its secrets.json, delete it
+  manually" warning. A plain ``403`` -- the ack of a restarted container, whose
+  nonce no longer matches -- is the same class with the opposite fact and keeps
+  the generic TTL-fallback wording. Driven through the real client on both
+  sides, plus the conservative ``False`` default on every error class.
+* Chunked responses (F-C1): the body is drained to EOF, so a reply split across
+  several TCP chunks is reassembled instead of being parsed half-read, while the
+  ``CONTAINER_MAX_RESPONSE_BYTES`` ceiling (inclusive boundary) and the
+  buffering bound still hold. Pinned end-to-end through
+  ``async_step_container_login`` with the real client.
 * Fetch response validation: refused redirect (3xx) and other non-auth statuses
   -> ``ContainerUnreachableError``; wrong content type, a body exceeding
   ``CONTAINER_MAX_RESPONSE_BYTES``, non-JSON and structurally malformed
@@ -762,6 +783,69 @@ async def test_ack_after_ttl_expiry_logs_at_debug_not_warning(
     assert bool(warnings) is expect_warning
     # Either way the failure is reported somewhere and stays free of secrets.
     assert "ContainerUnreachableError" in caplog.text
+    assert _PAIRING_CODE not in caplog.text
+    assert _DELETE_TOKEN not in caplog.text
+
+
+async def test_ack_lockout_warning_does_not_promise_a_ttl_delete(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A *proven* lockout means the container KEEPS the file, so say that.
+
+    A locked-out server deliberately preserves ``secrets.json`` and then exits,
+    so nothing deletes it afterwards. The generic "expected to fall back to its
+    TTL delete" wording would therefore tell the operator the credential cleans
+    itself up while it actually stays on disk.
+
+    The error is built the way ``_require_ack_deleted`` builds it -- with
+    ``secret_retained=True`` -- because that flag, not the error class, is what
+    the branch keys on (see
+    ``test_only_a_proven_lockout_claims_a_retained_secret`` for the sibling
+    ``ContainerAuthError`` that must NOT reach this message).
+    """
+
+    recorder = _Recorder()
+    _install_container_client(monkeypatch, recorder)
+
+    async def _locked_out_ack(*_args: Any, **_kwargs: Any) -> None:
+        raise config_flow.ContainerAuthError(
+            "ack rejected: endpoint locked", secret_retained=True
+        )
+
+    monkeypatch.setattr(config_flow, "ack_consumed", _locked_out_ack)
+
+    hass = _build_hass([])
+    config_flow._async_stage_container_cleanup(
+        hass,
+        unique_id=_EMAIL,
+        job=config_flow.PendingContainerCleanup(
+            ack=config_flow._ContainerAckTarget(
+                host="127.0.0.1",
+                port=CONTAINER_TOKEN_PORT,
+                pairing_code=_PAIRING_CODE,
+                delete_token=_DELETE_TOKEN,
+                # Well inside the TTL: the "the TTL already deleted it" excuse
+                # must not be reachable here.
+                fetched_monotonic=time.monotonic(),
+            )
+        ),
+    )
+
+    with caplog.at_level(logging.DEBUG, logger=config_flow._LOGGER.name):
+        await config_flow.async_run_pending_container_cleanup(hass, unique_id=_EMAIL)
+
+    warnings = [
+        record for record in caplog.records if record.levelno >= logging.WARNING
+    ]
+    assert warnings, "a rejected ack leaves a credential behind and must warn"
+    text = "\n".join(record.getMessage() for record in warnings)
+    assert "ContainerAuthError" in text
+    assert "lockout" in text
+    # The operator has to act, so the message has to say so.
+    assert "manually" in text
+    # The whole point: no false promise of an automatic cleanup.
+    assert "TTL delete" not in text
     assert _PAIRING_CODE not in caplog.text
     assert _DELETE_TOKEN not in caplog.text
 
@@ -1506,17 +1590,45 @@ async def test_ack_maps_builtin_timeout_to_container_timeout() -> None:
 
 
 class _FakeContent:
-    """Stand-in for ``response.content`` honoring the caller's read limit."""
+    """Stand-in for ``response.content`` with chunk-wise ``StreamReader`` reads.
 
-    def __init__(self, body: bytes) -> None:
-        self._body = body
+    ``read(n)`` hands back *up to* n bytes of the next queued chunk and stops at
+    the chunk boundary, so EOF is only ever signalled by an empty result. The
+    real ``StreamReader`` may coalesce *already buffered* chunks up to n bytes
+    (``streams.py::_read_nowait``); this double deliberately models the
+    pessimistic case that the network actually produces -- a short read at every
+    TCP boundary -- because that is what a single ``read()`` call trips over.
+
+    ``chunk_size`` splits the body so a test can force that multi-chunk arrival.
+    ``read_calls`` and ``bytes_served`` are the instrumentation the regression
+    tests assert on (loop actually iterated / memory ceiling honoured).
+    """
+
+    def __init__(self, body: bytes, *, chunk_size: int | None = None) -> None:
+        if chunk_size is None:
+            self._chunks = [body] if body else []
+        else:
+            self._chunks = [
+                body[offset : offset + chunk_size]
+                for offset in range(0, len(body), chunk_size)
+            ]
+        self.read_calls = 0
+        self.bytes_served = 0
 
     async def read(self, limit: int = -1) -> bytes:
-        """Return at most ``limit`` bytes, like ``StreamReader.read``."""
+        """Return at most ``limit`` bytes of the next chunk (``b""`` at EOF)."""
 
-        if limit < 0:
-            return self._body
-        return self._body[:limit]
+        self.read_calls += 1
+        if not self._chunks:
+            return b""
+        chunk = self._chunks[0]
+        if 0 <= limit < len(chunk):
+            self._chunks[0] = chunk[limit:]
+            chunk = chunk[:limit]
+        else:
+            self._chunks.pop(0)
+        self.bytes_served += len(chunk)
+        return chunk
 
 
 class _FakeResponse:
@@ -1528,10 +1640,11 @@ class _FakeResponse:
         *,
         body: bytes = b"{}",
         content_type: str = "application/json",
+        chunk_size: int | None = None,
     ) -> None:
         self.status = status
         self.content_type = content_type
-        self.content = _FakeContent(body)
+        self.content = _FakeContent(body, chunk_size=chunk_size)
 
 
 class _FakeCtx:
@@ -1583,10 +1696,26 @@ class _FakeSession:
         return _FakeCtx(self.response, self.error)
 
 
-def _json_response(payload: Any, *, status: int = 200) -> _FakeResponse:
+def _json_response(
+    payload: Any, *, status: int = 200, chunk_size: int | None = None
+) -> _FakeResponse:
     """Build a JSON ``_FakeResponse`` from a payload object."""
 
-    return _FakeResponse(status, body=json.dumps(payload).encode())
+    return _FakeResponse(
+        status, body=json.dumps(payload).encode(), chunk_size=chunk_size
+    )
+
+
+def _ack_deleted_response(*, status: int = 200) -> _FakeResponse:
+    """Build the server's success answer for ``POST /ack``.
+
+    Mirrors ``docker-login/token_server.py``: ``200 {"status": "deleted"}`` when
+    the file was removed now, ``410 {"status": "already_deleted"}`` when it was
+    already gone (duplicate ack / TTL fallback).
+    """
+
+    marker = "deleted" if status == 200 else "already_deleted"
+    return _json_response({"status": marker}, status=status)
 
 
 async def _fetch(session: _FakeSession, *, host: str = "127.0.0.1") -> Any:
@@ -1630,6 +1759,9 @@ async def test_fetch_410_is_auth_error_and_flags_code_used() -> None:
         await _fetch(session)
 
     assert excinfo.value.code_used is True
+    # A fetch-path 410 says nothing about the file: the server is one-shot for
+    # *handing out* the bundle, and its TTL delete is still ahead.
+    assert excinfo.value.secret_retained is False
     assert "410" in str(excinfo.value)
     assert len(session.calls) == 1
 
@@ -1653,18 +1785,48 @@ async def test_container_auth_error_defaults_code_used_to_false() -> None:
     err = container_login.ContainerAuthError("nope")
 
     assert err.code_used is False
+    assert err.secret_retained is False
     assert str(err) == "nope"
 
 
-@pytest.mark.parametrize("status", [200, 410])
-async def test_ack_treats_200_and_410_as_success(status: int) -> None:
-    """ACK: 410 ("already gone") is the two-phase-delete success, like 200.
+@pytest.mark.parametrize(
+    "factory",
+    [
+        container_login.ContainerLoginError,
+        container_login.ContainerAuthError,
+        container_login.ContainerUnreachableError,
+        container_login.ContainerTimeoutError,
+    ],
+)
+async def test_secret_retained_defaults_to_false_on_every_error(
+    factory: type[container_login.ContainerLoginError],
+) -> None:
+    """``secret_retained`` reads "not known to be retained", so it defaults off.
 
-    This is the other half of the 410 asymmetry: inverting ``gone_is_auth``
-    here would turn a completed delete into a spurious auth failure.
+    The flag lives on the base class because it states a *fact* about the
+    container rather than a cause, but every class must keep the conservative
+    default: only :func:`container_login._require_ack_deleted` has evidence, and
+    a wrongly defaulted ``True`` would tell operators to hand-delete files that
+    the container removes by itself.
     """
 
-    session = _FakeSession(_FakeResponse(status))
+    err = factory("boom")
+
+    assert err.secret_retained is False
+    assert str(err) == "boom"
+
+
+@pytest.mark.parametrize("status", [200, 410])
+async def test_ack_treats_200_and_confirmed_410_as_success(status: int) -> None:
+    """ACK: a *confirmed* 410 ("already deleted") succeeds just like 200.
+
+    This is the other half of the 410 asymmetry: inverting ``gone_is_auth``
+    here would turn a completed delete into a spurious auth failure. The body
+    has to carry the confirmation -- see the lockout test below for the 410 that
+    must NOT be accepted.
+    """
+
+    session = _FakeSession(_ack_deleted_response(status=status))
 
     await _ack(session)
 
@@ -1686,6 +1848,12 @@ async def test_ack_still_raises_auth_error_for_401_403(status: int) -> None:
         await _ack(session)
 
     assert excinfo.value.code_used is False
+    # Same class as the lockout, opposite fact: a rejected ack leaves the
+    # endpoint running and its TTL delete intact, so nothing is retained on
+    # purpose. Keying a "delete the file yourself" hint on the class alone
+    # would fire here (see
+    # ``test_only_a_proven_lockout_claims_a_retained_secret``).
+    assert excinfo.value.secret_retained is False
 
 
 async def test_ack_500_maps_to_unreachable() -> None:
@@ -1828,6 +1996,388 @@ async def test_ack_blocks_link_local_metadata_host_before_any_request() -> None:
         await _ack(session, host="169.254.169.254")
 
     assert session.calls == []
+
+
+# --- F-C1: a body split across several TCP chunks (read-to-EOF) -------------
+
+
+async def test_fetch_reassembles_a_body_that_arrives_in_several_chunks() -> None:
+    """A chunked reply must be drained to EOF, not truncated to the first read.
+
+    ``StreamReader.read(n)`` returns whatever is buffered *now*, so a single
+    call silently yields partial JSON on a multi-chunk response and turns a
+    perfectly valid handoff into an intermittent ``container_unreachable``. The
+    body here is deliberately delivered in small chunks; only a read loop can
+    reassemble it.
+    """
+
+    bundle = _valid_bundle()
+    response = _json_response(
+        {"bundle": bundle, "delete_token": _DELETE_TOKEN}, chunk_size=8
+    )
+    session = _FakeSession(response)
+
+    result = await _fetch(session)
+
+    assert result == (bundle, _DELETE_TOKEN)
+    # More than one read plus the EOF read: the loop really iterated.
+    assert response.content.read_calls > 2
+
+
+async def test_ack_reassembles_a_chunked_410_confirmation() -> None:
+    """The ack path reads the same hardened way (one reader, no DRY leak)."""
+
+    response = _json_response({"status": "already_deleted"}, status=410, chunk_size=4)
+    session = _FakeSession(response)
+
+    await _ack(session)
+
+    assert response.content.read_calls > 2
+
+
+async def test_fetch_rejects_an_oversized_body_that_arrives_in_chunks() -> None:
+    """The hard ceiling survives the read loop, and buffering stays bounded.
+
+    Chunked delivery must not become a way past the cap, and the loop must stop
+    one byte past it instead of swallowing the whole stream.
+    """
+
+    oversized = b"x" * (CONTAINER_MAX_RESPONSE_BYTES * 2)
+    response = _FakeResponse(200, body=oversized, chunk_size=64 * 1024)
+    session = _FakeSession(response)
+
+    with pytest.raises(container_login.ContainerUnreachableError) as excinfo:
+        await _fetch(session)
+
+    assert str(CONTAINER_MAX_RESPONSE_BYTES) in str(excinfo.value)
+    # Never buffered more than the ceiling plus the one proving byte.
+    assert response.content.bytes_served <= CONTAINER_MAX_RESPONSE_BYTES + 1
+
+
+async def test_fetch_rejects_a_body_one_byte_over_the_cap() -> None:
+    """The off-by-one boundary: cap plus one byte is already too much."""
+
+    response = _FakeResponse(200, body=b"x" * (CONTAINER_MAX_RESPONSE_BYTES + 1))
+    session = _FakeSession(response)
+
+    with pytest.raises(container_login.ContainerUnreachableError) as excinfo:
+        await _fetch(session)
+
+    assert str(CONTAINER_MAX_RESPONSE_BYTES) in str(excinfo.value)
+
+
+async def test_fetch_accepts_a_body_of_exactly_the_size_cap() -> None:
+    """The boundary is inclusive: exactly the cap is still a valid response."""
+
+    bundle = _valid_bundle()
+    payload = {"bundle": bundle, "delete_token": _DELETE_TOKEN}
+    body = json.dumps(payload).encode()
+    # Pad the bundle with filler until the encoded body hits the cap exactly.
+    padding = CONTAINER_MAX_RESPONSE_BYTES - len(body) - len(', "pad": ""')
+    bundle["pad"] = "p" * padding
+    body = json.dumps({"bundle": bundle, "delete_token": _DELETE_TOKEN}).encode()
+    assert len(body) == CONTAINER_MAX_RESPONSE_BYTES
+
+    session = _FakeSession(_FakeResponse(200, body=body, chunk_size=64 * 1024))
+
+    result = await _fetch(session)
+
+    assert result == (bundle, _DELETE_TOKEN)
+
+
+# --- F-C2: the ack outcome is payload-conditional (lockout vs. deleted) -----
+
+
+async def test_ack_410_lockout_is_an_error_not_a_success() -> None:
+    """A lockout 410 keeps the secret on disk and must surface as a failure.
+
+    ``token_server.py`` answers ``410 {"error": "locked"}`` once any loopback
+    client burned the five-attempt budget -- and ``_run()`` deliberately does
+    NOT delete ``secrets.json`` after a lockout. Accepting that as "already
+    deleted" would retire the cleanup while the credential stays on disk
+    indefinitely.
+    """
+
+    session = _FakeSession(_json_response({"error": "locked"}, status=410))
+
+    with pytest.raises(container_login.ContainerAuthError) as excinfo:
+        await _ack(session)
+
+    assert "lock" in str(excinfo.value).lower()
+    # The user is long past code entry here; the flag stays a fetch-path signal.
+    assert excinfo.value.code_used is False
+    # The one place in the client that has proof the file survives: this is the
+    # discriminator the config flow's "delete it yourself" hint keys on.
+    assert excinfo.value.secret_retained is True
+
+
+@pytest.mark.parametrize("status", [200, 410])
+@pytest.mark.parametrize(
+    "response_factory",
+    [
+        # Unknown JSON object: neither marker present.
+        lambda status: _json_response({"status": "something_else"}, status=status),
+        # Right shape, wrong place: a JSON array carries no verdict.
+        lambda status: _json_response(["already_deleted"], status=status),
+        # Not JSON at all.
+        lambda status: _FakeResponse(status, body=b"{not json"),
+        # A proxy/foreign server answering in HTML.
+        lambda status: _FakeResponse(
+            status, body=b"<html>gone</html>", content_type="text/html"
+        ),
+        # Empty body: no confirmation either.
+        lambda status: _FakeResponse(status, body=b""),
+    ],
+)
+async def test_ack_without_a_classifiable_body_is_not_a_success(
+    response_factory: Any, status: int
+) -> None:
+    """An unclassifiable body is no proof of deletion: explicit failure.
+
+    The negative path is defined rather than left to fall through: anything that
+    does not carry a deletion marker (and is not the known lockout refusal)
+    counts as an unconfirmed delete. Both accepted statuses are held to the same
+    standard -- scrutinising only the ambiguous 410 would still let a foreign
+    ``200`` (a proxy, a wrong port) book a delete that never happened.
+    """
+
+    session = _FakeSession(response_factory(status))
+
+    with pytest.raises(container_login.ContainerUnreachableError) as excinfo:
+        await _ack(session)
+
+    # Unconfirmed is not the same as retained: an unreadable answer leaves the
+    # container's state unknown, and the TTL fallback is still expected to run.
+    assert excinfo.value.secret_retained is False
+
+
+# --- F-C3: both findings through the real production paths ------------------
+
+
+def _install_real_client_with_session(
+    monkeypatch: pytest.MonkeyPatch, session: _FakeSession
+) -> None:
+    """Wire the REAL container client into ``config_flow`` over ``session``.
+
+    Only the aiohttp session and the token probe are replaced, so the flow runs
+    through the genuine ``container_login`` primitives (status mapping, size
+    cap, chunked read, 410 classification) instead of a stub.
+    """
+
+    async def _fake_pick(
+        hass: Any,
+        email: str,
+        candidates: list[tuple[str, str]],
+        *,
+        secrets_bundle: dict[str, Any] | None = None,
+    ) -> str | None:
+        return candidates[0][1] if candidates else None
+
+    monkeypatch.setattr(config_flow, "async_pick_working_token", _fake_pick)
+    monkeypatch.setattr(config_flow, "async_get_clientsession", lambda hass: session)
+
+
+async def test_container_login_step_survives_a_chunked_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """End-to-end (F-C1): the flow step itself must not fail on a chunked reply.
+
+    Drives ``async_step_container_login`` with the REAL fetch primitive; only
+    the session and the token probe are faked. Before the read loop this ended
+    in ``container_unreachable`` whenever the container's reply happened to
+    arrive in more than one chunk.
+    """
+
+    bundle = _valid_bundle()
+    session = _FakeSession(
+        _json_response({"bundle": bundle, "delete_token": _DELETE_TOKEN}, chunk_size=16)
+    )
+    _install_real_client_with_session(monkeypatch, session)
+
+    hass = _build_hass([])
+    flow = config_flow.ConfigFlow()
+    flow.hass = hass  # type: ignore[assignment]
+    flow.context = {}
+
+    captured: dict[str, Any] = {}
+
+    async def _fake_device_selection() -> dict[str, Any]:
+        captured["auth_data"] = dict(flow._auth_data)
+        return {"type": "form", "step_id": "device_selection"}
+
+    flow.async_step_device_selection = _fake_device_selection  # type: ignore[assignment]
+
+    result = await _maybe_await(
+        flow.async_step_container_login(
+            {
+                "host": "127.0.0.1",
+                "port": CONTAINER_TOKEN_PORT,
+                "pairing_code": _PAIRING_CODE,
+            }
+        )
+    )
+
+    assert isinstance(result, dict)
+    assert result.get("errors") is None or result.get("errors") == {}
+    assert captured["auth_data"][CONF_OAUTH_TOKEN] == _TOKEN
+    assert captured["auth_data"][CONF_GOOGLE_EMAIL] == _EMAIL
+
+
+async def test_cleanup_runner_reports_a_lockout_410_as_a_failed_ack(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """End-to-end (F-C2): the deferred runner must see the lockout, not silence.
+
+    ``async_run_pending_container_cleanup`` runs the REAL ``ack_consumed`` here.
+    A lockout 410 leaves the credential on disk, so the failure has to reach the
+    runner (warning, never the nonce/delete token) instead of the flow quietly
+    booking the delete as done. Note what this does *not* claim: the runner pops
+    its jobs before executing them and swallows every ``ContainerLoginError``,
+    so the staged job is still consumed -- the client only refuses to call an
+    unconfirmed delete a success, the retry/retention policy belongs to the
+    caller (``config_flow.py``).
+    """
+
+    session = _FakeSession(_json_response({"error": "locked"}, status=410))
+    _install_real_client_with_session(monkeypatch, session)
+
+    hass = _build_hass([])
+    config_flow._async_stage_container_cleanup(
+        hass,
+        unique_id=_EMAIL,
+        job=config_flow.PendingContainerCleanup(
+            ack=config_flow._ContainerAckTarget(
+                host="127.0.0.1",
+                port=CONTAINER_TOKEN_PORT,
+                pairing_code=_PAIRING_CODE,
+                delete_token=_DELETE_TOKEN,
+                # Past the TTL: even that must not downgrade a lockout to debug,
+                # because the lockout is exactly the case where the container
+                # keeps the file.
+                fetched_monotonic=time.monotonic() - (CONTAINER_TOKEN_TTL + 1),
+            )
+        ),
+    )
+
+    with caplog.at_level(logging.DEBUG, logger=config_flow._LOGGER.name):
+        await config_flow.async_run_pending_container_cleanup(hass, unique_id=_EMAIL)
+
+    assert "ContainerAuthError" in caplog.text
+    assert [record for record in caplog.records if record.levelno >= logging.WARNING]
+    assert _PAIRING_CODE not in caplog.text
+    assert _DELETE_TOKEN not in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("response_factory", "retained"),
+    [
+        # The proven lockout: token_server answers 410 {"error": "locked"} and
+        # then keeps secrets.json on purpose (see token_server.py::_run).
+        (lambda: _json_response({"error": "locked"}, status=410), True),
+        # The look-alike: 403 {"error": "forbidden"} is the SAME error class but
+        # the opposite fact. token_server returns it for a wrong delete_token
+        # and for a nonce that no longer matches -- the realistic trigger being
+        # a deferred ack (retained across ConfigEntryNotReady retries) that
+        # reaches a *restarted* container. That instance deletes on its own TTL,
+        # so telling the operator to remove the file by hand would be fiction.
+        (lambda: _json_response({"error": "forbidden"}, status=403), False),
+    ],
+    ids=["lockout_410", "forbidden_403"],
+)
+async def test_only_a_proven_lockout_claims_a_retained_secret(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    response_factory: Any,
+    retained: bool,
+) -> None:
+    """The "container kept the file" message is keyed on the fact, not the class.
+
+    Both answers below raise ``ContainerAuthError`` out of the REAL client, so a
+    branch that keys on the error *type* cannot tell them apart and would invent
+    a lockout for the 403. Only ``_require_ack_deleted`` has the evidence (the
+    lockout body) and marks it with ``secret_retained``.
+    """
+
+    session = _FakeSession(response_factory())
+    _install_real_client_with_session(monkeypatch, session)
+
+    hass = _build_hass([])
+    config_flow._async_stage_container_cleanup(
+        hass,
+        unique_id=_EMAIL,
+        job=config_flow.PendingContainerCleanup(
+            ack=config_flow._ContainerAckTarget(
+                host="127.0.0.1",
+                port=CONTAINER_TOKEN_PORT,
+                pairing_code=_PAIRING_CODE,
+                delete_token=_DELETE_TOKEN,
+                # Inside the TTL for both cases, so the debug branch cannot
+                # absorb either of them and the two warnings are comparable.
+                fetched_monotonic=time.monotonic(),
+            )
+        ),
+    )
+
+    with caplog.at_level(logging.DEBUG, logger=config_flow._LOGGER.name):
+        await config_flow.async_run_pending_container_cleanup(hass, unique_id=_EMAIL)
+
+    warnings = [
+        record for record in caplog.records if record.levelno >= logging.WARNING
+    ]
+    assert warnings, "an unconfirmed delete is a problem on either path"
+    text = "\n".join(record.getMessage() for record in warnings)
+    assert "ContainerAuthError" in text
+    if retained:
+        assert "kept its secrets.json" in text
+        assert "manually" in text
+        # No false promise of an automatic cleanup: none follows a lockout.
+        assert "TTL delete" not in text
+    else:
+        # The container is still up and its TTL still deletes, so the generic
+        # message is the truthful one -- and none of the lockout wording may
+        # leak into it.
+        assert "TTL delete" in text
+        assert "lockout" not in text
+        assert "manually" not in text
+    assert _PAIRING_CODE not in caplog.text
+    assert _DELETE_TOKEN not in caplog.text
+
+
+async def test_cleanup_runner_stays_quiet_for_a_confirmed_410(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The counter-test: the idempotent 410 stays a silent success.
+
+    Guards the reverse mutation -- turning *every* ack-side 410 into an error
+    would spam a warning on the perfectly normal duplicate-ack / TTL-fallback
+    ending.
+    """
+
+    session = _FakeSession(_ack_deleted_response(status=410))
+    _install_real_client_with_session(monkeypatch, session)
+
+    hass = _build_hass([])
+    config_flow._async_stage_container_cleanup(
+        hass,
+        unique_id=_EMAIL,
+        job=config_flow.PendingContainerCleanup(
+            ack=config_flow._ContainerAckTarget(
+                host="127.0.0.1",
+                port=CONTAINER_TOKEN_PORT,
+                pairing_code=_PAIRING_CODE,
+                delete_token=_DELETE_TOKEN,
+            )
+        ),
+    )
+
+    with caplog.at_level(logging.DEBUG, logger=config_flow._LOGGER.name):
+        await config_flow.async_run_pending_container_cleanup(hass, unique_id=_EMAIL)
+
+    warnings = [
+        record for record in caplog.records if record.levelno >= logging.WARNING
+    ]
+    assert warnings == []
+    assert len(session.calls) == 1
 
 
 async def test_hostname_and_non_link_local_ip_are_not_blocked() -> None:

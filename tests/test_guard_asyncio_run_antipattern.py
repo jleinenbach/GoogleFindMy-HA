@@ -19,7 +19,6 @@ LEGACY_ALLOWLIST: set[str] = {
     "tests/test_config_flow_initial_auth.py",
     "tests/test_device_identifier_normalization.py",
     "tests/test_device_tracker_scanner.py",
-    "tests/test_discovery_runtime.py",
     "tests/test_duplicate_device_entities.py",
     "tests/test_e2ee_token_cache_propagation.py",
     "tests/test_fcm_receiver_guard.py",

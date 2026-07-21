@@ -11,6 +11,7 @@ import uuid
 from collections.abc import Callable, Coroutine, Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
+from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -117,20 +118,93 @@ def _home_assistant_discovery_sources() -> set[str]:
     return sources
 
 
-def _log_task_exception(task: asyncio.Future[Any]) -> None:
-    """Log and suppress exceptions raised by cloud discovery tasks."""
+def _invoke_failure_hook(on_failure: Callable[[], None] | None) -> None:
+    """Run a discovery failure hook without letting it break its caller.
+
+    The hook is a plain synchronous callback owned by the *producer* of the
+    discovery payload (see :meth:`SecretsJSONWatcher._invalidate_signature`).
+    It runs either from a task done-callback or straight from the scheduling
+    call, so it must never raise into the event loop.
+    """
+
+    if on_failure is None:
+        return
+    try:
+        on_failure()
+    except Exception:  # noqa: BLE001 - defensive best effort
+        _LOGGER.debug("Discovery failure hook raised", exc_info=True)
+
+
+def _hass_is_stopping(hass: Any) -> bool:
+    """Return ``True`` only when Home Assistant itself is shutting down.
+
+    Reads :attr:`homeassistant.core.HomeAssistant.is_stopping` defensively:
+    stripped cores and test doubles may not expose the attribute at all, and a
+    missing/odd value must never raise out of a done-callback. An *unknown*
+    state deliberately resolves to ``False`` (= "not a shutdown"), because the
+    two error costs are asymmetric: reading a live cancel as shutdown swallows
+    the retry for good, while reading a shutdown cancel as failure only re-arms
+    a watcher that is about to be discarded anyway.
+    """
+
+    return getattr(hass, "is_stopping", False) is True
+
+
+def _handle_discovery_task_result(
+    task: asyncio.Future[Any],
+    *,
+    hass: Any = None,
+    on_failure: Callable[[], None] | None = None,
+) -> None:
+    """Consume a cloud discovery task result and report failures upstream.
+
+    Discovery tasks are fire-and-forget, so exceptions are logged and
+    suppressed here. When ``on_failure`` is supplied the producer additionally
+    learns that the attempt did *not* succeed and can re-arm whatever change
+    detection gated the task, otherwise a transient flow-creation error would
+    stall the import until the source file changes again.
+
+    ``asyncio.CancelledError`` counts as a failure *unless* Home Assistant is
+    actually shutting down. Cancellation is not a reliable shutdown signal
+    here: ``_cleanup_cloud_discovery_runtime`` cancels exactly these handles on
+    every entry unload, and an unload happens on every reload (an options
+    change, a reauth, a repair). The producing watcher is a Home Assistant
+    instance singleton that survives such a reload, so treating a reload-cancel
+    as "no failure" would leave its change detection armed on a bundle that was
+    never imported -- the precise stall this feedback channel exists to
+    prevent. Only a real shutdown makes re-arming pointless.
+    """
 
     try:
         task.result()
-    except asyncio.CancelledError:  # pragma: no cover - cancellation is expected
-        return
+    except asyncio.CancelledError:
+        if _hass_is_stopping(hass):
+            return
+        _LOGGER.debug(
+            "Cloud discovery task cancelled while Home Assistant keeps running "
+            "(entry unload/reload); treating the attempt as failed"
+        )
     except Exception as err:  # noqa: BLE001 - logging best effort
         _LOGGER.debug("Suppressed cloud discovery task exception: %s", err)
+    else:
+        return
+
+    _invoke_failure_hook(on_failure)
 
 
 CLOUD_DISCOVERY_NAMESPACE = f"{DOMAIN}.cloud_scan"
 SECRETS_DISCOVERY_NAMESPACE = f"{DOMAIN}.secrets_file"
 _DEFAULT_SECRETS_SCAN_INTERVAL = timedelta(seconds=30)
+
+#: How often a *single* secrets bundle may be re-queued after a failed import
+#: attempt before the watcher stops re-arming it. The budget exists because a
+#: retry is not free: every attempt appends another copy of the bundle (OAuth
+#: token included) to ``runtime.results`` and can emit another warning, so an
+#: endlessly failing bundle would grow memory and flood the log at scan rate.
+#: Four attempts spread over ~90 s cover the transient causes this feedback
+#: channel was built for (startup races, a config-flow backend that is not
+#: ready yet) without turning a permanent failure into a permanent leak.
+_MAX_SECRETS_RETRY_ATTEMPTS = 3
 
 
 class _CloudDiscoveryResults(list[dict[str, Any]]):
@@ -167,7 +241,26 @@ class _CloudDiscoveryResults(list[dict[str, Any]]):
         item: Mapping[str, Any],
         *,
         trigger: bool = True,
+        on_failure: Callable[[], None] | None = None,
     ) -> None:
+        """Record a discovery payload and (optionally) queue the config flow.
+
+        ``on_failure`` is an opaque callback supplied by the producer of the
+        payload. This container stays deliberately ignorant of *what* it means
+        (it knows nothing about watchers or file signatures).
+
+        The promise is narrower than "the attempt did not succeed": the hook
+        runs when the queued coroutine **raised**, when it was cancelled
+        outside a Home Assistant shutdown, or when its outcome cannot be
+        observed at all (no usable done-callback, no running loop). A ``False``
+        return value from :func:`_trigger_cloud_discovery` deliberately does
+        **not** run it. Every ``False`` path there is a *deduplication* path --
+        an identical flow is already in flight (``runtime.active_keys``) or the
+        runtime container was torn down mid-unload -- so re-arming the producer
+        would schedule a second attempt for work that is already running and
+        recreate exactly the duplicate flows the dedup exists to suppress.
+        """
+
         payload = dict(item)
         super().append(payload)
         if not trigger:
@@ -193,9 +286,27 @@ class _CloudDiscoveryResults(list[dict[str, Any]]):
             title=title if isinstance(title, str) else None,
             entry=self._entry,
         )
-        self._schedule(coro)
+        self._schedule(coro, on_failure=on_failure)
 
-    def _schedule(self, coro: Coroutine[Any, Any, object]) -> None:
+    def _schedule(
+        self,
+        coro: Coroutine[Any, Any, object],
+        *,
+        on_failure: Callable[[], None] | None = None,
+    ) -> None:
+        """Queue ``coro`` and route its outcome to ``on_failure``.
+
+        Every branch that cannot observe the outcome (no done-callback support,
+        no running loop) counts as a failure: the attempt is then either lost or
+        unverifiable, and re-arming the producer costs one extra scan while not
+        re-arming stalls the import indefinitely.
+        """
+
+        done_callback = partial(
+            _handle_discovery_task_result,
+            hass=self._hass,
+            on_failure=on_failure,
+        )
         create_task = getattr(self._hass, "async_create_task", None)
         if callable(create_task):
             try:
@@ -207,14 +318,22 @@ class _CloudDiscoveryResults(list[dict[str, Any]]):
                 task = create_task(coro)
             if isinstance(task, asyncio.Future):
                 self._register_handle(task)
-                task.add_done_callback(_log_task_exception)
-            elif hasattr(task, "add_done_callback"):
+                task.add_done_callback(done_callback)
+                return
+            if hasattr(task, "add_done_callback"):
                 try:
-                    task.add_done_callback(_log_task_exception)
+                    task.add_done_callback(done_callback)
                 except Exception:  # noqa: BLE001 - defensive best effort
                     _LOGGER.debug(
                         "Unable to attach discovery task callback", exc_info=True
                     )
+                    _invoke_failure_hook(on_failure)
+                return
+            _LOGGER.debug(
+                "Discovery task handle does not support done callbacks; "
+                "treating the attempt as unverified"
+            )
+            _invoke_failure_hook(on_failure)
             return
 
         try:
@@ -223,10 +342,11 @@ class _CloudDiscoveryResults(list[dict[str, Any]]):
             _LOGGER.debug(
                 "Cloud discovery append scheduling skipped: event loop not running"
             )
+            _invoke_failure_hook(on_failure)
             return
 
         self._register_handle(task)
-        task.add_done_callback(_log_task_exception)
+        task.add_done_callback(done_callback)
 
     def _register_handle(self, handle: asyncio.Future[Any]) -> None:
         if self._runtime is None:
@@ -445,6 +565,13 @@ async def _trigger_cloud_discovery(
     async with lock:
         results_list = runtime.results
         if not isinstance(results_list, _CloudDiscoveryResults):
+            # Defensive, and not reachable through an entry unload: that path
+            # cancels the registered handles *before* it clears ``results``, so
+            # a coroutine suspended on a contended ``lock`` wakes up with
+            # ``CancelledError`` and never gets here. What can get here is a
+            # producer whose task is not registered in ``retry_handles`` (the
+            # cloud scanner), and that one passes no failure hook anyway, so
+            # returning ``False`` loses nothing.
             return False
 
         results_list.append(payload, trigger=False)
@@ -741,6 +868,8 @@ class SecretsJSONWatcher:
         "_namespace",
         "_lock",
         "_last_signature",
+        "_retry_signature",
+        "_retry_attempts",
         "_unsubscribers",
     )
 
@@ -770,6 +899,8 @@ class SecretsJSONWatcher:
         self._namespace = namespace
         self._lock = asyncio.Lock()
         self._last_signature: str | None = None
+        self._retry_signature: str | None = None
+        self._retry_attempts = 0
         self._unsubscribers: list[CALLBACK_TYPE] = []
 
     @property
@@ -794,7 +925,7 @@ class SecretsJSONWatcher:
                 seen.add(candidate)
                 deduped.append(candidate)
             self._paths = deduped
-            self._last_signature = None
+            self._forget_signature()
 
     async def async_start(self) -> None:
         """Begin watching for secrets.json updates."""
@@ -820,7 +951,7 @@ class SecretsJSONWatcher:
                     "Error while unsubscribing secrets watcher",
                     exc_info=err,
                 )
-        self._last_signature = None
+        self._forget_signature()
 
     async def async_force_scan(self) -> None:
         """Force an immediate scan of the secrets.json bundle."""
@@ -830,6 +961,75 @@ class SecretsJSONWatcher:
     @callback
     def _handle_interval(self, _now: datetime | None) -> None:
         self._hass.async_create_task(self._scan(reason="interval"))
+
+    @callback
+    def _forget_signature(self) -> None:
+        """Drop the armed signature together with its retry budget.
+
+        Single writer for "this watcher currently knows nothing": used by
+        stop/path-change/bundle-missing. Keeping both fields in one helper is
+        what makes the budget reset rules complete -- a bundle that disappears
+        and comes back byte-identical gets a fresh budget, not the exhausted
+        one from its previous life.
+        """
+
+        self._last_signature = None
+        self._retry_signature = None
+        self._retry_attempts = 0
+
+    @callback
+    def _invalidate_signature(self, signature: str) -> None:
+        """Re-arm ``signature`` so the next scan retries the same bundle.
+
+        Called from the discovery task's done-callback (or straight from the
+        scheduling call when the outcome is unobservable), i.e. *after* the
+        :meth:`_scan` that armed the signature has already released the lock.
+
+        Deliberately lock-free: the callback runs on the event loop thread, and
+        acquiring ``self._lock`` would need a task (the callback is sync) and
+        could interleave with a scan that is already running. A single attribute
+        assignment on the loop thread is atomic with respect to every other
+        watcher operation, and the identity check keeps it safe against a newer
+        scan: if a *different* bundle has been armed meanwhile, that newer state
+        wins and the stale failure is ignored.
+
+        Retries are **bounded** per signature. Re-arming is not free: each new
+        attempt appends another full copy of the bundle (OAuth token included)
+        to ``runtime.results`` and may emit another warning, so an unbounded
+        retry turns a deterministic failure into unbounded credential copies in
+        memory plus a permanent log flood at scan rate. After
+        :data:`_MAX_SECRETS_RETRY_ATTEMPTS` retries the signature therefore
+        stays armed (= pre-feedback-channel behaviour), and the operator is told
+        once, at warning level, that the bundle was given up on. This method is
+        the single owner of the budget: it rebases it on the first failure of a
+        signature it has not seen yet, and :meth:`_forget_signature` drops it
+        whenever the bundle vanishes, the watch paths change or the watcher
+        stops. Every operator reaction (rewrite the bundle, remove and restore
+        it, change the paths, restart Home Assistant) therefore buys a full new
+        budget.
+        """
+
+        if self._last_signature != signature:
+            return
+
+        if self._retry_signature != signature:
+            self._retry_signature = signature
+            self._retry_attempts = 0
+        self._retry_attempts += 1
+
+        if self._retry_attempts > _MAX_SECRETS_RETRY_ATTEMPTS:
+            _LOGGER.warning(
+                "Secrets discovery gave up on the current bundle after %s failed "
+                "attempts; it will be retried once the bundle changes, the watch "
+                "paths change or Home Assistant restarts",
+                _MAX_SECRETS_RETRY_ATTEMPTS + 1,
+                # The signature itself is never logged: it embeds the account
+                # e-mail. The observed paths identify the bundle well enough.
+                extra={"bundle_paths": [str(path) for path in self._paths]},
+            )
+            return
+
+        self._last_signature = None
 
     async def _scan(self, *, reason: str) -> None:
         async with self._lock:
@@ -843,12 +1043,24 @@ class SecretsJSONWatcher:
                             "bundle_paths": [str(path) for path in self._paths],
                         },
                     )
-                self._last_signature = None
+                self._forget_signature()
                 return
 
             signature = f"{result.stable_key}:{result.digest}"
             if signature == self._last_signature:
                 return
+
+            # Arming a *different* bundle retires the budget of the previous
+            # one. Without this, an exhausted signature keeps its spent counter
+            # while another bundle is armed in between, and when it comes back
+            # (two watched paths plus the delete-after-import hook make that
+            # routine) it would get a single attempt instead of a full budget --
+            # and the give-up warning would then claim attempts that never
+            # happened in this life. ``_invalidate_signature`` still owns the
+            # counting; this is the ownership *transfer*.
+            if self._retry_signature is not None and self._retry_signature != signature:
+                self._retry_signature = None
+                self._retry_attempts = 0
 
             self._last_signature = signature
 
@@ -886,7 +1098,22 @@ class SecretsJSONWatcher:
             runtime = _cloud_discovery_runtime(self._hass, existing_entry)
             results_list = runtime.results
 
-            if not isinstance(results_list, _CloudDiscoveryResults):
+            if not isinstance(  # pragma: no cover - unreachable, kept for typing
+                results_list, _CloudDiscoveryResults
+            ):
+                # Not reachable in production and not pretended to be: the call
+                # to ``_cloud_discovery_runtime`` right above *guarantees* a
+                # ``_CloudDiscoveryResults`` (it even replaces a foreign list),
+                # and no ``await`` sits between that guarantee and this check,
+                # so nothing can swap the container in between. The branch stays
+                # because ``CloudDiscoveryRuntime.results`` is typed
+                # ``_CloudDiscoveryResults | list[...] | None`` and mypy needs
+                # the narrowing before the keyword-only ``append`` call below;
+                # deleting it would mean an ``assert``/``cast`` instead, which
+                # buys nothing. It is marked ``no cover`` rather than covered by
+                # a test that monkeypatches ``_cloud_discovery_runtime``: such a
+                # test would fabricate a state production cannot produce.
+                self._invalidate_signature(signature)
                 _LOGGER.debug(
                     "Secrets discovery results missing runtime container",
                     extra={
@@ -898,8 +1125,13 @@ class SecretsJSONWatcher:
                 return
 
             try:
-                results_list.append(payload)
+                results_list.append(
+                    payload,
+                    on_failure=partial(self._invalidate_signature, signature),
+                )
             except Exception as err:  # noqa: BLE001 - keep watcher alive
+                # Queueing never got far enough to report back, so re-arm here.
+                self._invalidate_signature(signature)
                 _LOGGER.warning(
                     "Secrets discovery flow queueing failed",
                     extra={

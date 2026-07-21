@@ -129,6 +129,16 @@ done
 # Post-login handoff tracks (only after a successful main.py run; unset -> the
 # historical behaviour is completely unchanged).
 #
+# GFMY_ONECLICK and GFMY_CLEARTEXT are INDEPENDENT switches (as documented in
+# docker-compose.yml and README.md), so the two blocks below are two separate
+# `if`s evaluated in sequence, never an if/elif chain: with both set, Track C
+# has to stay reachable after the token server returned. Each block re-tests
+# `-f "${_secrets_path}"`, which is what keeps the sequence honest -- the server
+# consumes (deletes) the file on ack and on TTL, so Track C only ever prints a
+# bundle that is still there -- chiefly the lockout case, and likewise anything
+# else that leaves the file behind (a failed delete, for instance) -- never an
+# empty block.
+#
 # These run in the FOREGROUND *before* the final `exit`, so the EXIT trap's
 # cleanup (ownership handoff of /data + supervisor shutdown) fires strictly
 # AFTER the handoff is done. That is the BLOCKING-1 lifecycle fix: a One-Click
@@ -168,11 +178,21 @@ if [ "${_rc}" -eq 0 ] && [ "${GFMY_ONECLICK:-}" = "1" ] && [ -f "${_secrets_path
   #   - Home Assistant acks the handoff  -> secrets.json is deleted (consumed),
   #   - the TTL elapses without an ack   -> secrets.json is deleted (fallback),
   #   - the pairing code is locked out   -> the endpoint closes but secrets.json
-  #     is KEPT on purpose, so the file handoff (Track A) and the clear-text
-  #     fallback (Track C) still work and no login has to be repeated.
+  #     is KEPT on purpose, so no login has to be repeated: the file handoff
+  #     (Track A) still works, and if GFMY_CLEARTEXT is also set the next block
+  #     prints the bundle. Note that the two are alternatives, not cumulative:
+  #     Track C is ephemeral by contract and removes the file after printing it,
+  #     so with both switches the clear-text output REPLACES the file handoff.
   python3 /app/gfmy/docker-login/token_server.py || true
+fi
 
-elif [ "${_rc}" -eq 0 ] && [ "${GFMY_CLEARTEXT:-}" = "1" ] && [ -f "${_secrets_path}" ]; then
+# Deliberately a fresh `if`, not an `elif` on the block above: the switches are
+# independent, so with GFMY_ONECLICK=1 *and* GFMY_CLEARTEXT=1 this is the
+# promised fallback for the lockout case, where the server left secrets.json in
+# place on purpose. The `-f` test is re-evaluated AFTER the server returned, so
+# an acked or TTL-expired (i.e. deleted) bundle prints nothing at all. The
+# clear-text block exists exactly once and serves both entry paths.
+if [ "${_rc}" -eq 0 ] && [ "${GFMY_CLEARTEXT:-}" = "1" ] && [ -f "${_secrets_path}" ]; then
   # Track C: no port is opened. Print the full secrets.json in a clearly
   # delimited block so the user can SELECT + COPY it inside the noVNC terminal
   # and paste it into Home Assistant's secrets.json field. The file is ephemeral

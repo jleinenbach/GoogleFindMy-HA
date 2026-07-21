@@ -38,6 +38,10 @@ services:
       #                       overlay docker-compose.oneclick.yml (see `ports:`).
       #   GFMY_CLEARTEXT=1 -> after login, print secrets.json in the terminal for
       #                       manual copy/paste (no port opened) and delete it.
+      #                       Independent of GFMY_ONECLICK: with both set it runs
+      #                       after the endpoint returns, and only if the file is
+      #                       still there (i.e. the lockout case -- an acked or
+      #                       TTL-expired handoff has already deleted it).
       # NOTE: the pairing code is generated at RUNTIME and printed by the
       # container; there is intentionally NO GFMY_PAIRING_CODE default here.
       GFMY_ONECLICK: "${GFMY_ONECLICK:-}"

@@ -1719,14 +1719,21 @@ class _ContainerFetchResult:
 def _container_ttl_certainly_elapsed(target: _ContainerAckTarget) -> bool:
     """Report whether the container's token TTL has provably run out by now.
 
-    The login container deletes its copy and shuts the endpoint down
-    :data:`CONTAINER_TOKEN_TTL` seconds after the *server* started, regardless of
-    whether anyone fetched or acked (``docker-login/token_server.py``). The ack
-    fires at the very end of ``async_setup_entry``, i.e. after credential
-    validation, the first coordinator refresh, FCM registration and the platform
-    forward, so on a slow instance the TTL routinely wins the race. That is a
-    normal, harmless ending: the TTL deletes exactly the same file the ack would
-    have deleted, and the bundle is already in the config entry.
+    Unless it has been shut down earlier, the login container deletes its copy
+    and shuts the endpoint down :data:`CONTAINER_TOKEN_TTL` seconds after the
+    *server* started, regardless of whether anyone fetched or acked
+    (``docker-login/token_server.py``). The ack fires at the very end of
+    ``async_setup_entry``, i.e. after credential validation, the first
+    coordinator refresh, FCM registration and the platform forward, so on a slow
+    instance the TTL routinely wins the race. That is the normal, harmless
+    ending: the TTL deletes exactly the same file the ack would have deleted,
+    and the bundle is already in the config entry.
+
+    What this predicate does *not* say is that the file is gone: it reports
+    elapsed time, and the early-shutdown paths (a lockout, which keeps the file
+    deliberately, or a failed delete) never reach the TTL branch at all. The
+    caller therefore uses it only to pick a log level, never to conclude that
+    the credential was cleaned up.
 
     The elapsed time is measured from the *fetch*, which happens after the
     server started, so this is a lower bound on the server's age: when it says
@@ -1749,9 +1756,12 @@ async def _async_send_container_ack(
     ``async_setup_entry``) share one implementation instead of two copies of
     the same error handling.
 
-    Note that a *successful* ack includes HTTP 410 ("already gone"), which
-    ``ack_consumed`` deliberately treats as success on this path: the on-disk
-    secret is confirmed absent, which is all the ack ever wanted.
+    A *successful* ack includes an HTTP 410 whose body confirms the deletion
+    ("already gone"): the on-disk secret is then provably absent, which is all
+    the ack ever wanted. A 410 that merely reports the endpoint's attempt
+    lockout is **not** success -- the container keeps ``secrets.json`` in that
+    case -- and ``ack_consumed`` raises for it. See
+    :func:`~.container_login._require_ack_deleted`.
     """
 
     session = async_get_clientsession(hass)
@@ -1765,30 +1775,61 @@ async def _async_send_container_ack(
             timeout=CONTAINER_FETCH_TIMEOUT,
         )
     except ContainerLoginError as exc:
-        # Non-fatal either way: the container deletes on its own TTL fallback,
-        # and the bundle is already in the config entry. Never log the nonce or
-        # the delete token.
+        # Non-fatal for the setup either way: the bundle is already in the
+        # config entry, and the container usually deletes on its own TTL
+        # fallback. Never log the nonce or the delete token.
         #
-        # Two very different situations reach this branch, so they get two log
-        # levels. An unreachable/timed-out endpoint *after* the TTL has provably
-        # run out is simply the TTL fallback having won the race: the container
-        # deleted the same file and shut down, nothing is wrong and there is
-        # nothing for the user to do, so debug. Everything else (an auth
-        # failure, or an endpoint that is unreachable while it should still be
-        # up) points at a real problem and stays a warning.
+        # The three branches below differ in exactly one thing: what can be said
+        # *honestly* about the container's copy of ``secrets.json``.
+        #
+        # 1. The container proved it kept the file (``secret_retained``), which
+        #    today is only the ack-path lockout 410. A locked-out server
+        #    preserves ``secrets.json`` on purpose (so the file handoff and the
+        #    copy/paste track keep working) and then exits, so nothing removes
+        #    it later. Promising an automatic cleanup here would be false; the
+        #    operator has to delete the leftover copy. Deliberately keyed on the
+        #    flag and NOT on ``ContainerAuthError``: a plain 401/403 shares that
+        #    class while leaving the TTL fallback intact, and it is the routine
+        #    outcome of a late ack meeting a *restarted* container (the old
+        #    pairing nonce no longer matches). Checked first so a proven
+        #    leftover can never be downgraded by branch 2.
+        # 2. Unreachable/timed out *after* the TTL has provably run out. By far
+        #    the likeliest ending is that the TTL fallback won the race and
+        #    deleted the same file, but it is not the only one: a container that
+        #    already exited after a lockout, or whose own delete failed
+        #    (``500 {"error": "delete_failed"}``), is equally silent, and a
+        #    closed port carries no body to tell those apart. Debug is therefore
+        #    a deliberate trade, not a proof of cleanliness -- the benign case is
+        #    the routine one and would otherwise warn on every slow setup, while
+        #    the rare leftover is already reported by the container's own log.
+        # 3. Anything else (an unreachable endpoint that should still be up, or
+        #    a rejected/unclassifiable ack): a real problem, and the TTL fallback
+        #    is still ahead of it.
         expected_ttl_shutdown = isinstance(
             exc, (ContainerUnreachableError, ContainerTimeoutError)
         ) and _container_ttl_certainly_elapsed(target)
-        if expected_ttl_shutdown:
+        if exc.secret_retained:
+            _LOGGER.warning(
+                "Container ack failed (%s) and the login container kept its "
+                "secrets.json: it hit its pairing lockout, which preserves the "
+                "file on purpose, and nothing removes it automatically "
+                "afterwards. Delete that file manually once the container has "
+                "stopped",
+                type(exc).__name__,
+            )
+        elif expected_ttl_shutdown:
             _LOGGER.debug(
                 "Container ack skipped (%s): the %ds token TTL had already "
-                "elapsed, so the container deleted its copy itself",
+                "elapsed, so the container is expected to have deleted its copy "
+                "itself",
                 type(exc).__name__,
                 CONTAINER_TOKEN_TTL,
             )
         else:
             _LOGGER.warning(
-                "Container ack failed (%s); container will fall back to TTL delete",
+                "Container ack failed (%s); the container is expected to fall "
+                "back to its TTL delete, unless it had already stopped for "
+                "another reason",
                 type(exc).__name__,
             )
 
@@ -3863,7 +3904,9 @@ class ConfigFlow(
         A no-op unless a container-login fetch staged a result in
         ``self._container_pending_ack``. The pending result is cleared *before*
         the ack call so a caller cannot double-ack, and the ack itself is
-        best-effort (its own errors fall back to the container's TTL delete).
+        best-effort (its own errors normally fall back to the container's TTL
+        delete; :func:`_async_send_container_ack` grades the exceptions that do
+        not).
 
         Only valid where the entry has already been written through
         ``hass.config_entries.async_update_entry``, which persists inline (the

@@ -235,6 +235,9 @@ further request is refused, and repeated wrong pairing codes lock it out. A
 lockout closes the endpoint but **keeps** `secrets.json`, so you never have to
 repeat the Google login: fall back to the file handoff (Track A) or the
 clear-text output (Track C), or simply run the container again for a fresh code.
+Those two fallbacks are alternatives, not cumulative: Track C is ephemeral by
+contract and deletes the file right after printing it, so if `GFMY_CLEARTEXT=1`
+is set as well, the clear-text output replaces the file handoff.
 
 > **How the loopback guarantee is enforced.** Under Docker's default *bridge*
 > network the published port is DNAT'd onto the container's `eth0`, not onto the
@@ -354,6 +357,20 @@ The block is framed by `BEGIN secrets.json` / `END secrets.json` markers so it i
 easy to select. The file is **ephemeral**: it is deleted immediately after it is
 displayed, so nothing lingers on disk. This switch is independent of
 `GFMY_ONECLICK` and of the plain file handoff.
+
+Combined with `GFMY_ONECLICK=1`, the clear-text block runs *after* the one-click
+endpoint has returned, and only if `secrets.json` is still there. Home Assistant
+acknowledging the handoff, and the token TTL expiring, both delete the file, so
+in those cases there is deliberately nothing left to print. The combination
+therefore matters in exactly the case it was meant for: the endpoint's attempt
+lockout, where the file is kept on purpose so that the file and clear-text
+tracks still work.
+
+> **Worth knowing before you combine the two.** The lockout is what someone
+> *else* on the machine triggers by guessing the pairing code five times. In
+> that situation this switch is what puts the full bundle on the noVNC screen,
+> which is only as private as `GFMY_NOVNC_BIND` makes it. On a shared or
+> LAN-exposed host, prefer the file handoff and leave `GFMY_CLEARTEXT` unset.
 
 ## Using `secrets.json` in Home Assistant
 
