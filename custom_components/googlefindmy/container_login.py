@@ -63,6 +63,9 @@ _LOGGER = logging.getLogger(__name__)
 _JSON_CONTENT_TYPE: Final = "application/json"
 # Any 3xx status is treated as a refused redirect / unexpected reply.
 _HTTP_REDIRECT_FLOOR: Final = 300
+# 410 Gone: asymmetric between the two paths (see _raise_for_auth).
+_HTTP_GONE: Final = 410
+_HTTP_OK: Final = 200
 # Best-effort link-local / cloud-metadata block (IPv4 literals only; see the
 # module docstring for what this intentionally does NOT cover).
 _LINK_LOCAL_V4: Final = ipaddress.ip_network("169.254.0.0/16")
@@ -73,7 +76,28 @@ class ContainerLoginError(Exception):
 
 
 class ContainerAuthError(ContainerLoginError):
-    """The pairing nonce was rejected (wrong code, expired, or locked out)."""
+    """The pairing nonce was rejected (wrong code, expired, or locked out).
+
+    Attributes:
+        code_used: ``True`` only for the *fetch*-path ``HTTP 410``, i.e. the
+            endpoint has nothing left to hand out: the pairing code expired,
+            was locked out, or the one-shot bundle was already collected. The
+            code the user typed may well have been correct, so the caller can
+            show a "start the login container again for a fresh code" hint
+            instead of the misleading "check the pairing code". ``False`` for a
+            plain rejection (``401``/``403``), where re-typing the code is the
+            right advice, and ``False`` for every construction that does not
+            pass the flag (backwards compatible).
+    """
+
+    def __init__(self, message: str, *, code_used: bool = False) -> None:
+        """Store the message plus the fetch-path ``410`` discriminator.
+
+        ``code_used`` is keyword-only and defaults to ``False`` so existing
+        single-argument constructions keep working unchanged.
+        """
+        super().__init__(message)
+        self.code_used = code_used
 
 
 class ContainerUnreachableError(ContainerLoginError):
@@ -155,7 +179,10 @@ async def fetch_secrets_from_container(
     validation path.
 
     Raises:
-        ContainerAuthError: the nonce was rejected (HTTP 401/403/410).
+        ContainerAuthError: the nonce was rejected (HTTP 401/403), or the
+            endpoint has nothing left to hand out (HTTP 410: code expired,
+            locked out, or the one-shot bundle was already collected). Note the
+            asymmetry with :func:`ack_consumed`, where 410 is a success.
         ContainerTimeoutError: the request timed out.
         ContainerUnreachableError: connection/redirect/content/size failure, or
             a malformed response missing the expected fields.
@@ -173,7 +200,8 @@ async def fetch_secrets_from_container(
             allow_redirects=False,
             timeout=_make_timeout(timeout),
         ) as response:
-            _raise_for_auth(response.status)
+            # Fetch path: 410 means the bundle is unobtainable with this code.
+            _raise_for_auth(response.status, gone_is_auth=True)
             if response.status >= _HTTP_REDIRECT_FLOOR:
                 raise ContainerUnreachableError(
                     f"container endpoint returned HTTP {response.status}"
@@ -217,6 +245,10 @@ async def ack_consumed(  # noqa: PLR0913 - fixed two-phase-delete API contract
     accepted the bundle. A failure here is non-fatal for the caller -- the
     container deletes on its own TTL fallback -- but is surfaced as a typed
     error so the caller can log it (never the token itself).
+
+    HTTP 410 is a **success** here (the secret is confirmed absent: duplicate
+    ack, or the TTL fallback deleted it first), unlike on the fetch path where
+    the same status is an auth failure. See :func:`_raise_for_auth`.
     """
     _maybe_block_link_local(host)
     url = f"{_build_base_url(host, port)}/ack"
@@ -231,10 +263,11 @@ async def ack_consumed(  # noqa: PLR0913 - fixed two-phase-delete API contract
             allow_redirects=False,
             timeout=_make_timeout(timeout),
         ) as response:
-            _raise_for_auth(response.status)
+            # ACK path: 410 is success ("already gone"), NOT an auth failure.
+            _raise_for_auth(response.status, gone_is_auth=False)
             # 200 (deleted now) and 410 (already gone / TTL fired) are both an
             # idempotent success: the on-disk secret is confirmed absent.
-            if response.status not in (200, 410):
+            if response.status not in (_HTTP_OK, _HTTP_GONE):
                 raise ContainerUnreachableError(
                     f"container ack returned HTTP {response.status}"
                 )
@@ -246,8 +279,35 @@ async def ack_consumed(  # noqa: PLR0913 - fixed two-phase-delete API contract
         raise ContainerUnreachableError(str(err)) from err
 
 
-def _raise_for_auth(status: int) -> None:
-    """Map an auth-class status to :class:`ContainerAuthError`."""
+def _raise_for_auth(status: int, *, gone_is_auth: bool) -> None:
+    """Map an auth-class status to :class:`ContainerAuthError`.
+
+    ``401``/``403`` are an auth failure on every path. ``410`` is deliberately
+    **asymmetric** and the caller must say which side it is on:
+
+    * ``gone_is_auth=True`` (fetch path): the endpoint has nothing left to hand
+      out. The pairing code expired, was locked out after too many attempts, or
+      the bundle was already delivered (the server is one-shot). The user has to
+      run the login container again and use the fresh code, so this is an auth
+      failure, not an unreachable host. Mapping it to
+      :class:`ContainerUnreachableError` would show a misleading host/port error.
+      This is the only case that sets ``ContainerAuthError.code_used=True``, so
+      the caller can tell "code already used/expired" apart from "wrong code".
+    * ``gone_is_auth=False`` (ack path): ``410`` means "already gone", i.e. the
+      secret is confirmed absent. That is the *success* outcome of the two-phase
+      delete (a duplicate ack, or the TTL fallback fired first) and must never
+      be turned into an error.
+
+    ``401``/``403`` keep ``code_used=False``: there the code itself was wrong,
+    and re-typing it is the useful advice.
+    """
+    if status == _HTTP_GONE and gone_is_auth:
+        raise ContainerAuthError(
+            "container endpoint has no bundle to hand out (HTTP 410): the pairing "
+            "code expired, was locked out, or the bundle was already collected; "
+            "run the login container again for a fresh code",
+            code_used=True,
+        )
     if status in (401, 403):
         raise ContainerAuthError(
             f"container endpoint rejected the pairing code (HTTP {status})"

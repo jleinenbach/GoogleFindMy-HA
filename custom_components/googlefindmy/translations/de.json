@@ -94,6 +94,8 @@
       "container_unreachable": "Der Anmelde-Container konnte nicht erreicht werden. Stelle sicher, dass er läuft und Host und Port korrekt sind.",
       "container_timeout": "Der Anmelde-Container hat nicht rechtzeitig geantwortet. Bitte versuche es erneut.",
       "container_auth_failed": "Die Authentifizierung über den Anmelde-Container ist fehlgeschlagen. Prüfe den Kopplungscode und versuche es erneut.",
+      "container_code_used": "Dieser Kopplungscode wurde bereits verwendet oder ist abgelaufen. Starte den Anmelde-Container neu und verwende den neuen Code.",
+      "container_code_too_short": "Der Kopplungscode ist zu kurz. Kopiere den vollständigen Code aus dem Anmelde-Container.",
       "container_login_failed": "Die Container-Anmeldung konnte nicht abgeschlossen werden. Bitte versuche es erneut."
     },
     "abort": {
@@ -357,6 +359,8 @@
       "container_unreachable": "Der Anmelde-Container konnte nicht erreicht werden. Stelle sicher, dass er läuft und Host und Port korrekt sind.",
       "container_timeout": "Der Anmelde-Container hat nicht rechtzeitig geantwortet. Bitte versuche es erneut.",
       "container_auth_failed": "Die Authentifizierung über den Anmelde-Container ist fehlgeschlagen. Prüfe den Kopplungscode und versuche es erneut.",
+      "container_code_used": "Dieser Kopplungscode wurde bereits verwendet oder ist abgelaufen. Starte den Anmelde-Container neu und verwende den neuen Code.",
+      "container_code_too_short": "Der Kopplungscode ist zu kurz. Kopiere den vollständigen Code aus dem Anmelde-Container.",
       "container_login_failed": "Die Container-Anmeldung konnte nicht abgeschlossen werden. Bitte versuche es erneut."
     },
     "abort": {

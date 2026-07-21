@@ -11,19 +11,35 @@ exercising the security contract documented in the module docstring:
 * Two-phase delete: ``GET /secrets`` returns the bundle + ``delete_token`` and
   leaves the file on disk; ``POST /ack`` with a matching token deletes it and
   shuts the endpoint down; a second ``GET`` then reports ``410 gone``.
+* One-shot delivery: once a ``GET`` succeeded, every further ``GET`` is refused
+  with ``410`` even while the file is still on disk, and the ``POST /ack`` of the
+  original client keeps working.
 * Nonce lockout: a wrong bearer nonce yields ``403`` and, after
-  ``_NONCE_MAX_ATTEMPTS`` failures, flips to ``410`` + shutdown.
+  ``_NONCE_MAX_ATTEMPTS`` failures, flips to ``410`` + shutdown. The counter is
+  server-wide: a wrong nonce on ``POST /ack`` feeds the same budget, and a
+  locked endpoint refuses both routes.
+* Non-ASCII credentials: a bearer nonce or a ``delete_token`` carrying non-ASCII
+  code points (including a lone surrogate from a JSON ``\\ud800`` escape) is an
+  ordinary mismatch, not a ``TypeError`` out of ``hmac.compare_digest``. It must
+  yield the regular rejection status *and*, for the nonce, increment the lockout
+  counter, otherwise the lockout can be bypassed with 500s.
 * Body hardening: an oversized ``/ack`` body is rejected with ``413`` and a
-  non-JSON body with ``400``; neither burns the GET lockout counter.
-* TTL fallback: the on-disk secret is deleted even when no ack arrives (the
-  ``_run`` timeout path), via a direct drive of ``_delete_secret_file``.
+  non-JSON body with ``400``; neither burns the lockout counter.
+* TTL fallback: the on-disk secret is deleted even when no ack arrives, both via
+  a direct drive of ``_delete_secret_file`` and through the real ``_run``
+  timeout path against a live loopback socket.
+* Lockout is non-destructive: after a lockout ``_run`` returns (the endpoint is
+  gone, the port refuses connections) but ``secrets.json`` stays on disk, so the
+  file-handoff and copy/paste tracks survive an unauthenticated lockout.
 * ACK idempotency: a second correct ack returns ``410`` without error, and a
-  *failed* ack (wrong ``delete_token``) does not burn the GET nonce.
+  *failed* ack (wrong ``delete_token``) does not burn the nonce.
+* Constant mirroring: the values copied into the standalone module are asserted
+  against ``const.py``, the source of truth, not against literals.
 * Host-publish loopback boundary: the container-internal bind is ``0.0.0.0`` on
   purpose (Docker bridge DNATs the published port onto eth0, not container
   loopback), and the *no-LAN* guarantee is asserted against the HOST publish in
   ``docker-compose.yml`` (``127.0.0.1:7901:7901`` present, no ``0.0.0.0:7901``
-  publish), NOT against the container bind.
+  publish, no ``network_mode``), NOT against the container bind.
 
 Collection hardening (Audit HOCH-3): ``docker-login/`` is NOT a Python package
 and its basename is not importable via ``import``. The module is loaded with
@@ -35,13 +51,19 @@ the tree). ``pytest --collect-only tests/test_token_server.py`` must stay green.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import importlib.util
 import json
+import socket
+from collections.abc import AsyncIterator
 from pathlib import Path
 from types import ModuleType
 from typing import Any
 
+import aiohttp
 import pytest
+import yaml
 from aiohttp.test_utils import TestClient, TestServer
 
 # NOTE: no module-level ``pytestmark = pytest.mark.asyncio`` here. This module
@@ -116,20 +138,83 @@ def _auth(nonce: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {nonce}"}
 
 
+def _free_loopback_port() -> int:
+    """Reserve and release an ephemeral loopback port for the ``_run`` drives."""
+
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        return int(probe.getsockname()[1])
+
+
+async def _wait_until_listening(port: int) -> None:
+    """Block until ``_run`` has its site up on ``port`` (or fail the test)."""
+
+    for _ in range(250):
+        try:
+            _reader, writer = await asyncio.open_connection("127.0.0.1", port)
+        except OSError:
+            await asyncio.sleep(0.02)
+        else:
+            writer.close()
+            await writer.wait_closed()
+            return
+    raise AssertionError(f"token server never started listening on {port}")
+
+
+def _patch_run_socket(monkeypatch: pytest.MonkeyPatch, port: int) -> list[Any]:
+    """Point ``_run`` at a private loopback port and capture its ``_State``.
+
+    ``_run`` builds the state itself, so the test grabs it by wrapping
+    ``_build_app``. The bind is forced to ``127.0.0.1``: the production
+    ``0.0.0.0`` bind is correct inside the container (bridge DNAT) but must not
+    be opened on a developer/CI machine by a test.
+    """
+
+    captured: list[Any] = []
+    real_build_app = token_server._build_app
+
+    def _capture(state: Any) -> Any:
+        captured.append(state)
+        return real_build_app(state)
+
+    monkeypatch.setattr(token_server, "_BIND_HOST", "127.0.0.1")
+    monkeypatch.setattr(token_server, "_TOKEN_PORT", port)
+    monkeypatch.setattr(token_server, "_build_app", _capture)
+    return captured
+
+
 # ---------------------------------------------------------------------------
 # Collection hardening / bind contract
 # ---------------------------------------------------------------------------
 
 
 def test_module_loads_and_mirrors_constants() -> None:
-    """The module loads by path and mirrors the integration const values."""
+    """The module loads by path and mirrors the integration const values.
 
-    # Container-internal bind is 0.0.0.0 on purpose (bridge DNAT); the loopback
-    # boundary is the host publish, asserted in the compose test.
+    ``token_server.py`` runs without the integration package on its path, so it
+    keeps private copies of the container-login constants that are kept in sync
+    with ``const.py`` *by convention* (module docstring). The convention is only
+    worth anything if it is asserted against the source of truth: comparing the
+    copies with literals would let a change to ``const.py`` drift past a green
+    test. Every mirrored value is therefore checked against ``const``.
+    """
+
+    # Imported inside the test on purpose: the module under test is standalone
+    # and must not need the integration package at import/collection time.
+    from custom_components.googlefindmy import const
+
+    assert token_server._TOKEN_PORT == const.CONTAINER_TOKEN_PORT
+    assert token_server._NONCE_BYTES == const.CONTAINER_NONCE_MIN_LEN
+    assert token_server._NONCE_MAX_ATTEMPTS == const.CONTAINER_NONCE_MAX_ATTEMPTS
+    assert token_server._TOKEN_TTL == const.CONTAINER_TOKEN_TTL
+    assert token_server._MAX_BODY_BYTES == const.CONTAINER_MAX_RESPONSE_BYTES
+
+    # Not mirrored from const.py: the container-internal bind is 0.0.0.0 on
+    # purpose (bridge DNAT); the loopback boundary is the host publish, asserted
+    # in the compose test. The port literal anchors the third corner of the
+    # const/module/compose triangle.
     assert token_server._BIND_HOST == "0.0.0.0"
     assert token_server._TOKEN_PORT == 7901
-    assert token_server._NONCE_MAX_ATTEMPTS == 5
-    assert token_server._TOKEN_TTL == 300
 
 
 def test_container_bind_is_wildcard_for_bridge_dnat() -> None:
@@ -163,6 +248,25 @@ def test_host_publish_is_loopback_only_no_lan_exposure() -> None:
 
     bare_publish = re.compile(r'(^|[\s"\'])7901:7901(\b)')
     assert bare_publish.search(compose) is None
+
+
+def test_compose_does_not_set_network_mode() -> None:
+    """No service may set ``network_mode``; ``host`` would collapse the boundary.
+
+    The two-layer guarantee is "wildcard bind inside the container, loopback
+    publish on the host". ``network_mode: host`` removes the bridge and with it
+    the publish, so the container's ``0.0.0.0:7901`` bind would land directly on
+    the host's interfaces and expose the cleartext token endpoint to the LAN.
+    The compose file *mentions* ``network_mode: host`` in a warning comment, so
+    this is asserted on the parsed YAML rather than on the raw text.
+    """
+
+    compose = yaml.safe_load(_COMPOSE_PATH.read_text(encoding="utf-8"))
+    services: dict[str, Any] = compose["services"]
+    offenders = sorted(
+        name for name, service in services.items() if "network_mode" in service
+    )
+    assert offenders == []
 
 
 # ---------------------------------------------------------------------------
@@ -218,6 +322,91 @@ async def test_ack_deletes_file_and_second_get_is_gone(tmp_path: Path) -> None:
         await client.close()
 
 
+@pytest.mark.asyncio
+async def test_second_get_after_delivery_is_refused(tmp_path: Path) -> None:
+    """One-shot delivery: a repeat ``GET /secrets`` is refused with 410.
+
+    The two-phase delete leaves the file on disk until the ack, so the delivery
+    itself has to be the one-shot gate. Without it every holder of the pairing
+    code could re-collect the bundle until the ack or the TTL fired. The ack must
+    stay usable afterwards, otherwise the original client could not complete the
+    delete.
+    """
+
+    state = _make_state(tmp_path)
+    client = await _client(state)
+    try:
+        first = await client.get("/secrets", headers=_auth(_VALID_NONCE))
+        assert first.status == 200
+        delete_token = (await first.json())["delete_token"]
+
+        second = await client.get("/secrets", headers=_auth(_VALID_NONCE))
+        assert second.status == 410
+        assert (await second.json())["error"] == "already_delivered"
+        # Refused, not deleted: the two-phase delete is untouched by the refusal.
+        assert state.deleted is False
+        assert state.secrets_path.is_file()
+        # The refusal is not a nonce failure and must not feed the lockout.
+        assert state.failed_attempts == 0
+
+        # The ACK path still works for the client that received the bundle.
+        ack = await client.post(
+            "/ack",
+            headers=_auth(_VALID_NONCE),
+            json={"delete_token": delete_token},
+        )
+        assert ack.status == 200
+        assert (await ack.json())["status"] == "deleted"
+        assert not state.secrets_path.exists()
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_get_reports_gone_when_file_vanished(tmp_path: Path) -> None:
+    """A secret removed out-of-band yields ``410 gone``, not a stack trace.
+
+    Guards the read path of the merged terminal-state branch: ``deleted`` is
+    still ``False`` here, so the 410 can only come from the ``FileNotFoundError``
+    handler around the actual read.
+    """
+
+    state = _make_state(tmp_path)
+    state.secrets_path.unlink()
+    client = await _client(state)
+    try:
+        resp = await client.get("/secrets", headers=_auth(_VALID_NONCE))
+        assert resp.status == 410
+        assert (await resp.json())["error"] == "gone"
+        assert state.delivered is False
+        assert state.deleted is False
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_get_reports_read_failure_without_marking_delivered(
+    tmp_path: Path,
+) -> None:
+    """An unreadable/corrupt secrets file yields 500 and no delivery is recorded.
+
+    ``delivered`` must stay ``False`` so a retry after fixing the file still
+    works: the one-shot gate may only close on an actual handoff.
+    """
+
+    state = _make_state(tmp_path)
+    state.secrets_path.write_text("{not json", encoding="utf-8")
+    client = await _client(state)
+    try:
+        resp = await client.get("/secrets", headers=_auth(_VALID_NONCE))
+        assert resp.status == 500
+        assert (await resp.json())["error"] == "read_failed"
+        assert state.delivered is False
+        assert state.secrets_path.is_file()
+    finally:
+        await client.close()
+
+
 # ---------------------------------------------------------------------------
 # Nonce failures + lockout
 # ---------------------------------------------------------------------------
@@ -256,12 +445,17 @@ async def test_lockout_after_max_attempts(tmp_path: Path) -> None:
         assert statuses[-1] == 410
         assert state.locked is True
         assert state.shutdown_event.is_set()
+        assert state.shutdown_reason == token_server._SHUTDOWN_LOCKOUT
 
         # Even a subsequently *correct* nonce is refused once locked.
         after = await client.get("/secrets", headers=_auth(_VALID_NONCE))
         assert after.status == 410
         # The secret was never handed out.
         assert state.delivered is False
+        # ... and never destroyed either: the lockout closes the endpoint, it
+        # does not wipe the credential (``_run`` skips the delete, see below).
+        assert state.deleted is False
+        assert state.secrets_path.is_file()
     finally:
         await client.close()
 
@@ -276,6 +470,98 @@ async def test_missing_authorization_header_is_rejected(tmp_path: Path) -> None:
         resp = await client.get("/secrets")
         assert resp.status == 403
         assert state.failed_attempts == 1
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_non_ascii_bearer_nonce_is_rejected_and_counted(tmp_path: Path) -> None:
+    """A non-ASCII bearer nonce is a normal mismatch: 403 *and* counted.
+
+    Regression guard: ``hmac.compare_digest`` raises ``TypeError`` on ``str``
+    arguments with non-ASCII code points. HTTP header values are latin-1 on the
+    wire, so ``Authorization: Bearer b\\xe4d`` is a legal request that used to
+    blow up the handler with a 500 traceback while leaving ``failed_attempts``
+    at 0. That made the documented lockout bypassable by unlimited guessing.
+    """
+
+    state = _make_state(tmp_path)
+    client = await _client(state)
+    try:
+        resp = await client.get("/secrets", headers=_auth("b\xe4d"))
+        assert resp.status == 403
+        assert (await resp.json())["error"] == "forbidden"
+        assert state.failed_attempts == 1
+        assert state.secrets_path.is_file()
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_non_ascii_nonce_still_reaches_the_lockout(tmp_path: Path) -> None:
+    """Repeated non-ASCII nonces lock the endpoint like any other wrong nonce."""
+
+    state = _make_state(tmp_path)
+    client = await _client(state)
+    try:
+        statuses = [
+            (await client.get("/secrets", headers=_auth("b\xe4d"))).status
+            for _ in range(token_server._NONCE_MAX_ATTEMPTS)
+        ]
+        assert statuses[-1] == 410
+        assert state.locked is True
+        assert state.failed_attempts == token_server._NONCE_MAX_ATTEMPTS
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_non_ascii_delete_token_is_rejected(tmp_path: Path) -> None:
+    """A non-ASCII ``delete_token`` yields 403, not a 500, and deletes nothing.
+
+    Second site of the same ``compare_digest`` class as the bearer nonce: the
+    ``/ack`` body is JSON and may carry arbitrary Unicode.
+    """
+
+    state = _make_state(tmp_path)
+    client = await _client(state)
+    try:
+        resp = await client.post(
+            "/ack",
+            headers=_auth(_VALID_NONCE),
+            json={"delete_token": "b\xe4d-token"},
+        )
+        assert resp.status == 403
+        assert (await resp.json())["error"] == "forbidden"
+        assert state.deleted is False
+        assert state.secrets_path.is_file()
+        # A wrong delete_token never feeds the lockout counter (retry safety).
+        assert state.failed_attempts == 0
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_lone_surrogate_delete_token_is_rejected(tmp_path: Path) -> None:
+    """A lone surrogate in the ``delete_token`` is rejected, not a 500.
+
+    ``json.loads`` turns the escape ``\\ud800`` into a lone surrogate, which
+    plain ``utf-8`` (and ``surrogateescape``) cannot encode. The comparison
+    helper therefore uses ``surrogatepass``, the only handler that is total over
+    every ``str`` the JSON decoder can produce.
+    """
+
+    state = _make_state(tmp_path)
+    client = await _client(state)
+    try:
+        resp = await client.post(
+            "/ack",
+            headers={**_auth(_VALID_NONCE), "Content-Type": "application/json"},
+            data=b'{"delete_token": "\\ud800"}',
+        )
+        assert resp.status == 403
+        assert state.deleted is False
+        assert state.secrets_path.is_file()
     finally:
         await client.close()
 
@@ -299,6 +585,37 @@ async def test_ack_oversize_body_rejected(tmp_path: Path) -> None:
             data=oversize,
         )
         assert resp.status == 413
+        assert state.deleted is False
+        assert state.secrets_path.is_file()
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_ack_oversize_chunked_body_rejected(tmp_path: Path) -> None:
+    """A chunked ``/ack`` body without ``Content-Length`` is capped while reading.
+
+    The declared length is only the cheap first line of defence; a chunked
+    request carries no ``Content-Length`` at all, so the cap has to hold on the
+    bytes actually received.
+    """
+
+    state = _make_state(tmp_path)
+    client = await _client(state)
+
+    async def _chunks() -> AsyncIterator[bytes]:
+        chunk = b"x" * 65536
+        for _ in range(token_server._MAX_BODY_BYTES // 65536 + 1):
+            yield chunk
+
+    try:
+        resp = await client.post(
+            "/ack",
+            headers={**_auth(_VALID_NONCE), "Content-Type": "application/json"},
+            data=_chunks(),
+        )
+        assert resp.status == 413
+        assert (await resp.json())["error"] == "too_large"
         assert state.deleted is False
         assert state.secrets_path.is_file()
     finally:
@@ -344,8 +661,14 @@ async def test_ack_wrong_delete_token_forbidden(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_ack_wrong_nonce_forbidden(tmp_path: Path) -> None:
-    """A wrong nonce on ``/ack`` is 403 and does not touch the GET lockout counter."""
+async def test_ack_wrong_nonce_forbidden_and_counted(tmp_path: Path) -> None:
+    """A wrong nonce on ``/ack`` is 403 and feeds the shared lockout counter.
+
+    The counter is server-wide, not per route: otherwise ``/ack`` would be an
+    unrate-limited nonce oracle sitting next to the rate-limited ``/secrets``. A
+    legitimate client cannot trip this, because it holds the nonce; only the
+    ``delete_token`` half of the ack stays outside the counter (retry safety).
+    """
 
     state = _make_state(tmp_path)
     client = await _client(state)
@@ -356,9 +679,45 @@ async def test_ack_wrong_nonce_forbidden(tmp_path: Path) -> None:
             json={"delete_token": state.delete_token},
         )
         assert resp.status == 403
-        # ACK never increments the GET lockout counter (docstring invariant).
-        assert state.failed_attempts == 0
+        assert state.failed_attempts == 1
         assert state.deleted is False
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_ack_nonce_failures_lock_the_endpoint(tmp_path: Path) -> None:
+    """``/ack`` cannot be used to guess the nonce past the lockout threshold."""
+
+    state = _make_state(tmp_path)
+    client = await _client(state)
+    try:
+        statuses = []
+        for _ in range(token_server._NONCE_MAX_ATTEMPTS):
+            resp = await client.post(
+                "/ack",
+                headers=_auth("wrong-nonce"),
+                json={"delete_token": "guess"},
+            )
+            statuses.append(resp.status)
+        assert statuses[:-1] == [403] * (token_server._NONCE_MAX_ATTEMPTS - 1)
+        assert statuses[-1] == 410
+        assert state.locked is True
+        assert state.shutdown_reason == token_server._SHUTDOWN_LOCKOUT
+
+        # Locked closes the whole endpoint, both routes, even for a correct nonce.
+        after_get = await client.get("/secrets", headers=_auth(_VALID_NONCE))
+        assert after_get.status == 410
+        after_ack = await client.post(
+            "/ack",
+            headers=_auth(_VALID_NONCE),
+            json={"delete_token": state.delete_token},
+        )
+        assert after_ack.status == 410
+        assert (await after_ack.json())["error"] == "locked"
+        # A lockout must never destroy the credential (see the ``_run`` test).
+        assert state.deleted is False
+        assert state.secrets_path.is_file()
     finally:
         await client.close()
 
@@ -395,30 +754,42 @@ async def test_ack_idempotent_second_ack_returns_410(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_failed_ack_does_not_burn_nonce_for_get(tmp_path: Path) -> None:
-    """A failed ack must not burn the GET nonce: a later correct GET still works."""
+    """A retried ack must not burn the nonce: a later correct GET still works.
+
+    The retry scenario the invariant protects (network retry, double click) uses
+    the *correct* nonce with a stale/wrong ``delete_token``, so that half stays
+    outside the lockout counter entirely. A wrong nonce is counted (it can only
+    come from someone who does not hold it) but a single one is far below the
+    threshold and must not disturb the handoff.
+    """
 
     state = _make_state(tmp_path)
     client = await _client(state)
     try:
-        # A failed ack (wrong nonce) followed by a failed ack (wrong token).
+        # Repeated wrong delete_token: pure retry noise, never counted.
+        for _ in range(token_server._NONCE_MAX_ATTEMPTS + 2):
+            bad_token = await client.post(
+                "/ack",
+                headers=_auth(_VALID_NONCE),
+                json={"delete_token": "nope"},
+            )
+            assert bad_token.status == 403
+        assert state.failed_attempts == 0
+
+        # One wrong nonce is counted but stays below the lockout threshold.
         bad_nonce = await client.post(
             "/ack",
             headers=_auth("wrong-nonce"),
             json={"delete_token": state.delete_token},
         )
         assert bad_nonce.status == 403
-        bad_token = await client.post(
-            "/ack",
-            headers=_auth(_VALID_NONCE),
-            json={"delete_token": "nope"},
-        )
-        assert bad_token.status == 403
+        assert state.failed_attempts == 1
+        assert state.locked is False
 
-        # The GET nonce is untouched: the bundle is still deliverable.
+        # The bundle is still deliverable.
         resp = await client.get("/secrets", headers=_auth(_VALID_NONCE))
         assert resp.status == 200
         assert (await resp.json())["bundle"] == _BUNDLE
-        assert state.failed_attempts == 0
         assert state.deleted is False
     finally:
         await client.close()
@@ -524,3 +895,104 @@ async def test_ack_reports_500_and_stays_up_when_delete_fails(
         assert not state.shutdown_event.is_set()  # endpoint stays up for retry
     finally:
         await client.close()
+
+
+# ---------------------------------------------------------------------------
+# Full ``_run`` lifecycle: shutdown reason decides whether the file is deleted
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_run_ttl_fallback_deletes_secret(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``_run`` deletes the secret when the TTL elapses without an ack.
+
+    Drives the real timeout path (with a millisecond TTL) instead of only the
+    helper, so the shutdown-reason branching introduced for the lockout case
+    cannot silently disable the fallback delete.
+    """
+
+    secrets_path = _write_secret(tmp_path)
+    captured = _patch_run_socket(monkeypatch, _free_loopback_port())
+    monkeypatch.setattr(token_server, "_TOKEN_TTL", 0.05)
+
+    await token_server._run(_VALID_NONCE, secrets_path)
+
+    assert captured[0].shutdown_reason == token_server._SHUTDOWN_TTL
+    assert captured[0].deleted is True
+    assert not secrets_path.exists()
+
+
+@pytest.mark.asyncio
+async def test_run_reports_failed_ttl_fallback_delete(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failing TTL-fallback delete is surfaced, not silently treated as done.
+
+    ``_run`` must not mark the credential as consumed when ``os.remove`` fails
+    (permission/transient error on the mounted ``./data``); the file is still
+    there and the state must say so.
+    """
+
+    secrets_path = _write_secret(tmp_path)
+    captured = _patch_run_socket(monkeypatch, _free_loopback_port())
+    monkeypatch.setattr(token_server, "_TOKEN_TTL", 0.05)
+
+    def _boom(_path: str) -> None:
+        raise OSError("permission denied")
+
+    monkeypatch.setattr(token_server.os, "remove", _boom)
+
+    await token_server._run(_VALID_NONCE, secrets_path)
+
+    assert captured[0].shutdown_reason == token_server._SHUTDOWN_TTL
+    assert captured[0].deleted is False
+    assert secrets_path.is_file()
+
+
+@pytest.mark.asyncio
+async def test_run_lockout_keeps_secret_file_and_closes_endpoint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A lockout stops the server but leaves ``secrets.json`` on disk.
+
+    The loopback publish is reachable by every local account on the Docker host,
+    so five unauthenticated GETs must not be able to destroy freshly minted
+    credentials and force the user through a full Google login incl. 2FA again.
+    The file is also the carrier of the file-handoff and copy/paste tracks,
+    which do not depend on this endpoint. What the lockout *must* do is close
+    the endpoint: ``_run`` returns and the port stops accepting connections.
+    """
+
+    secrets_path = _write_secret(tmp_path)
+    port = _free_loopback_port()
+    captured = _patch_run_socket(monkeypatch, port)
+
+    server = asyncio.create_task(token_server._run(_VALID_NONCE, secrets_path))
+    try:
+        await _wait_until_listening(port)
+        url = f"http://127.0.0.1:{port}/secrets"
+        async with aiohttp.ClientSession() as session:
+            for _ in range(token_server._NONCE_MAX_ATTEMPTS):
+                async with session.get(url, headers=_auth("wrong-nonce")) as resp:
+                    assert resp.status in (403, 410)
+        # The lockout shuts the server down on its own; no cancellation needed.
+        await asyncio.wait_for(server, timeout=10)
+    finally:
+        # No-op on the expected path (the task is already done); only a failing
+        # assertion above would leave it running.
+        server.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await server
+
+    state = captured[0]
+    assert state.locked is True
+    assert state.shutdown_reason == token_server._SHUTDOWN_LOCKOUT
+    # The credential survived the lockout.
+    assert state.deleted is False
+    assert secrets_path.is_file()
+    assert json.loads(secrets_path.read_text(encoding="utf-8")) == _BUNDLE
+    # ... but nothing is served any more: the listener is gone.
+    with pytest.raises(OSError):
+        await asyncio.open_connection("127.0.0.1", port)

@@ -207,6 +207,12 @@ one-shot, nonce-authenticated endpoint that is reachable **only on the Docker
 host's loopback** (`127.0.0.1:7901`), then deletes the file once Home Assistant
 confirms it (or after a short timeout).
 
+The endpoint is strictly single-use: once the bundle has been handed out, every
+further request is refused, and repeated wrong pairing codes lock it out. A
+lockout closes the endpoint but **keeps** `secrets.json`, so you never have to
+repeat the Google login: fall back to the file handoff (Track A) or the
+clear-text output (Track C), or simply run the container again for a fresh code.
+
 > **How the loopback guarantee is enforced.** Under Docker's default *bridge*
 > network the published port is DNAT'd onto the container's `eth0`, not onto the
 > container's loopback, so the server inside the container binds `0.0.0.0` (all
@@ -243,12 +249,38 @@ is the SSH tunnel above.
 > `127.0.0.1:7901` is unreachable and the SSH tunnel only helps if its local end
 > is opened inside HA's own network namespace. Two supported routes:
 >
-> 1. **Same Docker network (recommended, no LAN exposure).** Attach the HA
->    container and this login container to the same user-defined Docker network,
->    then enter the login container's **service/container name** as the host (port
->    `7901`). The server binds `0.0.0.0` *inside* the container, so a peer
->    container on the shared bridge reaches it directly, container-to-container,
->    without publishing anything to the LAN.
+> 1. **Same Docker network (no LAN exposure).** This needs two deliberate steps,
+>    because the shipped launchers (`login.sh` / `login.cmd`) start a throwaway
+>    one-off container that gets a *generated* name and, by default, **no network
+>    alias** you could dial:
+>
+>    a. Put both containers on one user-defined network. Create a
+>       `docker-compose.override.yml` next to `docker-compose.yml`:
+>
+>    ```yaml
+>    services:
+>      googlefindmy-login:
+>        networks: [gfmy]
+>    networks:
+>      gfmy:
+>        external: true   # the network your Home Assistant container is on
+>    ```
+>
+>    b. Start it **with** the service alias instead of using `login.sh`:
+>
+>    ```bash
+>    docker compose run --use-aliases --build --service-ports --rm googlefindmy-login
+>    ```
+>
+>    Then enter `googlefindmy-login` (the **service** name, which `--use-aliases`
+>    turns into a resolvable DNS alias, not the generated container name) as the
+>    host, port `7901`. The server binds `0.0.0.0` *inside* the container, so a
+>    peer container on the shared network reaches it directly, without publishing
+>    anything to the LAN. Without `--use-aliases` the name does not resolve and
+>    Home Assistant reports `container_unreachable`.
+>
+>    If that is more plumbing than you want, use route 2 instead: it is simpler
+>    and needs no network at all.
 > 2. **File handoff instead (Track A, no network at all).** Point the integration
 >    at `docker-login/data/secrets.json` via the options and let the secrets
 >    watcher pick it up — this needs no reachable port.

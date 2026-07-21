@@ -94,6 +94,8 @@
       "container_unreachable": "Could not reach the login container. Make sure it is running and the host and port are correct.",
       "container_timeout": "The login container did not respond in time. Please try again.",
       "container_auth_failed": "Authentication with the login container failed. Check the pairing code and try again.",
+      "container_code_used": "This pairing code has already been used or has expired. Restart the login container and use the new code.",
+      "container_code_too_short": "The pairing code is too short. Copy the complete code from the login container.",
       "container_login_failed": "The container login could not be completed. Please try again."
     },
     "abort": {
@@ -357,6 +359,8 @@
       "container_unreachable": "Could not reach the login container. Make sure it is running and the host and port are correct.",
       "container_timeout": "The login container did not respond in time. Please try again.",
       "container_auth_failed": "Authentication with the login container failed. Check the pairing code and try again.",
+      "container_code_used": "This pairing code has already been used or has expired. Restart the login container and use the new code.",
+      "container_code_too_short": "The pairing code is too short. Copy the complete code from the login container.",
       "container_login_failed": "The container login could not be completed. Please try again."
     },
     "abort": {

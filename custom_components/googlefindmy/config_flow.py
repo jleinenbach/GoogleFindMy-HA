@@ -83,6 +83,7 @@ from .const import (
     CONF_OAUTH_TOKEN,
     CONFIG_ENTRY_VERSION,
     CONTAINER_FETCH_TIMEOUT,
+    CONTAINER_NONCE_MIN_LEN,
     CONTAINER_NOVNC_PORT,
     CONTAINER_TOKEN_PORT,
     CONTRIBUTOR_MODE_HIGH_TRAFFIC,
@@ -783,26 +784,63 @@ async def _async_delete_watched_secrets(
     hass: HomeAssistant | None,
     *,
     imported_stable_key: str | None = None,
+    imported_digest: str | None = None,
 ) -> None:
-    """Delete the watched secrets.json copies of the imported account only.
+    """Delete the watched secrets.json copies the import actually consumed.
 
     Mirrors the legacy ``Auth/secrets.json`` cleanup (``Auth/token_cache.py``):
     once the bundle has been persisted into the config entry the on-disk copies
-    are transient secrets and must not linger. But because
-    :data:`SECRETS_EXTRA_WATCH_PATHS` may point at bundles of *different* Google
-    accounts, this is account-aware (reconciliation, variant C):
+    are transient secrets and must not linger. Two things make that unsafe to do
+    blindly, so the hook is both *account-aware* and *content-aware*:
 
-    - The imported winner bundle is always removed (it matches
-      ``imported_stable_key``).
-    - Further watched files are removed only when they carry the *same* account
-      as the imported one (the real ``Auth/`` + ``data/`` redundancy copies).
-    - A file of a *different* account is kept and a redacted warning is logged
-      (no plaintext account).
-    - A missing file is a no-op; an unreadable/unparseable file is kept with a
-      debug log (the account cannot be determined, so nothing is destroyed).
-    - Fail-safe: if ``imported_stable_key`` is ``None`` (the caller could not
-      determine it, which must not happen at the persist points) nothing is
-      deleted and a debug log is emitted; unidentified data is never destroyed.
+    * :data:`SECRETS_EXTRA_WATCH_PATHS` may point at bundles of **different**
+      Google accounts, and the account key of an identified bundle collapses to
+      ``email:<addr>`` whenever an email is present.
+    * The login container may write **fresher** credentials of the *same*
+      account while the discovery flow is still waiting for the user's
+      confirmation. Matching on the account key alone would then delete that
+      newer bundle even though the entry only holds the older payload.
+
+    Decision per watched file (``imported_digest`` is the content digest of the
+    imported payload, :func:`discovery.secrets_bundle_digest`):
+
+    - Account not determinable (missing, unreadable, unparseable, no email):
+      kept, debug log. Nothing unidentified is ever destroyed.
+    - Different account: kept, redacted warning (no plaintext account).
+    - Same account **and** the file's own digest equals ``imported_digest``:
+      removed. This is exactly the content that was consumed, so it is the only
+      unconditionally safe delete; it covers the ``Auth/`` +
+      ``docker-login/data/`` redundancy case where both copies are identical.
+    - Same account but a **different** digest: removed only if the file is
+      provably stale, i.e. its mtime is strictly older than the mtime of *every*
+      on-disk copy of the imported content. Anything younger or equal (including
+      the mtime tie) is kept with an info log; the watcher imports it on its next
+      scan, so the system converges.
+    - Fail-safe: with ``imported_stable_key`` or ``imported_digest`` ``None``
+      nothing is deleted (debug log). A payload without a secrets bundle has no
+      content identity and, more importantly, did not come from one of these
+      files, so deleting them would destroy unrelated data.
+
+    Why the freshness test is a per-file mtime comparison and not "is the import
+    still the scan winner": :func:`discovery.scan_secrets_bundles` orders by
+    ``(mtime, digest)`` and therefore resolves *identical* mtimes by the larger
+    SHA-256 -- a coin flip with respect to age, and coarse mtimes are exactly
+    what the tiebreak exists for (network mounts/QNAP). Trusting that winner
+    would let a lexicographically larger *old* digest mark the import as
+    "current" and take a fresher, never-imported bundle down with it. Comparing
+    each candidate against the imported bundle's own timestamp needs no
+    additional state (:class:`discovery._SecretsScanResult` carries ``mtime``)
+    and fails towards keeping: a lost credential costs the user the full Google
+    login including 2FA, an orphaned secret file does not.
+
+    Race window: the scan snapshot and the delete are separated by executor
+    hops, so each removal re-reads the file inside the *same* executor job and
+    only unlinks while the digest still matches what the decision was based on
+    (:func:`discovery.read_secrets_bundle`). That closes the window down to the
+    gap between that re-read and ``os.remove``, which POSIX offers no atomic
+    primitive for; a container writing into exactly that gap can still lose its
+    bundle, but the login container then keeps its own copy until the ack
+    arrives.
 
     The removal is idempotent (a missing file is a no-op) and never raises: a
     non-writable external path only logs a warning so the flow completes. Because
@@ -822,10 +860,12 @@ async def _async_delete_watched_secrets(
     if not watch_paths:
         return
 
-    if imported_stable_key is None:
+    if imported_stable_key is None or imported_digest is None:
         _LOGGER.debug(
-            "Skipping watched-secrets cleanup: imported account key unknown; "
-            "keeping all watched bundles to avoid destroying unidentified data",
+            "Skipping watched-secrets cleanup: imported bundle identity unknown "
+            "(account=%s, content=%s); keeping all watched bundles",
+            "known" if imported_stable_key is not None else "unknown",
+            "known" if imported_digest is not None else "unknown",
         )
         return
 
@@ -833,10 +873,35 @@ async def _async_delete_watched_secrets(
     # (discovery imports config_flow).
     from . import discovery as discovery_module
 
-    def _read_key(path_str: str) -> str | None:
-        return discovery_module.read_secrets_stable_key(Path(path_str))
+    paths = [Path(str(path)) for path in watch_paths]
 
-    def _remove(path_str: str) -> None:
+    def _scan() -> list[tuple[Path, Any]]:
+        return discovery_module.scan_secrets_bundles(paths)
+
+    def _remove_if_digest_matches(path_str: str, expected_digest: str) -> None:
+        """Re-read the file and unlink it only if it still holds the scanned content.
+
+        Check and unlink share one executor job, so the flow cannot hand the
+        event loop back between "this is the bundle I decided about" and the
+        ``os.remove``. A file that changed, became unreadable or lost its account
+        identity in the meantime is kept.
+        """
+
+        current = discovery_module.read_secrets_bundle(Path(path_str))
+        if current is None:
+            _LOGGER.debug(
+                "Keeping watched secrets file: it is gone or no longer "
+                "identifiable since the scan: %s",
+                path_str,
+            )
+            return
+        if current.digest != expected_digest:
+            _LOGGER.info(
+                "Keeping watched secrets bundle: its content changed after the "
+                "scan and before the delete: %s",
+                path_str,
+            )
+            return
         try:
             os.remove(path_str)
         except FileNotFoundError:
@@ -847,10 +912,24 @@ async def _async_delete_watched_secrets(
                 path_str,
             )
 
-    for path in watch_paths:
+    scanned = await hass.async_add_executor_job(_scan)
+    results = {path: result for path, result in scanned}
+
+    # Oldest on-disk copy of the imported content: only a same-account bundle
+    # older than *that* can be ruled out as a fresher credential. ``None`` (the
+    # imported content is no longer on disk) disables the stale-copy branch
+    # entirely, so only exact content matches are ever removed.
+    imported_mtimes = [
+        result.mtime
+        for _path, result in scanned
+        if result.stable_key == imported_stable_key and result.digest == imported_digest
+    ]
+    oldest_imported_mtime = min(imported_mtimes) if imported_mtimes else None
+
+    for path in paths:
         path_str = str(path)
-        key = await hass.async_add_executor_job(_read_key, path_str)
-        if key is None:
+        result = results.get(path)
+        if result is None:
             # Missing file: nothing to do. Unreadable/unparseable: keep it,
             # since the account cannot be positively determined.
             _LOGGER.debug(
@@ -858,13 +937,24 @@ async def _async_delete_watched_secrets(
                 path_str,
             )
             continue
-        if key == imported_stable_key:
-            await hass.async_add_executor_job(_remove, path_str)
+        if result.stable_key != imported_stable_key:
+            _LOGGER.warning(
+                "Keeping watched secrets bundle of a different account (%s); only "
+                "the imported account's copies were removed: %s",
+                discovery_module._redact_account_for_log(None, result.stable_key),
+                path_str,
+            )
             continue
-        _LOGGER.warning(
-            "Keeping watched secrets bundle of a different account (%s); only the "
-            "imported account's copies were removed: %s",
-            discovery_module._redact_account_for_log(None, key),
+        if result.digest == imported_digest or (
+            oldest_imported_mtime is not None and result.mtime < oldest_imported_mtime
+        ):
+            await hass.async_add_executor_job(
+                _remove_if_digest_matches, path_str, result.digest
+            )
+            continue
+        _LOGGER.info(
+            "Keeping watched secrets bundle: it is not older than the imported "
+            "one for the same account; the watcher imports it on its next scan: %s",
             path_str,
         )
 
@@ -877,7 +967,7 @@ def _stable_key_for_discovery_payload(
     Uses the same identity function as the watcher
     (``discovery._cloud_discovery_stable_key``) over the payload's email, its
     first OAuth candidate token and its secrets bundle, so the value matches the
-    winner bundle's ``stable_key`` used for the account-aware delete. Returns
+    watched bundles' ``stable_key`` used for the account-aware delete. Returns
     ``None`` if the payload is absent (the caller then keeps all bundles).
     """
 
@@ -890,6 +980,30 @@ def _stable_key_for_discovery_payload(
     return discovery_module._cloud_discovery_stable_key(
         payload.email, token, payload.secrets_bundle
     )
+
+
+def _digest_for_discovery_payload(
+    payload: CloudDiscoveryData | None,
+) -> str | None:
+    """Derive the content digest of a confirmed discovery payload.
+
+    Sister helper of :func:`_stable_key_for_discovery_payload`: while the stable
+    key answers "which account", this answers "which exact bundle". It reuses
+    :func:`discovery.secrets_bundle_digest`, the same function that stamps every
+    watched file, so the values are directly comparable and no second digest
+    definition exists.
+
+    Returns ``None`` when the payload is absent or carries no secrets bundle. In
+    that case nothing was imported from a watched file, so the delete hook must
+    keep every bundle (see its docstring).
+    """
+
+    if payload is None or payload.secrets_bundle is None:
+        return None
+
+    from . import discovery as discovery_module
+
+    return discovery_module.secrets_bundle_digest(payload.secrets_bundle)
 
 
 def _mask_email_for_logs(email: str | None) -> str:
@@ -1489,9 +1603,21 @@ def _persist_secrets_bundle(
 def _map_container_error(exc: ContainerLoginError) -> str:
     """Map a typed container-login exception to an HA error key.
 
-    The referenced keys (``container_unreachable`` etc.) are added to
-    ``strings.json``/translations by a later step; this function only produces
-    the keys, it never logs the pairing nonce or any token.
+    The referenced keys (``container_unreachable`` etc.) live in
+    ``strings.json``/translations; this function only produces the keys, it
+    never logs the pairing nonce or any token.
+
+    Auth failures are split by cause because the remedies differ. The token
+    server is one-shot: after the bundle has been handed out, every further
+    ``GET /secrets`` answers ``410``. A flow that fails *after* a successful
+    fetch (a transient token validation error, say) re-shows its form with the
+    same code, and the retry then hits that ``410``. Telling the user to "check
+    the pairing code" would be wrong -- the code was right, it is simply spent --
+    so this case maps to ``container_code_used``, which asks for a restart of the
+    login container. The distinction is carried by
+    :class:`~.container_login.ContainerAuthError`'s ``code_used`` flag; it is
+    read defensively via ``getattr`` so an older client module (without the
+    attribute) degrades to the generic auth message instead of raising.
     """
 
     if isinstance(exc, ContainerUnreachableError):
@@ -1499,6 +1625,8 @@ def _map_container_error(exc: ContainerLoginError) -> str:
     if isinstance(exc, ContainerTimeoutError):
         return "container_timeout"
     if isinstance(exc, ContainerAuthError):
+        if getattr(exc, "code_used", False):
+            return "container_code_used"
         return "container_auth_failed"
     return "container_login_failed"
 
@@ -2207,7 +2335,24 @@ class _ContainerLoginMixin:
         any failure it writes an error key into ``errors`` and returns ``None``;
         the two-phase-delete ``ack_consumed`` is left to the caller so it only
         runs after Home Assistant has actually persisted the bundle.
+
+        The pairing nonce is length-checked here rather than in the individual
+        steps: this method is the single chokepoint in front of the network, so
+        the guarantee :data:`CONTAINER_NONCE_MIN_LEN` documents ("shorter values
+        are rejected before any network round-trip") holds for the setup, the
+        reauth and the options path alike, without three copies of the same
+        check. A truncated code can only be a typo, and refusing it locally
+        keeps the container's lockout counter untouched.
         """
+
+        if len(pairing_code) < CONTAINER_NONCE_MIN_LEN:
+            _LOGGER.debug(
+                "Rejecting container pairing code before fetch: %d chars < %d",
+                len(pairing_code),
+                CONTAINER_NONCE_MIN_LEN,
+            )
+            errors["pairing_code"] = "container_code_too_short"
+            return None
 
         session = async_get_clientsession(self.hass)
         try:
@@ -2898,19 +3043,21 @@ class ConfigFlow(
                 # Delete-after-import: only once the entry is actually created
                 # (the user confirmed). Aborted device selection leaves the
                 # watched bundles in place so the flow can be retried. Only the
-                # imported account's copies are removed (see the hook docstring),
-                # so a co-located bundle of a different account survives.
+                # copies the import actually consumed are removed (see the hook
+                # docstring): a co-located bundle of a different account and a
+                # same-account bundle that got fresher while the user was
+                # confirming both survive.
                 if (
                     isinstance(result, Mapping)
                     and result.get("type")
                     == data_entry_flow.FlowResultType.CREATE_ENTRY
                 ):
-                    imported_stable_key = _stable_key_for_discovery_payload(
-                        pending_payload
-                    )
                     await _async_delete_watched_secrets(
                         getattr(self, "hass", None),
-                        imported_stable_key=imported_stable_key,
+                        imported_stable_key=_stable_key_for_discovery_payload(
+                            pending_payload
+                        ),
+                        imported_digest=_digest_for_discovery_payload(pending_payload),
                     )
                 return result
 
@@ -3101,12 +3248,13 @@ class ConfigFlow(
                 )
 
             # Delete-after-import (update case): the entry update succeeded, so
-            # remove the watched secrets copies of the imported account only.
-            # See _async_delete_watched_secrets; a co-located bundle of a
-            # different account is kept.
-            imported_stable_key = _stable_key_for_discovery_payload(normalized)
+            # remove the watched copies this import actually consumed. See
+            # _async_delete_watched_secrets; a co-located bundle of a different
+            # account and a newer same-account bundle are kept.
             await _async_delete_watched_secrets(
-                hass, imported_stable_key=imported_stable_key
+                hass,
+                imported_stable_key=_stable_key_for_discovery_payload(normalized),
+                imported_digest=_digest_for_discovery_payload(normalized),
             )
 
             def _normalize_tracking_lists() -> None:

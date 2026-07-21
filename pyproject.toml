@@ -94,7 +94,6 @@ target-version = "py313"
 extend-exclude = [
     "custom_components/googlefindmy/ProtoDecoders",
     "custom_components/googlefindmy/Auth/firebase_messaging/proto",
-    "custom_components/googlefindmy/docker-login",
 ]
 
 [tool.ruff.lint]
@@ -312,7 +311,7 @@ warn_return_any = true
 files = [
     "custom_components/googlefindmy",
 ]
-exclude = "(^custom_components/googlefindmy/ProtoDecoders/|^custom_components/googlefindmy/Auth/firebase_messaging/proto/|^custom_components/googlefindmy/docker-login/)"
+exclude = "(^custom_components/googlefindmy/ProtoDecoders/|^custom_components/googlefindmy/Auth/firebase_messaging/proto/)"
 
 [[tool.mypy.overrides]]
 module = ["tests.*"]

@@ -155,9 +155,14 @@ if [ "${_rc}" -eq 0 ] && [ "${GFMY_ONECLICK:-}" = "1" ] && [ -f "${_secrets_path
   echo "[entrypoint] (From another machine, tunnel: ssh -L 7901:127.0.0.1:7901 <host>)"
   echo "=================================================================="
   echo ""
-  # Foreground: this blocks until Home Assistant acks (file deleted) or the TTL
-  # elapses (file deleted as a fallback), then returns and we fall through to
-  # the final exit -> EXIT trap cleanup (ownership handoff + supervisor stop).
+  # Foreground: this blocks until one of three things happens, then returns and
+  # we fall through to the final exit -> EXIT trap cleanup (ownership handoff +
+  # supervisor stop):
+  #   - Home Assistant acks the handoff  -> secrets.json is deleted (consumed),
+  #   - the TTL elapses without an ack   -> secrets.json is deleted (fallback),
+  #   - the pairing code is locked out   -> the endpoint closes but secrets.json
+  #     is KEPT on purpose, so the file handoff (Track A) and the clear-text
+  #     fallback (Track C) still work and no login has to be repeated.
   python3 /app/gfmy/docker-login/token_server.py || true
 
 elif [ "${_rc}" -eq 0 ] && [ "${GFMY_CLEARTEXT:-}" = "1" ] && [ -f "${_secrets_path}" ]; then

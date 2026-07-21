@@ -8,7 +8,7 @@ import hashlib
 import json
 import logging
 import uuid
-from collections.abc import Callable, Coroutine, Mapping
+from collections.abc import Callable, Coroutine, Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -55,6 +55,7 @@ from .const import (
 )
 from .email_utils import normalize_email
 from .ha_typing import CloudDiscoveryRuntime, callback
+from .shared_helpers import normalize_secrets_bundle
 
 cf = cast(Any, config_flow_module)
 
@@ -525,13 +526,21 @@ async def _trigger_cloud_discovery(
 
 @dataclass(slots=True)
 class _SecretsScanResult:
-    """Structured result produced by reading Auth/secrets.json."""
+    """Structured result produced by reading Auth/secrets.json.
+
+    ``mtime`` is the modification time of the file the payload was read from.
+    It travels with the content identity (``digest``) on purpose: the
+    delete-after-import hook has to decide whether a *differing* bundle can be
+    older than the imported one, and reading a second, independently taken
+    ``stat()`` there would compare two unrelated snapshots.
+    """
 
     email: str
     token: str | None
     bundle: dict[str, Any]
     digest: str
     stable_key: str
+    mtime: float
 
 
 def _default_secrets_path() -> Path:
@@ -580,6 +589,31 @@ def _extract_bundle_token(bundle: Mapping[str, Any]) -> str | None:
     return None
 
 
+def secrets_bundle_digest(bundle: Mapping[str, Any]) -> str:
+    """Return the canonical content digest of a secrets bundle.
+
+    This is the single definition of "same bundle content" in the integration.
+    It is used for the watcher's change signature, for the newest-wins tiebreak
+    on identical modification times, and by the delete-after-import hook to tell
+    the imported bundle apart from a *newer* one of the same account.
+
+    The bundle is first run through :func:`normalize_secrets_bundle` and then
+    serialized canonically (sorted keys, no separators whitespace) before
+    hashing with SHA-256. Normalizing first is what makes the value
+    identity-safe across the import boundary: the config flow stores the
+    *normalized* bundle in its discovery payload, so hashing the raw file
+    content instead would make the on-disk file and the payload it produced hash
+    differently whenever normalization changed anything (a stray whitespace, a
+    promoted scoped ``shared_key``). ``normalize_secrets_bundle`` is idempotent,
+    so normalizing an already normalized payload is a no-op.
+    """
+
+    normalized = normalize_secrets_bundle(dict(bundle))
+    return hashlib.sha256(
+        json.dumps(normalized, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
 def read_secrets_bundle(path: Path) -> _SecretsScanResult | None:
     """Read, parse and identify a single secrets.json bundle.
 
@@ -587,10 +621,20 @@ def read_secrets_bundle(path: Path) -> _SecretsScanResult | None:
     file (or one without a Google account email) yields ``None`` and only debug
     logs. Both the watcher and the delete-after-import hook share this single
     read path so the JSON parsing and stable-key derivation live in one place.
+
+    The ``stat()`` for :attr:`_SecretsScanResult.mtime` is taken *after* the
+    read, deliberately: if the file is rewritten in between, the returned mtime
+    belongs to the newer content while ``digest`` still describes the older one.
+    Consumers that use the mtime as a "can this be fresher than my import?"
+    guard therefore err towards *keeping* the file, never towards deleting a
+    bundle they have not seen.
     """
 
     try:
         raw_text = path.read_text(encoding="utf-8")
+        # Vanishing between read and stat is a FileNotFoundError like any other:
+        # without a timestamp the bundle has no place in the newest-wins order.
+        mtime = path.stat().st_mtime
     except FileNotFoundError:
         return None
     except OSError as err:
@@ -627,29 +671,53 @@ def read_secrets_bundle(path: Path) -> _SecretsScanResult | None:
         return None
 
     token = _extract_bundle_token(parsed)
-    digest = hashlib.sha256(
-        json.dumps(parsed, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    ).hexdigest()
     stable_key = _cloud_discovery_stable_key(email, token, parsed)
     return _SecretsScanResult(
         email=email,
         token=token,
         bundle=dict(parsed),
-        digest=digest,
+        digest=secrets_bundle_digest(parsed),
         stable_key=stable_key,
+        mtime=mtime,
     )
 
 
-def read_secrets_stable_key(path: Path) -> str | None:
-    """Return the account stable-key of a secrets bundle, or ``None``.
+def scan_secrets_bundles(
+    paths: Iterable[Path],
+) -> list[tuple[Path, _SecretsScanResult]]:
+    """Read every identifiable bundle among ``paths``, newest first.
 
-    ``None`` means the account could not be positively determined (the file is
-    missing, unreadable, unparseable or lacks an account email). Callers must
-    treat ``None`` conservatively: it never proves two files share an account.
+    Single definition of the newest-wins ordering, shared by the watcher (which
+    only needs the winner) and the delete-after-import hook (which needs the
+    winner *and* every candidate). Pairs are returned sorted by modification
+    time descending, breaking ties on identical mtimes with the larger content
+    digest (mtime resolution on network mounts/QNAP can be coarse, so the digest
+    tiebreak keeps the selection stable). ``result[0]`` is therefore the winner.
+    Note what the tiebreak does *not* say: on identical mtimes the digest order
+    is arbitrary with respect to age, so "is the scan winner" must never be used
+    as a proof of "is the freshest content" (see
+    ``config_flow._async_delete_watched_secrets``, which compares mtimes per
+    candidate instead).
+
+    A path that is missing, unreadable, unparseable or lacking an account email
+    is skipped, so an absent path is a strict no-op and the caller can only
+    conclude "account not determinable" for the paths that are missing from the
+    result. The ordering key comes from :func:`read_secrets_bundle` (which stats
+    the file it read), so the mtime and the digest of an entry always describe
+    the same snapshot. Blocking file IO: call it from an executor job.
     """
 
-    result = read_secrets_bundle(path)
-    return result.stable_key if result is not None else None
+    candidates: list[tuple[Path, _SecretsScanResult]] = []
+    for path in paths:
+        result = read_secrets_bundle(path)
+        if result is None:
+            continue
+        candidates.append((path, result))
+
+    candidates.sort(
+        key=lambda candidate: (candidate[1].mtime, candidate[1].digest), reverse=True
+    )
+    return candidates
 
 
 class SecretsJSONWatcher:
@@ -884,46 +952,15 @@ class SecretsJSONWatcher:
     def _read_bundle(self) -> _SecretsScanResult | None:
         """Return the newest valid bundle across all observed paths.
 
-        Runs in the executor. Each existing, parseable path yields a candidate;
-        the winner is the one with the newest modification time, breaking mtime
-        ties deterministically by the SHA-256 digest (mtime resolution on network
-        mounts/QNAP can be coarse, so the digest tiebreak keeps selection stable).
-        Missing paths are silently skipped, so empty/absent extra paths are a
+        Runs in the executor. Delegates to the shared
+        :func:`scan_secrets_bundles` ordering so the watcher and the
+        delete-after-import hook agree on which bundle is the current winner;
+        missing paths are silently skipped, so empty/absent extra paths are a
         no-op and a single-path watcher behaves exactly as before.
         """
 
-        best_result: _SecretsScanResult | None = None
-        best_mtime: float = float("-inf")
-        for path in self._paths:
-            try:
-                mtime = path.stat().st_mtime
-            except FileNotFoundError:
-                continue
-            except OSError as err:
-                _LOGGER.debug(
-                    "Unable to stat secrets bundle",
-                    extra={"bundle_path": str(path)},
-                    exc_info=err,
-                )
-                continue
-
-            result = self._read_single_bundle(path)
-            if result is None:
-                continue
-
-            if best_result is None or mtime > best_mtime:
-                best_result, best_mtime = result, mtime
-            elif mtime == best_mtime and result.digest > best_result.digest:
-                # Deterministic tiebreak on identical mtimes (coarse-resolution
-                # filesystems / clock skew).
-                best_result = result
-
-        return best_result
-
-    def _read_single_bundle(self, path: Path) -> _SecretsScanResult | None:
-        # Delegate to the shared module-level reader so the watcher and the
-        # delete-after-import hook use one identical read/parse/identify path.
-        return read_secrets_bundle(path)
+        scan = scan_secrets_bundles(self._paths)
+        return scan[0][1] if scan else None
 
 
 def _collect_extra_watch_paths(hass: HomeAssistant) -> list[Path]:
@@ -1049,10 +1086,14 @@ class DiscoveryManager:
         """Return every secrets.json path observed across all watchers.
 
         Consumers (for example the discovery flow's delete-after-import hook) use
-        this to reconcile observed bundles once one has been imported: the hook
-        removes the on-disk copies of the *imported* account and keeps any bundle
-        of a different account, so no stale secret of the imported account is left
-        behind while foreign-account bundles survive.
+        this to reconcile observed bundles once one has been imported. The hook
+        is account- *and* content-aware: it removes the copies that carry the
+        imported payload (same account key and same
+        :func:`secrets_bundle_digest`) plus same-account copies that are provably
+        older, while any bundle of a different account, any bundle that could be
+        fresher than the import, and anything unidentifiable stays on disk. So no
+        stale secret of the imported account is left behind, and a bundle the
+        login container wrote during the confirmation is not destroyed.
         """
 
         collected: list[Path] = []
@@ -1081,7 +1122,8 @@ __all__ = [
     "DiscoveryManager",
     "async_initialize_discovery_runtime",
     "read_secrets_bundle",
-    "read_secrets_stable_key",
+    "scan_secrets_bundles",
+    "secrets_bundle_digest",
     "_cloud_discovery_runtime",
     "_trigger_cloud_discovery",
     "_redact_account_for_log",
