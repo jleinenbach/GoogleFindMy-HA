@@ -185,9 +185,7 @@ async def test_delete_keeps_foreign_account_file_and_warns(
     assert not winner.exists()  # imported account removed
     assert foreign.exists()  # foreign account preserved
     # A redacted warning is logged; the foreign account is not in plaintext.
-    assert any(
-        "different account" in record.getMessage() for record in caplog.records
-    )
+    assert any("different account" in record.getMessage() for record in caplog.records)
     assert "foreign@example.com" not in caplog.text
 
 

@@ -2375,6 +2375,7 @@ class GoogleFindMyDomainData(TypedDict, total=False):
     ecdsa_acceleration_info: dict[str, str | None]
     entries: dict[str, RuntimeData]
     eid_resolver: GoogleFindMyEIDResolver
+    discovery_manager: DiscoveryManager
     fcm_lock: asyncio.Lock
     fcm_receiver: FcmReceiverHAType
     fcm_receivers: dict[str, FcmReceiverHAType]

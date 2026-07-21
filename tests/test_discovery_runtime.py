@@ -183,9 +183,7 @@ class _OptionsHass:
         self.data: dict[str, Any] = {}
         self._entry = SimpleNamespace(options={})
         self.config_entries = SimpleNamespace(
-            async_entries=lambda domain: (
-                [self._entry] if domain == DOMAIN else []
-            )
+            async_entries=lambda domain: [self._entry] if domain == DOMAIN else []
         )
         self.config = SimpleNamespace(
             language="en", components=set(), top_level_components=set()

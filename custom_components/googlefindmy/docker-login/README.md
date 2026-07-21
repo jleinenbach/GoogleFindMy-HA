@@ -237,6 +237,25 @@ ssh -L 7901:127.0.0.1:7901 <docker-host>
 There is deliberately **no LAN opt-in** for this port — the split-machine path
 is the SSH tunnel above.
 
+> **If Home Assistant itself runs in a bridged Docker container** (the *HA
+> Container* install method), `127.0.0.1` inside Home Assistant points at the
+> **HA container**, not at the Docker host — so the host-published
+> `127.0.0.1:7901` is unreachable and the SSH tunnel only helps if its local end
+> is opened inside HA's own network namespace. Two supported routes:
+>
+> 1. **Same Docker network (recommended, no LAN exposure).** Attach the HA
+>    container and this login container to the same user-defined Docker network,
+>    then enter the login container's **service/container name** as the host (port
+>    `7901`). The server binds `0.0.0.0` *inside* the container, so a peer
+>    container on the shared bridge reaches it directly, container-to-container,
+>    without publishing anything to the LAN.
+> 2. **File handoff instead (Track A, no network at all).** Point the integration
+>    at `docker-login/data/secrets.json` via the options and let the secrets
+>    watcher pick it up — this needs no reachable port.
+>
+> For **HA OS, HA Core, or host-networked HA on the same machine**, the plain
+> `127.0.0.1:7901` above is correct.
+
 ### noVNC clear-text copy fallback (`GFMY_CLEARTEXT=1`)
 
 If you cannot share a filesystem *and* cannot open a port (or you simply prefer

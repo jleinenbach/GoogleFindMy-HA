@@ -100,17 +100,27 @@ def _check_nonce(state: _State, request: web.Request) -> bool:
     return bool(presented) and hmac.compare_digest(presented, state.nonce)
 
 
-def _delete_secret_file(state: _State) -> None:
-    """Best-effort delete of the on-disk secret; idempotent."""
+def _delete_secret_file(state: _State) -> bool:
+    """Delete the on-disk secret; idempotent.
+
+    Returns ``True`` when the file is gone (removed now or already absent) and
+    ``False`` when removal genuinely failed (e.g. a transient/permission
+    ``OSError`` on the mounted ``./data`` directory). On failure ``deleted``
+    stays ``False`` so the caller can surface an error and the TTL fallback (or
+    a client retry) re-attempts the removal instead of leaving a credential on
+    disk while the logs claim success.
+    """
     if state.deleted:
-        return
+        return True
     try:
         os.remove(state.secrets_path)
     except FileNotFoundError:
-        pass
+        pass  # Already gone: treat as deleted.
     except OSError as err:
         _LOGGER.warning("Failed to remove secrets file: %s", err)
+        return False
     state.deleted = True
+    return True
 
 
 async def _handle_secrets(request: web.Request) -> web.Response:
@@ -184,7 +194,11 @@ async def _handle_ack(request: web.Request) -> web.Response:
         state.shutdown_event.set()
         return web.json_response({"status": "already_deleted"}, status=410)
 
-    _delete_secret_file(state)
+    if not _delete_secret_file(state):
+        # Removal genuinely failed. Do NOT claim success or shut down: keep the
+        # endpoint alive so the client can retry the ack and the TTL fallback
+        # gets another attempt, rather than stranding the credential on disk.
+        return web.json_response({"error": "delete_failed"}, status=500)
     _LOGGER.info("Consumption acked; secret deleted, endpoint shutting down.")
     state.shutdown_event.set()
     return web.json_response({"status": "deleted"}, status=200)
@@ -221,7 +235,11 @@ async def _run(nonce: str, secrets_path: Path) -> None:
         except asyncio.TimeoutError:
             _LOGGER.warning("TTL elapsed without ack; deleting secret (fallback).")
         # TTL-fallback delete: ensure no secret lingers even without an ack.
-        _delete_secret_file(state)
+        if not _delete_secret_file(state):
+            _LOGGER.error(
+                "TTL-fallback delete failed; secret may still linger at %s.",
+                state.secrets_path,
+            )
     finally:
         await runner.cleanup()
 

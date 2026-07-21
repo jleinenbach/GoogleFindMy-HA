@@ -461,5 +461,66 @@ def test_delete_secret_file_tolerates_missing_file(tmp_path: Path) -> None:
 
     state = _make_state(tmp_path)
     state.secrets_path.unlink()  # remove out-of-band
-    token_server._delete_secret_file(state)  # FileNotFoundError swallowed
+    assert (
+        token_server._delete_secret_file(state) is True
+    )  # FileNotFoundError swallowed
     assert state.deleted is True
+
+
+def test_delete_secret_file_reports_failure_on_oserror(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A genuine OSError leaves ``deleted`` False and returns False (retryable).
+
+    Regression guard: a permission/transient error on the mounted ``./data``
+    directory must not be reported as a successful deletion, otherwise the file
+    lingers on disk while the logs and the ack both claim it was removed.
+    """
+
+    state = _make_state(tmp_path)
+
+    def _boom(_path: str) -> None:
+        raise OSError("permission denied")
+
+    monkeypatch.setattr(token_server.os, "remove", _boom)
+
+    assert token_server._delete_secret_file(state) is False
+    assert state.deleted is False
+    assert state.secrets_path.is_file()  # still on disk, cleanup can retry
+
+
+@pytest.mark.asyncio
+async def test_ack_reports_500_and_stays_up_when_delete_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed removal makes ``/ack`` return 500 without shutting down.
+
+    The endpoint must stay alive so the client can retry the ack and the TTL
+    fallback gets another attempt, instead of stranding the credential while
+    reporting success.
+    """
+
+    state = _make_state(tmp_path)
+
+    def _boom(_path: str) -> None:
+        raise OSError("permission denied")
+
+    monkeypatch.setattr(token_server.os, "remove", _boom)
+
+    client = await _client(state)
+    try:
+        first = await client.get("/secrets", headers=_auth(_VALID_NONCE))
+        delete_token = (await first.json())["delete_token"]
+
+        ack = await client.post(
+            "/ack",
+            headers=_auth(_VALID_NONCE),
+            json={"delete_token": delete_token},
+        )
+        assert ack.status == 500
+        assert (await ack.json())["error"] == "delete_failed"
+        assert state.deleted is False
+        assert state.secrets_path.is_file()  # not stranded silently
+        assert not state.shutdown_event.is_set()  # endpoint stays up for retry
+    finally:
+        await client.close()
