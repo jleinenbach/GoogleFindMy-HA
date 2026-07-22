@@ -501,3 +501,58 @@ async def test_async_remove_entry_survives_failing_watch_path_refresh(
     assert google_home_filter.shutdown_called is True
     assert entry.entry_id not in hass.data[DOMAIN]["entries"]
     assert "device-1" not in hass.data[DOMAIN]["device_owner_index"]
+
+
+@pytest.mark.asyncio
+async def test_async_remove_entry_drains_only_this_entrys_cleanup_tickets() -> None:
+    """The removal seam passes the entry id, not the account, to the drain.
+
+    ``async_remove_entry`` is the only production caller of
+    ``async_discard_pending_container_cleanup_for_entry``. Without this test the
+    seam is unverified: a later refactor to ``unique_id`` would make
+    ``ticket.entry_id == <unique_id>`` never match, the tickets would survive the
+    removal holding a pairing nonce and a delete token, and no test would go red.
+    The foreign ticket pins the other direction -- the drain must not reach
+    across entries.
+    """
+
+    from custom_components.googlefindmy import config_flow
+    from custom_components.googlefindmy.config_flow import (
+        PENDING_CONTAINER_CLEANUP_KEY,
+    )
+    from custom_components.googlefindmy.const import CONTAINER_TOKEN_PORT
+
+    def _stage(hass: Any, *, flow_id: str, entry: Any) -> None:
+        config_flow._async_stage_container_cleanup_for(
+            hass,
+            flow_id=flow_id,
+            unique_id=getattr(entry, "unique_id", None),
+            job=config_flow.PendingContainerCleanup(
+                ack=config_flow._ContainerAckTarget(
+                    host="127.0.0.1",
+                    port=CONTAINER_TOKEN_PORT,
+                    pairing_code="pair-code",
+                    delete_token="delete-token",
+                )
+            ),
+            entry=entry,
+        )
+
+    entry = make_config_entry(
+        entry_id="entry-remove", unique_id="user@example.com", title="Find My Entry"
+    )
+    entry.options[OPT_DELETE_CACHES_ON_REMOVE] = False
+    _coordinator, _token_cache, _filter, runtime_data = _setup_runtime(entry)
+    hass = _HassStub(entry, runtime_data)
+
+    # Two tickets for the entry being removed, one for a different entry.
+    foreign = make_config_entry(entry_id="entry-other", unique_id="other@example.com")
+    _stage(hass, flow_id="flow-a", entry=entry)
+    _stage(hass, flow_id="flow-b", entry=entry)
+    _stage(hass, flow_id="flow-foreign", entry=foreign)
+    assert len(hass.data[DOMAIN][PENDING_CONTAINER_CLEANUP_KEY]) == 3
+
+    await integration.async_remove_entry(hass, entry)
+
+    survivors = hass.data[DOMAIN][PENDING_CONTAINER_CLEANUP_KEY]
+    assert [ticket.entry_id for ticket in survivors] == ["entry-other"]

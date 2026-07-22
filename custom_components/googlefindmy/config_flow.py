@@ -2268,6 +2268,95 @@ def _async_claim_container_cleanup(
 
 
 @_typed_callback
+def _async_drop_cleanup_tickets(
+    hass: HomeAssistant | None,
+    predicate: Callable[[_StagedCleanupTicket], bool],
+) -> int:
+    """Drop every staged ticket matching ``predicate`` *without* executing it.
+
+    The single place that mutates the staging list for a *predicate-addressed*
+    discard. The two such addressings -- by flow (an ended flow takes its own
+    uncorrelated ticket with it) and by entry (a removed entry takes all of its
+    tickets) -- differ only in their predicate, so they share this body and
+    cannot drift apart in their bookkeeping. The third discard,
+    :func:`async_discard_pending_container_cleanup`, deliberately goes through
+    the claim helper instead, because it must drop exactly the one ticket the
+    failed setup would have claimed.
+
+    Removal is decided by the ticket count, not by the job count: a matching
+    ticket that happens to carry no jobs must still be dropped.
+
+    Args:
+        hass: The Home Assistant instance holding the staging bucket.
+        predicate: Selects the tickets to drop. Non-ticket objects in the list
+            are never passed to it and are always kept.
+
+    Returns:
+        The number of discarded jobs, for logging and tests.
+    """
+
+    found = _async_staged_cleanup_tickets(hass)
+    if found is None:
+        return 0
+    bucket, tickets = found
+
+    discarded = 0
+    kept: list[Any] = []
+    for ticket in tickets:
+        if isinstance(ticket, _StagedCleanupTicket) and predicate(ticket):
+            discarded += len(ticket.jobs)
+            continue
+        kept.append(ticket)
+    if len(kept) != len(tickets):
+        tickets[:] = kept
+    if not tickets:
+        bucket.pop(PENDING_CONTAINER_CLEANUP_KEY, None)
+    return discarded
+
+
+@_typed_callback
+def async_discard_pending_container_cleanup_for_entry(
+    hass: HomeAssistant | None, *, entry_id: str | None
+) -> int:
+    """Drop **every** staged ticket that names ``entry_id``, on entry removal.
+
+    Addressed by entry id *only*, deliberately without the account and
+    account-less fallbacks of :func:`_async_claim_container_cleanup_ticket`.
+    Those fallbacks exist for the create path, where a flow cannot yet know its
+    entry id; applying them here would let a removed entry discard the ticket of
+    a *different*, still running same-account flow, leaving that flow's watched
+    bundle undeleted and its container un-acked.
+
+    An entry being removed can only hold tickets that name it: an uncorrelated
+    create-path ticket is either already claimed by the first
+    ``async_setup_entry`` or dropped with its flow by
+    :func:`_async_discard_cleanup_ticket_for_flow`. Should one nevertheless
+    survive, keeping it is the fail-safe direction -- the credential files stay
+    on disk and the un-acked container falls back to its own TTL.
+
+    Every matching ticket is dropped in one pass. There is no upper bound: the
+    staging list is finite, and a cutoff would strand exactly the tickets this
+    call exists to clear, leaving pairing nonces and delete tokens in
+    ``hass.data`` for the rest of the process lifetime.
+
+    Args:
+        hass: The Home Assistant instance holding the staging bucket.
+        entry_id: The id of the entry being removed. A falsy value drops
+            nothing. No production caller can pass one today (``async_remove_entry``
+            dereferences ``entry.entry_id`` earlier), so this is defence in depth
+            rather than a reachable path: an unguarded ``ticket.entry_id == None``
+            would match precisely the uncorrelated tickets of other flows.
+
+    Returns:
+        The number of discarded jobs, for logging and tests.
+    """
+
+    if not entry_id:
+        return 0
+    return _async_drop_cleanup_tickets(hass, lambda ticket: ticket.entry_id == entry_id)
+
+
+@_typed_callback
 def _async_discard_cleanup_ticket_for_flow(
     hass: HomeAssistant | None, flow_id: str
 ) -> int:
@@ -2293,29 +2382,10 @@ def _async_discard_cleanup_ticket_for_flow(
     Returns the number of discarded jobs, for logging and tests.
     """
 
-    found = _async_staged_cleanup_tickets(hass)
-    if found is None:
-        return 0
-    bucket, tickets = found
-
-    discarded = 0
-    kept: list[Any] = []
-    for ticket in tickets:
-        if (
-            isinstance(ticket, _StagedCleanupTicket)
-            and ticket.flow_id == flow_id
-            and ticket.entry_id is None
-        ):
-            discarded += len(ticket.jobs)
-            continue
-        kept.append(ticket)
-    # Removal is decided by the ticket count, not by the job count: a matching
-    # ticket that happens to carry no jobs must still be dropped.
-    if len(kept) != len(tickets):
-        tickets[:] = kept
-    if not tickets:
-        bucket.pop(PENDING_CONTAINER_CLEANUP_KEY, None)
-    return discarded
+    return _async_drop_cleanup_tickets(
+        hass,
+        lambda ticket: ticket.flow_id == flow_id and ticket.entry_id is None,
+    )
 
 
 def _parse_stored_modified_at(record: CollMapping[str, Any]) -> datetime | None:

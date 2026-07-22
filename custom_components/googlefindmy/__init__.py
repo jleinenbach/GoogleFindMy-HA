@@ -600,13 +600,6 @@ CONFIG_SCHEMA: vol.Schema = getattr(
 
 _LOGGER = logging.getLogger(__name__)
 
-# Upper bound for draining staged container-login cleanup tickets of a single
-# entry on removal. One discard call claims at most one ticket, and an entry can
-# legitimately hold more than one (a create flow plus later update flows). The
-# bound only exists so a corrupted staging area cannot spin here; it is not a
-# semantic limit.
-_MAX_CLEANUP_TICKETS_PER_ENTRY = 16
-
 
 async def _async_self_heal_duplicate_entities(
     hass: HomeAssistant,
@@ -7152,9 +7145,20 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
         try:
             from .config_flow import (  # noqa: PLC0415 - lazy, avoids an import cycle
                 async_discard_pending_container_cleanup,
+                async_discard_pending_container_cleanup_for_entry,
             )
 
-            discarded = async_discard_pending_container_cleanup(
+            # Two addressings, in this order and both needed. The entry-id drain
+            # first, because this entry may hold SEVERAL update-path tickets and
+            # the claim-based discard below takes at most one; running it first
+            # would consume one of those and leave the create-path ticket behind.
+            # The claim-based discard second, for exactly that uncorrelated
+            # create-path ticket, which carries no entry id and is therefore
+            # invisible to the drain.
+            discarded = async_discard_pending_container_cleanup_for_entry(
+                hass, entry_id=getattr(entry, "entry_id", None)
+            )
+            discarded += async_discard_pending_container_cleanup(
                 hass,
                 unique_id=getattr(entry, "unique_id", None),
                 entry_id=getattr(entry, "entry_id", None),
@@ -8755,21 +8759,17 @@ async def async_remove_entry(hass: HomeAssistant, entry: MyConfigEntry) -> None:
     # just removed.
     try:
         from .config_flow import (  # noqa: PLC0415 - lazy, avoids an import cycle
-            async_discard_pending_container_cleanup,
+            async_discard_pending_container_cleanup_for_entry,
         )
 
-        # One call claims at most one ticket, so drain under a hard bound
-        # rather than assuming a single ticket per entry.
-        discarded = 0
-        for _ in range(_MAX_CLEANUP_TICKETS_PER_ENTRY):
-            dropped = async_discard_pending_container_cleanup(
-                hass,
-                unique_id=getattr(entry, "unique_id", None),
-                entry_id=getattr(entry, "entry_id", None),
-            )
-            if not dropped:
-                break
-            discarded += dropped
+        # Addressed by entry id only, and in a single pass over the whole
+        # staging list: the account fallbacks of the claim helper belong to the
+        # create path and would let this removal discard a concurrent
+        # same-account flow's ticket, and any upper bound would strand exactly
+        # the tickets this call exists to clear.
+        discarded = async_discard_pending_container_cleanup_for_entry(
+            hass, entry_id=entry.entry_id
+        )
         if discarded:
             _LOGGER.debug(
                 "[%s] Discarded %s staged container-login cleanup job(s) on entry removal; credential files are kept on disk",

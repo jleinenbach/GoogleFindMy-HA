@@ -111,6 +111,11 @@ Covered (real ``container_login`` client, fake session, F-A2/F-N3):
 * SSRF best-effort guard: a literal IPv4 link-local/metadata host
   (``169.254.169.254``) is rejected on both paths *before* any request is
   issued (the fake session records zero calls).
+* Entry-removal drain (``async_discard_pending_container_cleanup_for_entry``,
+  helper ``_stage_entry_ticket``): addressed by entry id only, so a concurrent
+  same-account flow's uncorrelated ticket survives, and unbounded, so every
+  ticket of the removed entry goes in one pass. Also pins the job-count return
+  contract, the ``None`` guard and the empty-staging-area path.
 
 Conventions (tests/AGENTS.md): ``make_config_entry`` for config-entry doubles,
 ``pytestmark = pytest.mark.asyncio``, no ``asyncio.run``, no ``pathspec``
@@ -3442,3 +3447,150 @@ async def test_guard_rejects_url_syntax_smuggled_into_the_host_field() -> None:
         "[::1]",
     ):
         container_login._maybe_block_link_local(ok)
+
+
+def _stage_entry_ticket(hass: Any, *, flow_id: str, entry: Any) -> None:
+    """Stage one ack job on an entry-correlated ticket, as an update path does."""
+
+    config_flow._async_stage_container_cleanup_for(
+        hass,
+        flow_id=flow_id,
+        unique_id=getattr(entry, "unique_id", None),
+        job=config_flow.PendingContainerCleanup(
+            ack=config_flow._ContainerAckTarget(
+                host="127.0.0.1",
+                port=CONTAINER_TOKEN_PORT,
+                pairing_code=_PAIRING_CODE,
+                delete_token=_DELETE_TOKEN,
+            )
+        ),
+        entry=entry,
+    )
+
+
+async def test_entry_removal_spares_a_concurrent_flows_ticket(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Removing an entry must not discard another running flow's ticket.
+
+    The claim helper falls back from the entry id to the account and then to any
+    account-less ticket, because a create flow cannot know its entry id yet.
+    Reusing that selection for a removal would let entry A discard the ticket of
+    a concurrent same-account flow B, leaving B's watched bundle undeleted and
+    its container un-acked. Removal is therefore addressed by entry id only.
+    """
+
+    recorder = _Recorder()
+    _install_container_client(monkeypatch, recorder)
+    hass = _build_hass([])
+
+    doomed = make_config_entry(entry_id="entry-doomed", unique_id=_EMAIL)
+    _stage_entry_ticket(hass, flow_id="flow-update", entry=doomed)
+    # A second ticket for the same entry, carrying TWO jobs. It pins the return
+    # contract on the job count rather than the ticket count: a body counting
+    # tickets would report 2 here instead of 3.
+    _stage_entry_ticket(hass, flow_id="flow-update-2", entry=doomed)
+    _stage_entry_ticket(hass, flow_id="flow-update-2", entry=doomed)
+    # A different flow, same account, still running: its ticket carries no entry
+    # id and is exactly what the account fallback would have swallowed.
+    _stage_ack_ticket(hass, flow_id="flow-concurrent", unique_id=_EMAIL)
+
+    discarded = config_flow.async_discard_pending_container_cleanup_for_entry(
+        hass, entry_id="entry-doomed"
+    )
+
+    assert discarded == 3
+    assert [ticket.flow_id for ticket in _staged_cleanup(hass)] == ["flow-concurrent"]
+
+    # A caller without an entry id must drop nothing. Only ``None`` discriminates
+    # here: an unguarded ``ticket.entry_id == None`` would match exactly the
+    # surviving uncorrelated ticket. (``""`` cannot reach a ticket at all, the
+    # staging helper normalises it away via ``entry_id or None``.)
+    assert (
+        config_flow.async_discard_pending_container_cleanup_for_entry(
+            hass, entry_id=None
+        )
+        == 0
+    )
+    assert [ticket.flow_id for ticket in _staged_cleanup(hass)] == ["flow-concurrent"]
+
+
+async def test_entry_removal_drains_every_ticket_of_that_entry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """All of a removed entry's tickets go in one pass, with no upper bound.
+
+    Each update path stages its own ticket, so an entry can accumulate many
+    before their reloads claim them. A per-call cutoff would strand exactly the
+    tickets this drain exists to clear: they can never be claimed once the entry
+    is gone and would hold pairing nonces and delete tokens in ``hass.data`` for
+    the rest of the process lifetime.
+    """
+
+    recorder = _Recorder()
+    _install_container_client(monkeypatch, recorder)
+    hass = _build_hass([])
+
+    doomed = make_config_entry(entry_id="entry-many", unique_id=_EMAIL)
+    # Deliberately above the cutoff this fix removed (_MAX_CLEANUP_TICKETS_PER_ENTRY
+    # was 16). The constant is gone, so the number is no longer grep-able from the
+    # source; it is named here so a reintroduced bound of any size below this is
+    # caught rather than silently passing.
+    staged_count = 20
+    for index in range(staged_count):
+        _stage_entry_ticket(hass, flow_id=f"flow-update-{index}", entry=doomed)
+    assert len(_staged_cleanup(hass)) == staged_count
+
+    discarded = config_flow.async_discard_pending_container_cleanup_for_entry(
+        hass, entry_id="entry-many"
+    )
+
+    assert discarded == staged_count
+    assert _staged_cleanup(hass) == []
+    # Nothing was executed: discarding keeps the credentials on disk.
+    assert recorder.ack_calls == []
+
+    # The drain emptied the staging area, so the bucket key is gone. A second
+    # removal must report zero rather than raise -- entry removal runs on paths
+    # that never staged anything at all.
+    assert (
+        config_flow.async_discard_pending_container_cleanup_for_entry(
+            hass, entry_id="entry-many"
+        )
+        == 0
+    )
+
+
+async def test_entry_drain_before_claim_discard_clears_both_ticket_kinds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The duplicate-account abort needs BOTH discards, drain first.
+
+    That path (``__init__.py``, ``should_setup`` false) leaves the entry in
+    place but must let go of everything it staged. The entry can hold several
+    update-path tickets *and* the uncorrelated create-path ticket of the flow
+    that just produced it. The claim-based discard takes at most one ticket and
+    prefers an ``entry_id`` match, so running it first would consume one update
+    ticket and strand the create-path one. Drain first, claim second.
+    """
+
+    recorder = _Recorder()
+    _install_container_client(monkeypatch, recorder)
+    hass = _build_hass([])
+
+    entry = make_config_entry(entry_id="entry-dup", unique_id=_EMAIL)
+    _stage_entry_ticket(hass, flow_id="flow-update-a", entry=entry)
+    _stage_entry_ticket(hass, flow_id="flow-update-b", entry=entry)
+    _stage_ack_ticket(hass, flow_id="flow-create", unique_id=_EMAIL)
+
+    discarded = config_flow.async_discard_pending_container_cleanup_for_entry(
+        hass, entry_id="entry-dup"
+    )
+    discarded += config_flow.async_discard_pending_container_cleanup(
+        hass, unique_id=_EMAIL, entry_id="entry-dup"
+    )
+
+    assert discarded == 3
+    assert _staged_cleanup(hass) == []
+    # Discarding never executes: the credential files stay on disk.
+    assert recorder.ack_calls == []
