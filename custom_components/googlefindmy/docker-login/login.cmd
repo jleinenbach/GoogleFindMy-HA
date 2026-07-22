@@ -259,6 +259,46 @@ if "%INNER%"=="::" exit /b 0
 set "_T=%INNER%"
 for %%x in (0 1 2 3 4 5 6 7 8 9 a b c d e f A B C D E F) do call set "_T=%%_T:%%x=%%"
 if "%_T%"=="%INNER%" exit /b 1
+rem At most ONE "::" run: two are ambiguous, so RFC 4291 forbids it.
+rem `%VAR:*::=%` drops everything up to and including the first run.
+set "_HAS_RUN="
+set "_T=%INNER:::=%"
+if not "%_T%"=="%INNER%" set "_HAS_RUN=1"
+if defined _HAS_RUN (
+  set "_TAIL=%INNER:*::=%"
+) else (
+  set "_TAIL="
+)
+if defined _TAIL call :v6_no_second_run "%_TAIL%" || exit /b 1
+rem Group width (max four hex digits) and count. `for /f` collapses repeated
+rem delimiters, so a compressed address simply yields fewer tokens.
+for /f "tokens=1-9 delims=:" %%a in ("%INNER%") do (
+  if not "%%i"=="" exit /b 1
+  call :v6_group "%%a" || exit /b 1
+  call :v6_group "%%b" || exit /b 1
+  call :v6_group "%%c" || exit /b 1
+  call :v6_group "%%d" || exit /b 1
+  call :v6_group "%%e" || exit /b 1
+  call :v6_group "%%f" || exit /b 1
+  call :v6_group "%%g" || exit /b 1
+  call :v6_group "%%h" || exit /b 1
+  if not defined _HAS_RUN if "%%h"=="" exit /b 1
+)
+exit /b 0
+
+:v6_no_second_run
+rem Reject a second "::" run in the tail after the first one.
+set "_TT=%~1"
+set "_T2=%_TT:::=%"
+if not "%_T2%"=="%_TT%" exit /b 1
+exit /b 0
+
+:v6_group
+rem An IPv6 group is one to four hex digits. Empty means the token was produced
+rem by the compressed run and carries no width of its own.
+set "_G=%~1"
+if not defined _G exit /b 0
+if not "%_G:~4%"=="" exit /b 1
 exit /b 0
 
 :set_novnc_from_ip

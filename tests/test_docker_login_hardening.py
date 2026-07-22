@@ -1353,7 +1353,14 @@ def test_login_sh_rejects_unbalanced_ipv6_brackets() -> None:
         ("2001:db8::1", False),
         ("1:2:3:4:5:6:7:8", False),
         ("::", False),
+        ("fe80::1", False),
         ("192.168.1.21", False),
+        # Structural rules beyond "looks like IPv6": one compression run only,
+        # at most four hex digits per group, eight groups unless compressed.
+        ("1::2::3", True),
+        ("12345::1", True),
+        ("1:2:3:4:5:6:7:8:9", True),
+        ("1:2:3:4:5:6:7", True),
         ("[::1", True),
         ("]::1[", True),
         ("[[::1]]", True),
@@ -1408,4 +1415,36 @@ def test_login_cmd_validates_ipv6_structure_not_just_a_colon() -> None:
     )
     assert 'if "%INNER%"=="::" exit /b 0' in cmd, (
         "'::' is the one addressable-digit exception and must be spelled out."
+    )
+
+
+def test_login_cmd_mirrors_the_full_ipv6_structural_rules() -> None:
+    """The batch validator must carry the same rules, not a weaker subset.
+
+    ``login.sh`` is executed by the matrix above; ``login.cmd`` cannot be run
+    here, so the three rules that go beyond "contains a colon" are pinned by
+    text: a single compression run, group width, and group count.
+    """
+
+    cmd = _read("login.cmd")
+    assert 'set "_TAIL=%INNER:*::=%"' in cmd, (
+        "login.cmd must isolate the tail after the first '::' run to detect a "
+        "second one."
+    )
+    assert re.search(r"^:v6_no_second_run$", cmd, re.MULTILINE), (
+        "login.cmd must define the second-run rejection helper."
+    )
+    assert re.search(r"^:v6_group$", cmd, re.MULTILINE), (
+        "login.cmd must define the per-group width helper."
+    )
+    assert 'if not "%_G:~4%"=="" exit /b 1' in cmd, (
+        "a group wider than four hex digits must be rejected."
+    )
+    assert cmd.count('call :v6_group "%%') == 8, (
+        "all eight possible groups must be width-checked (found "
+        f"{cmd.count('call :v6_group ' + chr(34) + '%%')})."
+    )
+    assert 'if not "%%i"=="" exit /b 1' in cmd, "a ninth group must be rejected."
+    assert 'if not defined _HAS_RUN if "%%h"=="" exit /b 1' in cmd, (
+        "without a compression run, all eight groups must be present."
     )

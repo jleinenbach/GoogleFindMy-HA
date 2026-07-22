@@ -2932,3 +2932,47 @@ async def test_link_local_guard_rejects_residual_brackets() -> None:
 
     # The one legal bracket pair must still pass.
     container_login._maybe_block_link_local("[::1]")
+
+
+async def test_guard_rejects_url_syntax_smuggled_into_the_host_field() -> None:
+    """A host that is not a bare host component must never reach the URL.
+
+    ``host`` is free text and is interpolated into the base URL, so an authority
+    or path delimiter silently retargets the request. Reproduced before fixing:
+
+    ==========================  ==========================  ==================
+    host                        resulting URL               yarl parses as
+    ==========================  ==========================  ==================
+    ``169.254.169.254#x``       ``http://169.254.169.254#x:7901``  host ``169.254.169.254``, port 80
+    ``user@127.0.0.1``          ``http://user@127.0.0.1:7901``     URL credentials
+    ==========================  ==========================  ==================
+
+    The first reaches the very link-local target this guard exists to refuse
+    (the ``#`` starts a fragment, so ``:7901`` never becomes the port); the
+    second makes aiohttp raise an uncaught ``ValueError``, because URL
+    credentials cannot be combined with the explicit ``Authorization`` header.
+    Neither parses as an IP literal, so an IP-only guard stayed silent.
+    """
+
+    for smuggled in (
+        "169.254.169.254#x",
+        "user@127.0.0.1",
+        "127.0.0.1?a=b",
+        "127.0.0.1/x",
+        "127.0.0.1:8080",
+        "-leading-hyphen",
+        "a" * 300,
+        "",
+    ):
+        with pytest.raises(container_login.ContainerUnreachableError):
+            container_login._maybe_block_link_local(smuggled)
+
+    # Ordinary host names and IP literals must keep working.
+    for ok in (
+        "googlefindmy-login",
+        "my.host.local",
+        "host.local.",
+        "127.0.0.1",
+        "[::1]",
+    ):
+        container_login._maybe_block_link_local(ok)

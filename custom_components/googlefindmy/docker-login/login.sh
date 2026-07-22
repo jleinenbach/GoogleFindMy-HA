@@ -122,6 +122,36 @@ is_ip_literal() {
         *[0-9A-Fa-f]*) ;;
         *) return 1 ;;
       esac
+      # At most ONE "::" run: two of them are ambiguous, so RFC 4291 forbids it.
+      local has_compression=0 tail_after_run
+      case "$inner" in
+        *::*)
+          has_compression=1
+          tail_after_run="${inner#*::}"
+          case "$tail_after_run" in
+            *::*) return 1 ;;
+          esac
+          ;;
+      esac
+      # Group count and width. Without compression exactly eight groups are
+      # required; with it at most seven may be written out, since "::" stands
+      # for one or more omitted groups.
+      local saved_ifs=$IFS group groups=0
+      local -a parts=()
+      IFS=:
+      # shellcheck disable=SC2206  # word splitting on IFS is exactly the intent
+      parts=($inner)
+      IFS=$saved_ifs
+      for group in ${parts[@]+"${parts[@]}"}; do
+        [ -n "$group" ] || continue
+        [ "${#group}" -le 4 ] || return 1
+        groups=$((groups + 1))
+      done
+      if [ "$has_compression" -eq 1 ]; then
+        [ "$groups" -le 7 ] || return 1
+      else
+        [ "$groups" -eq 8 ] || return 1
+      fi
       return 0
       ;;
   esac

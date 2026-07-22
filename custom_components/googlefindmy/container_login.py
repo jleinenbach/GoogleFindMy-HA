@@ -59,6 +59,7 @@ from __future__ import annotations
 
 import ipaddress
 import logging
+import re
 from typing import Any, Final
 
 import aiohttp
@@ -180,6 +181,38 @@ def normalise_host_literal(host: str) -> str:
     return candidate
 
 
+# RFC 1035: 253 characters for the whole name, 63 per label.
+_MAX_HOSTNAME_LEN: Final = 253
+_HOSTNAME_LABEL: Final = re.compile(r"(?!-)[A-Za-z0-9-]{1,63}(?<!-)\Z")
+
+
+def _reject_non_host_syntax(candidate: str) -> None:
+    """Refuse anything that is not a bare host component.
+
+    ``host`` is free text from the form and is interpolated into a URL, so any
+    authority or path delimiter in it silently retargets the request:
+    ``169.254.169.254#x`` parses as the link-local host on port 80 (the ``#``
+    starts a fragment, so our ``:7901`` never becomes the port), and
+    ``user@127.0.0.1`` produces URL credentials, which aiohttp refuses to
+    combine with the explicit ``Authorization`` header by raising an uncaught
+    ``ValueError``. Both slip past a guard that only asks "is this an IP
+    literal?", because neither parses as one.
+
+    Accepted are an IP literal (validated by the caller) and a DNS host name:
+    dot-separated labels of 1-63 characters from ``[A-Za-z0-9-]``, not starting
+    or ending in a hyphen, 253 characters in total. Everything else is refused
+    before a URL exists.
+    """
+
+    if not candidate or len(candidate) > _MAX_HOSTNAME_LEN:
+        raise ContainerUnreachableError("refusing an empty or over-long host")
+    labels = candidate.rstrip(".").split(".")
+    if not all(_HOSTNAME_LABEL.match(label) for label in labels):
+        raise ContainerUnreachableError(
+            "refusing a host that is not a bare host name or IP literal"
+        )
+
+
 def _maybe_block_link_local(host: str) -> None:
     """Reject a literal link-local/metadata host (best-effort only).
 
@@ -210,8 +243,10 @@ def _maybe_block_link_local(host: str) -> None:
     try:
         ip = ipaddress.ip_address(candidate)
     except ValueError:
-        # Not a literal IP (a hostname). We do NOT resolve here; see the module
-        # docstring for the honest scope of this guard.
+        # Not a literal IP. Before accepting it as a host name, make sure it IS
+        # one: an unvalidated string here retargets the URL built from it.
+        _reject_non_host_syntax(candidate)
+        # We do NOT resolve; see the module docstring for the guard's scope.
         return
     if ip.is_link_local:
         raise ContainerUnreachableError(
