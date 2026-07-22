@@ -87,7 +87,7 @@ Covered (real ``container_login`` client, fake session, F-A2/F-N3):
   *keeps* ``secrets.json``, so that case raises (``ContainerAuthError``), as
   does any body that cannot be classified, on either accepted status
   (``ContainerUnreachableError``). Pinned end-to-end through
-  ``async_run_pending_container_cleanup`` with the real client: the lockout must
+  ``_async_execute_container_cleanup`` with the real client: the lockout must
   reach the log as a warning, the idempotent 410 must stay silent.
 * The retention discriminator: only the lockout body sets
   ``ContainerLoginError.secret_retained``, and only that flag (never the error
@@ -572,13 +572,32 @@ async def test_aborted_flow_before_entry_keeps_bundle_no_ack(
     assert recorder.ack_calls == []
 
 
-def _staged_cleanup(hass: Any) -> dict[str, list[Any]]:
-    """Return the in-memory staging area the flow writes its cleanup jobs to."""
+def _staged_cleanup(hass: Any) -> list[Any]:
+    """Return the in-memory staging area the flow writes its cleanup tickets to.
+
+    A FIFO list of per-flow tickets, not a mapping keyed by account: two
+    overlapping create flows for the same account must stay separable.
+    """
 
     bucket = hass.data.get(config_flow.DOMAIN) or {}
-    staged = bucket.get(config_flow.PENDING_CONTAINER_CLEANUP_KEY) or {}
-    assert isinstance(staged, dict)
+    staged = bucket.get(config_flow.PENDING_CONTAINER_CLEANUP_KEY) or []
+    assert isinstance(staged, list)
     return staged
+
+
+async def _run_staged_cleanup(hass: Any, *, unique_id: str | None) -> None:
+    """Claim one staged ticket and execute it, as the durability gate does.
+
+    Production never runs the jobs inline: ``async_setup_entry`` only claims the
+    ticket and arms a background task that waits for proof that the config entry
+    reached Home Assistant's storage (see
+    ``config_flow.async_schedule_pending_container_cleanup``). These tests cover
+    the job semantics *after* that proof, so they drive the two halves directly
+    instead of standing up HA's storage against a hand-built ``hass`` double.
+    """
+
+    jobs = config_flow._async_claim_container_cleanup(hass, unique_id=unique_id)
+    await config_flow._async_execute_container_cleanup(hass, jobs)
 
 
 async def test_create_entry_stages_ack_instead_of_sending_it(
@@ -620,7 +639,7 @@ async def test_create_entry_stages_ack_instead_of_sending_it(
     assert isinstance(form, dict)
     assert form.get("step_id") == "device_selection"
     assert recorder.ack_calls == []
-    assert _staged_cleanup(hass) == {}
+    assert _staged_cleanup(hass) == []
 
     # Submitting the form reaches async_create_entry.
     created = await _maybe_await(flow.async_step_device_selection({}))
@@ -634,8 +653,11 @@ async def test_create_entry_stages_ack_instead_of_sending_it(
     # new entry verbatim.
     assert flow._container_pending_ack is None
     staged = _staged_cleanup(hass)
-    assert list(staged) == [flow.unique_id]
-    jobs = staged[flow.unique_id]
+    assert [ticket.unique_id for ticket in staged] == [flow.unique_id]
+    # One ticket for this one flow, addressed by the flow's own id: that is what
+    # keeps a second, concurrent flow for the same account separable.
+    assert staged[0].flow_id == flow._async_cleanup_ticket_id()
+    jobs = staged[0].jobs
     assert len(jobs) == 1
     assert isinstance(jobs[0], config_flow.PendingContainerCleanup)
 
@@ -690,13 +712,13 @@ async def test_staged_ack_is_sent_by_the_cleanup_runner_exactly_once(
     assert recorder.ack_calls == []
 
     unique_id = flow.unique_id
-    await config_flow.async_run_pending_container_cleanup(hass, unique_id=unique_id)
+    await _run_staged_cleanup(hass, unique_id=unique_id)
     assert len(recorder.ack_calls) == 1
     assert recorder.ack_calls[0]["delete_token"] == _DELETE_TOKEN
-    assert _staged_cleanup(hass) == {}
+    assert _staged_cleanup(hass) == []
 
     # Reload: nothing left to do, so no second ack.
-    await config_flow.async_run_pending_container_cleanup(hass, unique_id=unique_id)
+    await _run_staged_cleanup(hass, unique_id=unique_id)
     assert len(recorder.ack_calls) == 1
 
 
@@ -716,6 +738,7 @@ async def test_cleanup_runner_ignores_jobs_of_other_accounts(
 
     config_flow._async_stage_container_cleanup(
         hass,
+        flow_id="flow-account-a",
         unique_id="account-a@example.com",
         job=config_flow.PendingContainerCleanup(
             ack=config_flow._ContainerAckTarget(
@@ -727,15 +750,13 @@ async def test_cleanup_runner_ignores_jobs_of_other_accounts(
         ),
     )
 
-    await config_flow.async_run_pending_container_cleanup(
-        hass, unique_id="account-b@example.com"
-    )
+    await _run_staged_cleanup(hass, unique_id="account-b@example.com")
     assert recorder.ack_calls == []
-    assert list(_staged_cleanup(hass)) == ["account-a@example.com"]
+    assert [ticket.unique_id for ticket in _staged_cleanup(hass)] == [
+        "account-a@example.com"
+    ]
 
-    await config_flow.async_run_pending_container_cleanup(
-        hass, unique_id="account-a@example.com"
-    )
+    await _run_staged_cleanup(hass, unique_id="account-a@example.com")
     assert len(recorder.ack_calls) == 1
 
 
@@ -749,10 +770,10 @@ async def test_cleanup_runner_is_a_noop_without_staged_jobs(
     hass = _build_hass([])
 
     # No hass.data[DOMAIN] bucket at all.
-    await config_flow.async_run_pending_container_cleanup(hass, unique_id=_EMAIL)
+    await _run_staged_cleanup(hass, unique_id=_EMAIL)
     # Bucket present but no staging area.
     hass.data[config_flow.DOMAIN] = {}
-    await config_flow.async_run_pending_container_cleanup(hass, unique_id=_EMAIL)
+    await _run_staged_cleanup(hass, unique_id=_EMAIL)
     assert recorder.ack_calls == []
 
 
@@ -778,6 +799,7 @@ async def test_failing_ack_is_logged_and_never_raises(
     hass = _build_hass([])
     config_flow._async_stage_container_cleanup(
         hass,
+        flow_id="flow-failing-ack",
         unique_id=_EMAIL,
         job=config_flow.PendingContainerCleanup(
             ack=config_flow._ContainerAckTarget(
@@ -790,13 +812,13 @@ async def test_failing_ack_is_logged_and_never_raises(
     )
 
     with caplog.at_level(logging.WARNING):
-        await config_flow.async_run_pending_container_cleanup(hass, unique_id=_EMAIL)
+        await _run_staged_cleanup(hass, unique_id=_EMAIL)
 
     assert "ContainerUnreachableError" in caplog.text
     assert _PAIRING_CODE not in caplog.text
     assert _DELETE_TOKEN not in caplog.text
     # Consumed regardless: the container's TTL fallback owns it from here.
-    assert _staged_cleanup(hass) == {}
+    assert _staged_cleanup(hass) == []
 
 
 @pytest.mark.parametrize(
@@ -838,6 +860,7 @@ async def test_ack_after_ttl_expiry_logs_at_debug_not_warning(
     hass = _build_hass([])
     config_flow._async_stage_container_cleanup(
         hass,
+        flow_id="flow-ttl-debug",
         unique_id=_EMAIL,
         job=config_flow.PendingContainerCleanup(
             ack=config_flow._ContainerAckTarget(
@@ -851,7 +874,7 @@ async def test_ack_after_ttl_expiry_logs_at_debug_not_warning(
     )
 
     with caplog.at_level(logging.DEBUG, logger=config_flow._LOGGER.name):
-        await config_flow.async_run_pending_container_cleanup(hass, unique_id=_EMAIL)
+        await _run_staged_cleanup(hass, unique_id=_EMAIL)
 
     warnings = [
         record for record in caplog.records if record.levelno >= logging.WARNING
@@ -894,6 +917,7 @@ async def test_ack_lockout_warning_does_not_promise_a_ttl_delete(
     hass = _build_hass([])
     config_flow._async_stage_container_cleanup(
         hass,
+        flow_id="flow-lockout",
         unique_id=_EMAIL,
         job=config_flow.PendingContainerCleanup(
             ack=config_flow._ContainerAckTarget(
@@ -909,7 +933,7 @@ async def test_ack_lockout_warning_does_not_promise_a_ttl_delete(
     )
 
     with caplog.at_level(logging.DEBUG, logger=config_flow._LOGGER.name):
-        await config_flow.async_run_pending_container_cleanup(hass, unique_id=_EMAIL)
+        await _run_staged_cleanup(hass, unique_id=_EMAIL)
 
     warnings = [
         record for record in caplog.records if record.levelno >= logging.WARNING
@@ -935,6 +959,7 @@ async def test_staging_without_hass_is_a_noop() -> None:
 
     config_flow._async_stage_container_cleanup(
         None,
+        flow_id="flow-no-hass",
         unique_id=_EMAIL,
         job=config_flow.PendingContainerCleanup(imported_digest="deadbeef"),
     )
@@ -954,7 +979,7 @@ async def test_stage_container_ack_without_pending_result_is_a_noop(
 
     assert flow._container_pending_ack is None
     flow._async_stage_container_ack()
-    assert _staged_cleanup(hass) == {}
+    assert _staged_cleanup(hass) == []
     assert recorder.ack_calls == []
 
 
@@ -1023,7 +1048,7 @@ async def test_reconfigure_persist_still_acks_inline_and_stages_nothing(
     assert recorder.ack_calls[0]["delete_token"] == _DELETE_TOKEN
     assert flow._container_pending_ack is None
     # Sent, not staged: nothing is left for async_setup_entry to do.
-    assert _staged_cleanup(hass) == {}
+    assert _staged_cleanup(hass) == []
 
 
 # ---------------------------------------------------------------------------
@@ -1745,7 +1770,7 @@ async def test_options_container_persist_acks_inline_and_stages_nothing(
     assert result.get("reason") == "reconfigure_successful"
     assert len(recorder.ack_calls) == 1
     # Acked inline, so nothing is left for async_setup_entry to redo.
-    assert _staged_cleanup(hass) == {}
+    assert _staged_cleanup(hass) == []
 
 
 # ---------------------------------------------------------------------------
@@ -2586,7 +2611,7 @@ async def test_cleanup_runner_reports_a_lockout_410_as_a_failed_ack(
 ) -> None:
     """End-to-end (F-C2): the deferred runner must see the lockout, not silence.
 
-    ``async_run_pending_container_cleanup`` runs the REAL ``ack_consumed`` here.
+    ``_async_execute_container_cleanup`` runs the REAL ``ack_consumed`` here.
     A lockout 410 leaves the credential on disk, so the failure has to reach the
     runner (warning, never the nonce/delete token) instead of the flow quietly
     booking the delete as done. Note what this does *not* claim: the runner pops
@@ -2602,6 +2627,7 @@ async def test_cleanup_runner_reports_a_lockout_410_as_a_failed_ack(
     hass = _build_hass([])
     config_flow._async_stage_container_cleanup(
         hass,
+        flow_id="flow-lockout-410",
         unique_id=_EMAIL,
         job=config_flow.PendingContainerCleanup(
             ack=config_flow._ContainerAckTarget(
@@ -2618,7 +2644,7 @@ async def test_cleanup_runner_reports_a_lockout_410_as_a_failed_ack(
     )
 
     with caplog.at_level(logging.DEBUG, logger=config_flow._LOGGER.name):
-        await config_flow.async_run_pending_container_cleanup(hass, unique_id=_EMAIL)
+        await _run_staged_cleanup(hass, unique_id=_EMAIL)
 
     assert "ContainerAuthError" in caplog.text
     assert [record for record in caplog.records if record.levelno >= logging.WARNING]
@@ -2662,6 +2688,7 @@ async def test_only_a_proven_lockout_claims_a_retained_secret(
     hass = _build_hass([])
     config_flow._async_stage_container_cleanup(
         hass,
+        flow_id="flow-retained-secret",
         unique_id=_EMAIL,
         job=config_flow.PendingContainerCleanup(
             ack=config_flow._ContainerAckTarget(
@@ -2677,7 +2704,7 @@ async def test_only_a_proven_lockout_claims_a_retained_secret(
     )
 
     with caplog.at_level(logging.DEBUG, logger=config_flow._LOGGER.name):
-        await config_flow.async_run_pending_container_cleanup(hass, unique_id=_EMAIL)
+        await _run_staged_cleanup(hass, unique_id=_EMAIL)
 
     warnings = [
         record for record in caplog.records if record.levelno >= logging.WARNING
@@ -2717,6 +2744,7 @@ async def test_cleanup_runner_stays_quiet_for_a_confirmed_410(
     hass = _build_hass([])
     config_flow._async_stage_container_cleanup(
         hass,
+        flow_id="flow-confirmed-410",
         unique_id=_EMAIL,
         job=config_flow.PendingContainerCleanup(
             ack=config_flow._ContainerAckTarget(
@@ -2729,7 +2757,7 @@ async def test_cleanup_runner_stays_quiet_for_a_confirmed_410(
     )
 
     with caplog.at_level(logging.DEBUG, logger=config_flow._LOGGER.name):
-        await config_flow.async_run_pending_container_cleanup(hass, unique_id=_EMAIL)
+        await _run_staged_cleanup(hass, unique_id=_EMAIL)
 
     warnings = [
         record for record in caplog.records if record.levelno >= logging.WARNING

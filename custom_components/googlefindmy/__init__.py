@@ -338,7 +338,7 @@ if TYPE_CHECKING:
         unregister_fcm_receiver_provider as ApiUnregisterFcmProviderType,
     )
     from .Auth.fcm_receiver_ha import FcmReceiverHA as FcmReceiverHAType
-    from .config_flow import PendingContainerCleanup
+    from .config_flow import _StagedCleanupTicket
     from .coordinator import GoogleFindMyCoordinator as GoogleFindMyCoordinatorType
     from .discovery import (
         DiscoveryManager as DiscoveryManagerType,
@@ -2399,10 +2399,14 @@ class GoogleFindMyDomainData(TypedDict, total=False):
     pending_reconfigure_device_list_refresh: set[str]
     recent_reconfigure_markers: dict[str, float]
     # In-memory only, NEVER persisted: post-create cleanup jobs staged by the
-    # config flow (watched-secrets delete, login-container ack), keyed by the
-    # flow's unique id. ``async_setup_entry`` pops and runs them once the entry
-    # actually exists. See ``config_flow.PendingContainerCleanup``.
-    pending_container_cleanup: dict[str, list[PendingContainerCleanup]]
+    # config flow (watched-secrets delete, login-container ack). A FIFO list of
+    # per-flow tickets, NOT a mapping keyed by account: two overlapping create
+    # flows for the same account must not share one list, and every
+    # ``async_setup_entry`` run claims at most one ticket. The claimed jobs run
+    # only after the entry is provably in Home Assistant's storage. See
+    # ``config_flow._StagedCleanupTicket`` and
+    # ``config_flow.async_schedule_pending_container_cleanup``.
+    pending_container_cleanup: list[_StagedCleanupTicket]
 
 
 # Typed hass.data key for the global domain bucket (HA 2024.6+ HassKey).
@@ -7799,10 +7803,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
     # cleanups (deleting the imported secrets.json copies, acking the login
     # container so it drops its copy), because `ConfigFlow.async_create_entry`
     # merely builds a FlowResult -- Home Assistant creates and stores the entry
-    # afterwards in `ConfigEntriesFlowManager.async_finish_flow`. This is the
-    # first point at which the entry provably exists, so it is where those jobs
-    # run. Deliberately behind the whole setup core: every `ConfigEntryNotReady`
-    # above must leave the credentials on disk for the next attempt.
+    # afterwards in `ConfigEntriesFlowManager.async_finish_flow`. Deliberately
+    # behind the whole setup core: every `ConfigEntryNotReady` above must leave
+    # the credentials on disk for the next attempt.
+    #
+    # Reaching this line proves the entry exists *in memory*, not that it has
+    # been stored: `ConfigEntries.async_add` awaits this very coroutine and only
+    # calls `_async_schedule_save` afterwards, which then saves debounced. So
+    # the jobs are only CLAIMED here (synchronously, so a reload cannot claim
+    # them twice) and executed later, by a background task that first waits for
+    # proof that the entry reached Home Assistant's storage. Everything that is
+    # not such a proof -- shutdown, unload, timeout, error -- drops the jobs and
+    # keeps the credentials on disk.
     #
     # Best effort in both directions: the runner isolates each job, and this
     # guard makes sure a cleanup failure can never turn a successful setup into
@@ -7810,15 +7822,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
     # watcher re-imports a surviving file on its next scan).
     try:
         from .config_flow import (  # noqa: PLC0415 - lazy, avoids an import cycle
-            async_run_pending_container_cleanup,
+            async_schedule_pending_container_cleanup,
         )
 
-        await async_run_pending_container_cleanup(
-            hass, unique_id=getattr(entry, "unique_id", None)
-        )
+        async_schedule_pending_container_cleanup(hass, entry)
     except Exception as err:  # noqa: BLE001 - cleanup must never fail setup
         _LOGGER.warning(
-            "[%s] Deferred container-login cleanup failed: %s", entry.entry_id, err
+            "[%s] Deferred container-login cleanup could not be armed: %s",
+            entry.entry_id,
+            err,
         )
 
     # Counterpart to the refresh in `async_remove_entry`: bring this entry's
@@ -7829,9 +7841,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
     # would otherwise contribute nothing until the next options update.
     # Cheap and safe: `async_refresh_watch_paths` skips watchers whose path set
     # is unchanged, which is the normal case for a plain setup or reload, so no
-    # rescan is triggered there. Runs after the cleanup above so it cannot scan
-    # a bundle that cleanup is about to delete, and only on a successful setup:
-    # every `ConfigEntryNotReady` above returns before this point.
+    # rescan is triggered there. Only runs on a successful setup: every
+    # `ConfigEntryNotReady` above returns before this point.
+    #
+    # Note on ordering: the deferred cleanup above is now armed, not executed,
+    # so a rescan triggered here can still see a bundle that the cleanup will
+    # delete moments later. That is harmless -- a re-import of the very bundle
+    # this entry was created from is idempotent (same account, same content),
+    # and the delete stays account- and content-aware, so it only removes the
+    # copies the import actually consumed.
     await _async_refresh_discovery_watch_paths(hass)
 
     return True

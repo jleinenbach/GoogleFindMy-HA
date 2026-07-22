@@ -1022,13 +1022,32 @@ def _importable_bundle(email: str, token: str) -> dict[str, Any]:
     }
 
 
-def _staged_cleanup(hass: Any) -> dict[str, list[Any]]:
-    """Return the in-memory staging area the flow writes its cleanup jobs to."""
+def _staged_cleanup(hass: Any) -> list[Any]:
+    """Return the in-memory staging area the flow writes its cleanup tickets to.
+
+    A FIFO list of per-flow tickets, not a mapping keyed by account: two
+    overlapping create flows for the same account must stay separable.
+    """
 
     bucket = hass.data.get(DOMAIN) or {}
-    staged = bucket.get(config_flow.PENDING_CONTAINER_CLEANUP_KEY) or {}
-    assert isinstance(staged, dict)
+    staged = bucket.get(config_flow.PENDING_CONTAINER_CLEANUP_KEY) or []
+    assert isinstance(staged, list)
     return staged
+
+
+async def _run_staged_cleanup(hass: Any, *, unique_id: str | None) -> None:
+    """Claim one staged ticket and execute it, as the durability gate does.
+
+    Production never runs the jobs inline: ``async_setup_entry`` only claims the
+    ticket and arms a background task that waits for proof that the config entry
+    reached Home Assistant's storage (see
+    ``config_flow.async_schedule_pending_container_cleanup``). These tests cover
+    the job semantics *after* that proof, so they drive the two halves directly
+    instead of standing up HA's storage against a hand-built ``hass`` double.
+    """
+
+    jobs = config_flow._async_claim_container_cleanup(hass, unique_id=unique_id)
+    await config_flow._async_execute_container_cleanup(hass, jobs)
 
 
 async def test_discovery_confirm_stages_delete_instead_of_running_it(
@@ -1073,10 +1092,13 @@ async def test_discovery_confirm_stages_delete_instead_of_running_it(
     # NOT deleted yet: the entry does not exist at this point.
     assert watched.exists()
 
-    # Staged instead, under the fallback bucket because this synthetic flow
-    # never set a unique id.
+    # Staged instead, on this flow's own ticket. The synthetic flow never set a
+    # unique id, so the ticket stays account-less: claimable by any entry of
+    # this integration, but still only by exactly one of them.
     staged = _staged_cleanup(hass)
-    jobs = staged[config_flow._PENDING_CLEANUP_UNKNOWN_ACCOUNT]
+    assert len(staged) == 1
+    assert staged[0].unique_id is None
+    jobs = staged[0].jobs
     assert len(jobs) == 1
     # The staged identity is the one of the file that must eventually go.
     assert jobs[0].imported_stable_key == on_disk.stable_key
@@ -1114,7 +1136,7 @@ async def test_aborted_discovery_confirm_stages_nothing(tmp_path: Path) -> None:
     result = await flow.async_step_discovery({})
     assert result["type"] == "form"
     assert watched.exists()
-    assert _staged_cleanup(hass) == {}
+    assert _staged_cleanup(hass) == []
 
 
 async def test_staged_delete_runs_once_when_setup_entry_claims_it(
@@ -1134,6 +1156,7 @@ async def test_staged_delete_runs_once_when_setup_entry_claims_it(
 
     config_flow._async_stage_container_cleanup(
         hass,
+        flow_id="flow-claim-once",
         unique_id="user@example.com",
         job=config_flow.PendingContainerCleanup(
             imported_stable_key=_stable_key_for("user@example.com", "aas_et/DEFERRED"),
@@ -1142,18 +1165,14 @@ async def test_staged_delete_runs_once_when_setup_entry_claims_it(
     )
     assert watched.exists()
 
-    await config_flow.async_run_pending_container_cleanup(
-        hass, unique_id="user@example.com"
-    )
+    await _run_staged_cleanup(hass, unique_id="user@example.com")
     assert not watched.exists()
-    assert _staged_cleanup(hass) == {}
+    assert _staged_cleanup(hass) == []
 
     # Reload with a freshly written bundle: the job was consumed, so nothing
     # touches the new file.
     _write_secrets(watched, "user@example.com", token="aas_et/DEFERRED")
-    await config_flow.async_run_pending_container_cleanup(
-        hass, unique_id="user@example.com"
-    )
+    await _run_staged_cleanup(hass, unique_id="user@example.com")
     assert watched.exists()
 
 
@@ -1178,6 +1197,7 @@ async def test_staged_delete_failure_never_propagates(
 
     config_flow._async_stage_container_cleanup(
         hass,
+        flow_id="flow-delete-boom",
         unique_id="user@example.com",
         job=config_flow.PendingContainerCleanup(
             imported_stable_key=_stable_key_for("user@example.com", "aas_et/BOOM"),
@@ -1186,9 +1206,7 @@ async def test_staged_delete_failure_never_propagates(
     )
 
     # Must not raise.
-    await config_flow.async_run_pending_container_cleanup(
-        hass, unique_id="user@example.com"
-    )
+    await _run_staged_cleanup(hass, unique_id="user@example.com")
     assert watched.exists()
 
 
@@ -1300,4 +1318,4 @@ async def test_discovery_update_case_still_deletes_inline(
     # Deleted inline, in the step itself.
     assert not watched.exists()
     # ... and therefore nothing left for async_setup_entry to redo.
-    assert _staged_cleanup(hass) == {}
+    assert _staged_cleanup(hass) == []
