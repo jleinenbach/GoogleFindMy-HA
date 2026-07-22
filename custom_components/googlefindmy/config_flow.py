@@ -1715,7 +1715,9 @@ def _novnc_access_placeholder(host: str) -> str:
         )
         url = f"http://{literal}:{CONTAINER_NOVNC_PORT}"
         return f"[{url}]({url})"
-    return f"`http://<docker-host>:{CONTAINER_NOVNC_PORT}`"
+    # No angle-bracket placeholder here: hassfest rejects HTML-looking sequences
+    # in translated strings, and this value is substituted straight into one.
+    return f"`http://DOCKER-HOST:{CONTAINER_NOVNC_PORT}`"
 
 
 def _count_supplied_credential_methods(

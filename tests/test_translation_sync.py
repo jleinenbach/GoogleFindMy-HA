@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -159,4 +160,47 @@ def test_no_empty_string_values(translation_file: Path) -> None:
 
     assert not critical_empty, (
         f"{translation_file.name} has empty string values at: {critical_empty[:10]}"
+    )
+
+
+def _iter_string_values(data: Any, prefix: str = "") -> list[tuple[str, str]]:
+    """Return every (dotted key path, string value) pair inside ``data``."""
+
+    found: list[tuple[str, str]] = []
+    if isinstance(data, dict):
+        for key, value in data.items():
+            found.extend(
+                _iter_string_values(value, f"{prefix}.{key}" if prefix else key)
+            )
+    elif isinstance(data, str):
+        found.append((prefix, data))
+    return found
+
+
+@pytest.mark.parametrize(
+    "path",
+    [Path("custom_components/googlefindmy/strings.json"), *_get_translation_files()],
+    ids=lambda p: p.name,
+)
+def test_no_translation_string_looks_like_html(path: Path) -> None:
+    """Hassfest rejects any translated string that looks like it contains HTML.
+
+    The check is a plain ``<...>`` match, so an ordinary shell placeholder such
+    as ``ssh -L 7900:127.0.0.1:7900 <docker-host>`` fails it even though nothing
+    about it is HTML. That is invisible locally (``sync_translations.py``,
+    ``translation_key_check.py`` and ``translation_placeholder_check.py`` all
+    pass) and only surfaces as a red ``hassfest`` job, so it is pinned here.
+    Write such placeholders in caps instead: ``DOCKER-HOST``, ``ADDRESS``.
+    """
+
+    offenders = [
+        (key, value)
+        for key, value in _iter_string_values(
+            json.loads(path.read_text(encoding="utf-8"))
+        )
+        if re.search(r"<[^<>]+>", value)
+    ]
+    assert not offenders, (
+        f"{path.name} carries HTML-looking angle brackets, which hassfest rejects: "
+        f"{offenders!r}. Use an upper-case placeholder instead of <placeholder>."
     )

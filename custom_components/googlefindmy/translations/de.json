@@ -22,7 +22,7 @@
       },
       "container_login": {
         "title": "Ein-Klick-Anmeldung über Container",
-        "description": "Melde dich über den mitgelieferten Anmelde-Container an. Öffne die noVNC-Sitzung, führe die Google-Anmeldung im Browser durch und gib anschließend den dort angezeigten Kopplungscode ein, um deine Anmeldedaten automatisch zu übernehmen.\n\nnoVNC-Ansicht (Passwort: `secret`): {novnc_access}\n\nDie Ansicht wird von deinem Browser geöffnet, der oft auf einem anderen Rechner läuft als der Docker-Host. Deshalb wird sie nur dann verlinkt, wenn oben eine Nicht-Loopback-IP steht. Bei einer Loopback-Bindung öffne sie direkt auf dem Docker-Host, tunnele sie mit `ssh -L 7900:127.0.0.1:7900 <docker-host>` oder starte den Launcher erneut mit `--ip <Adresse>` und nutze die ausgegebene Adresse.",
+        "description": "Melde dich über den mitgelieferten Anmelde-Container an. Öffne die noVNC-Sitzung, führe die Google-Anmeldung im Browser durch und gib anschließend den dort angezeigten Kopplungscode ein, um deine Anmeldedaten automatisch zu übernehmen.\n\nnoVNC-Ansicht (Passwort: `secret`): {novnc_access}\n\nDie Ansicht wird von deinem Browser geöffnet, der oft auf einem anderen Rechner läuft als der Docker-Host. Deshalb wird sie nur dann verlinkt, wenn oben eine Nicht-Loopback-IP steht. Bei einer Loopback-Bindung öffne sie direkt auf dem Docker-Host, tunnele sie mit `ssh -L 7900:127.0.0.1:7900 DOCKER-HOST` oder starte den Launcher erneut mit `--ip ADRESSE` und nutze die ausgegebene Adresse.",
         "data": {
           "host": "Container-Host",
           "port": "Container-Port",
