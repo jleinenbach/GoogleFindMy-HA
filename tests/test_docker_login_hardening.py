@@ -1457,3 +1457,29 @@ def test_login_cmd_mirrors_the_full_ipv6_structural_rules() -> None:
         "with a compression run at most seven groups may be written out; "
         "checking only the ninth token accepts `1:2:3:4:5:6:7:8::`."
     )
+
+
+def test_cleartext_cleanup_reports_a_failed_removal() -> None:
+    """Track C must not claim a removal it did not perform.
+
+    The clear-text fallback prints the whole bundle and then deletes it. A
+    silenced ``rm -f ... 2>/dev/null || true`` next to a message asserting the
+    file "is now removed" lies whenever the delete fails (a readable file under
+    a directory that is no longer writable), leaving the full credentials on
+    disk with no warning.
+    """
+
+    entrypoint = _read("entrypoint.sh")
+    assert 'rm -f "${_secrets_path}" 2>/dev/null || true' not in entrypoint, (
+        "the clear-text cleanup must not force a successful exit status."
+    )
+    assert 'if rm -f "${_secrets_path}" 2>/dev/null; then' in entrypoint, (
+        "the clear-text cleanup must branch on the actual removal result."
+    )
+    assert "could not remove" in entrypoint and "STILL on disk" in entrypoint, (
+        "a failed removal must warn that the bundle is retained, naming the path."
+    )
+    # The unconditional past-tense claim must be gone from the preceding text.
+    assert "The file is now removed." not in entrypoint, (
+        "the message must not assert the removal before it has happened."
+    )

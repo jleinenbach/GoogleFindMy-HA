@@ -203,9 +203,19 @@ if [ "${_rc}" -eq 0 ] && [ "${GFMY_CLEARTEXT:-}" = "1" ] && [ -f "${_secrets_pat
   echo ""
   echo "==================== END secrets.json (copy) ====================="
   echo "[entrypoint] Select the block above, copy it, and paste it into the"
-  echo "[entrypoint] Home Assistant 'secrets.json' field. The file is now removed."
+  echo "[entrypoint] Home Assistant 'secrets.json' field."
   echo ""
-  rm -f "${_secrets_path}" 2>/dev/null || true
+  # Report the real outcome instead of asserting it. A silenced `rm` claimed the
+  # bundle was gone even when it was not (a readable file under a directory that
+  # is no longer writable), leaving the full credentials on disk with no warning
+  # -- the opposite of what Track C promises.
+  if rm -f "${_secrets_path}" 2>/dev/null; then
+    echo "[entrypoint] The file has been removed."
+  else
+    echo "[entrypoint] WARNING: could not remove ${_secrets_path}." >&2
+    echo "[entrypoint] The full credential bundle is STILL on disk at that path." >&2
+    echo "[entrypoint] Delete it yourself before leaving this host unattended." >&2
+  fi
 fi
 
 exit "${_rc}"
