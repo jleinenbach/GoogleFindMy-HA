@@ -60,6 +60,16 @@ Codex review finding on PR #1208:
   clear-text fallback stayed silent. The tracks are now two separate ``if``s, each
   re-testing ``-f "${_secrets_path}"`` so an acked/TTL-consumed (deleted) bundle
   still prints nothing (Codex P2 on PR #1211).
+* The One-Click token server ran as a FOREGROUND child. Bash is PID 1 (exec-form
+  ``ENTRYPOINT``) and defers its TERM/INT traps until a foreground child returns,
+  which for this server can be its full 300 s TTL -- so ``docker stop`` escalated
+  to SIGKILL after the grace period and the EXIT cleanup (``/data`` ownership
+  handoff + supervisor shutdown) never ran, leaving the 0600 bundle owned by the
+  container UID (Codex P2 on PR #1211). Both long-running children now go through
+  one tracked slot and one wait helper. Backgrounding alone is not enough: the
+  child then dies on the relayed signal and its ``wait`` returns NORMALLY, so a
+  shutdown check after the wait stops the run instead of falling through into the
+  clear-text track and dumping the bundle into the container log.
 """
 
 from __future__ import annotations
@@ -69,6 +79,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -510,7 +521,7 @@ def test_entrypoint_runs_handoff_from_exit_trap() -> None:
     )
 
 
-def test_entrypoint_forwards_signals_to_cli_child() -> None:
+def test_entrypoint_forwards_signals_to_the_tracked_child() -> None:
     """SIGTERM/SIGINT must be forwarded to the CLI, which must run in the background.
 
     If ``python3 main.py`` runs in the FOREGROUND, bash defers the TERM/INT trap
@@ -530,14 +541,14 @@ def test_entrypoint_forwards_signals_to_cli_child() -> None:
         "main.py must be started in the BACKGROUND, otherwise bash defers the signal "
         "traps until it exits and docker stop hits SIGKILL."
     )
-    assert "CLI_PID=$!" in entrypoint, (
-        "the entrypoint must capture the CLI child PID (CLI_PID=$!) so signals can "
+    assert "CHILD_PID=$!" in entrypoint, (
+        "the entrypoint must capture the child PID (CHILD_PID=$!) so signals can "
         "be forwarded to it and its exit status waited on."
     )
 
     # 2) The entrypoint waits on that specific child (not a bare `wait`).
-    assert 'wait "${CLI_PID}"' in entrypoint, (
-        "the entrypoint must wait on the CLI child PID so its real exit status "
+    assert 'wait "${CHILD_PID}"' in entrypoint, (
+        "the entrypoint must wait on the tracked child PID so its real exit status "
         "propagates to the EXIT cleanup."
     )
 
@@ -546,14 +557,14 @@ def test_entrypoint_forwards_signals_to_cli_child() -> None:
     assert "trap 'on_signal INT 130' INT" in entrypoint
     assert "trap 'exit 143' TERM" not in entrypoint, (
         "a bare `exit` on SIGTERM does not reach the foreground child; the trap must "
-        "forward the signal to CLI_PID (on_signal)."
+        "forward the signal to CHILD_PID (on_signal)."
     )
     assert "trap 'exit 130' INT" not in entrypoint
 
     # 4) on_signal actually relays the signal to the running child.
-    assert 'kill -s "${sig}" "${CLI_PID}"' in entrypoint, (
-        "on_signal must relay the received signal to the CLI child via "
-        "kill -s <sig> CLI_PID."
+    assert 'kill -s "${sig}" "${CHILD_PID}"' in entrypoint, (
+        "on_signal must relay the received signal to the tracked child via "
+        "kill -s <sig> CHILD_PID."
     )
 
 
@@ -683,8 +694,8 @@ def test_backgrounded_login_child_behaviourally_keeps_stdin_and_default_sigint(
             "function on_signal { :; }\n"
             f"cd {tmp_path!s}\n"
             f"{launch_line}\n"
-            "CLI_PID=$!\n"
-            'wait "${CLI_PID}"\n'
+            "CHILD_PID=$!\n"
+            'wait "${CHILD_PID}"\n'
         )
         proc = subprocess.run(
             ["bash", "-c", script],
@@ -710,6 +721,411 @@ def test_backgrounded_login_child_behaviourally_keeps_stdin_and_default_sigint(
     assert "STDIN_OK=False" in control_out, (
         "control without `<&0` unexpectedly read stdin; the behavioural stdin "
         f"assertion is not discriminating. got: {control_out!r}"
+    )
+
+
+def _code_lines(script: str) -> list[str]:
+    """Return only the non-comment, non-blank lines of a shell script.
+
+    Every guard below that counts occurrences or matches a construct runs on this,
+    so an explanatory comment can neither satisfy a guard (false negative: the
+    construct is only *described*, not present) nor break one (false positive: a
+    comment that merely mentions ``CHILD_PID=$!`` inflating a count).
+    """
+
+    return [
+        ln
+        for ln in script.splitlines()
+        if ln.strip() and not ln.lstrip().startswith("#")
+    ]
+
+
+def _extract_shell_function(entrypoint: str, name: str) -> str:
+    """Return the verbatim ``function <name> { ... }`` block from ``entrypoint.sh``.
+
+    The behavioural test below runs the REAL signal-handling helpers rather than a
+    hand-written imitation, so it regresses with the script instead of drifting away
+    from it. Relies on the file's own formatting: the body is indented and the block
+    is closed by a ``}`` in column 0.
+    """
+
+    lines = entrypoint.splitlines()
+    for i, line in enumerate(lines):
+        if line.startswith(f"function {name} {{"):
+            for j in range(i + 1, len(lines)):
+                if lines[j] == "}":
+                    return "\n".join(lines[i : j + 1])
+            break
+    raise AssertionError(f"could not locate `function {name}` in entrypoint.sh")
+
+
+def _extract_token_server_launch(entrypoint: str) -> str:
+    """Return the real backgrounded ``token_server.py`` launch line.
+
+    Feeding this verbatim into the behavioural test below is what makes it a
+    WIRING test and not merely a construct test: if the server is ever moved back
+    into the foreground, this raises instead of silently exercising a hand-written
+    backgrounding line that no longer reflects the script.
+    """
+
+    for line in _code_lines(entrypoint):
+        stripped = line.strip()
+        if "exec python3" in stripped and "token_server.py" in stripped:
+            if not stripped.endswith(") &"):
+                break
+            return stripped
+    raise AssertionError(
+        "could not locate a BACKGROUNDED `( ... exec python3 ... token_server.py ) &` "
+        "launch line in entrypoint.sh (a foreground invocation defers the signal "
+        "traps for up to the full TTL)"
+    )
+
+
+def test_every_tracked_wait_is_followed_by_the_shutdown_check() -> None:
+    """Both waits must be guarded, not just the one the report happened to name.
+
+    A tracked child dies on the relayed signal and its ``wait`` returns NORMALLY, so
+    the status alone cannot distinguish "finished" from "shutting down" -- ``main.py``
+    even catches ``KeyboardInterrupt`` and returns 0. Guarding only the token-server
+    wait leaves the structurally identical CLI wait open: a relayed SIGINT would then
+    look like a successful login and the run would continue into the handoff tracks,
+    starting a token server nobody can reach or printing the bundle to the log.
+    """
+
+    code = _code_lines(_read("entrypoint.sh"))
+
+    waits = [
+        i
+        for i, ln in enumerate(code)
+        if ln.lstrip().startswith("wait_for_tracked_child")
+    ]
+    assert len(waits) == 2, f"expected exactly two tracked waits, found {len(waits)}"
+    for i in waits:
+        following = code[i + 1].lstrip()
+        assert following.startswith("exit_if_terminating "), (
+            "every wait_for_tracked_child must be followed immediately by "
+            f"exit_if_terminating; the wait at {code[i].strip()!r} is followed by "
+            f"{following!r}."
+        )
+    assert sum(ln.startswith("function exit_if_terminating {") for ln in code) == 1, (
+        "the shutdown check must exist exactly once, as a shared helper."
+    )
+
+
+def test_wait_helper_clears_the_slot_and_ignores_an_empty_one() -> None:
+    """The tracked slot must be reset, and an empty slot must not read as failure.
+
+    Without the reset, ``on_signal`` keeps relaying to a PID number that the kernel
+    may since have recycled to an unrelated process. And ``wait ""`` returns 1, which
+    the ``-eq 0`` handoff gates would silently read as "the login failed".
+    """
+
+    helper = _extract_shell_function(_read("entrypoint.sh"), "wait_for_tracked_child")
+
+    assert 'CHILD_PID=""' in helper, (
+        "wait_for_tracked_child must clear the tracked slot before returning, so "
+        "on_signal cannot signal a recycled PID in the gap between children."
+    )
+    assert '[ -n "${CHILD_PID}" ] || return 0' in helper, (
+        "an empty slot must return success, not the exit status of a failed `wait`."
+    )
+
+
+def test_wait_helper_behaviourally_survives_a_child_that_outlives_one_signal(
+    tmp_path: Path,
+) -> None:
+    """The re-wait loop -- the whole reason the helper exists -- must be exercised.
+
+    ``wait`` returns >128 as soon as a forwarded signal interrupts it, even though the
+    child is still shutting down. A child that handles the signal and exits with its
+    own status a moment later is the case the loop is for; both other behavioural
+    tests use a child that dies instantly and never enter it. Here the child traps
+    TERM, sleeps, and exits 5 -- so a missing loop would surface as 143 instead.
+
+    The stub is Python, matching the real children: a bash stub would have to hold
+    its own ``sleep`` in the foreground and would therefore defer its own trap,
+    reproducing the very defect under test instead of the shutdown being modelled.
+    """
+
+    entrypoint = _read("entrypoint.sh")
+    on_signal = _extract_shell_function(entrypoint, "on_signal")
+    wait_helper = _extract_shell_function(entrypoint, "wait_for_tracked_child")
+    rc_file = tmp_path / "rc"
+
+    stub = tmp_path / "slow_shutdown_child.py"
+    stub.write_text(
+        "import signal, sys, time\n"
+        "def _handler(signum, frame):\n"
+        "    time.sleep(1)  # graceful shutdown still in progress\n"
+        "    sys.exit(5)\n"
+        "signal.signal(signal.SIGTERM, _handler)\n"
+        "time.sleep(30)\n",
+        encoding="utf-8",
+    )
+
+    script = (
+        "#!/usr/bin/env bash\n"
+        "set -e\n"
+        'CHILD_PID=""\n'
+        '_terminating=""\n'
+        f"{on_signal}\n"
+        f"{wait_helper}\n"
+        "trap 'on_signal TERM 143' TERM\n"
+        f"( trap - INT QUIT; exec {sys.executable} {stub!s} ) &\n"
+        "CHILD_PID=$!\n"
+        "_rc=0\n"
+        "wait_for_tracked_child || _rc=$?\n"
+        f'echo "${{_rc}}" > "{rc_file!s}"\n'
+    )
+    proc = subprocess.Popen(  # noqa: S603 - fixed argv, no shell
+        ["bash", "-c", script], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+    )
+    try:
+        time.sleep(0.5)
+        proc.terminate()
+        proc.wait(timeout=15)
+    finally:
+        proc.kill()
+        proc.wait(timeout=15)
+
+    assert rc_file.exists(), "the helper never returned after the forwarded signal"
+    assert rc_file.read_text().strip() == "5", (
+        "the helper returned the interrupted-wait status instead of re-waiting for "
+        f"the child's real exit code; got {rc_file.read_text().strip()!r}."
+    )
+
+
+def test_terminating_marker_catches_a_child_that_exits_cleanly_on_the_signal(
+    tmp_path: Path,
+) -> None:
+    """The ``_terminating`` half of the shutdown check must not be dead weight.
+
+    The status check (``_srv_rc > 128``) alone covers today's server, which returns
+    130 on ``KeyboardInterrupt``. It does NOT cover a child that catches the signal
+    and shuts down cleanly with 0 -- an entirely ordinary way to write a server, and
+    one change away. Then only the marker set in ``on_signal`` still says "we are
+    shutting down", and without it execution would fall through into the clear-text
+    track on a plain ``docker stop``. Both halves are kept for that reason; this test
+    pins the half the status check cannot reach.
+    """
+
+    entrypoint = _read("entrypoint.sh")
+    on_signal = _extract_shell_function(entrypoint, "on_signal")
+    wait_helper = _extract_shell_function(entrypoint, "wait_for_tracked_child")
+    guard = (
+        f"{_extract_shell_function(entrypoint, 'exit_if_terminating')}\n"
+        'exit_if_terminating "${_srv_rc}"'
+    )
+    fallthrough = tmp_path / "fallthrough"
+
+    stub = tmp_path / "clean_exit_child.py"
+    stub.write_text(
+        "import signal, sys, time\n"
+        "signal.signal(signal.SIGTERM, lambda s, f: sys.exit(0))\n"
+        "time.sleep(30)\n",
+        encoding="utf-8",
+    )
+
+    script = (
+        "#!/usr/bin/env bash\n"
+        "set -e\n"
+        'CHILD_PID=""\n'
+        '_terminating=""\n'
+        f"{on_signal}\n"
+        f"{wait_helper}\n"
+        "trap 'on_signal TERM 143' TERM\n"
+        f"( trap - INT QUIT; exec {sys.executable} {stub!s} ) &\n"
+        "CHILD_PID=$!\n"
+        "_srv_rc=0\n"
+        "wait_for_tracked_child || _srv_rc=$?\n"
+        f"{guard}\n"
+        f'echo reached > "{fallthrough!s}"\n'
+    )
+    proc = subprocess.Popen(  # noqa: S603 - fixed argv, no shell
+        ["bash", "-c", script], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+    )
+    try:
+        time.sleep(0.5)
+        proc.terminate()
+        proc.wait(timeout=15)
+    finally:
+        proc.kill()
+        proc.wait(timeout=15)
+
+    assert not fallthrough.exists(), (
+        "a child that exited 0 on the relayed signal was treated as a normal "
+        "completion, so execution continued into the post-server handoff tracks."
+    )
+
+
+def test_entrypoint_tracks_the_oneclick_token_server_like_the_cli_child() -> None:
+    """The One-Click token server must NOT run as a foreground child.
+
+    Codex: with ``GFMY_ONECLICK=1`` the server can wait for its full TTL (300 s).
+    Bash is PID 1 here (exec-form ``ENTRYPOINT``) and defers its TERM/INT traps until
+    the foreground child returns, so a ``docker stop`` during that wait escalates to
+    SIGKILL after the default 10 s grace period: the EXIT cleanup never runs, ``/data``
+    keeps container ownership and the 0600 bundle stays unreadable for the host user.
+    This is the exact failure the CLI launch already avoids -- the server has to use
+    the same tracked-child construct.
+    """
+
+    entrypoint = _read("entrypoint.sh")
+    code = _code_lines(entrypoint)
+
+    launch = _extract_token_server_launch(entrypoint)  # raises on a foreground call
+    assert launch.endswith(") &"), (
+        "the token server must be started in the BACKGROUND (`( ... ) &`), otherwise "
+        "bash defers the signal traps for up to the full TTL."
+    )
+    assert not any(
+        ln.strip() == "python3 /app/gfmy/docker-login/token_server.py || true"
+        for ln in code
+    ), "the bare foreground `python3 token_server.py || true` invocation must be gone."
+    assert "trap - INT QUIT; exec python3" in launch, (
+        "the server child must reset INT/QUIT before exec so Python installs its own "
+        "KeyboardInterrupt handler instead of inheriting SIG_IGN."
+    )
+    # Both long-running children go through the ONE tracked slot and the ONE wait
+    # helper; a second hand-rolled re-wait loop would be a copy waiting to drift.
+    assert sum(ln.strip() == "CHILD_PID=$!" for ln in code) == 2, (
+        "both the CLI child and the token server must publish their PID into the "
+        "single tracked slot on_signal relays to."
+    )
+    definitions = [
+        ln for ln in code if ln.startswith("function wait_for_tracked_child {")
+    ]
+    call_sites = [ln for ln in code if ln.lstrip().startswith("wait_for_tracked_child")]
+    assert len(definitions) == 1, (
+        "the signal-interrupted re-wait loop must exist exactly once, as a shared "
+        f"helper; found {len(definitions)} definitions."
+    )
+    assert len(call_sites) == 2, (
+        "expected exactly two call sites of the shared wait helper (CLI child and "
+        f"token server), no per-call-site copy of the loop; found {len(call_sites)}."
+    )
+
+
+def test_tracked_child_behaviourally_lets_cleanup_run_on_sigterm(
+    tmp_path: Path,
+) -> None:
+    """Behavioural proof that a signal reaches cleanup while a long child is waiting.
+
+    Runs the REAL ``on_signal`` / ``wait_for_tracked_child`` helpers AND the real
+    token-server launch line, all taken verbatim out of ``entrypoint.sh``, around a
+    long-sleeping stub child; sends SIGTERM to the outer bash and asserts the
+    EXIT-trap cleanup runs PROMPTLY -- i.e. well within a Docker stop grace period
+    rather than only after the child's own timeout. Taking the launch line from the
+    file (rather than writing one here) is what also makes this a wiring test: moving
+    the server back into the foreground fails extraction instead of quietly passing.
+
+    The negative control is the construct Codex flagged: the very same script with the
+    child in the FOREGROUND. There bash defers the trap until the child returns, so no
+    cleanup marker appears in time -- which is what makes the positive assertion
+    discriminating rather than vacuously true.
+    """
+
+    entrypoint = _read("entrypoint.sh")
+    on_signal = _extract_shell_function(entrypoint, "on_signal")
+    wait_helper = _extract_shell_function(entrypoint, "wait_for_tracked_child")
+
+    # The child outlives the observation window by far, standing in for a token
+    # server that is still waiting for an ack (up to its 300 s TTL). Only the
+    # executed program is swapped; the surrounding construct stays verbatim.
+    child_sleep = 30
+    grace = 5.0
+    real_launch = _extract_token_server_launch(entrypoint)
+    stub_launch = re.sub(
+        r"exec python3 \S*token_server\.py", f"exec sleep {child_sleep}", real_launch
+    )
+    assert "exec sleep" in stub_launch, (
+        f"could not substitute the stub into the real launch line: {real_launch!r}"
+    )
+
+    guard = (
+        f"{_extract_shell_function(entrypoint, 'exit_if_terminating')}\n"
+        'exit_if_terminating "${_srv_rc}"'
+    )
+
+    def _run(tracked: bool, *, with_guard: bool = True) -> bool:
+        tag = f"{'tracked' if tracked else 'foreground'}_{int(with_guard)}"
+        marker = tmp_path / f"cleanup_{tag}"
+        # Stands in for the clear-text track that follows the server wait: it must
+        # NOT be reached when the run is ending because of a signal.
+        fallthrough = tmp_path / f"fallthrough_{tag}"
+        launch = (
+            f"{stub_launch}\n"
+            "CHILD_PID=$!\n"
+            "_srv_rc=0\n"
+            "wait_for_tracked_child || _srv_rc=$?\n"
+            f"{guard if with_guard else ''}\n"
+            if tracked
+            else f"sleep {child_sleep} || true\n"
+        )
+        script = (
+            "#!/usr/bin/env bash\n"
+            "set -e\n"
+            "_cleaned=0\n"
+            'CHILD_PID=""\n'
+            '_terminating=""\n'
+            "function cleanup {\n"
+            '  [ "${_cleaned}" = 1 ] && return\n'
+            "  _cleaned=1\n"
+            f'  echo ran > "{marker!s}"\n'
+            "}\n"
+            f"{on_signal}\n"
+            f"{wait_helper}\n"
+            "trap cleanup EXIT\n"
+            "trap 'on_signal TERM 143' TERM\n"
+            f"{launch}"
+            f'echo reached > "{fallthrough!s}"\n'
+        )
+        proc = subprocess.Popen(  # noqa: S603 - fixed argv, no shell
+            ["bash", "-c", script],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        try:
+            time.sleep(0.5)  # let the child start and the wait settle
+            proc.terminate()
+            try:
+                proc.wait(timeout=grace)
+            except subprocess.TimeoutExpired:
+                pass
+            return marker.exists(), fallthrough.exists()
+        finally:
+            proc.kill()
+            proc.wait(timeout=grace)
+
+    cleaned, fell_through = _run(tracked=True)
+    assert cleaned, (
+        "the EXIT cleanup did not run within the grace window while a long-lived "
+        "tracked child was being waited on; a `docker stop` would escalate to "
+        "SIGKILL and skip the /data ownership handoff."
+    )
+    # Backgrounding alone is not enough: the tracked child dies on the relayed
+    # signal and its wait() returns NORMALLY, so without the terminating check the
+    # script would continue into the clear-text track and dump the credential
+    # bundle into the container log on a plain `docker stop`.
+    assert not fell_through, (
+        "execution continued into the post-server handoff tracks after a relayed "
+        "SIGTERM; a `docker stop` would print the credential bundle to the "
+        "container log and report success."
+    )
+
+    control_cleaned, _ = _run(tracked=False)
+    assert not control_cleaned, (
+        "control with a FOREGROUND child unexpectedly ran cleanup in time, so this "
+        "test does not actually discriminate between the two constructs."
+    )
+
+    # Second control: the same tracked construct WITHOUT the terminating check does
+    # fall through -- proving the assertion above discriminates on that guard and is
+    # not merely satisfied by the backgrounding.
+    _, unguarded_fell_through = _run(tracked=True, with_guard=False)
+    assert unguarded_fell_through, (
+        "control without the terminating check unexpectedly stopped anyway, so the "
+        "fall-through assertion does not discriminate on that guard."
     )
 
 
@@ -873,7 +1289,14 @@ def _as_elif_chain(section: str) -> str:
         1,
     )
     assert chained != section, "clear-text condition not found; control is stale"
-    chained = chained.replace("|| true\nfi\n", "|| true\n", 1)
+    # Drop the `fi` that closes the one-click block, so the clear-text branch really
+    # chains onto it. Located structurally (last top-level `fi` before the `elif`)
+    # rather than by a text anchor next to the server call, which moves whenever the
+    # one-click block gains a line.
+    lines = chained.splitlines()
+    elif_at = next(i for i, ln in enumerate(lines) if ln.startswith("elif "))
+    close_at = max(i for i in range(elif_at) if lines[i] == "fi")
+    chained = "\n".join(lines[:close_at] + lines[close_at + 1 :]) + "\n"
     assert chained.count("\nfi\n") == 1, (
         "control must leave exactly the chain-closing `fi`; got "
         f"{chained.count(chr(10) + 'fi' + chr(10))}"
@@ -912,8 +1335,23 @@ def _run_handoff_section(
     script = section.replace(_TOKEN_SERVER_PATH, str(server_stub)).replace(
         "python3", sys.executable
     )
+    # The extracted section calls the tracked-child helpers, which are defined
+    # ABOVE it in entrypoint.sh. Without them bash reports "command not found",
+    # never waits for the backgrounded server, and the dispatch below races the
+    # stub -- a green-looking harness measuring nothing. Prepend the REAL helpers
+    # (and the state they own) so the section runs in its actual context.
+    entrypoint = _read("entrypoint.sh")
+    preamble = (
+        "set -e\n"
+        "_rc=0\n"
+        'CHILD_PID=""\n'
+        '_terminating=""\n'
+        f"{_extract_shell_function(entrypoint, 'on_signal')}\n"
+        f"{_extract_shell_function(entrypoint, 'wait_for_tracked_child')}\n"
+        f"{_extract_shell_function(entrypoint, 'exit_if_terminating')}\n"
+    )
     proc = subprocess.run(
-        ["bash", "-c", "set -e\n_rc=0\n" + script],
+        ["bash", "-c", preamble + script],
         env={
             **os.environ,
             "GFMY_ONECLICK": "1" if oneclick else "",
@@ -1030,11 +1468,7 @@ def _entrypoint_code_lines() -> list[str]:
     by prose in a comment that describes the intended shape.
     """
 
-    return [
-        line
-        for line in _read("entrypoint.sh").splitlines()
-        if line.strip() and not line.lstrip().startswith("#")
-    ]
+    return _code_lines(_read("entrypoint.sh"))
 
 
 def test_entrypoint_keeps_one_clear_text_block_in_its_own_if(tmp_path: Path) -> None:
