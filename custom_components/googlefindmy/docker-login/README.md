@@ -50,12 +50,51 @@ itself.
   ssh -L 7900:127.0.0.1:7900 <docker-host>
   ```
   Then open `http://localhost:7900` on your own machine.
-- **Trusted LAN opt-in.** Only on a network you trust, bind noVNC to all
-  interfaces by setting `GFMY_NOVNC_BIND=0.0.0.0` before starting:
+- **Trusted LAN opt-in.** Only on a network you trust, bind noVNC to a
+  **concrete** address of the Docker host:
   ```bash
-  GFMY_NOVNC_BIND=0.0.0.0 ./login.sh
+  ./login.sh --ip 192.168.1.21
   ```
-  Then browse to `http://<docker-host-ip>:7900`. Prefer the tunnel over this.
+  The launcher then prints exactly that address as the URL to open. Prefer this
+  over the `GFMY_NOVNC_BIND=0.0.0.0` wildcard, which publishes on every
+  interface; prefer the SSH tunnel over both.
+
+  Run `./login.sh` without arguments first: when noVNC stays on loopback the
+  launcher lists the addresses it detected on this host, each with the
+  ready-to-paste `--ip` command. Container and VPN interfaces (`docker0`,
+  `br-*`, `veth*`, `tun*`, `wg*`) are left out, but the list is still a
+  suggestion: pick the one your browser can actually reach. (`login.cmd` on
+  Windows takes the same `--ip` flag, in both the `--ip X` and `--ip=X`
+  spellings, but does not auto-detect, because parsing `ipconfig` output in
+  batch is locale-dependent.)
+
+### The three address roles
+
+The token endpoint and the noVNC viewer serve **different consumers**, so they
+have separate settings. Never collapse them into one value.
+
+| Setting | Port | Consumer | Default | Why |
+|---|---|---|---|---|
+| *(none, pinned)* | 7901 | Home Assistant, machine-to-machine | `127.0.0.1`, **not configurable** | **Security boundary.** The endpoint serves Google credentials in cleartext, so it gets no environment override surface at all: the bind is written literally into `docker-compose.oneclick.yml`, so one stray variable in a shell, `.env` file or compose wrapper cannot widen it. |
+| `GFMY_NOVNC_BIND` | 7900 | the browser, via the host's network stack | `127.0.0.1` | Where the viewer actually listens. Everything the launchers print about reachability is derived from **this** value, never from the printed one. |
+| `GFMY_NOVNC_URL_HOST` | 7900 | printed text only | the noVNC bind | The address you are told to open. A wildcard bind is never printed as a URL: `login.sh` substitutes the first detected address, `login.cmd` (which does not auto-detect) falls back to `127.0.0.1` and asks you to pass `--ip`. |
+
+Home Assistant cannot derive the noVNC address for you: that link is opened by
+**your browser**, which usually runs on a different machine than the Docker
+host, and no machine on the LAN can know where you are clicking from. The
+config flow therefore only renders a clickable noVNC link when the host you
+entered is a non-loopback IP address; otherwise it shows the guidance above.
+
+> **Does the loopback token endpoint reach your Home Assistant?**
+> Yes when HA shares the host's network namespace (Home Assistant OS, HA Core,
+> or a container started with `network_mode: host`), because then HA's
+> `127.0.0.1` *is* the host loopback. A HA container in a bridge network has its **own**
+> loopback and cannot reach it; use the shared-network route below or the file
+> handoff instead. Check the mode without guessing the container name:
+> ```bash
+> docker ps --format '{{.Names}}' | while read n; do \
+>   printf '%-28s %s\n' "$n" "$(docker inspect -f '{{.HostConfig.NetworkMode}}' "$n")"; done
+> ```
 
 ## Which setup can run this?
 

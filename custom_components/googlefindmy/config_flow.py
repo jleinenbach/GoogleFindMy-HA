@@ -47,6 +47,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import ipaddress
 import json
 import logging
 import os
@@ -1652,6 +1653,86 @@ def _map_container_error(exc: ContainerLoginError) -> str:
     return "container_login_failed"
 
 
+def _classify_novnc_host(host: str) -> str:
+    """Classify ``host`` for noVNC link rendering.
+
+    Returns ``"linkable"``, ``"loopback"`` or ``"hostname"``.
+
+    The token endpoint (``CONTAINER_TOKEN_PORT``) and the noVNC viewer
+    (``CONTAINER_NOVNC_PORT``) have different consumers, so the address that
+    reaches one does not necessarily reach the other. ``host`` is entered for
+    the machine-to-machine token fetch and is resolved from Home Assistant's
+    network namespace, while the noVNC URL is opened by the *user's browser*,
+    which commonly runs on a different machine than the Docker host. Rendering
+    a clickable link is therefore only honest for a non-loopback IP address:
+
+    * ``loopback`` - Home Assistant reaches the container over the host
+      loopback, but a browser on another machine never will.
+    * ``hostname`` - anything that is not an IP literal, notably the compose
+      service name used by the documented shared-network route; container-only
+      DNS does not resolve in a browser.
+
+    Deliberately no ``homeassistant.helpers.network.get_url()`` fallback here:
+    with ``external_url`` unset and Nabu Casa remote UI active, its external
+    branch returns the *public* cloud URL, and its internal branch returns
+    whatever ``internal_url`` says, which behind a reverse proxy need not
+    resolve in the user's browser either. Both would be worse than no link.
+    """
+
+    candidate = (host or "").strip()
+    if not candidate:
+        return "hostname"
+    try:
+        address = ipaddress.ip_address(candidate.strip("[]"))
+    except ValueError:
+        return "hostname"
+    if address.is_loopback or address.is_unspecified:
+        return "loopback"
+    return "linkable"
+
+
+def _novnc_access_placeholder(host: str) -> str:
+    """Render the noVNC access placeholder for ``host``.
+
+    Returns a markdown link only when the address is browser-reachable; the
+    fallback is inline code, never a link, so the UI cannot offer a target that
+    is known not to work. Neither branch contains prose (one is the address
+    itself, the other a fixed URL skeleton), so this value needs no translation
+    while the surrounding sentence stays fully translatable.
+
+    The address is re-rendered from the parsed value rather than interpolated
+    raw, so an IPv6 literal is bracketed exactly once whether or not the user
+    typed the brackets. ``_classify_novnc_host`` accepts both spellings, so
+    interpolating ``host`` verbatim would emit ``http://2001:db8::1:7900``,
+    which no browser can parse.
+    """
+
+    candidate = (host or "").strip()
+    if _classify_novnc_host(candidate) == "linkable":
+        address = ipaddress.ip_address(candidate.strip("[]"))
+        literal = (
+            f"[{address.compressed}]" if address.version == 6 else address.compressed
+        )
+        url = f"http://{literal}:{CONTAINER_NOVNC_PORT}"
+        return f"[{url}]({url})"
+    return f"`http://<docker-host>:{CONTAINER_NOVNC_PORT}`"
+
+
+def _count_supplied_credential_methods(
+    user_input: Mapping[str, Any], field_names: tuple[str, ...]
+) -> int:
+    """Count how many of ``field_names`` carry a non-blank value.
+
+    Credential forms accept several mutually exclusive methods. The container
+    ``GET`` is one-shot, so a submission carrying more than one method has to be
+    rejected *before* any network call: otherwise the pasted bundle is silently
+    dropped and the pairing code is burned. Kept as one helper so the precedence
+    is not re-derived at each call site (reauth and options share it).
+    """
+
+    return sum(1 for name in field_names if str(user_input.get(name) or "").strip())
+
+
 def _container_login_schema(
     *, host: str, port: int, pairing_code: str = ""
 ) -> vol.Schema:
@@ -2250,6 +2331,22 @@ def _interpret_credentials_choice(
 # ---------------------------
 _REAUTH_FIELD_SECRETS = "secrets_json"
 _REAUTH_FIELD_TOKEN = "new_oauth_token"
+_REAUTH_FIELD_PAIRING_CODE = "pairing_code"
+
+# Mutually exclusive credential inputs per form, in the order they appear.
+# ``_REAUTH_FIELD_TOKEN`` stays listed although its UI input is commented out
+# (broken manual path, see agents/config_flow/AGENTS.md): if it is ever
+# re-enabled the exclusivity check must already cover it.
+_REAUTH_CREDENTIAL_FIELDS: tuple[str, ...] = (
+    _REAUTH_FIELD_SECRETS,
+    _REAUTH_FIELD_TOKEN,
+    _REAUTH_FIELD_PAIRING_CODE,
+)
+_OPTIONS_CREDENTIAL_FIELDS: tuple[str, ...] = (
+    "new_secrets_json",
+    "new_oauth_token",
+    _REAUTH_FIELD_PAIRING_CODE,
+)
 
 
 def _interpret_reauth_choice(
@@ -3992,7 +4089,9 @@ class ConfigFlow(
             ),
             errors=errors,
             description_placeholders={
-                "novnc_url": f"http://{host}:{CONTAINER_NOVNC_PORT}"
+                # Always present, so the translated description can reference it
+                # unconditionally without risking a KeyError while rendering.
+                "novnc_access": _novnc_access_placeholder(host)
             },
         )
 
@@ -4651,7 +4750,22 @@ class ConfigFlow(
                 }
             )
 
-        if user_input is not None and (user_input.get("pairing_code") or "").strip():
+        if (
+            user_input is not None
+            and _count_supplied_credential_methods(
+                user_input, _REAUTH_CREDENTIAL_FIELDS
+            )
+            > 1
+        ):
+            # Reject a mixed submission BEFORE any network call: the container
+            # GET is one-shot, so picking a winner here would silently drop the
+            # pasted bundle and burn the pairing code. Mirrors the `choose_one`
+            # verdict that _interpret_reauth_choice() gives for secrets+token.
+            errors["base"] = "choose_one"
+        elif (
+            user_input is not None
+            and (user_input.get(_REAUTH_FIELD_PAIRING_CODE) or "").strip()
+        ):
             container_result = await self._async_reauth_container_persist(
                 entry=entry,
                 fixed_email=fixed_email,
@@ -7063,7 +7177,15 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin, _ContainerLoginMixi
                 has_token = bool(new_token)
                 has_secrets = bool((user_input.get("new_secrets_json") or "").strip())
                 has_container = bool((user_input.get("pairing_code") or "").strip())
-                if not has_secrets and not has_token and not has_container:
+                supplied = _count_supplied_credential_methods(
+                    user_input, _OPTIONS_CREDENTIAL_FIELDS
+                )
+                if supplied != 1:
+                    # Exactly one credential method per submission. Zero is the
+                    # pre-existing "nothing entered" case; more than one must
+                    # fail here too, before any network call, because the
+                    # container GET is one-shot: silently picking a winner would
+                    # discard the pasted bundle AND burn the pairing code.
                     errors["base"] = "choose_one"
                 elif has_container:
                     entry = self.config_entry

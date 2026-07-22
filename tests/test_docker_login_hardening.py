@@ -1086,3 +1086,154 @@ def test_entrypoint_keeps_one_clear_text_block_in_its_own_if(tmp_path: Path) -> 
         "the clear-text condition must re-test the secrets file, so an acked or "
         "TTL-consumed (deleted) bundle prints nothing."
     )
+
+
+def _echo_lines(launcher: str) -> list[str]:
+    """Return the launcher lines that actually PRINT something to the user.
+
+    Only these lines are the user-facing contract; the surrounding comment
+    blocks may (and do) still discuss ``localhost`` as a concept. For bash an
+    output line starts with ``echo`` after optional indentation; for the batch
+    file the ``echo`` may sit behind a one-line ``if`` guard, so any line
+    carrying an ``echo`` token counts, minus the ``rem`` comments.
+    """
+
+    lines = _read(launcher).splitlines()
+    if launcher.endswith(".cmd"):
+        return [
+            line
+            for line in lines
+            if not line.lstrip().lower().startswith("rem")
+            and re.search(r"\becho\b", line, re.IGNORECASE)
+        ]
+    return [line for line in lines if re.match(r"\s*echo\b", line)]
+
+
+@pytest.mark.parametrize("launcher", ["login.sh", "login.cmd"])
+def test_launcher_never_prints_localhost_as_the_novnc_url(launcher: str) -> None:
+    """No printed line may hand the user ``localhost:7900`` as the noVNC address.
+
+    The noVNC viewer is opened by the operator's BROWSER, which in the common
+    setup does not run on the Docker host at all (NAS, home server, VM). A
+    printed ``http://localhost:7900`` then points the browser at the wrong
+    machine and the login appears broken. The launchers therefore print the
+    address they actually bound (or the one passed via ``--ip``), never the
+    ``localhost`` alias.
+    """
+
+    offenders = [line for line in _echo_lines(launcher) if "localhost:7900" in line]
+    assert not offenders, (
+        f"{launcher} still prints a localhost noVNC URL ({offenders!r}). Print the "
+        "bound/--ip address instead: the browser that opens this URL usually runs "
+        "on a different machine than the Docker host."
+    )
+
+
+def test_login_sh_handles_the_ip_flag_in_its_argument_parser() -> None:
+    """``login.sh`` must handle ``--ip`` in its argument parser.
+
+    ``--ip <ADDRESS>`` is the supported way to make the noVNC viewer reachable
+    from another machine, and it has to be handled by the argument parser
+    itself, not merely mentioned in the usage text (which is the failure mode a
+    plain substring check would miss).
+
+    The token endpoint (7901) has no such opt-in on purpose: its loopback
+    publish is pinned statically in ``docker-compose.oneclick.yml`` and guarded
+    by ``test_no_lan_opt_in_exists_for_the_token_port`` above. There is no
+    runtime check in either launcher, and this test must not imply one.
+    """
+
+    text = _read("login.sh")
+    # `--ip` must be handled inside the argument-dispatch LOOP. Anchoring on the
+    # first `case "$1" in` would be wrong: the address-validation helpers use
+    # that construct too, so the guard would pass on their text alone.
+    lines = text.splitlines()
+    loop_start = next(
+        (
+            i
+            for i, line in enumerate(lines)
+            if line.strip() == 'while [ "$#" -gt 0 ]; do'
+        ),
+        None,
+    )
+    assert loop_start is not None, (
+        'login.sh must dispatch its arguments through a `while [ "$#" -gt 0 ]` '
+        "loop; the --ip guard below anchors on it."
+    )
+    loop_end = next(
+        i
+        for i, line in enumerate(lines[loop_start:], loop_start)
+        if line.strip() == "done"
+    )
+    parser = "\n".join(lines[loop_start:loop_end])
+    assert "--ip" in parser, (
+        "login.sh must handle `--ip` in its argument parser (documenting it in the "
+        "usage text alone leaves the flag unimplemented)."
+    )
+    assert "--ip=*" in parser, (
+        "login.sh must accept the `--ip=<addr>` spelling too; the README promises "
+        "both spellings for parity with login.cmd."
+    )
+
+
+def test_reachability_hint_is_derived_from_the_bind_not_the_printed_address() -> None:
+    """The "who can reach this" verdict must key on the BIND in both launchers.
+
+    With a wildcard bind the PRINTED address is a concrete one (loopback for
+    ``login.cmd``, a detected address for ``login.sh``). Branching the hint on
+    that printed value therefore claims "only this Docker host reaches it" for a
+    viewer that is in fact listening on every interface, protected by the fixed
+    password ``secret`` -- a false all-clear in exactly the security note whose
+    job is to be true. This regression shipped once and is pinned here.
+    """
+
+    sh = _read("login.sh")
+    assert 'if is_loopback_addr "$novnc_bind"; then' in sh, (
+        "login.sh must classify the BIND for the reachability hint; branching on "
+        "$novnc_url_host gives a false all-clear for a wildcard bind."
+    )
+    assert 'case "$novnc_url_host" in' not in sh, (
+        "login.sh must not branch its reachability hint on the printed address."
+    )
+
+    cmd = _read("login.cmd")
+    assert "if defined IS_LOOPBACK goto :loopback_hint" in cmd, (
+        "login.cmd must branch its reachability hint on the IS_LOOPBACK flag."
+    )
+    assert '"%NOVNC_URL_HOST%"=="127.0.0.1" goto :loopback_hint' not in cmd, (
+        "login.cmd must not branch its reachability hint on the printed address."
+    )
+    loopback_flags = [
+        line for line in cmd.splitlines() if 'set "IS_LOOPBACK=1"' in line
+    ]
+    assert loopback_flags, "login.cmd must set IS_LOOPBACK somewhere."
+    assert all("%NOVNC_BIND" in line for line in loopback_flags), (
+        "every IS_LOOPBACK assignment must be derived from %NOVNC_BIND%, not "
+        f"from the printed address (found {loopback_flags!r})."
+    )
+
+
+def test_login_cmd_argument_parser_handles_both_ip_spellings() -> None:
+    """``login.cmd`` must implement ``--ip X`` and ``--ip=X``, with a miss path.
+
+    The README promises "the same ``--ip`` flag" as ``login.sh``. Batch has no
+    argument parser, so the flag lives in hand-written labels; a missing label
+    or a lost ``shift`` silently turns the flag into "unknown option". Every
+    label referenced by a ``goto`` must therefore also be defined.
+    """
+
+    cmd = _read("login.cmd")
+    for needle in (
+        'if /i "%~1"=="--ip" goto :parse_ip',
+        'if /i "%ARG:~0,5%"=="--ip=" goto :parse_ip_inline',
+        ":parse_ip_inline",
+        ":ip_missing",
+    ):
+        assert needle in cmd, f"login.cmd must contain {needle!r}"
+
+    targets = set(re.findall(r"goto :([A-Za-z_][A-Za-z0-9_]*)", cmd))
+    targets |= set(re.findall(r"call :([A-Za-z_][A-Za-z0-9_]*)", cmd))
+    defined = set(re.findall(r"^:([A-Za-z_][A-Za-z0-9_]*)", cmd, re.MULTILINE))
+    defined.add("eof")  # `goto :eof` is a cmd.exe builtin, never a real label
+    missing = sorted(targets - defined)
+    assert not missing, f"login.cmd jumps to undefined labels: {missing}"

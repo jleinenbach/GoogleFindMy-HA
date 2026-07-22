@@ -26,8 +26,19 @@ Covered (config-flow surfaces, client monkeypatched):
 * Happy path initial setup: user step -> ``container_login`` auth method ->
   fetch returns a valid bundle -> device_selection, with the persisted auth data
   carrying the validated token. Also pins the form defaults: ``port`` default is
-  ``CONTAINER_TOKEN_PORT`` (7901) and the ``novnc_url`` placeholder targets the
-  noVNC port (``:7900``).
+  ``CONTAINER_TOKEN_PORT`` (7901) and the ``novnc_access`` placeholder targets
+  the noVNC port (``:7900``).
+* noVNC link rendering: ``_classify_novnc_host`` /
+  ``_novnc_access_placeholder`` only produce a clickable markdown link for a
+  non-loopback IP literal. A loopback address or a hostname (``localhost``, the
+  compose service name) is rendered as inline code, because the URL is opened
+  by the operator's browser, which usually runs on a different machine than the
+  Docker host and therefore cannot follow either of those.
+* Credential-method exclusivity on reauth and options: a submission carrying
+  more than one method (pasted ``secrets_json`` *and* a container
+  ``pairing_code``) is rejected with ``choose_one`` BEFORE any network call, so
+  the one-shot container fetch neither burns the pairing code nor silently
+  discards the pasted bundle. Exactly one method still routes to its own path.
 * Two-phase-delete timing (F4): ``container_login`` STAGES the ack instead of
   sending it; an abort before the entry exists keeps the bundle and sends no
   ack.
@@ -298,6 +309,65 @@ async def _maybe_await(result: Any) -> Any:
 
 
 # ---------------------------------------------------------------------------
+# noVNC link rendering
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("host", "expected"),
+    [
+        # Loopback / unspecified: Home Assistant reaches the container over the
+        # host loopback, but the browser that opens noVNC usually runs on
+        # another machine and never will. "0.0.0.0" is a bind wildcard, not a
+        # browsable address at all.
+        ("127.0.0.1", "loopback"),
+        ("::1", "loopback"),
+        ("0.0.0.0", "loopback"),
+        # Concrete non-loopback literals: the one case where a link is honest.
+        ("192.168.1.21", "linkable"),
+        ("10.0.3.1", "linkable"),
+        # Not an IP literal: container-only DNS (the compose service name) and
+        # the `localhost` alias resolve inside HA, not necessarily in the
+        # browser. The empty string is the "nothing entered yet" form state.
+        ("localhost", "hostname"),
+        ("googlefindmy-login", "hostname"),
+        ("", "hostname"),
+    ],
+)
+async def test_classify_novnc_host_buckets_by_browser_reachability(
+    host: str, expected: str
+) -> None:
+    """The classifier sorts hosts by what a BROWSER can reach, not what HA can.
+
+    ``localhost`` is deliberately *not* loopback here: the classification keys
+    on "is this an IP literal that a remote browser can dial", and a name is
+    resolved by whoever opens the link, so it can never be judged from here.
+    """
+
+    assert config_flow._classify_novnc_host(host) == expected
+
+
+async def test_novnc_access_placeholder_links_only_linkable_hosts() -> None:
+    """Only a non-loopback IP literal is rendered as a clickable markdown link.
+
+    Offering a link that is known not to resolve in the operator's browser is
+    worse than offering none: it turns a documentation problem into an apparent
+    product failure. The fallback therefore stays inline code with a
+    placeholder host, which cannot be clicked.
+    """
+
+    linkable = config_flow._novnc_access_placeholder("192.168.1.21")
+    assert f"](http://192.168.1.21:{CONTAINER_NOVNC_PORT})" in linkable
+
+    for host in ("127.0.0.1", "googlefindmy-login"):
+        rendered = config_flow._novnc_access_placeholder(host)
+        assert "](http" not in rendered, (
+            f"{host!r} is not browser-reachable from here, so its noVNC hint must "
+            f"not be a markdown link; got {rendered!r}"
+        )
+
+
+# ---------------------------------------------------------------------------
 # Initial setup: user step routing + happy path
 # ---------------------------------------------------------------------------
 
@@ -326,7 +396,7 @@ async def test_user_step_routes_container_method_to_container_login(
 async def test_container_form_defaults_port_and_novnc_placeholder(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The initial container form defaults port to 7901 and links noVNC on :7900."""
+    """The container form defaults port to 7901 and hints noVNC on :7900."""
 
     recorder = _Recorder()
     _install_container_client(monkeypatch, recorder)
@@ -349,11 +419,17 @@ async def test_container_form_defaults_port_and_novnc_placeholder(
     )
     assert port_default == CONTAINER_TOKEN_PORT == 7901
 
-    # The noVNC placeholder targets the noVNC port, not the token port.
+    # The noVNC placeholder targets the noVNC port, not the token port, and the
+    # key is ALWAYS present so a translated description can reference it
+    # unconditionally without risking a KeyError while rendering.
     placeholders = result.get("description_placeholders") or {}
-    assert placeholders.get("novnc_url") == f"http://127.0.0.1:{CONTAINER_NOVNC_PORT}"
-    assert placeholders["novnc_url"].endswith(":7900")
+    assert "novnc_access" in placeholders
+    access = placeholders["novnc_access"]
+    assert f":{CONTAINER_NOVNC_PORT}" in access
     assert CONTAINER_NOVNC_PORT == 7900
+    # The default host is the loopback, which the operator's browser generally
+    # cannot follow, so the hint must NOT be rendered as a clickable link.
+    assert "](http" not in access
 
 
 async def test_initial_setup_happy_path_persists_token_and_defers_ack(
@@ -1302,6 +1378,154 @@ async def test_reauth_container_branch_error_does_not_ack(
 
 
 # ---------------------------------------------------------------------------
+# Credential-method exclusivity (reauth)
+# ---------------------------------------------------------------------------
+#
+# The container GET is ONE-SHOT: the token server hands out the bundle once and
+# then locks the pairing code. A submission that carries a pasted secrets bundle
+# *and* a pairing code therefore must not be resolved by precedence -- whichever
+# method lost would be silently discarded, and if the container won, the code is
+# burned for a bundle the user did not even want. Both forms reject the mixed
+# submission with ``choose_one`` before any request leaves the process.
+
+
+def _secrets_json() -> str:
+    """Serialize the valid bundle the way a user would paste it into the form."""
+
+    return json.dumps(_valid_bundle())
+
+
+def _make_reauth_flow(hass: Any, entry: Any, captured: dict[str, Any]) -> Any:
+    """Build a reauth flow whose persist point is observable.
+
+    Same stubbing as ``test_reauth_container_branch_happy_path``:
+    ``async_update_reload_and_abort`` is the reauth persist point and is
+    replaced by a recorder, and the cache clear is a no-op because no runtime
+    data exists in these doubles.
+    """
+
+    flow = config_flow.ConfigFlow()
+    flow.hass = hass  # type: ignore[assignment]
+    flow.context = {"entry_id": entry.entry_id}
+
+    def _update_reload_and_abort(
+        *, entry: Any, data: dict[str, Any], reason: str, **_: Any
+    ) -> dict[str, Any]:
+        captured["data"] = data
+        captured["reason"] = reason
+        return {"type": "abort", "reason": reason}
+
+    async def _clear_cached_aas_token(_entry: Any) -> None:
+        return None
+
+    flow.async_update_reload_and_abort = _update_reload_and_abort  # type: ignore[assignment]
+    flow._async_clear_cached_aas_token = _clear_cached_aas_token  # type: ignore[attr-defined]
+    return flow
+
+
+async def test_reauth_rejects_two_credential_methods_before_any_fetch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Secrets JSON *and* a pairing code -> ``choose_one``, and no container call.
+
+    The container client is the same mock the rest of this module uses, so the
+    "no network" claim is proven by the recorder staying empty -- not by the
+    absence of an exception.
+    """
+
+    recorder = _Recorder()
+    _install_container_client(monkeypatch, recorder)
+
+    entry = make_config_entry(
+        entry_id="entry-reauth-exclusive",
+        data={CONF_GOOGLE_EMAIL: _EMAIL},
+        options={},
+    )
+    hass = _build_hass([entry])
+    captured: dict[str, Any] = {}
+    flow = _make_reauth_flow(hass, entry, captured)
+
+    result = await _maybe_await(
+        flow.async_step_reauth_confirm(
+            {
+                "secrets_json": _secrets_json(),
+                "container_host": "127.0.0.1",
+                "container_port": CONTAINER_TOKEN_PORT,
+                "pairing_code": _PAIRING_CODE,
+            }
+        )
+    )
+    assert isinstance(result, dict)
+    assert result.get("type") == "form"
+    assert result.get("errors") == {"base": "choose_one"}
+    # The whole point: the one-shot code was NOT spent, and nothing was
+    # persisted from the pasted bundle either.
+    assert recorder.fetch_calls == []
+    assert recorder.ack_calls == []
+    assert "data" not in captured
+
+
+async def test_reauth_with_only_a_pairing_code_takes_the_container_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Control (b) for the gate above: one method still routes to the container."""
+
+    recorder = _Recorder()
+    _install_container_client(monkeypatch, recorder)
+
+    entry = make_config_entry(
+        entry_id="entry-reauth-container-only",
+        data={CONF_GOOGLE_EMAIL: _EMAIL},
+        options={},
+    )
+    hass = _build_hass([entry])
+    captured: dict[str, Any] = {}
+    flow = _make_reauth_flow(hass, entry, captured)
+
+    result = await _maybe_await(
+        flow.async_step_reauth_confirm(
+            {
+                "container_host": "127.0.0.1",
+                "container_port": CONTAINER_TOKEN_PORT,
+                "pairing_code": _PAIRING_CODE,
+            }
+        )
+    )
+    assert isinstance(result, dict)
+    assert result.get("type") == "abort"
+    assert len(recorder.fetch_calls) == 1
+    assert captured["data"][DATA_SECRET_BUNDLE]["shared_key"] == _SHARED_HEX
+
+
+async def test_reauth_with_only_secrets_json_takes_the_secrets_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Control (c): one method still routes to the pasted-bundle path, no fetch."""
+
+    recorder = _Recorder()
+    _install_container_client(monkeypatch, recorder)
+
+    entry = make_config_entry(
+        entry_id="entry-reauth-secrets-only",
+        data={CONF_GOOGLE_EMAIL: _EMAIL},
+        options={},
+    )
+    hass = _build_hass([entry])
+    captured: dict[str, Any] = {}
+    flow = _make_reauth_flow(hass, entry, captured)
+
+    result = await _maybe_await(
+        flow.async_step_reauth_confirm({"secrets_json": _secrets_json()})
+    )
+    assert isinstance(result, dict)
+    assert result.get("type") == "abort"
+    assert captured["data"][DATA_SECRET_BUNDLE]["shared_key"] == _SHARED_HEX
+    # The secrets path must not talk to a login container at all.
+    assert recorder.fetch_calls == []
+    assert recorder.ack_calls == []
+
+
+# ---------------------------------------------------------------------------
 # Options container branch
 # ---------------------------------------------------------------------------
 
@@ -1522,6 +1746,140 @@ async def test_options_container_persist_acks_inline_and_stages_nothing(
     assert len(recorder.ack_calls) == 1
     # Acked inline, so nothing is left for async_setup_entry to redo.
     assert _staged_cleanup(hass) == {}
+
+
+# ---------------------------------------------------------------------------
+# Credential-method exclusivity (options)
+# ---------------------------------------------------------------------------
+#
+# Same rule as the reauth form above, enforced in ``async_step_credentials``.
+# There it is expressed as ``supplied != 1``, which folds the pre-existing
+# "nothing entered" case and the new "more than one method" case into the same
+# ``choose_one`` verdict. These tests drive the REAL step (not the persist
+# helper), because the gate lives in the step.
+
+
+def _make_options_flow(hass: Any, entry: Any) -> Any:
+    """Build an options flow with the persist side effects stubbed out."""
+
+    flow = config_flow.OptionsFlowHandler()
+    flow.hass = hass  # type: ignore[assignment]
+    flow.config_entry = entry  # type: ignore[attr-defined]
+
+    async def _clear_cached_aas_token(_entry: Any) -> None:
+        return None
+
+    async def _refresh_title(_entry: Any, _opt: Any) -> None:
+        return None
+
+    def _abort(*, reason: str, **_: Any) -> dict[str, Any]:
+        return {"type": "abort", "reason": reason}
+
+    flow._async_clear_cached_aas_token = _clear_cached_aas_token  # type: ignore[attr-defined]
+    flow._async_refresh_subentry_entry_title = _refresh_title  # type: ignore[attr-defined]
+    flow.async_abort = _abort  # type: ignore[assignment]
+    return flow
+
+
+def _options_entry(entry_id: str) -> Any:
+    """A config entry double for the options credentials step.
+
+    ``subentries={}`` is the "no feature groups configured" case, for which the
+    step synthesises the single ``core_tracking`` choice; the subentry selector
+    is not what these tests are about.
+    """
+
+    return make_config_entry(
+        entry_id=entry_id,
+        data={CONF_GOOGLE_EMAIL: _EMAIL},
+        options={},
+        unique_id=_EMAIL,
+        subentries={},
+    )
+
+
+async def test_options_rejects_two_credential_methods_before_any_fetch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Secrets JSON *and* a pairing code -> ``choose_one``, and no container call."""
+
+    recorder = _Recorder()
+    _install_container_client(monkeypatch, recorder)
+
+    entry = _options_entry("entry-options-exclusive")
+    hass = _build_hass([entry])
+    flow = _make_options_flow(hass, entry)
+
+    result = await _maybe_await(
+        flow.async_step_credentials(
+            {
+                "new_secrets_json": _secrets_json(),
+                "container_host": "127.0.0.1",
+                "container_port": CONTAINER_TOKEN_PORT,
+                "pairing_code": _PAIRING_CODE,
+            }
+        )
+    )
+    assert isinstance(result, dict)
+    assert result.get("type") == "form"
+    assert result.get("errors") == {"base": "choose_one"}
+    # Neither method ran: the pairing code is still usable for a clean retry and
+    # the entry was left untouched.
+    assert recorder.fetch_calls == []
+    assert recorder.ack_calls == []
+    assert DATA_SECRET_BUNDLE not in entry.data
+
+
+async def test_options_with_only_a_pairing_code_takes_the_container_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Control (b): one method still routes to the container persist."""
+
+    recorder = _Recorder()
+    _install_container_client(monkeypatch, recorder)
+
+    entry = _options_entry("entry-options-container-only")
+    hass = _build_hass([entry])
+    flow = _make_options_flow(hass, entry)
+
+    result = await _maybe_await(
+        flow.async_step_credentials(
+            {
+                "container_host": "127.0.0.1",
+                "container_port": CONTAINER_TOKEN_PORT,
+                "pairing_code": _PAIRING_CODE,
+            }
+        )
+    )
+    assert isinstance(result, dict)
+    assert result.get("type") == "abort"
+    assert result.get("reason") == "reconfigure_successful"
+    assert len(recorder.fetch_calls) == 1
+    assert entry.data[DATA_SECRET_BUNDLE]["shared_key"] == _SHARED_HEX
+
+
+async def test_options_with_only_secrets_json_takes_the_secrets_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Control (c): one method still routes to the pasted-bundle path, no fetch."""
+
+    recorder = _Recorder()
+    _install_container_client(monkeypatch, recorder)
+
+    entry = _options_entry("entry-options-secrets-only")
+    hass = _build_hass([entry])
+    flow = _make_options_flow(hass, entry)
+
+    result = await _maybe_await(
+        flow.async_step_credentials({"new_secrets_json": _secrets_json()})
+    )
+    assert isinstance(result, dict)
+    assert result.get("type") == "abort"
+    assert result.get("reason") == "reconfigure_successful"
+    assert entry.data[DATA_SECRET_BUNDLE]["shared_key"] == _SHARED_HEX
+    # The secrets path must not talk to a login container at all.
+    assert recorder.fetch_calls == []
+    assert recorder.ack_calls == []
 
 
 # --- F-N3: builtin TimeoutError (total timeout) mapping -----------------------
@@ -2393,3 +2751,93 @@ async def test_hostname_and_non_link_local_ip_are_not_blocked() -> None:
         )
         await _fetch(session, host=host)
         assert len(session.calls) == 1
+
+
+async def test_reauth_rejects_manual_token_combined_with_a_pairing_code(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The disabled manual-token field still counts as a credential method.
+
+    Guards the ``_REAUTH_FIELD_TOKEN`` entry of ``_REAUTH_CREDENTIAL_FIELDS``,
+    which the secrets+code test cannot reach: drop that entry and this
+    submission counts as ONE method, so the flow would fetch and burn the
+    one-shot pairing code while ignoring the token. The UI input is currently
+    commented out, but a hand-crafted or restored submission still arrives here.
+    """
+
+    recorder = _Recorder()
+    _install_container_client(monkeypatch, recorder)
+
+    entry = make_config_entry(
+        entry_id="entry-reauth-token-plus-code",
+        data={CONF_GOOGLE_EMAIL: _EMAIL},
+        options={},
+    )
+    hass = _build_hass([entry])
+    captured: dict[str, Any] = {}
+    flow = _make_reauth_flow(hass, entry, captured)
+
+    result = await _maybe_await(
+        flow.async_step_reauth_confirm(
+            {
+                "new_oauth_token": "aas_et/manual-token-value",
+                "container_host": "127.0.0.1",
+                "container_port": CONTAINER_TOKEN_PORT,
+                "pairing_code": _PAIRING_CODE,
+            }
+        )
+    )
+    assert isinstance(result, dict)
+    assert result.get("type") == "form"
+    assert result.get("errors") == {"base": "choose_one"}
+    assert recorder.fetch_calls == []
+    assert recorder.ack_calls == []
+    assert "data" not in captured
+
+
+async def test_options_rejects_manual_token_combined_with_a_pairing_code(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Options pendant: guards ``new_oauth_token`` in ``_OPTIONS_CREDENTIAL_FIELDS``."""
+
+    recorder = _Recorder()
+    _install_container_client(monkeypatch, recorder)
+
+    entry = _options_entry("entry-options-token-plus-code")
+    hass = _build_hass([entry])
+    flow = _make_options_flow(hass, entry)
+
+    result = await _maybe_await(
+        flow.async_step_credentials(
+            {
+                "new_oauth_token": "aas_et/manual-token-value",
+                "container_host": "127.0.0.1",
+                "container_port": CONTAINER_TOKEN_PORT,
+                "pairing_code": _PAIRING_CODE,
+            }
+        )
+    )
+    assert isinstance(result, dict)
+    assert result.get("type") == "form"
+    assert result.get("errors") == {"base": "choose_one"}
+    assert recorder.fetch_calls == []
+    assert recorder.ack_calls == []
+    assert DATA_SECRET_BUNDLE not in entry.data
+
+
+async def test_novnc_access_placeholder_brackets_ipv6_exactly_once() -> None:
+    """An IPv6 literal must render as ``http://[addr]:7900`` in both spellings.
+
+    ``_classify_novnc_host`` strips brackets before parsing, so it accepts the
+    bare and the bracketed form alike. Interpolating the raw input would emit
+    ``http://2001:db8::1:7900``, which no browser can parse, and adding brackets
+    unconditionally would double them for the already-bracketed spelling.
+    """
+
+    expected = "http://[2001:db8::1]:7900"
+    for spelling in ("2001:db8::1", "[2001:db8::1]", " 2001:db8::1 "):
+        rendered = config_flow._novnc_access_placeholder(spelling)
+        assert rendered == f"[{expected}]({expected})", spelling
+
+    # Loopback IPv6 stays unlinked, like its IPv4 counterpart.
+    assert "](http" not in config_flow._novnc_access_placeholder("::1")

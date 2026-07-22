@@ -40,6 +40,16 @@ services:
       # an explicit GFMY_ONECLICK from your shell still wins.
       GFMY_ONECLICK: "${GFMY_ONECLICK:-1}"
     ports:
-      # Merged onto (not replacing) the base file's noVNC publish. Host side is
-      # loopback-only by design, see the header above.
+      # Merged onto (not replacing) the base file's noVNC publish. Three-part
+      # mapping HOST_IP:HOST_PORT:CONTAINER_PORT; the leading host address is the
+      # security boundary, the two equal port numbers are just host and container
+      # side of the same service. The host side is FIXED to loopback, not merely
+      # defaulted, see the header above. Deliberately NOT variable-driven, unlike
+      # noVNC's GFMY_NOVNC_BIND: this endpoint serves credentials in clear text,
+      # so it gets no environment override surface at all. A `${VAR:-127.0.0.1}`
+      # form would still default to loopback, but it would let one stray variable
+      # in any shell, .env file or compose wrapper widen the bind silently. Home
+      # Assistant in a bridge network does not need one either, because the
+      # supported route puts both containers on a shared network and publishes no
+      # host port at all.
       - "127.0.0.1:7901:7901"
