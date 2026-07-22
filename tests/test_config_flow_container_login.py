@@ -129,8 +129,10 @@ import asyncio
 import inspect
 import json
 import logging
+import re
 import time
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any
 
 import aiohttp
@@ -476,6 +478,49 @@ async def test_container_form_defaults_port_and_novnc_placeholder(
     # The default host is the loopback, which the operator's browser generally
     # cannot follow, so the hint must NOT be rendered as a clickable link.
     assert "](http" not in access
+
+
+async def test_container_form_supplies_every_placeholder_the_text_references(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every ``{placeholder}`` in the shipped description must be supplied.
+
+    The requirement is derived from ``strings.json`` rather than restated here,
+    so it keeps holding when the translated text grows a new placeholder: an
+    unsupplied one renders literally in the UI (``{docs_url}``), and hassfest
+    forbids the alternative of writing the URL into the text itself. Reading the
+    real file and driving the real step is what makes this a wiring check
+    instead of a restatement of the code under test.
+    """
+
+    strings_path = Path(config_flow.__file__).resolve().parent / "strings.json"
+    described = json.loads(strings_path.read_text(encoding="utf-8"))["config"]["step"][
+        "container_login"
+    ]["description"]
+    required = set(re.findall(r"{([a-zA-Z0-9_]+)}", described))
+    assert required, "the container_login description references no placeholder"
+
+    recorder = _Recorder()
+    _install_container_client(monkeypatch, recorder)
+    hass = _build_hass([])
+    flow = config_flow.ConfigFlow()
+    flow.hass = hass  # type: ignore[assignment]
+    flow.context = {}
+
+    result = await _maybe_await(flow.async_step_container_login(None))
+    assert isinstance(result, dict)
+    supplied = set((result.get("description_placeholders") or {}).keys())
+
+    assert required <= supplied, (
+        "container_login renders placeholders it never supplies: "
+        f"{sorted(required - supplied)}"
+    )
+
+    # Supplied but empty is the same defect one layer down: the sentence keeps
+    # its shape and loses its content ("Full instructions:  (folder ...)").
+    placeholders = result.get("description_placeholders") or {}
+    empty = sorted(name for name in required if not str(placeholders[name]).strip())
+    assert not empty, f"container_login supplies empty placeholders: {empty}"
 
 
 async def test_address_and_pairing_code_are_asked_in_separate_steps(

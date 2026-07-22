@@ -1238,6 +1238,13 @@ _SUBENTRY_PLACEHOLDERS: dict[str, str] = {
     "subentries_docs_url": _SUBENTRIES_DOCS_URL,
 }
 
+# Documentation entry point for the bundled login container. Kept out of the
+# translated strings on purpose: hassfest rejects a literal URL inside any
+# translation value ("the string should not contain URLs, please use
+# description placeholders instead"), so the address lives here and reaches the
+# form as the ``docs_url`` placeholder, exactly like the subentry docs above.
+_CONTAINER_LOGIN_DOCS_URL = "https://github.com/BSkando/GoogleFindMy-HA"
+
 # ---------------------------
 # Validators (format/plausibility)
 # ---------------------------
@@ -5255,7 +5262,8 @@ class ConfigFlow(
             description_placeholders={
                 # Always present, so the translated description can reference it
                 # unconditionally without risking a KeyError while rendering.
-                "novnc_access": _novnc_access_placeholder(host)
+                "novnc_access": _novnc_access_placeholder(host),
+                "docs_url": _CONTAINER_LOGIN_DOCS_URL,
             },
         )
 

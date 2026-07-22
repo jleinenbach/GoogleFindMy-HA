@@ -2167,3 +2167,75 @@ def test_no_english_source_locates_the_pairing_code_in_the_novnc_viewer() -> Non
                             f"{locale.name}: {step_name}.{section}.{field} still "
                             "locates the pairing code in the noVNC viewer."
                         )
+
+
+def test_login_cmd_trims_trailing_blanks_from_every_inbound_switch() -> None:
+    """`set VAR=1 && login.cmd` must not silently start the wrong mode.
+
+    cmd.exe stores everything up to the `&&` INCLUDING the blank in front of
+    it, so that documented one-liner leaves the value as ``"1 "``. Measured
+    with a real cmd.exe: without a trim, `if "%GFMY_ONECLICK%"=="1"` is false
+    and the launcher starts without the one-click overlay while still reporting
+    success. The same environment is handed to `docker compose`, which
+    interpolates it into the container, where `entrypoint.sh` compares
+    ``GFMY_ONECLICK`` and ``GFMY_CLEARTEXT`` against ``"1"`` just as strictly.
+
+    The expected set is therefore DERIVED from the compose files rather than
+    restated here: every ``${GFMY_*}`` a compose file interpolates travels into
+    the container and has to be trimmed, so adding one there without adding it
+    to the launcher's list is exactly the regression this guards.
+    """
+
+    text = _read("login.cmd")
+    lines = text.splitlines()
+
+    from_compose = set(
+        re.findall(
+            r"\$\{(GFMY_[A-Z_]+)",
+            _read("docker-compose.yml") + _read(ONECLICK_COMPOSE),
+        )
+    )
+    assert from_compose, "no ${GFMY_*} found in the compose files"
+    # Only this script reads it, so no compose file mentions it.
+    expected = from_compose | {"GFMY_NOVNC_URL_HOST"}
+
+    trim_lines = [
+        i for i, line in enumerate(lines) if "call :trim_trailing_blanks" in line
+    ]
+    assert trim_lines, "login.cmd must call the trim routine"
+    dispatch = min(trim_lines)
+    covered = set(re.findall(r"GFMY_[A-Z_]+", lines[dispatch]))
+    assert expected <= covered, (
+        "login.cmd trims only part of the class; a user can set these and they "
+        f"reach Compose or the container with a trailing blank: {sorted(expected - covered)}"
+    )
+
+    # The trim is worthless once a consumer has already read the value.
+    for switch in sorted(expected):
+        uses = [
+            i
+            for i, line in enumerate(lines)
+            if f"%{switch}%" in line
+            and not line.lstrip().startswith(("rem ", "REM ", "::"))
+        ]
+        if uses:
+            assert dispatch < min(uses), (
+                f"login.cmd reads {switch} at line {min(uses) + 1} before trimming "
+                f"it at line {dispatch + 1}."
+            )
+
+    # The routine has to actually loop, and it has to loop on a BLANK: a body
+    # that trims once leaves "1  " broken, and a body comparing against another
+    # character never trims at all. Both mutations keep every other assertion
+    # here green, so they are pinned explicitly.
+    assert "\n:trim_trailing_blanks" in text, (
+        "login.cmd calls :trim_trailing_blanks but never defines the label"
+    )
+    routine = text[text.index("\n:trim_trailing_blanks") :]
+    assert ':~-1%"==" "' in routine, (
+        "the trim routine must test the LAST character against a blank"
+    )
+    assert ":~0,-1%" in routine, "the trim routine must drop the last character"
+    assert "goto :trim_trailing_blanks" in routine, (
+        "the trim routine must recurse, otherwise it strips at most one blank"
+    )

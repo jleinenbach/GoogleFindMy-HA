@@ -10,6 +10,14 @@
 #   By hand it is:
 #     docker compose -f docker-compose.yml -f docker-compose.oneclick.yml \
 #       run --build --service-ports --rm googlefindmy-login
+#   On Windows, set the switch on ITS OWN LINE for a by-hand run. In a
+#   `set GFMY_ONECLICK=1 && docker compose ...` one-liner, cmd.exe keeps the
+#   blank in front of the `&&`, so the value becomes "1 ", Compose interpolates
+#   it verbatim below, and the container's entrypoint gate (which compares
+#   against "1") silently stays off. login.cmd strips that blank from every
+#   GFMY_* switch before it calls Compose; a hand-typed compose call has
+#   nothing that would. (login.sh needs no such trim: `VAR=1 ./login.sh` is an
+#   assignment prefix, which cannot pick up a trailing blank.)
 #   Note: passing any `-f` disables Compose's implicit auto-load of a
 #   `docker-compose.override.yml`, so list that file explicitly too if you keep
 #   one (the launchers do this as well).

@@ -43,6 +43,19 @@ rem host where port 7901 is already in use.
 setlocal
 pushd "%~dp0"
 
+rem Strip trailing blanks from EVERY inbound GFMY_* switch before anything reads
+rem or forwards one. `set VAR=1 && login.cmd` is the form users reach for, and
+rem cmd.exe stores everything up to the `&&` INCLUDING the blank in front of it,
+rem so the value arrives as "1 " (measured with a real cmd.exe). Both consumers
+rem compare strictly against "1": this script for GFMY_ONECLICK, and
+rem entrypoint.sh inside the container for GFMY_ONECLICK and GFMY_CLEARTEXT,
+rem which reach it because Compose interpolates our process environment. So the
+rem list below is not "what this script reads", it is "what a user can set and
+rem what survives into Compose or the container": the ${GFMY_*} names of
+rem docker-compose.yml plus GFMY_NOVNC_URL_HOST, which only this script uses.
+rem Without the trim the wrong mode starts silently, with exit code 0.
+for %%V in (GFMY_ONECLICK GFMY_CLEARTEXT GFMY_ARGS GFMY_HOST_UID GFMY_HOST_GID GFMY_NOVNC_BIND GFMY_NOVNC_URL_HOST) do call :trim_trailing_blanks %%V
+
 set "NOVNC_BIND=%GFMY_NOVNC_BIND%"
 if "%NOVNC_BIND%"=="" set "NOVNC_BIND=127.0.0.1"
 set "NOVNC_URL_HOST=%GFMY_NOVNC_URL_HOST%"
@@ -366,3 +379,15 @@ if "%_NOCOLON%"=="%BRACKETED%" goto :eof
 if "%BRACKETED:~0,1%"=="[" goto :eof
 set "BRACKETED=[%BRACKETED%]"
 goto :eof
+
+:trim_trailing_blanks
+rem Removes trailing blanks from the variable NAMED in %1, in place. Recurses
+rem through `goto :` (which keeps %1 bound) instead of a delayed-expansion loop,
+rem so the file needs no `setlocal EnableDelayedExpansion` and the routine is
+rem safe to call before the environment has been normalised. `call set` performs
+rem the second expansion round that turns the name into its value.
+if not defined %~1 exit /b 0
+call set "_TTB=%%%~1%%"
+if not "%_TTB:~-1%"==" " exit /b 0
+call set "%~1=%%%~1:~0,-1%%"
+goto :trim_trailing_blanks
