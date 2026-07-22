@@ -206,7 +206,15 @@ def _reject_non_host_syntax(candidate: str) -> None:
 
     if not candidate or len(candidate) > _MAX_HOSTNAME_LEN:
         raise ContainerUnreachableError("refusing an empty or over-long host")
-    labels = candidate.rstrip(".").split(".")
+    # Strip at most ONE trailing dot (the absolute-DNS spelling ``example.com.``
+    # is legal), never a run of them. ``str.rstrip(".")`` removes every trailing
+    # dot, so ``a.b..`` would be validated as the well-formed ``a.b`` while the
+    # URL builder interpolates the value it was GIVEN and emits
+    # ``http://a.b..:7901``: the guard and the request would disagree about the
+    # same input, which is exactly the failure the bracket note in
+    # ``_maybe_block_link_local`` warns about. Validate the shape that is
+    # actually used, not a friendlier normalisation of it.
+    labels = (candidate[:-1] if candidate.endswith(".") else candidate).split(".")
     if not all(_HOSTNAME_LABEL.match(label) for label in labels):
         raise ContainerUnreachableError(
             "refusing a host that is not a bare host name or IP literal"

@@ -111,6 +111,20 @@ is_ip_literal() {
       case "$inner" in
         *:::*) return 1 ;;
       esac
+      # An empty group at either end must be caught HERE, on the raw string,
+      # not inferred from the split below: word splitting on IFS=":" drops a
+      # single trailing separator, and the counting loop skips empty fields, so
+      # ":1:2:3:4:5:6:7:8" and "1:2:3:4:5:6:7:8:" would both produce eight
+      # non-empty groups and satisfy the "exactly eight" rule. A leading or
+      # trailing ":" is legal only as part of a "::" run ("::1", "1::", "::").
+      case "$inner" in
+        ::*) ;;
+        :*) return 1 ;;
+      esac
+      case "$inner" in
+        *::) ;;
+        *:) return 1 ;;
+      esac
       case "$inner" in
         *::* | *:*:*) ;;
         *) return 1 ;;
@@ -155,8 +169,13 @@ is_ip_literal() {
       return 0
       ;;
   esac
+  # Structure BEFORE splitting, for the same reason as in the IPv6 branch: word
+  # splitting on IFS="." drops a single trailing separator, so "1.2.3.4." would
+  # yield four clean octets and pass the count check. A leading dot, a trailing
+  # dot and an inner ".." all mean an empty octet and are rejected on the raw
+  # string, where the emptiness is still visible.
   case "$1" in
-    *[!0-9.]* | "" | *..*) return 1 ;;
+    *[!0-9.]* | "" | *..* | .* | *.) return 1 ;;
   esac
   local IFS=.
   # shellcheck disable=SC2206  # word splitting on IFS is exactly the intent

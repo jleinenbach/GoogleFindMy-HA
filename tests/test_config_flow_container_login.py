@@ -3479,6 +3479,35 @@ async def test_link_local_guard_sees_the_same_host_as_the_url_builder() -> None:
         container_login._maybe_block_link_local(spelling)
 
 
+async def test_host_syntax_guard_validates_the_string_the_url_builder_uses() -> None:
+    """The guard must not validate a friendlier normalisation of the host.
+
+    Same class as the bracket regression above, one layer down: the guard
+    stripped the trailing dots with ``str.rstrip(".")``, which removes a whole
+    RUN of them, and then validated the result. ``a.b..`` therefore passed as
+    the well-formed ``a.b``, while ``_build_base_url`` interpolates the value it
+    was given and emits ``http://a.b..:7901``. Guard and request disagreed about
+    the same input.
+
+    A single trailing dot is the legal absolute-DNS spelling and must stay
+    accepted, so the fix trims exactly one, never a run. Asserting the URL too
+    keeps this a statement about the two components together rather than about
+    the guard alone.
+    """
+
+    for malformed in ("a.b..", "a.b...", "example.com..", "a..b"):
+        with pytest.raises(container_login.ContainerUnreachableError):
+            container_login._reject_non_host_syntax(malformed)
+
+    # Legal spellings, including the absolute-DNS form with ONE trailing dot.
+    for legal in ("example.com.", "example.com", "host", "googlefindmy-login"):
+        container_login._reject_non_host_syntax(legal)
+
+    # The reason the guard has to be strict: the builder does not re-normalise
+    # the dots away, so anything the guard lets through reaches yarl verbatim.
+    assert container_login._build_base_url("a.b..", 7901) == "http://a.b..:7901"
+
+
 async def test_host_normalisation_is_shared_between_client_and_config_flow() -> None:
     """One helper, so classification and request can never disagree.
 

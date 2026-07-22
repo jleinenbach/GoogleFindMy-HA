@@ -212,6 +212,20 @@ rem `if 0a GTR 255` falls back to a STRING compare, and "0a" sorts below "255".
 set "REST=%CAND%"
 for %%x in (0 1 2 3 4 5 6 7 8 9 .) do call set "REST=%%REST:%%x=%%"
 if defined REST exit /b 1
+rem Structure BEFORE splitting. `for /f` collapses a run of delimiters into one
+rem and discards leading/trailing ones, so ".1.2.3.4", "1.2.3.4." and "1..2.3.4"
+rem would ALL tokenise into the same four clean octets and pass every test in
+rem the block below. An empty octet is therefore only visible on the raw string
+rem and has to be rejected here, mirroring the `*..*` / `.*` / `*.` guards in
+rem is_ip_literal() in login.sh.
+set "_T=%CAND:..=%"
+if not "%_T%"=="%CAND%" exit /b 1
+rem Substring note: "%CAND:~-1%" on a one-character value yields that whole
+rem character, which is exactly what is wanted here. CAND="." is caught by the
+rem leading test on the line above it, and any other one-character CAND is a
+rem digit (the allowlist above left only digits and dots), so it fails both.
+if "%CAND:~0,1%"=="." exit /b 1
+if "%CAND:~-1%"=="." exit /b 1
 rem Exactly four octets, none empty, none above 255. `for /f` skips a line that
 rem is nothing but delimiters, so "." or ".." would never enter the block at
 rem all: the OCTETS_OK flag turns that silence into a rejection.
@@ -233,6 +247,14 @@ rem Mirrors the IPv6 half of is_ip_literal() in login.sh. The character
 rem allowlist alone would accept a lone ":" (and `[::1`, since :bracket_ipv6
 rem leaves a leading bracket untouched), and both would reach docker as a port
 rem bind after being printed as a working URL.
+rem Narrow the shared allowlist first: it permits "." because the IPv4 branch
+rem needs it, and only that branch narrows it away again (see the digits-only
+rem pass above). The IPv6 half of is_ip_literal() forbids "." outright, so
+rem without this line "::1.", "1.2::3" and "fe80::1." would pass here while
+rem login.sh rejects them, and this file would stop being the mirror it claims
+rem to be in the comment above.
+set "_T=%CAND:.=%"
+if not "%_T%"=="%CAND%" exit /b 1
 set "INNER=%CAND%"
 if not "%INNER:~0,1%"=="[" goto :v6_unbracketed
 if not "%INNER:~-1%"=="]" exit /b 1
@@ -247,7 +269,23 @@ if not "%_T%"=="%INNER%" exit /b 1
 rem Forbid a ":::" run.
 set "_T=%INNER::::=%"
 if not "%_T%"=="%INNER%" exit /b 1
-rem Require a "::" run, or at least two separators.
+rem Structure BEFORE splitting, same class of defect as in the IPv4 branch:
+rem `for /f` discards leading and trailing delimiters, so ":1:2:3:4:5:6:7:8" and
+rem "1:2:3:4:5:6:7:8:" would both yield eight clean groups and satisfy the count
+rem test further down. A leading or trailing ":" is legal only as part of a "::"
+rem run, i.e. "::1", "1::" and "::" pass, ":1:..." and "...:8:" do not.
+rem Substring note: "%INNER:~0,2%" on a one-character value yields that single
+rem character, and "%INNER:~-2%" clamps the same way, so INNER=":" compares as
+rem ":" neq "::" and is rejected by the leading test -- the intended verdict.
+if "%INNER:~0,1%"==":" if not "%INNER:~0,2%"=="::" exit /b 1
+if "%INNER:~-1%"==":" if not "%INNER:~-2%"=="::" exit /b 1
+rem Require a "::" run, or at least two separators. The next two lines detect
+rem the run and jump away when there is one; the separator probe below them is
+rem therefore reached only WITHOUT a run. There the structural guard above has
+rem already removed any leading/trailing ":", so every field between the
+rem separators is non-empty and a third token exists exactly when a second
+rem separator does. Without that guard the token count would be an unreliable
+rem stand-in for the separator count, which is the very defect fixed above.
 set "_T=%INNER:::=%"
 if not "%_T%"=="%INNER%" goto :v6_has_digits
 set "_TWO_SEP="
@@ -271,7 +309,10 @@ if defined _HAS_RUN (
 )
 if defined _TAIL call :v6_no_second_run "%_TAIL%" || exit /b 1
 rem Group width (max four hex digits) and count. `for /f` collapses repeated
-rem delimiters, so a compressed address simply yields fewer tokens.
+rem delimiters, so a compressed address simply yields fewer tokens. That is safe
+rem to lean on ONLY because the structural guard above already rejected an empty
+rem group at either end; the token count may stand in for the group count, never
+rem for the shape of the raw value.
 for /f "tokens=1-9 delims=:" %%a in ("%INNER%") do (
   if not "%%i"=="" exit /b 1
   call :v6_group "%%a" || exit /b 1

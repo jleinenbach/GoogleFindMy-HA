@@ -1776,6 +1776,17 @@ def test_login_sh_rejects_unbalanced_ipv6_brackets() -> None:
     Accepting ``[::1`` would let the normaliser produce ``[[::1]``, so the
     promise "exactly one pair" in both comment blocks would be untrue and the
     value would still reach docker as a malformed port bind.
+
+    The matrix also covers the empty-field class. ``is_ip_literal`` splits on a
+    non-whitespace ``IFS`` and then counts the fields, but that splitter drops a
+    single TRAILING separator and the counting loops skip empty fields, so the
+    token result cannot testify to the shape of the raw value: ``1.2.3.4.``,
+    ``:1:2:3:4:5:6:7:8`` and ``1:2:3:4:5:6:7:8:`` all produce the exact token
+    count of a well-formed address. The structure is therefore checked BEFORE
+    the split, and the positive controls below pin that the legal leading and
+    trailing colons of ``::1`` / ``1::`` / ``::`` survive that guard.
+
+    This runs the real script, so it is a behaviour test, not a re-implementation.
     """
 
     # Absolute: the script cd's to its own directory, and the run below sets a
@@ -1811,6 +1822,40 @@ def test_login_sh_rejects_unbalanced_ipv6_brackets() -> None:
         ("1.2.3.0a", True),
         (".", True),
         ("not an ip", True),
+        # Empty-field class (Codex P2 on login.cmd, same defect in login.sh).
+        # An empty octet / group is invisible in the token result. Measured
+        # against the pre-fix script, exactly THREE of the five below used to be
+        # accepted and would have reached docker as a port bind: "1.2.3.4.",
+        # ":1:2:3:4:5:6:7:8" and "1:2:3:4:5:6:7:8:". The other two were already
+        # rejected -- a non-whitespace IFS does produce an empty LEADING field,
+        # and ".." was caught by its own guard -- so they are kept here as
+        # regression sentinels for that older guard, not as evidence for the new
+        # one. Do not read this block as "all five were broken".
+        ("1..2.3.4", True),
+        (".1.2.3.4", True),
+        ("1.2.3.4.", True),
+        (":1:2:3:4:5:6:7:8", True),
+        ("1:2:3:4:5:6:7:8:", True),
+        # Neighbours of the same class, for the guard's boundaries.
+        ("..", True),
+        ("1.2.3.", True),
+        (".1.2.3", True),
+        (":1", True),
+        ("1:", True),
+        (":1:2", True),
+        ("1:2:", True),
+        # Positive controls: a leading or trailing colon IS legal when it is
+        # part of the "::" run, and the plain forms must stay accepted. If the
+        # new guard were written as a blanket "no leading/trailing colon", every
+        # one of these four would flip to rejected.
+        ("1::", False),
+        ("::1", False),
+        ("::", False),
+        ("2001:db8::", False),
+        ("1.2.3.4", False),
+        ("0.0.0.0", False),
+        ("127.0.0.1", False),
+        ("255.255.255.255", False),
     ):
         proc = subprocess.run(
             ["bash", str(script), "--ip", value],
@@ -1891,6 +1936,98 @@ def test_login_cmd_mirrors_the_full_ipv6_structural_rules() -> None:
         "with a compression run at most seven groups may be written out; "
         "checking only the ninth token accepts `1:2:3:4:5:6:7:8::`."
     )
+
+
+def test_login_cmd_checks_empty_fields_before_splitting() -> None:
+    """The batch validator must not derive structure from the token result.
+
+    ``for /f`` collapses a run of delimiters into one and discards leading and
+    trailing ones. ``.1.2.3.4``, ``1.2.3.4.`` and ``1..2.3.4`` therefore all
+    tokenise into the same four clean octets, and ``:1:2:3:4:5:6:7:8`` /
+    ``1:2:3:4:5:6:7:8:`` into eight clean groups, so every count test in
+    ``:validate_ip`` / ``:validate_ipv6`` passes on a malformed value. The
+    emptiness only exists on the raw string and has to be rejected there.
+
+    Honest limits of this test: there is no cmd.exe and no wine in this
+    environment, so ``login.cmd`` cannot be executed. What follows pins the
+    PRESENCE of the guards and their position relative to the ``for /f`` they
+    protect. It does NOT prove that they behave as intended on Windows; the
+    executed proof of the same rules lives in
+    ``test_login_sh_rejects_unbalanced_ipv6_brackets`` against the mirror
+    ``login.sh``.
+
+    That transfer holds only as far as the two files really accept the same
+    set, and THAT is an intent pinned by text here, never an executed result:
+    the shared allowlist above ``:validate_ipv6`` permits ``.`` for the IPv4
+    branch, so the IPv6 branch has to narrow it away again to match the
+    ``*[!0-9A-Fa-f:[]]*`` case in ``is_ip_literal``. The pin below exists
+    because that narrowing was missing once, which let ``::1.`` through in the
+    batch file while ``login.sh`` rejected it.
+    """
+
+    cmd = _read("login.cmd")
+
+    # Parity of the character allowlist: the IPv6 branch must drop "." again,
+    # and it must do so BEFORE the bracket handling, so that "[::1.]" cannot
+    # reach the structural rules either.
+    dot_guard = 'set "_T=%CAND:.=%"'
+    assert dot_guard in cmd, (
+        "the IPv6 branch must narrow the shared allowlist by rejecting '.', "
+        "as the IPv6 case of is_ip_literal() in login.sh does; without it "
+        "'::1.' passes here but is rejected there."
+    )
+    assert cmd.index(dot_guard) < cmd.index('set "INNER=%CAND%"'), (
+        "the '.' rejection must run before the value is unbracketed into INNER."
+    )
+
+    # IPv4: no ".." run, no leading dot, no trailing dot.
+    ipv4_guards = (
+        'set "_T=%CAND:..=%"',
+        'if "%CAND:~0,1%"=="." exit /b 1',
+        'if "%CAND:~-1%"=="." exit /b 1',
+    )
+    for guard in ipv4_guards:
+        assert guard in cmd, (
+            f"login.cmd must reject an empty octet on the raw string ({guard!r})."
+        )
+    octet_split_at = cmd.index('for /f "tokens=1-5 delims=." ')
+    for guard in ipv4_guards:
+        assert cmd.index(guard) < octet_split_at, (
+            f"{guard!r} must run BEFORE the octet split; after it the empty "
+            "octet is already gone and the guard can never fire."
+        )
+
+    # IPv6: a leading or trailing ":" is legal only as part of a "::" run.
+    ipv6_guards = (
+        'if "%INNER:~0,1%"==":" if not "%INNER:~0,2%"=="::" exit /b 1',
+        'if "%INNER:~-1%"==":" if not "%INNER:~-2%"=="::" exit /b 1',
+    )
+    for guard in ipv6_guards:
+        assert guard in cmd, (
+            f"login.cmd must reject an empty group at either end ({guard!r})."
+        )
+    group_split_at = cmd.index('for /f "tokens=1-9 delims=:" ')
+    two_sep_split_at = cmd.index('for /f "tokens=1-3 delims=:" ')
+    for guard in ipv6_guards:
+        assert cmd.index(guard) < min(group_split_at, two_sep_split_at), (
+            f"{guard!r} must run BEFORE every colon split, including the "
+            "two-separator probe, which would otherwise keep reading an "
+            "unreliable token count."
+        )
+    # The exemption for the "::" run has to hold in the FILE, not merely in the
+    # literals pinned above: an additional unconditional rejection anywhere in
+    # the block would leave every assertion above green while killing "::1",
+    # "1::" and "::". Assert against `cmd`, never against `ipv6_guards` -- a
+    # check that reads the test's own literals proves nothing about the code.
+    for unconditional in (
+        'if "%INNER:~0,1%"==":" exit /b 1',
+        'if "%INNER:~-1%"==":" exit /b 1',
+    ):
+        assert unconditional not in cmd, (
+            f"{unconditional!r} rejects a leading/trailing colon outright and "
+            "would also reject '::1', '1::' and '::'; the guard must stay "
+            "conditional on the '::' run."
+        )
 
 
 def test_cleartext_cleanup_reports_a_failed_removal() -> None:
