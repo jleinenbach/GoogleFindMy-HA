@@ -130,6 +130,7 @@ import inspect
 import json
 import logging
 import time
+from collections.abc import Mapping
 from typing import Any
 
 import aiohttp
@@ -296,6 +297,17 @@ def _build_hass(entries: list[Any]) -> Any:
                 frame_module=frame,
             )
 
+        async def async_add_executor_job(
+            self, func: Any, *args: Any, **kwargs: Any
+        ) -> Any:
+            # ``async_step_user`` reads the watched secrets paths through the
+            # executor; a double without this method would silently skip that
+            # scan instead of exercising it.
+            result = func(*args, **kwargs)
+            if inspect.isawaitable(result):
+                return await result
+            return result
+
         def async_create_task(self, coro: Any, *args: Any, **kwargs: Any) -> Any:
             # Close the coroutine to avoid "never awaited" warnings in tests that
             # schedule a reload; the reload itself is not under test here.
@@ -312,6 +324,34 @@ async def _maybe_await(result: Any) -> Any:
     if inspect.isawaitable(result):
         result = await result
     return result
+
+
+async def _drive_container_login(
+    flow: Any,
+    *,
+    host: str = "127.0.0.1",
+    port: int = CONTAINER_TOKEN_PORT,
+    pairing_code: str = _PAIRING_CODE,
+) -> Any:
+    """Walk the two-step container login: address form, then pairing form.
+
+    The setup flow asks for host/port first and for the pairing code only
+    afterwards, because the container prints that code once the Google sign-in
+    inside the noVNC session is done. Returns whatever the *address* step
+    produced when it did not reach the pairing step, so a test that exercises
+    the address half still sees its own result.
+    """
+
+    address = await _maybe_await(
+        flow.async_step_container_login({"host": host, "port": port})
+    )
+    if not (
+        isinstance(address, Mapping) and address.get("step_id") == "container_pairing"
+    ):
+        return address
+    return await _maybe_await(
+        flow.async_step_container_pairing({"pairing_code": pairing_code})
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -438,6 +478,126 @@ async def test_container_form_defaults_port_and_novnc_placeholder(
     assert "](http" not in access
 
 
+async def test_address_and_pairing_code_are_asked_in_separate_steps(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The address form must not ask for a code the container has not printed yet.
+
+    The pairing code only exists after the Google sign-in inside the noVNC
+    session, which the address collected in the first step is what makes
+    reachable. So ``container_login`` carries host/port only and
+    ``container_pairing`` carries the code only.
+    """
+
+    recorder = _Recorder()
+    _install_container_client(monkeypatch, recorder)
+    hass = _build_hass([])
+    flow = config_flow.ConfigFlow()
+    flow.hass = hass  # type: ignore[assignment]
+    flow.context = {}
+
+    address = await _maybe_await(flow.async_step_container_login(None))
+    assert isinstance(address, dict)
+    address_fields = {marker.schema for marker in address["data_schema"].schema}
+    assert address_fields == {"host", "port"}
+    assert "pairing_code" not in address_fields
+
+    pairing = await _maybe_await(flow.async_step_container_pairing(None))
+    assert isinstance(pairing, dict)
+    assert pairing.get("step_id") == "container_pairing"
+    pairing_fields = {marker.schema for marker in pairing["data_schema"].schema}
+    assert pairing_fields == {"pairing_code"}
+
+    # Nothing was fetched by merely rendering the two forms.
+    assert recorder.fetch_calls == []
+
+
+async def test_address_step_hands_host_and_port_to_the_pairing_fetch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Submitting the address form routes to the code form and keeps the address.
+
+    The fetch happens in the second step, so host and port have to survive the
+    step boundary in the flow state; otherwise the pairing step would silently
+    query the default loopback address instead of the one the user entered.
+    """
+
+    recorder = _Recorder()
+    _install_container_client(monkeypatch, recorder)
+    hass = _build_hass([])
+    flow = config_flow.ConfigFlow()
+    flow.hass = hass  # type: ignore[assignment]
+    flow.context = {}
+
+    async def _fake_device_selection() -> dict[str, Any]:
+        return {"type": "form", "step_id": "device_selection"}
+
+    flow.async_step_device_selection = _fake_device_selection  # type: ignore[assignment]
+
+    routed = await _maybe_await(
+        flow.async_step_container_login({"host": "192.168.1.21", "port": 7999})
+    )
+    assert isinstance(routed, dict)
+    assert routed.get("step_id") == "container_pairing"
+    assert recorder.fetch_calls == []
+
+    await _maybe_await(
+        flow.async_step_container_pairing({"pairing_code": _PAIRING_CODE})
+    )
+    assert len(recorder.fetch_calls) == 1
+    assert recorder.fetch_calls[0]["host"] == "192.168.1.21"
+    assert recorder.fetch_calls[0]["port"] == 7999
+
+
+async def test_unreachable_container_returns_to_the_address_step_keeping_the_code(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unreachable container is an address problem, so the code is not lost.
+
+    The remedy (fix host/port, start the container) lives in the *other* step,
+    so the flow goes back there -- and the code the user already read off the
+    launcher's terminal is prefilled when they arrive at the pairing form again.
+    """
+
+    recorder = _Recorder()
+    _install_container_client(
+        monkeypatch,
+        recorder,
+        fetch_raises=container_login.ContainerUnreachableError("boom"),
+    )
+    hass = _build_hass([])
+    flow = config_flow.ConfigFlow()
+    flow.hass = hass  # type: ignore[assignment]
+    flow.context = {}
+
+    await _maybe_await(
+        flow.async_step_container_login({"host": "10.0.3.1", "port": 7901})
+    )
+    back = await _maybe_await(
+        flow.async_step_container_pairing({"pairing_code": _PAIRING_CODE})
+    )
+    assert isinstance(back, dict)
+    assert back.get("step_id") == "container_login"
+    assert back.get("errors") == {"base": "container_unreachable"}
+    # The address the user entered is still the form's default...
+    host_default = next(
+        marker.default()
+        for marker in back["data_schema"].schema
+        if getattr(marker, "schema", None) == "host"
+    )
+    assert host_default == "10.0.3.1"
+
+    # ...and the pairing code survives the detour instead of having to be
+    # re-read from the launcher's terminal.
+    again = await _maybe_await(flow.async_step_container_pairing(None))
+    code_default = next(
+        marker.default()
+        for marker in again["data_schema"].schema
+        if getattr(marker, "schema", None) == "pairing_code"
+    )
+    assert code_default == _PAIRING_CODE
+
+
 async def test_initial_setup_happy_path_persists_token_and_defers_ack(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -467,15 +627,7 @@ async def test_initial_setup_happy_path_persists_token_and_defers_ack(
 
     flow.async_step_device_selection = _fake_device_selection  # type: ignore[assignment]
 
-    result = await _maybe_await(
-        flow.async_step_container_login(
-            {
-                "host": "127.0.0.1",
-                "port": CONTAINER_TOKEN_PORT,
-                "pairing_code": _PAIRING_CODE,
-            }
-        )
-    )
+    result = await _drive_container_login(flow, pairing_code=_PAIRING_CODE)
     assert isinstance(result, dict)
     assert captured.get("reached_device_selection") is True
 
@@ -520,15 +672,7 @@ async def test_pending_ack_is_handed_over_exactly_once(
 
     flow.async_step_device_selection = _fake_device_selection  # type: ignore[assignment]
 
-    await _maybe_await(
-        flow.async_step_container_login(
-            {
-                "host": "127.0.0.1",
-                "port": CONTAINER_TOKEN_PORT,
-                "pairing_code": _PAIRING_CODE,
-            }
-        )
-    )
+    await _drive_container_login(flow, pairing_code=_PAIRING_CODE)
     # Not acked while the entry is not yet created.
     assert recorder.ack_calls == []
     assert flow._container_pending_ack is not None
@@ -576,15 +720,7 @@ async def test_aborted_flow_before_entry_keeps_bundle_no_ack(
 
     flow.async_step_device_selection = _fake_device_selection  # type: ignore[assignment]
 
-    await _maybe_await(
-        flow.async_step_container_login(
-            {
-                "host": "127.0.0.1",
-                "port": CONTAINER_TOKEN_PORT,
-                "pairing_code": _PAIRING_CODE,
-            }
-        )
-    )
+    await _drive_container_login(flow, pairing_code=_PAIRING_CODE)
 
     # The credential is staged but the container was NOT told to delete it.
     assert flow._container_pending_ack is not None
@@ -654,15 +790,7 @@ async def test_create_entry_stages_ack_instead_of_sending_it(
     flow._abort_if_unique_id_configured = lambda **_: None  # type: ignore[attr-defined]
 
     # container_login -> real device_selection form (no entry yet).
-    form = await _maybe_await(
-        flow.async_step_container_login(
-            {
-                "host": "127.0.0.1",
-                "port": CONTAINER_TOKEN_PORT,
-                "pairing_code": _PAIRING_CODE,
-            }
-        )
-    )
+    form = await _drive_container_login(flow, pairing_code=_PAIRING_CODE)
     assert isinstance(form, dict)
     assert form.get("step_id") == "device_selection"
     assert recorder.ack_calls == []
@@ -726,15 +854,7 @@ async def test_staged_ack_is_sent_by_the_cleanup_runner_exactly_once(
     flow._available_devices = [("Device", "device-id")]  # type: ignore[attr-defined]
     flow._abort_if_unique_id_configured = lambda **_: None  # type: ignore[attr-defined]
 
-    await _maybe_await(
-        flow.async_step_container_login(
-            {
-                "host": "127.0.0.1",
-                "port": CONTAINER_TOKEN_PORT,
-                "pairing_code": _PAIRING_CODE,
-            }
-        )
-    )
+    await _drive_container_login(flow, pairing_code=_PAIRING_CODE)
     await _maybe_await(flow.async_step_device_selection({}))
     assert recorder.ack_calls == []
 
@@ -969,15 +1089,7 @@ async def test_removing_a_flow_keeps_the_ticket_of_a_retrying_entry_setup(
     flow._available_devices = [("Device", "device-id")]  # type: ignore[attr-defined]
     flow._abort_if_unique_id_configured = lambda **_: None  # type: ignore[attr-defined]
 
-    await _maybe_await(
-        flow.async_step_container_login(
-            {
-                "host": "127.0.0.1",
-                "port": CONTAINER_TOKEN_PORT,
-                "pairing_code": _PAIRING_CODE,
-            }
-        )
-    )
+    await _drive_container_login(flow, pairing_code=_PAIRING_CODE)
     created = await _maybe_await(flow.async_step_device_selection({}))
     assert created.get("type") == "create_entry"
 
@@ -1535,15 +1647,7 @@ async def test_reconfigure_persist_stages_the_ack_behind_the_gate(
     # A probe would need a live API; the device list is not what is under test.
     flow._available_devices = [("Device", "device-id")]  # type: ignore[attr-defined]
 
-    await _maybe_await(
-        flow.async_step_container_login(
-            {
-                "host": "127.0.0.1",
-                "port": CONTAINER_TOKEN_PORT,
-                "pairing_code": _PAIRING_CODE,
-            }
-        )
-    )
+    await _drive_container_login(flow, pairing_code=_PAIRING_CODE)
     # The fetch stages the ack on the flow; nothing has been sent yet.
     assert flow._container_pending_ack is not None
     assert recorder.ack_calls == []
@@ -1586,11 +1690,7 @@ async def test_empty_pairing_code_is_required(
     flow.hass = hass  # type: ignore[assignment]
     flow.context = {}
 
-    result = await _maybe_await(
-        flow.async_step_container_login(
-            {"host": "127.0.0.1", "port": CONTAINER_TOKEN_PORT, "pairing_code": "   "}
-        )
-    )
+    result = await _drive_container_login(flow, pairing_code="   ")
     assert isinstance(result, dict)
     assert result.get("type") == "form"
     assert result.get("errors") == {"pairing_code": "required"}
@@ -1631,15 +1731,7 @@ async def test_container_fetch_errors_map_to_keys(
     flow.hass = hass  # type: ignore[assignment]
     flow.context = {}
 
-    result = await _maybe_await(
-        flow.async_step_container_login(
-            {
-                "host": "127.0.0.1",
-                "port": CONTAINER_TOKEN_PORT,
-                "pairing_code": _PAIRING_CODE,
-            }
-        )
-    )
+    result = await _drive_container_login(flow, pairing_code=_PAIRING_CODE)
     assert isinstance(result, dict)
     assert result.get("type") == "form"
     assert result.get("errors") == {"base": expected_key}
@@ -1664,15 +1756,7 @@ async def test_too_short_pairing_code_is_rejected_before_any_request(
     flow.context = {}
 
     short_code = "x" * (CONTAINER_NONCE_MIN_LEN - 1)
-    result = await _maybe_await(
-        flow.async_step_container_login(
-            {
-                "host": "127.0.0.1",
-                "port": CONTAINER_TOKEN_PORT,
-                "pairing_code": short_code,
-            }
-        )
-    )
+    result = await _drive_container_login(flow, pairing_code=short_code)
     assert isinstance(result, dict)
     assert result.get("type") == "form"
     assert result.get("errors") == {"pairing_code": "container_code_too_short"}
@@ -1693,15 +1777,7 @@ async def test_shared_key_missing_bundle_hits_keys_gate(
     flow.hass = hass  # type: ignore[assignment]
     flow.context = {}
 
-    result = await _maybe_await(
-        flow.async_step_container_login(
-            {
-                "host": "127.0.0.1",
-                "port": CONTAINER_TOKEN_PORT,
-                "pairing_code": _PAIRING_CODE,
-            }
-        )
-    )
+    result = await _drive_container_login(flow, pairing_code=_PAIRING_CODE)
     assert isinstance(result, dict)
     assert result.get("type") == "form"
     assert result.get("errors") == {"base": "keys_missing"}
@@ -1735,15 +1811,7 @@ async def test_wrong_pairing_code_surfaces_auth_failed(
     # (CONTAINER_NONCE_MIN_LEN); this test is about a *rejected* code, not a
     # malformed one, so the rejection has to come from the fetch call.
     wrong_but_well_formed = "wrong-code-0123456789abcdef"
-    result = await _maybe_await(
-        flow.async_step_container_login(
-            {
-                "host": "127.0.0.1",
-                "port": CONTAINER_TOKEN_PORT,
-                "pairing_code": wrong_but_well_formed,
-            }
-        )
-    )
+    result = await _drive_container_login(flow, pairing_code=wrong_but_well_formed)
     assert isinstance(result, dict)
     assert result.get("errors") == {"base": "container_auth_failed"}
     assert recorder.ack_calls == []
@@ -1768,15 +1836,7 @@ async def test_no_token_or_bundle_content_in_logs(
     flow.async_step_device_selection = _fake_device_selection  # type: ignore[assignment]
 
     with caplog.at_level(logging.DEBUG, logger="custom_components.googlefindmy"):
-        await _maybe_await(
-            flow.async_step_container_login(
-                {
-                    "host": "127.0.0.1",
-                    "port": CONTAINER_TOKEN_PORT,
-                    "pairing_code": _PAIRING_CODE,
-                }
-            )
-        )
+        await _drive_container_login(flow, pairing_code=_PAIRING_CODE)
 
     log_text = caplog.text
     # Neither the pairing nonce, the delete token, the aas token, nor the shared
@@ -1805,15 +1865,7 @@ async def test_ack_not_called_when_token_selection_fails(
     flow.hass = hass  # type: ignore[assignment]
     flow.context = {}
 
-    result = await _maybe_await(
-        flow.async_step_container_login(
-            {
-                "host": "127.0.0.1",
-                "port": CONTAINER_TOKEN_PORT,
-                "pairing_code": _PAIRING_CODE,
-            }
-        )
-    )
+    result = await _drive_container_login(flow, pairing_code=_PAIRING_CODE)
     assert isinstance(result, dict)
     assert result.get("type") == "form"
     assert result.get("errors") == {"base": "cannot_connect"}
@@ -3144,15 +3196,7 @@ async def test_container_login_step_survives_a_chunked_response(
 
     flow.async_step_device_selection = _fake_device_selection  # type: ignore[assignment]
 
-    result = await _maybe_await(
-        flow.async_step_container_login(
-            {
-                "host": "127.0.0.1",
-                "port": CONTAINER_TOKEN_PORT,
-                "pairing_code": _PAIRING_CODE,
-            }
-        )
-    )
+    result = await _drive_container_login(flow, pairing_code=_PAIRING_CODE)
 
     assert isinstance(result, dict)
     assert result.get("errors") is None or result.get("errors") == {}

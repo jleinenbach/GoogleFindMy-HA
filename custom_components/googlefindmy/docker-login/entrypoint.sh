@@ -273,7 +273,11 @@ fi
 # clear-text block exists exactly once and serves both entry paths.
 if [ "${_rc}" -eq 0 ] && [ "${GFMY_CLEARTEXT:-}" = "1" ] && [ -f "${_secrets_path}" ]; then
   # Track C: no port is opened. Print the full secrets.json in a clearly
-  # delimited block so the user can SELECT + COPY it inside the noVNC terminal
+  # delimited block on THIS script's stdout, i.e. in the terminal that runs the
+  # launcher (or in `docker logs`). That is a different sink from the noVNC
+  # viewer, which renders the X display served by supervisord and never sees
+  # this file descriptor; a terminal opened inside the desktop is a fresh shell
+  # under supervisord, not this output stream. Select and copy the block there
   # and paste it into Home Assistant's secrets.json field. The file is ephemeral
   # and removed right after display so nothing lingers on disk.
   echo ""

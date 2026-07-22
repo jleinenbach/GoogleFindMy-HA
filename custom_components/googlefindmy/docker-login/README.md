@@ -318,8 +318,10 @@ overlay pins the publish to `127.0.0.1:7901:7901`; there is no supported way to
 put this port on the LAN.
 
 The container prints a **pairing code** (generated at runtime — there is no
-default). In Home Assistant, choose the *Container login* auth method and enter
-host `127.0.0.1`, port `7901`, and that pairing code. The endpoint is
+default) **in the terminal you started the launcher from**, right after the
+Google sign-in completes; it is not shown in the noVNC viewer, which only ever
+displays Chrome's own window. In Home Assistant, choose the *Container login*
+auth method and enter host `127.0.0.1`, port `7901`, and that pairing code. The endpoint is
 loopback-only by design (it carries the tokens in the clear); to drive it from
 another machine, tunnel it:
 
@@ -381,12 +383,18 @@ is the SSH tunnel above.
 > For **HA OS, HA Core, or host-networked HA on the same machine**, the plain
 > `127.0.0.1:7901` above is correct.
 
-### noVNC clear-text copy fallback (`GFMY_CLEARTEXT=1`)
+### Terminal clear-text copy fallback (`GFMY_CLEARTEXT=1`)
 
 If you cannot share a filesystem *and* cannot open a port (or you simply prefer
-copy/paste), this switch prints the full `secrets.json` in the terminal at the
-end of the login — inside the noVNC window you can **select, copy, and paste** it
-straight into Home Assistant's *secrets.json* field. No port is opened.
+copy/paste), this switch prints the full `secrets.json` at the end of the login
+**in the terminal you started the launcher from** (equivalently: in
+`docker logs` for that run). Select, copy, and paste it straight into Home
+Assistant's *secrets.json* field. No port is opened.
+
+> The block is printed on the entrypoint's stdout, which is a different sink
+> from the noVNC viewer: that viewer shows the container's X display, and a
+> terminal opened inside that desktop is a separate shell that never sees this
+> output. Copy the block where the launcher runs.
 
 ```bash
 GFMY_CLEARTEXT=1 ./login.sh
@@ -407,9 +415,12 @@ tracks still work.
 
 > **Worth knowing before you combine the two.** The lockout is what someone
 > *else* on the machine triggers by guessing the pairing code five times. In
-> that situation this switch is what puts the full bundle on the noVNC screen,
-> which is only as private as `GFMY_NOVNC_BIND` makes it. On a shared or
-> LAN-exposed host, prefer the file handoff and leave `GFMY_CLEARTEXT` unset.
+> that situation this switch is what puts the full bundle into the launcher's
+> terminal output, which also means into `docker logs` for that run: it is only
+> as private as shell access to that host and access to the Docker daemon are.
+> `GFMY_NOVNC_BIND` does **not** limit it, that setting only governs the noVNC
+> viewer on port 7900. On a shared host, or wherever the container logs are
+> collected, prefer the file handoff and leave `GFMY_CLEARTEXT` unset.
 
 ## Using `secrets.json` in Home Assistant
 

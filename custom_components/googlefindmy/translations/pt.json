@@ -8,13 +8,23 @@
     "step": {
       "user": {
         "title": "Autenticação Encontre Meu Dispositivo do Google",
-        "description": "Escolha seu método de autenticação. ",
+        "description": "Escolha como quer iniciar sessão. O início de sessão por contentor num clique arranca por si um contentor de navegador já preparado e precisa de uma máquina com Docker. GoogleFindMyTools secrets.json é a escolha certa se já tiver esse ficheiro ou se puder executar o GoogleFindMyTools com o Chrome num computador.",
         "data": {
           "auth_method": "Método de autenticação"
         }
       },
+      "found_local_bundle": {
+        "title": "Credenciais existentes encontradas",
+        "description": "Já existe um ficheiro de credenciais para {email} neste sistema:\n\n`{bundle_path}` (escrito pela última vez há {bundle_age})\n\nImporte-o agora para concluir a configuração sem iniciar sessão na Google novamente.",
+        "data": {
+          "use_found_bundle": "Importar as credenciais encontradas"
+        },
+        "data_description": {
+          "use_found_bundle": "Mantenha esta opção ativada para importar o ficheiro mostrado acima. Desative-a para escolher você mesmo um método de autenticação."
+        }
+      },
       "secrets_json": {
-        "title": "Método 1: GoogleFindMyTools secrets.json",
+        "title": "GoogleFindMyTools secrets.json",
         "description": "Execute GoogleFindMyTools (Chrome) para gerar tokens de autenticação e cole todo o conteúdo do arquivo Auth/secrets.json abaixo.",
         "data": {
           "secrets_json": "Conteúdo do arquivo secrets.json"
@@ -22,16 +32,24 @@
       },
       "container_login": {
         "title": "One-click container login",
-        "description": "Sign in through the bundled login container. Open the noVNC session, complete the Google sign-in in the browser, then enter the pairing code shown there to import your credentials automatically.\n\nnoVNC viewer (password: `secret`): {novnc_access}\n\nThe viewer is opened by your browser, which often runs on a different machine than the Docker host, so it is only linked when the host above is a non-loopback IP address. On a loopback bind, open it on the Docker host itself, tunnel it with `ssh -L 7900:127.0.0.1:7900 DOCKER-HOST`, or re-run the launcher with `--ip ADDRESS` and use the address it prints.",
+        "description": "Inicie sessão através do contentor de início de sessão incluído. Execute-o no próprio anfitrião Docker; o contentor do Home Assistant não tem socket do Docker.\n\n1. Abra uma shell no anfitrião Docker e vá para a pasta `custom_components/googlefindmy/docker-login/` desta integração.\n2. Inicie-o com `GFMY_ONECLICK=1 ./login.sh` (Windows: `set GFMY_ONECLICK=1 && login.cmd`).\n3. Conclua o início de sessão da Google na janela noVNC.\n4. O contentor imprime depois um código de emparelhamento nesse mesmo terminal. O passo seguinte pede-o.\n\nVisualizador noVNC (palavra-passe: `secret`): {novnc_access}\n\nO visualizador é aberto pelo seu navegador, que muitas vezes corre numa máquina diferente do anfitrião Docker, por isso só é ligado quando o anfitrião acima é um endereço IP fora do loopback. Com uma ligação de loopback, abra-o no próprio anfitrião Docker, faça um túnel com `ssh -L 7900:127.0.0.1:7900 DOCKER-HOST` ou execute novamente o lançador com `--ip ENDERECO` e use o endereço apresentado.\n\nInstruções completas: https://github.com/BSkando/GoogleFindMy-HA (pasta `custom_components/googlefindmy/docker-login/`).",
         "data": {
           "host": "Container host",
-          "port": "Container port",
-          "pairing_code": "Pairing code"
+          "port": "Container port"
         },
         "data_description": {
-          "host": "Hostname or IP address of the login container. Leave the default unless you run the container elsewhere.",
-          "port": "Port the login container serves credentials on. Leave the default unless you changed it.",
-          "pairing_code": "The pairing code shown in the noVNC login session after you finish signing in."
+          "host": "Nome de anfitrião ou endereço IP do contentor de início de sessão. O valor predefinido `127.0.0.1` é o loopback do anfitrião Docker, pelo que só funciona se o Home Assistant partilhar o espaço de rede desse anfitrião; um Home Assistant em modo bridge não lhe chega. Duas saídas: colocar ambos os contentores na mesma rede Docker, iniciar o lançador de modo a que `docker compose run` receba `--use-aliases` (sem essa opção o nome de serviço não é resolvido, ver o README) e indicar aqui o nome de serviço do contentor, ou dispensar a rede e deixar o contentor entregar o ficheiro através de `docker-login/data/secrets.json`, que esta integração importa sozinha. A porta das credenciais está fixada a esse loopback em `docker-compose.oneclick.yml`; não existe nenhuma definição para a alterar.",
+          "port": "Porta em que o contentor de início de sessão fornece as credenciais. Só é publicada quando o lançador corre com a sobreposição `docker-compose.oneclick.yml`; o ficheiro compose simples não a publica."
+        }
+      },
+      "container_pairing": {
+        "title": "Introduza o código de emparelhamento",
+        "description": "Conclua primeiro o início de sessão da Google na janela noVNC. O contentor imprime depois o código de emparelhamento no terminal onde o lançador corre (ou em `docker logs`, se o tiver iniciado em segundo plano).",
+        "data": {
+          "pairing_code": "Código de emparelhamento"
+        },
+        "data_description": {
+          "pairing_code": "O código que o contentor imprime no terminal do lançador assim que o início de sessão termina. É gerado de novo em cada execução, é válido durante 5 minutos e bloqueia após 5 tentativas erradas; nesse caso, pare o contentor e volte a iniciar o lançador."
         }
       },
       "device_selection": {

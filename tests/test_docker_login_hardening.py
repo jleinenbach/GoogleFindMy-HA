@@ -2054,3 +2054,116 @@ def test_cleartext_cleanup_reports_a_failed_removal() -> None:
     assert "The file is now removed." not in entrypoint, (
         "the message must not assert the removal before it has happened."
     )
+
+
+def test_no_output_is_located_in_the_novnc_viewer() -> None:
+    """Runtime output must be located where it is actually written.
+
+    The container's own docs claimed twice that the pairing code and the
+    ``GFMY_CLEARTEXT=1`` bundle can be read "inside the noVNC terminal"/"on the
+    noVNC screen". Both are written to the entrypoint's stdout, i.e. the
+    terminal running the launcher (and ``docker logs``), which is a different
+    sink from the X display that noVNC renders: ``supervisord`` starts before
+    ``GFMY_PAIRING_CODE`` exists, so no process under it inherits the value, and
+    a shell opened inside the desktop is a fresh session that never sees this
+    file descriptor.
+
+    The guard pins the *predicate* ("output is located where it is written"),
+    not the word "noVNC": performing the Google sign-in genuinely does happen in
+    the noVNC window, and those true statements must survive. The three banned
+    phrases below are location claims about *output* only.
+    """
+
+    entrypoint = _read("entrypoint.sh")
+    readme = _read("README.md")
+
+    for name, text in (("entrypoint.sh", entrypoint), ("README.md", readme)):
+        for phrase in ("noVNC terminal", "noVNC screen", "inside the noVNC window"):
+            assert phrase not in text, (
+                f"{name} must not locate runtime output in the noVNC viewer "
+                f"(found {phrase!r}); it is printed on the entrypoint's stdout."
+            )
+
+    # Positive counterpart: each of the two outputs names its real sink.
+    assert "in the terminal that runs the" in entrypoint, (
+        "the clear-text block must say it is printed in the launcher's terminal."
+    )
+    assert "docker logs" in entrypoint, (
+        "the clear-text comment must name `docker logs` as the second sink, "
+        "because that is what makes the block only as private as daemon access."
+    )
+    assert "in the terminal you started the launcher from" in readme, (
+        "the README must tell the user where the pairing code and the "
+        "clear-text block actually appear."
+    )
+    # The clear-text privacy note must not point at the wrong control knob:
+    # GFMY_NOVNC_BIND governs port 7900 only and cannot limit stdout.
+    cleartext_note = readme.split("### Terminal clear-text copy fallback")[-1]
+    assert "does **not** limit it" in cleartext_note, (
+        "the clear-text privacy note must state that GFMY_NOVNC_BIND does not "
+        "constrain the terminal output."
+    )
+
+
+def test_no_english_source_locates_the_pairing_code_in_the_novnc_viewer() -> None:
+    """Class-level guard: the mislocation must not come back anywhere else.
+
+    ``test_no_output_is_located_in_the_novnc_viewer`` pins the two files where
+    the claim was first found. It is the class, not those two files, that has to
+    stay clean: the same sentence had already been copied into the config-flow
+    docstrings, the translation source and the flow's own tests. Pinning only
+    the reported spots is what let it survive there.
+
+    Two complementary measurements, because a phrase sweep cannot cross
+    languages:
+
+    * phrase sweep over the English-language sources (Python, ``strings.json``,
+      ``en.json``, tests);
+    * structural check over *all* locale files -- no text describing the pairing
+      code field may mention noVNC at all, in any language.
+
+    True statements survive both: the Google sign-in genuinely happens in the
+    noVNC window, and the step that asks for the address may say so.
+    """
+
+    import json as _json
+
+    integration = Path("custom_components/googlefindmy")
+    english_sources = [
+        integration / "config_flow.py",
+        integration / "container_login.py",
+        integration / "strings.json",
+        integration / "translations" / "en.json",
+        Path("tests") / "test_config_flow_container_login.py",
+        Path("tests") / "test_config_flow_initial_auth.py",
+    ]
+    banned = ("noVNC terminal", "noVNC screen", "inside the noVNC window")
+    for source in english_sources:
+        text = source.read_text(encoding="utf-8")
+        for phrase in banned:
+            assert phrase not in text, (
+                f"{source} must not locate the pairing code or the clear-text "
+                f"bundle in the noVNC viewer (found {phrase!r}); both are "
+                "printed on the entrypoint's stdout."
+            )
+        for marker in ("read off the noVNC", "re-read it from the noVNC"):
+            assert marker not in text, (
+                f"{source} still tells the user to read the pairing code off "
+                f"the noVNC session (found {marker!r})."
+            )
+
+    locales = [
+        integration / "strings.json",
+        *sorted((integration / "translations").glob("*.json")),
+    ]
+    assert len(locales) == 11, f"expected 11 text files, found {len(locales)}"
+    for locale in locales:
+        steps = _json.loads(locale.read_text(encoding="utf-8"))["config"]["step"]
+        for step_name, block in steps.items():
+            for section in ("data", "data_description"):
+                for field, value in (block.get(section) or {}).items():
+                    if "pairing" in field and isinstance(value, str):
+                        assert "noVNC" not in value, (
+                            f"{locale.name}: {step_name}.{section}.{field} still "
+                            "locates the pairing code in the noVNC viewer."
+                        )

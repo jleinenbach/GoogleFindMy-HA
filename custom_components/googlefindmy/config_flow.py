@@ -185,6 +185,7 @@ _COALESCE_ENTRIES: _CoalesceCallable | None = None
 
 if TYPE_CHECKING:
     from .api import GoogleFindMyAPI
+    from .discovery import _SecretsScanResult
 
 
 class _SubentryManagerProto(Protocol):
@@ -994,7 +995,9 @@ async def _async_delete_watched_secrets(
             _LOGGER.warning(
                 "Keeping watched secrets bundle of a different account (%s); only "
                 "the imported account's copies were removed: %s",
-                discovery_module._redact_account_for_log(None, result.stable_key),
+                discovery_module._redact_account_for_log(
+                    result.email, result.stable_key
+                ),
                 path_str,
             )
             continue
@@ -1222,6 +1225,10 @@ _FIELD_REPAIR_FALLBACK = "fallback_subentry"
 _FIELD_VISIBILITY_HUB = "hub"
 # Field identifiers used in options/visibility flows
 _FIELD_REPAIR_DEVICES = "device_ids"
+# Sole field of the ``found_local_bundle`` preflight step: "import the bundle
+# that is already on disk?". Unset means "no", which returns to the auth-method
+# form.
+_FIELD_USE_FOUND_BUNDLE = "use_found_bundle"
 
 _SUBENTRIES_DOCS_URL = (
     "https://github.com/BSkando/GoogleFindMy-HA/blob/main/README.md"
@@ -1769,18 +1776,76 @@ def _count_supplied_credential_methods(
     return sum(1 for name in field_names if str(user_input.get(name) or "").strip())
 
 
-def _container_login_schema(
-    *, host: str, port: int, pairing_code: str = ""
-) -> vol.Schema:
-    """Build the container-login form schema with the given defaults."""
+def _format_bundle_age(mtime: float) -> str:
+    """Render the age of a found bundle as a prose-free ``2d 3h 4m`` string.
+
+    Display only. The preflight deliberately has no age *limit* (an old bundle
+    is not a wrong bundle), so this value never enters a decision; it exists so
+    the user can tell a leftover from a login they just performed.
+
+    Prose-free on purpose, exactly like :func:`_novnc_access_placeholder`: the
+    value is substituted into a translated sentence and is not itself
+    translatable, so it must not carry English words. A clock that jumped
+    backwards (or a file stamped in the future) clamps to ``0m`` rather than
+    rendering a negative age.
+    """
+
+    seconds = max(0, int(time.time() - mtime))
+    days, remainder = divmod(seconds, 86400)
+    hours, remainder = divmod(remainder, 3600)
+    minutes = remainder // 60
+    if days:
+        return f"{days}d {hours}h {minutes}m"
+    if hours:
+        return f"{hours}h {minutes}m"
+    return f"{minutes}m"
+
+
+_CONTAINER_DEFAULT_HOST = "127.0.0.1"
+"""Default login-container address of the setup flow (host loopback).
+
+Named because the split into an address step and a pairing step made the
+literal a *flow state* default that three places have to agree on (form
+rendering, submission fallback and the pairing fetch); the reauth/options forms
+keep their own inline default because they never carry the address across steps.
+"""
+
+
+def _container_login_schema(*, host: str, port: int) -> vol.Schema:
+    """Build the container *address* form schema with the given defaults.
+
+    Deliberately without ``pairing_code``: the login container only prints that
+    code once the Google sign-in inside the noVNC session has finished, i.e.
+    strictly *after* the user needs the address to open that session. Asking for
+    all three fields at once demanded a value that could not exist yet, so the
+    address and the code live in two consecutive steps
+    (:meth:`ConfigFlow.async_step_container_login` and
+    :meth:`ConfigFlow.async_step_container_pairing`).
+    """
 
     return vol.Schema(
         {
             vol.Required("host", default=host): str,
             vol.Required("port", default=port): _PORT_VALIDATOR,
-            vol.Required("pairing_code", default=pairing_code): str,
         }
     )
+
+
+def _container_pairing_schema(*, pairing_code: str = "") -> vol.Schema:
+    """Build the container *pairing-code* form schema with the given default.
+
+    ``pairing_code`` is prefilled from the flow state so a code that was already
+    typed survives a detour back to the address step (an unreachable container
+    is an address problem, not a code problem); the user must not have to go
+    back to the launcher terminal and read the code off it again.
+
+    The code is printed on the entrypoint's stdout, i.e. in the terminal running
+    the launcher (or ``docker logs``), not inside the noVNC viewer -- the viewer
+    renders the X display served by ``supervisord``, which was started before
+    the code was generated and never inherits it.
+    """
+
+    return vol.Schema({vol.Required("pairing_code", default=pairing_code): str})
 
 
 @dataclass(frozen=True, slots=True)
@@ -3754,6 +3819,27 @@ class ConfigFlow(
         # sent AFTER the config entry is actually created in device_selection. If
         # the user aborts before CREATE_ENTRY the bundle survives (retryable).
         self._container_pending_ack: _ContainerFetchResult | None = None
+        # Address of the login container, collected in ``container_login`` and
+        # consumed by ``container_pairing`` (the pairing code only exists after
+        # the sign-in the address step points the user at). Held on the config
+        # flow rather than on _ContainerLoginMixin because the options flow
+        # shares that mixin and asks for address and code in a single form.
+        self._container_host: str | None = None
+        self._container_port: int | None = None
+        # Pairing code typed in ``container_pairing``. Survives the detour back
+        # to the address step on ``container_unreachable``.
+        self._container_pairing_code: str = ""
+        # One-shot marker for the local-bundle preflight scan in
+        # ``async_step_user``; see _async_preflight_local_bundle. Lives here and
+        # not on _ContainerLoginMixin because the preflight is a *setup* step
+        # and the mixin is shared with OptionsFlowHandler.
+        self._local_bundle_preflight_done = False
+        # Bundle offered by ``found_local_bundle`` (path + scan result), kept so
+        # the form can be re-shown with its placeholders after an error.
+        self._local_bundle_candidate: tuple[Path, _SecretsScanResult] | None = None
+        # Delete-after-import job of an accepted preflight bundle. Staged (not
+        # executed) once device_selection actually creates the entry.
+        self._local_bundle_pending_cleanup: PendingContainerCleanup | None = None
         # Identity of this flow's cleanup ticket (see _StagedCleanupTicket).
         # Resolved lazily because Home Assistant assigns ``flow_id`` only when
         # the flow manager starts the flow, i.e. after ``__init__``.
@@ -4815,8 +4901,254 @@ class ConfigFlow(
 
                 return await self.async_step_device_selection()
 
+        # Preflight (Track A for fresh installs): a bundle that is already lying
+        # at one of the default watch paths must not be re-typed. The watcher
+        # cannot offer it here -- it is armed in ``async_setup``, which a first
+        # install without a config entry never runs, because Home Assistant only
+        # imports the ``config_flow`` module to start this flow. So the flow
+        # scans once, itself. One shot: a rejected offer returns to *this* form,
+        # and the marker is what stops that from looping.
+        #
+        # ``not is_reconfigure_context`` is a deliberately redundant second gate:
+        # the reconfigure branch above returns unconditionally, so this condition
+        # cannot currently be reached with a reconfigure context and no test can
+        # single it out (removing it keeps the suite green). It stays as a local
+        # guard should that early return ever gain a fall-through -- the failure
+        # it prevents, a preflight form hijacking a reconfigure dialog, is not
+        # one to rediscover in the field.
+        if (
+            user_input is None
+            and not is_reconfigure_context
+            and not self._local_bundle_preflight_done
+        ):
+            preflight = await self._async_preflight_local_bundle(existing_entries)
+            if preflight is not None:
+                return preflight
+
         _LOGGER.debug("User step: presenting auth method selection form.")
         return self.async_show_form(step_id="user", data_schema=STEP_USER_DATA_SCHEMA)
+
+    async def _async_preflight_local_bundle(
+        self, existing_entries: CollIterable[ConfigEntry]
+    ) -> FlowResult | None:
+        """Scan the default watch paths once and offer an unconfigured bundle.
+
+        Returns the ``found_local_bundle`` form, or ``None`` when the user step
+        should just show its own form (no bundle, no executor, or every bundle
+        belongs to an account that already has a config entry).
+
+        The scan runs through ``hass.async_add_executor_job`` because reading and
+        ``stat``-ing files in the event loop is forbidden; that hop is the only
+        thing borrowed from :func:`_async_delete_watched_secrets`. Its *path*
+        source is explicitly not borrowed: that one reads
+        ``hass.data[DOMAIN]["discovery_manager"].watch_paths``, and on a fresh
+        install there is no such manager yet, which is precisely the situation
+        this preflight exists for. :func:`discovery._default_watch_paths` is the
+        same list the manager would be built from.
+
+        "Already configured" is decided per account, not per installation: with
+        several accounts a second, still unknown bundle must still be offered.
+        The account identity is derived through the same
+        ``normalize_email`` -> ``unique_account_id`` chain that
+        :meth:`_async_prepare_account_context` sets as the flow's ``unique_id``,
+        so the comparison against the existing entries' ``unique_id`` cannot
+        drift from the duplicate check that follows later in the flow.
+
+        Deliberately age-blind: an old file is not a wrong file, and the login
+        container may have produced it long before the user got around to adding
+        the integration. The age is shown, never used as a filter.
+        """
+
+        self._local_bundle_preflight_done = True
+
+        hass_obj = getattr(self, "hass", None)
+        executor = getattr(hass_obj, "async_add_executor_job", None)
+        if not callable(executor):
+            _LOGGER.debug(
+                "Local-bundle preflight skipped: no executor available on hass"
+            )
+            return None
+
+        # Imported here (not at module level) to avoid a circular import:
+        # discovery imports config_flow.
+        from . import discovery as discovery_module
+
+        def _scan() -> list[tuple[Path, _SecretsScanResult]]:
+            return discovery_module.scan_secrets_bundles(
+                discovery_module._default_watch_paths()
+            )
+
+        try:
+            scanned: list[tuple[Path, _SecretsScanResult]] = await executor(_scan)
+        except OSError as err:  # Unreadable mount: never block the setup form.
+            _LOGGER.debug("Local-bundle preflight scan failed: %s", err)
+            return None
+
+        if not scanned:
+            return None
+
+        configured_ids = {
+            unique_id
+            for entry in existing_entries
+            if isinstance(unique_id := getattr(entry, "unique_id", None), str)
+            and unique_id
+        }
+
+        for path, scan in scanned:
+            account_id = unique_account_id(normalize_email(scan.email))
+            if account_id and account_id in configured_ids:
+                _LOGGER.debug(
+                    "Local-bundle preflight: skipping bundle of an already "
+                    "configured account (%s)",
+                    discovery_module._redact_account_for_log(
+                        scan.email, scan.stable_key
+                    ),
+                )
+                continue
+            _LOGGER.info(
+                "Local-bundle preflight: offering a bundle found on disk (%s)",
+                discovery_module._redact_account_for_log(scan.email, scan.stable_key),
+            )
+            self._local_bundle_candidate = (path, scan)
+            return await self.async_step_found_local_bundle()
+
+        return None
+
+    async def async_step_found_local_bundle(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Offer the bundle the preflight found, or fall back to the user step.
+
+        Rejection (``use_found_bundle`` unset) returns to the auth-method form;
+        the one-shot marker set by :meth:`_async_preflight_local_bundle` keeps
+        that from bouncing straight back here.
+
+        Every import failure -- an unusable token, a bundle without shared keys,
+        no network -- re-shows *this* form with the error rather than aborting
+        the flow, so the offer stays retryable and, above all, the rejection
+        stays reachable.
+        """
+
+        errors: dict[str, str] = {}
+        candidate = self._local_bundle_candidate
+        if candidate is None:  # pragma: no cover - defensive
+            return await self.async_step_user()
+        path, scan = candidate
+
+        if user_input is not None:
+            if not user_input.get(_FIELD_USE_FOUND_BUNDLE, False):
+                _LOGGER.debug("Local-bundle preflight: offer declined by the user")
+                self._local_bundle_candidate = None
+                return await self.async_step_user()
+            imported = await self._async_import_local_bundle(scan, errors)
+            if imported is not None:
+                return imported
+
+        return self.async_show_form(
+            step_id="found_local_bundle",
+            data_schema=vol.Schema(
+                {vol.Required(_FIELD_USE_FOUND_BUNDLE, default=True): bool}
+            ),
+            errors=errors,
+            description_placeholders={
+                "bundle_path": str(path),
+                # The account is the user's own and is shown to them in their own
+                # UI, so it is spelled out here; only the *log* is redacted.
+                "email": scan.email,
+                "bundle_age": _format_bundle_age(scan.mtime),
+            },
+        )
+
+    async def _async_import_local_bundle(
+        self, scan: _SecretsScanResult, errors: dict[str, str]
+    ) -> FlowResult | None:
+        """Validate and persist a preflight bundle; ``None`` means "re-show form".
+
+        Runs the same validation chain as the pasted-secrets path
+        (``normalize_secrets_bundle`` -> single-key gate -> token selection), so
+        the preflight cannot become a second, laxer import surface.
+
+        On success the delete-after-import job is *staged* on the flow, not
+        executed: it is the same :class:`PendingContainerCleanup` the watcher
+        path stages, so both entry points delete through
+        :func:`_async_delete_watched_secrets` behind the same durability gate.
+        ``device_selection`` hands it over once the entry is actually created.
+        """
+
+        parsed = normalize_secrets_bundle(dict(scan.bundle))
+        if _reject_if_shared_key_missing(parsed, errors):
+            return None
+
+        email = normalize_email(_extract_email_from_secrets(parsed))
+        if not email:
+            errors["base"] = "invalid_token"
+            return None
+
+        cands = _extract_oauth_candidates_from_secrets(parsed)
+        if not cands:
+            errors["base"] = "invalid_token"
+            return None
+
+        try:
+            chosen = await async_pick_working_token(
+                self.hass, email, cands, secrets_bundle=parsed
+            )
+        except (DependencyNotReady, ImportError) as exc:
+            _register_dependency_error(errors, exc)
+            return None
+
+        if not chosen:
+            _log_token_validation_failure(email=email, candidates=cands)
+            errors["base"] = "cannot_connect"
+            return None
+
+        to_persist = chosen
+        if _disqualifies_for_persistence(to_persist):
+            alt = next(
+                (v for (_src, v) in cands if not _disqualifies_for_persistence(v)),
+                None,
+            )
+            if alt:
+                to_persist = alt
+
+        try:
+            await self._async_prepare_account_context(email=email)
+        except data_entry_flow.AbortFlow:
+            return self.async_abort(reason="already_configured")
+
+        self._auth_data = {
+            DATA_AUTH_METHOD: _AUTH_METHOD_SECRETS,
+            CONF_OAUTH_TOKEN: to_persist,
+            CONF_GOOGLE_EMAIL: email,
+        }
+        self._auth_data.update(_persist_secrets_bundle(parsed, to_persist))
+        self._local_bundle_pending_cleanup = PendingContainerCleanup(
+            imported_stable_key=scan.stable_key,
+            imported_digest=scan.digest,
+        )
+        return await self.async_step_device_selection()
+
+    @_typed_callback
+    def _async_stage_local_bundle_cleanup(self) -> None:
+        """Hand a preflight import's delete-after-import job to the gate.
+
+        Same reasoning and same primitive as
+        :meth:`_ContainerLoginMixin._async_stage_container_ack`: a CREATE_ENTRY
+        FlowResult is a promise, not a stored entry, so the irreversible delete
+        waits behind the durability gate that ``async_setup_entry`` arms.
+        Clearing the slot first makes a second call a no-op.
+        """
+
+        pending = self._local_bundle_pending_cleanup
+        if pending is None:
+            return
+        self._local_bundle_pending_cleanup = None
+        _async_stage_container_cleanup(
+            getattr(self, "hass", None),
+            flow_id=self._async_cleanup_ticket_id(),
+            unique_id=getattr(self, "unique_id", None),
+            job=pending,
+        )
 
     # ------------------ Step: secrets.json path ------------------
     async def async_step_secrets_json(
@@ -4903,20 +5235,78 @@ class ConfigFlow(
             step_id="secrets_json", data_schema=schema, errors=errors
         )
 
+    def _async_show_container_login_form(
+        self, errors: dict[str, str] | None = None
+    ) -> FlowResult:
+        """Render the container *address* form for the current flow state.
+
+        One renderer for both entry points into that form: the step itself and
+        the way back out of ``container_pairing`` when the container turned out
+        to be unreachable. Sharing it keeps the noVNC placeholder tied to the
+        host that is actually displayed in the same form.
+        """
+
+        host = self._container_host or _CONTAINER_DEFAULT_HOST
+        port = self._container_port or CONTAINER_TOKEN_PORT
+        return self.async_show_form(
+            step_id="container_login",
+            data_schema=_container_login_schema(host=host, port=port),
+            errors=errors or {},
+            description_placeholders={
+                # Always present, so the translated description can reference it
+                # unconditionally without risking a KeyError while rendering.
+                "novnc_access": _novnc_access_placeholder(host)
+            },
+        )
+
     async def async_step_container_login(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
-        """One-click login: fetch secrets from the login container over loopback."""
-        errors: dict[str, str] = {}
+        """Collect the login container's address, then ask for the pairing code.
 
-        host = "127.0.0.1"
-        port = CONTAINER_TOKEN_PORT
-        pairing_code = ""
+        First half of the split one-click login. The code the container prints
+        only exists once the user has completed the Google sign-in in the noVNC
+        session, and the address collected here is what makes that session
+        reachable in the first place, so this step must not demand the code.
+        """
 
         if user_input is not None:
-            host = str(user_input.get("host") or host).strip() or host
-            port = int(user_input.get("port") or port)
+            host = (
+                str(user_input.get("host") or "").strip()
+                or self._container_host
+                or _CONTAINER_DEFAULT_HOST
+            )
+            port = int(
+                user_input.get("port") or self._container_port or CONTAINER_TOKEN_PORT
+            )
+            self._container_host = host
+            self._container_port = port
+            return await self.async_step_container_pairing()
+
+        return self._async_show_container_login_form()
+
+    async def async_step_container_pairing(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Fetch the secrets bundle with the pairing code shown by the container.
+
+        Second half of the split one-click login: address and port come from the
+        flow state that ``container_login`` filled in. The fetch, error mapping
+        and success handling are the ones the single-form step used to run.
+
+        An unreachable container is the one failure whose remedy lives in the
+        *other* step (wrong host/port, container not started), so that case
+        returns to the address form while the code typed here is kept in
+        ``self._container_pairing_code`` and prefilled on the way back.
+        """
+
+        errors: dict[str, str] = {}
+        host = self._container_host or _CONTAINER_DEFAULT_HOST
+        port = self._container_port or CONTAINER_TOKEN_PORT
+
+        if user_input is not None:
             pairing_code = str(user_input.get("pairing_code") or "").strip()
+            self._container_pairing_code = pairing_code
 
             if not pairing_code:
                 errors["pairing_code"] = "required"
@@ -4943,18 +5333,15 @@ class ConfigFlow(
                     # container keeps the bundle for a retry (TTL fallback).
                     self._container_pending_ack = result
                     return await self.async_step_device_selection()
+                if errors.get("base") == "container_unreachable":
+                    return self._async_show_container_login_form(dict(errors))
 
         return self.async_show_form(
-            step_id="container_login",
-            data_schema=_container_login_schema(
-                host=host, port=port, pairing_code=pairing_code
+            step_id="container_pairing",
+            data_schema=_container_pairing_schema(
+                pairing_code=self._container_pairing_code
             ),
             errors=errors,
-            description_placeholders={
-                # Always present, so the translated description can reference it
-                # unconditionally without risking a KeyError while rendering.
-                "novnc_access": _novnc_access_placeholder(host)
-            },
         )
 
     # ------------------ Step: manual token + email ------------------
@@ -5247,6 +5634,11 @@ class ConfigFlow(
             # Entry *promised*, not yet stored: hand the deferred ack over to
             # async_setup_entry (two-phase delete, F4/P2).
             self._async_stage_container_ack()
+            # Same gate, same primitive for the preflight import: the bundle the
+            # user accepted in ``found_local_bundle`` is deleted from disk only
+            # after the entry has been observed in storage (delete-ALL rule; no
+            # asymmetry between the watcher path and the preflight path).
+            self._async_stage_local_bundle_cleanup()
             # ... and pin the ticket to that promise BEFORE Home Assistant runs
             # async_finish_flow. From here on the flow's removal no longer means
             # "no entry": the first async_setup_entry runs inside

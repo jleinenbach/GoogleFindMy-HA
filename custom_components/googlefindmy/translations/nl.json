@@ -8,13 +8,23 @@
     "step": {
       "user": {
         "title": "Google Find My Device – Aanmelding",
-        "description": "Kies je aanmeldingsmethode. Methode 1 wordt aanbevolen als je GoogleFindMyTools met Chrome kunt uitvoeren op een computer.",
+        "description": "Kies hoe je je wilt aanmelden. De aanmelding met de één-klik-container start een voorbereide browsercontainer voor je en vereist een machine met Docker. GoogleFindMyTools secrets.json past als je dat bestand al hebt of GoogleFindMyTools zelf met Chrome op een computer kunt uitvoeren.",
         "data": {
           "auth_method": "Aanmeldingsmethode"
         }
       },
+      "found_local_bundle": {
+        "title": "Bestaande inloggegevens gevonden",
+        "description": "Er staat al een bestand met inloggegevens voor {email} op dit systeem:\n\n`{bundle_path}` (laatst geschreven {bundle_age} geleden)\n\nImporteer het nu om de installatie af te ronden zonder opnieuw bij Google aan te melden.",
+        "data": {
+          "use_found_bundle": "Gevonden inloggegevens importeren"
+        },
+        "data_description": {
+          "use_found_bundle": "Laat dit aan staan om het bestand hierboven te importeren. Zet het uit om zelf een aanmeldmethode te kiezen."
+        }
+      },
       "secrets_json": {
-        "title": "Methode 1: GoogleFindMyTools secrets.json",
+        "title": "GoogleFindMyTools secrets.json",
         "description": "Voer GoogleFindMyTools (Chrome) uit om authenticatietokens te genereren en plak vervolgens de volledige inhoud van het Auth/secrets.json-bestand hieronder.",
         "data": {
           "secrets_json": "Inhoud van secrets.json-bestand"
@@ -22,16 +32,24 @@
       },
       "container_login": {
         "title": "One-click container login",
-        "description": "Sign in through the bundled login container. Open the noVNC session, complete the Google sign-in in the browser, then enter the pairing code shown there to import your credentials automatically.\n\nnoVNC viewer (password: `secret`): {novnc_access}\n\nThe viewer is opened by your browser, which often runs on a different machine than the Docker host, so it is only linked when the host above is a non-loopback IP address. On a loopback bind, open it on the Docker host itself, tunnel it with `ssh -L 7900:127.0.0.1:7900 DOCKER-HOST`, or re-run the launcher with `--ip ADDRESS` and use the address it prints.",
+        "description": "Meld je aan via de meegeleverde aanmeldcontainer. Voer hem uit op de Docker-host zelf; de Home Assistant-container heeft geen Docker-socket.\n\n1. Open een shell op de Docker-host en ga naar de map `custom_components/googlefindmy/docker-login/` van deze integratie.\n2. Start hem met `GFMY_ONECLICK=1 ./login.sh` (Windows: `set GFMY_ONECLICK=1 && login.cmd`).\n3. Rond de Google-aanmelding af in het noVNC-venster.\n4. De container drukt daarna een koppelcode af in datzelfde terminalvenster. De volgende stap vraagt erom.\n\nnoVNC-viewer (wachtwoord: `secret`): {novnc_access}\n\nDe viewer wordt geopend door je browser, die vaak op een andere machine draait dan de Docker-host; daarom wordt hij alleen gelinkt als de host hierboven een niet-loopback IP-adres is. Bij een loopback-binding open je hem op de Docker-host zelf, tunnel je hem met `ssh -L 7900:127.0.0.1:7900 DOCKER-HOST`, of start je de launcher opnieuw met `--ip ADRES` en gebruik je het afgedrukte adres.\n\nVolledige instructies: https://github.com/BSkando/GoogleFindMy-HA (map `custom_components/googlefindmy/docker-login/`).",
         "data": {
           "host": "Container host",
-          "port": "Container port",
-          "pairing_code": "Pairing code"
+          "port": "Container port"
         },
         "data_description": {
-          "host": "Hostname or IP address of the login container. Leave the default unless you run the container elsewhere.",
-          "port": "Port the login container serves credentials on. Leave the default unless you changed it.",
-          "pairing_code": "The pairing code shown in the noVNC login session after you finish signing in."
+          "host": "Hostnaam of IP-adres van de aanmeldcontainer. De standaardwaarde `127.0.0.1` is de loopback van de Docker-host en werkt dus alleen als Home Assistant de netwerkruimte van die host deelt; een Home Assistant in bridge-modus kan hem niet bereiken. Twee uitwegen: zet beide containers in één Docker-netwerk, start de launcher zo dat `docker compose run` `--use-aliases` meekrijgt (zonder die optie lost de servicenaam niet op, zie de README) en vul hier de servicenaam van de container in, of sla het netwerk helemaal over en laat de container het bestand doorgeven via `docker-login/data/secrets.json`, dat deze integratie zelf importeert. De poort voor de inloggegevens is in `docker-compose.oneclick.yml` vast aan die loopback gebonden; er is geen instelling voor.",
+          "port": "Poort waarop de aanmeldcontainer de inloggegevens aanbiedt. Hij wordt alleen gepubliceerd als de launcher draait met de overlay `docker-compose.oneclick.yml`; het gewone compose-bestand publiceert hem niet."
+        }
+      },
+      "container_pairing": {
+        "title": "Voer de koppelcode in",
+        "description": "Rond eerst de Google-aanmelding af in het noVNC-venster. De container drukt de koppelcode daarna af in de terminal waarin de launcher draait (of in `docker logs` als je hem losgekoppeld hebt gestart).",
+        "data": {
+          "pairing_code": "Koppelcode"
+        },
+        "data_description": {
+          "pairing_code": "De code die de container in de terminal van de launcher afdrukt zodra de aanmelding klaar is. Hij wordt bij elke uitvoering opnieuw gegenereerd, is 5 minuten geldig en blokkeert na 5 mislukte pogingen; stop in dat geval de container en start de launcher opnieuw."
         }
       },
       "device_selection": {

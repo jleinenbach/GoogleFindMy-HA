@@ -8,13 +8,23 @@
     "step": {
       "user": {
         "title": "אימות Google Find My Device",
-        "description": "בחירת שיטת האימות שלך. שיטה 1 מומלצת אם ניתן להריץ את GoogleFindMyTools במחשב עם Chrome.",
+        "description": "בחר כיצד להתחבר. התחברות בלחיצה אחת דרך מכולה מפעילה עבורך מכולת דפדפן מוכנה מראש ודורשת מכונה שמריצה Docker. GoogleFindMyTools secrets.json מתאים אם כבר יש לך את הקובץ הזה, או אם ניתן להריץ את GoogleFindMyTools עם Chrome על מחשב.",
         "data": {
           "auth_method": "שיטת אימות"
         }
       },
+      "found_local_bundle": {
+        "title": "נמצאו פרטי התחברות קיימים",
+        "description": "כבר קיים במערכת קובץ פרטי התחברות עבור {email}:\n\n`{bundle_path}` (נכתב לאחרונה לפני {bundle_age})\n\nייבא אותו כעת כדי לסיים את ההגדרה בלי להתחבר שוב ל-Google.",
+        "data": {
+          "use_found_bundle": "ייבוא פרטי ההתחברות שנמצאו"
+        },
+        "data_description": {
+          "use_found_bundle": "השאר אפשרות זו פעילה כדי לייבא את הקובץ המוצג למעלה. כבה אותה כדי לבחור בעצמך שיטת אימות."
+        }
+      },
       "secrets_json": {
-        "title": "שיטה 1: קובץ secrets.json של GoogleFindMyTools",
+        "title": "קובץ secrets.json של GoogleFindMyTools",
         "description": "יש להריץ את GoogleFindMyTools (ב-Chrome) כדי לייצר טוקנים לאימות, ולאחר מכן להדביק כאן את התוכן המלא של הקובץ Auth/secrets.json.",
         "data": {
           "secrets_json": "תוכן קובץ secrets.json"
@@ -22,16 +32,24 @@
       },
       "container_login": {
         "title": "One-click container login",
-        "description": "Sign in through the bundled login container. Open the noVNC session, complete the Google sign-in in the browser, then enter the pairing code shown there to import your credentials automatically.\n\nnoVNC viewer (password: `secret`): {novnc_access}\n\nThe viewer is opened by your browser, which often runs on a different machine than the Docker host, so it is only linked when the host above is a non-loopback IP address. On a loopback bind, open it on the Docker host itself, tunnel it with `ssh -L 7900:127.0.0.1:7900 DOCKER-HOST`, or re-run the launcher with `--ip ADDRESS` and use the address it prints.",
+        "description": "היכנס דרך מכולת ההתחברות המצורפת. הפעל אותה על מארח ה-Docker עצמו; למכולת Home Assistant אין שקע Docker.\n\n1. פתח מעטפת על מארח ה-Docker ועבור לתיקייה `custom_components/googlefindmy/docker-login/` של אינטגרציה זו.\n2. הפעל אותה עם `GFMY_ONECLICK=1 ./login.sh` (ב-Windows: `set GFMY_ONECLICK=1 && login.cmd`).\n3. השלם את ההתחברות ל-Google בחלון noVNC.\n4. לאחר מכן המכולה מדפיסה קוד התאמה באותו מסוף עצמו. השלב הבא מבקש אותו.\n\nמציג noVNC (סיסמה: `secret`): {novnc_access}\n\nהמציג נפתח בדפדפן שלך, שפועל לעיתים קרובות במחשב אחר ממארח ה-Docker, ולכן הוא מקושר רק כאשר המארח שלמעלה הוא כתובת IP שאינה לולאה מקומית. בקישור ללולאה מקומית פתח אותו על מארח ה-Docker עצמו, נתב אותו עם `ssh -L 7900:127.0.0.1:7900 DOCKER-HOST`, או הפעל שוב את המפעיל עם `--ip ADDRESS` והשתמש בכתובת שהוא מדפיס.\n\nהוראות מלאות: https://github.com/BSkando/GoogleFindMy-HA (תיקייה `custom_components/googlefindmy/docker-login/`).",
         "data": {
           "host": "Container host",
-          "port": "Container port",
-          "pairing_code": "Pairing code"
+          "port": "Container port"
         },
         "data_description": {
-          "host": "Hostname or IP address of the login container. Leave the default unless you run the container elsewhere.",
-          "port": "Port the login container serves credentials on. Leave the default unless you changed it.",
-          "pairing_code": "The pairing code shown in the noVNC login session after you finish signing in."
+          "host": "שם המארח או כתובת ה-IP של מכולת ההתחברות. ברירת המחדל `127.0.0.1` היא הלולאה המקומית של מארח ה-Docker, ולכן היא פועלת רק כאשר Home Assistant חולק את מרחב הרשת של אותו מארח; Home Assistant במצב גשר אינו מגיע אליו. שתי דרכים לעקוף זאת: לחבר את שתי המכולות לאותה רשת Docker, להפעיל את המפעיל כך ש-`docker compose run` יקבל `--use-aliases` (בלעדיו שם השירות אינו נפתר, ראה את ה-README), ולהזין כאן את שם השירות של המכולה, או לוותר על הרשת ולתת למכולה למסור את הקובץ דרך `docker-login/data/secrets.json`, שאינטגרציה זו מייבאת בעצמה. יציאת האישורים קשורה ללולאה המקומית הזו בקובץ `docker-compose.oneclick.yml`; אין עבורה הגדרה.",
+          "port": "היציאה שבה מכולת ההתחברות מספקת את האישורים. היא מפורסמת רק כאשר המפעיל רץ עם שכבת-העל `docker-compose.oneclick.yml`; קובץ compose הרגיל אינו מפרסם אותה."
+        }
+      },
+      "container_pairing": {
+        "title": "הזן את קוד ההתאמה",
+        "description": "השלם תחילה את ההתחברות ל-Google בחלון noVNC. לאחר מכן המכולה מדפיסה את קוד ההתאמה במסוף שבו רץ המפעיל (או ב-`docker logs`, אם הפעלת אותו במצב מנותק).",
+        "data": {
+          "pairing_code": "קוד התאמה"
+        },
+        "data_description": {
+          "pairing_code": "הקוד שהמכולה מדפיסה במסוף של המפעיל לאחר סיום ההתחברות. הוא נוצר מחדש בכל הפעלה, תקף למשך 5 דקות, וננעל לאחר 5 ניסיונות שגויים; במקרה כזה עצור את המכולה והפעל את המפעיל מחדש."
         }
       },
       "device_selection": {

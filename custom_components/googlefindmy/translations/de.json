@@ -8,13 +8,23 @@
     "step": {
       "user": {
         "title": "Google Find My Device – Anmeldung",
-        "description": "Wähle deine Anmeldemethode. Methode 1 wird empfohlen, wenn du GoogleFindMyTools mit Chrome auf einem Rechner ausführen kannst.",
+        "description": "Wähle, wie du dich anmelden möchtest. Die Ein-Klick-Container-Anmeldung startet einen vorbereiteten Browser-Container für dich und setzt einen Rechner mit Docker voraus. GoogleFindMyTools secrets.json passt, wenn du diese Datei schon hast oder GoogleFindMyTools selbst mit Chrome auf einem Rechner ausführen kannst.",
         "data": {
           "auth_method": "Anmeldemethode"
         }
       },
+      "found_local_bundle": {
+        "title": "Vorhandene Zugangsdaten gefunden",
+        "description": "Auf diesem System liegt bereits eine Zugangsdaten-Datei für {email}:\n\n`{bundle_path}` (zuletzt geschrieben vor {bundle_age})\n\nImportiere sie jetzt, um die Einrichtung ohne erneute Google-Anmeldung abzuschließen.",
+        "data": {
+          "use_found_bundle": "Gefundene Zugangsdaten importieren"
+        },
+        "data_description": {
+          "use_found_bundle": "Lass die Option aktiviert, um die oben angezeigte Datei zu importieren. Schalte sie aus, um stattdessen selbst eine Anmeldemethode zu wählen."
+        }
+      },
       "secrets_json": {
-        "title": "Methode 1: GoogleFindMyTools secrets.json",
+        "title": "GoogleFindMyTools secrets.json",
         "description": "Führe GoogleFindMyTools (Chrome) aus, um Authentifizierungs-Tokens zu erzeugen, und füge unten den vollständigen Inhalt der Datei Auth/secrets.json ein.",
         "data": {
           "secrets_json": "Inhalt der secrets.json"
@@ -22,16 +32,24 @@
       },
       "container_login": {
         "title": "Ein-Klick-Anmeldung über Container",
-        "description": "Melde dich über den mitgelieferten Anmelde-Container an. Öffne die noVNC-Sitzung, führe die Google-Anmeldung im Browser durch und gib anschließend den dort angezeigten Kopplungscode ein, um deine Anmeldedaten automatisch zu übernehmen.\n\nnoVNC-Ansicht (Passwort: `secret`): {novnc_access}\n\nDie Ansicht wird von deinem Browser geöffnet, der oft auf einem anderen Rechner läuft als der Docker-Host. Deshalb wird sie nur dann verlinkt, wenn oben eine Nicht-Loopback-IP steht. Bei einer Loopback-Bindung öffne sie direkt auf dem Docker-Host, tunnele sie mit `ssh -L 7900:127.0.0.1:7900 DOCKER-HOST` oder starte den Launcher erneut mit `--ip ADRESSE` und nutze die ausgegebene Adresse.",
+        "description": "Melde dich über den mitgelieferten Anmelde-Container an. Führe ihn auf dem Docker-Host selbst aus; der Home-Assistant-Container hat keinen Docker-Socket.\n\n1. Öffne eine Shell auf dem Docker-Host und wechsle in den Ordner `custom_components/googlefindmy/docker-login/` dieser Integration.\n2. Starte ihn mit `GFMY_ONECLICK=1 ./login.sh` (Windows: `set GFMY_ONECLICK=1 && login.cmd`).\n3. Schließe die Google-Anmeldung im noVNC-Fenster ab.\n4. Der Container gibt anschließend einen Kopplungscode in genau diesem Terminal aus. Der nächste Schritt fragt ihn ab.\n\nnoVNC-Ansicht (Passwort: `secret`): {novnc_access}\n\nDie Ansicht öffnet dein Browser, der oft auf einem anderen Rechner läuft als der Docker-Host. Deshalb wird sie nur verlinkt, wenn oben eine Nicht-Loopback-Adresse steht. Bei einer Loopback-Bindung öffne sie auf dem Docker-Host selbst, leite sie mit `ssh -L 7900:127.0.0.1:7900 DOCKER-HOST` weiter, oder starte den Launcher erneut mit `--ip ADRESSE` und nutze die ausgegebene Adresse.\n\nAusführliche Anleitung: https://github.com/BSkando/GoogleFindMy-HA (Ordner `custom_components/googlefindmy/docker-login/`).",
         "data": {
           "host": "Container-Host",
-          "port": "Container-Port",
+          "port": "Container-Port"
+        },
+        "data_description": {
+          "host": "Hostname oder IP-Adresse des Anmelde-Containers. Die Vorgabe `127.0.0.1` ist der Loopback des Docker-Hosts und funktioniert nur, wenn Home Assistant dessen Netz-Namensraum teilt; ein gebrücktes Home Assistant erreicht ihn nicht. Zwei Auswege: beide Container in ein gemeinsames Docker-Netz legen, den Launcher so starten, dass `docker compose run` mit `--use-aliases` läuft (ohne das löst der Dienstname nicht auf, siehe README), und hier den Dienstnamen des Anmelde-Containers eintragen, oder das Netz ganz umgehen und die Datei über `docker-login/data/secrets.json` übergeben lassen, die diese Integration von selbst importiert. Der Zugangsdaten-Port ist in `docker-compose.oneclick.yml` fest an diesen Loopback gebunden; eine Einstellung dafür gibt es nicht.",
+          "port": "Port, über den der Anmelde-Container die Zugangsdaten ausliefert. Er wird überhaupt nur veröffentlicht, wenn der Launcher mit der Overlay-Datei `docker-compose.oneclick.yml` läuft; die einfache Compose-Datei veröffentlicht ihn nicht."
+        }
+      },
+      "container_pairing": {
+        "title": "Kopplungscode eingeben",
+        "description": "Schließe zuerst die Google-Anmeldung im noVNC-Fenster ab. Der Container gibt den Kopplungscode danach in dem Terminal aus, in dem der Launcher läuft (oder in `docker logs`, wenn du ihn abgekoppelt gestartet hast).",
+        "data": {
           "pairing_code": "Kopplungscode"
         },
         "data_description": {
-          "host": "Hostname oder IP-Adresse des Anmelde-Containers. Belasse den Standardwert, sofern der Container nicht anderswo läuft.",
-          "port": "Port, über den der Anmelde-Container die Anmeldedaten bereitstellt. Belasse den Standardwert, sofern du ihn nicht geändert hast.",
-          "pairing_code": "Der Kopplungscode, der in der noVNC-Anmeldesitzung angezeigt wird, nachdem du die Anmeldung abgeschlossen hast."
+          "pairing_code": "Der Code, den der Container nach abgeschlossener Anmeldung im Terminal des Launchers ausgibt. Er wird bei jedem Lauf neu erzeugt, gilt 5 Minuten und sperrt nach 5 Fehlversuchen; in dem Fall den Container stoppen und den Launcher erneut starten."
         }
       },
       "device_selection": {

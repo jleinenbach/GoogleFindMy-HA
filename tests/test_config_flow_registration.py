@@ -4,7 +4,8 @@
 from __future__ import annotations
 
 import inspect
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -27,12 +28,36 @@ def test_config_flow_import_and_registers_handler() -> None:
 
 
 @pytest.fixture(name="hass")
-async def hass_fixture() -> SimpleNamespace:
-    """Return a minimal hass stub with a flow manager."""
+async def hass_fixture(
+    hass_executor_stub: Callable[..., SimpleNamespace],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> SimpleNamespace:
+    """Return a minimal hass stub with a flow manager.
 
-    from custom_components.googlefindmy import config_flow  # noqa: PLC0415
+    ``async_step_user`` scans the default watch paths through
+    ``hass.async_add_executor_job``, so the double has to provide that method;
+    otherwise the preflight is skipped and this smoke test no longer exercises
+    it.
 
-    hass = SimpleNamespace(data={})
+    The scan itself is pinned to an empty ``tmp_path``: unpinned it reads the
+    real installation paths, and this smoke test asserts nothing about what it
+    would find there.
+    """
+
+    from custom_components.googlefindmy import (
+        config_flow,  # noqa: PLC0415
+        discovery,  # noqa: PLC0415
+    )
+
+    monkeypatch.setattr(
+        discovery,
+        "_default_watch_paths",
+        lambda: [tmp_path / "no-bundle" / "secrets.json"],
+        raising=True,
+    )
+
+    hass = hass_executor_stub(data={})
 
     async def _async_init(
         domain: str,
