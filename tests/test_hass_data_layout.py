@@ -809,6 +809,133 @@ async def test_async_setup_entry_drains_unknown_account_bucket(
 
 
 @pytest.mark.asyncio
+async def test_update_listener_adopts_newly_configured_watch_path(
+    monkeypatch: pytest.MonkeyPatch,
+    stub_coordinator_factory: Callable[..., type[Any]],
+    tmp_path: Path,
+) -> None:
+    """The registered update listener adopts the entry's new extra watch path.
+
+    ``async_setup_entry`` registers a listener adapter that forwards to
+    ``_async_refresh_discovery_watch_paths``. The adapter must NOT exclude the
+    entry that was just updated: that entry is precisely the one whose freshly
+    configured ``SECRETS_EXTRA_WATCH_PATHS`` has to be picked up without a Home
+    Assistant restart. The test drives the listener that production registered,
+    not a hand-built copy of it.
+    """
+
+    discovery = importlib.import_module("custom_components.googlefindmy.discovery")
+
+    default_path = tmp_path / "defaults" / "secrets.json"
+    extra_path = tmp_path / "extra" / "secrets.json"
+
+    async def _fake_translations(*_args: Any, **_kwargs: Any) -> dict[str, str]:
+        return {}
+
+    async def _fake_trigger(_hass: Any, **_kwargs: Any) -> bool:
+        return True
+
+    monkeypatch.setattr(discovery, "_default_watch_paths", lambda: [default_path])
+    monkeypatch.setattr(discovery, "_trigger_cloud_discovery", _fake_trigger)
+    monkeypatch.setattr(discovery, "async_track_time_interval", lambda *_: lambda: None)
+    monkeypatch.setattr(discovery.cf, "_find_entry_by_email", lambda *_: None)
+    monkeypatch.setattr(
+        discovery.translation, "async_get_translations", _fake_translations
+    )
+
+    loop = asyncio.get_running_loop()
+    harness = _prepare_async_setup_entry_harness(
+        monkeypatch, stub_coordinator_factory, loop
+    )
+    integration = harness.integration
+    entry = harness.entry
+    hass = harness.hass
+
+    entry.data[DATA_SECRET_BUNDLE] = {"username": "user@example.com"}
+    harness.cache.values = {integration.username_string: "user@example.com"}
+
+    assert await integration.async_setup(hass, {}) is True
+    assert await integration.async_setup_entry(hass, entry) is True
+
+    manager = hass.data[DOMAIN]["discovery_manager"]
+    assert manager.watch_paths == (default_path,)
+
+    listeners = list(entry._update_listeners)
+    assert len(listeners) == 1, "async_setup_entry must register exactly one listener"
+
+    entry.options = dict(entry.options)
+    entry.options[discovery.SECRETS_EXTRA_WATCH_PATHS] = [str(extra_path)]
+    await listeners[0](hass, entry)
+
+    assert extra_path in manager.watch_paths
+
+    await manager.async_stop()
+
+
+@pytest.mark.asyncio
+async def test_setup_entry_adopts_watch_path_armed_after_the_manager(
+    monkeypatch: pytest.MonkeyPatch,
+    stub_coordinator_factory: Callable[..., type[Any]],
+    tmp_path: Path,
+) -> None:
+    """Setting an entry up adopts an extra watch path the manager never saw.
+
+    The discovery manager is armed once per Home Assistant instance, and
+    ``_collect_extra_watch_paths`` skips disabled entries. Home Assistant fires
+    no update listener when an entry is enabled again, so without a refresh at
+    the end of ``async_setup_entry`` the path of a re-enabled (or later set up)
+    entry would stay unobserved until the next options update or a restart.
+    The test arms the manager first and only then makes the option visible,
+    which is exactly the state a re-enabled entry is in.
+    """
+
+    discovery = importlib.import_module("custom_components.googlefindmy.discovery")
+
+    default_path = tmp_path / "defaults" / "secrets.json"
+    extra_path = tmp_path / "reenabled" / "secrets.json"
+
+    async def _fake_translations(*_args: Any, **_kwargs: Any) -> dict[str, str]:
+        return {}
+
+    async def _fake_trigger(_hass: Any, **_kwargs: Any) -> bool:
+        return True
+
+    monkeypatch.setattr(discovery, "_default_watch_paths", lambda: [default_path])
+    monkeypatch.setattr(discovery, "_trigger_cloud_discovery", _fake_trigger)
+    monkeypatch.setattr(discovery, "async_track_time_interval", lambda *_: lambda: None)
+    monkeypatch.setattr(discovery.cf, "_find_entry_by_email", lambda *_: None)
+    monkeypatch.setattr(
+        discovery.translation, "async_get_translations", _fake_translations
+    )
+
+    loop = asyncio.get_running_loop()
+    harness = _prepare_async_setup_entry_harness(
+        monkeypatch, stub_coordinator_factory, loop
+    )
+    integration = harness.integration
+    entry = harness.entry
+    hass = harness.hass
+
+    entry.data[DATA_SECRET_BUNDLE] = {"username": "user@example.com"}
+    harness.cache.values = {integration.username_string: "user@example.com"}
+
+    # Arm the singleton while the extra path is still invisible.
+    assert await integration.async_setup(hass, {}) is True
+    manager = hass.data[DOMAIN]["discovery_manager"]
+    assert manager.watch_paths == (default_path,)
+
+    # Now the option becomes visible, as it does when an entry is re-enabled.
+    entry.options = dict(entry.options)
+    entry.options[discovery.SECRETS_EXTRA_WATCH_PATHS] = [str(extra_path)]
+
+    assert await integration.async_setup_entry(hass, entry) is True
+
+    assert extra_path in manager.watch_paths
+
+    await manager.async_stop()
+
+
+@pytest.mark.asyncio
 async def test_duplicate_account_abort_discards_staged_cleanup(
     monkeypatch: pytest.MonkeyPatch,
     stub_coordinator_factory: Callable[..., type[Any]],

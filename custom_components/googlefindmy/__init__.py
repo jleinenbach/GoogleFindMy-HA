@@ -7185,19 +7185,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
     # Refresh the running discovery watcher's paths when SECRETS_EXTRA_WATCH_PATHS
     # changes at runtime (options flow), so a newly configured path is observed
     # without a Home Assistant restart. The manager is a per-instance singleton and
-    # recomputes from ALL entries, so the listener is idempotent regardless of which
-    # entry changed. Best-effort: a missing manager or any error is only debug-logged.
+    # recomputes from every enabled entry, so the listener is idempotent regardless
+    # of which entry changed. It deliberately passes no exclude_entry_id: the entry
+    # that just changed is exactly the one whose new path must be adopted. This
+    # closure is only the listener adapter for Home Assistant's (hass, entry)
+    # signature; the refresh itself lives in the shared helper.
     async def _async_refresh_watch_paths(
         hass_arg: HomeAssistant, updated_entry: MyConfigEntry
     ) -> None:
-        manager = _domain_data(hass_arg).get("discovery_manager")
-        refresh = getattr(manager, "async_refresh_watch_paths", None)
-        if not callable(refresh):
-            return
-        try:
-            await refresh()
-        except Exception:  # noqa: BLE001 - watcher refresh is best-effort, never fatal
-            _LOGGER.debug("Discovery watch-path refresh failed", exc_info=True)
+        await _async_refresh_discovery_watch_paths(hass_arg)
 
     entry.async_on_unload(entry.add_update_listener(_async_refresh_watch_paths))
 
@@ -7824,6 +7820,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
         _LOGGER.warning(
             "[%s] Deferred container-login cleanup failed: %s", entry.entry_id, err
         )
+
+    # Counterpart to the refresh in `async_remove_entry`: bring this entry's
+    # SECRETS_EXTRA_WATCH_PATHS back into the running watcher. Needed because
+    # `_collect_extra_watch_paths` skips disabled entries while Home Assistant
+    # fires no update listener when an entry is enabled again, and because the
+    # discovery singleton is armed once per instance, so an entry set up later
+    # would otherwise contribute nothing until the next options update.
+    # Cheap and safe: `async_refresh_watch_paths` skips watchers whose path set
+    # is unchanged, which is the normal case for a plain setup or reload, so no
+    # rescan is triggered there. Runs after the cleanup above so it cannot scan
+    # a bundle that cleanup is about to delete, and only on a successful setup:
+    # every `ConfigEntryNotReady` above returns before this point.
+    await _async_refresh_discovery_watch_paths(hass)
 
     return True
 
@@ -8652,10 +8661,60 @@ async def async_unload_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
     return await _async_unload_parent_entry(hass, entry)
 
 
+async def _async_refresh_discovery_watch_paths(
+    hass: HomeAssistant, *, exclude_entry_id: str | None = None
+) -> None:
+    """Tell the discovery singleton to recompute its secrets watch paths.
+
+    Single owner of that step for every caller (the per-entry options update
+    listener and config entry removal), so both agree on the lookup of the
+    manager and on the failure policy. Watch-path bookkeeping is housekeeping
+    and must never break a setup, an options update or a removal:
+
+    * a missing manager or a manager without the hook (discovery never armed,
+      or a foreign object in the bucket) is ignored silently, because that is
+      the ordinary state on an instance where discovery did not start,
+    * an error raised by the hook is debug-logged with the caller's
+      ``exclude_entry_id``, which is what tells a failed removal refresh apart
+      from a failed options-update refresh in a debug log.
+
+    ``exclude_entry_id`` is forwarded to the manager and leaves that entry out
+    of the recomputation; removal passes the entry being removed.
+    """
+
+    manager = _domain_data(hass).get("discovery_manager")
+    refresh = getattr(manager, "async_refresh_watch_paths", None)
+    if not callable(refresh):
+        return
+    try:
+        await refresh(exclude_entry_id=exclude_entry_id)
+    except Exception:  # noqa: BLE001 - watcher refresh is best-effort, never fatal
+        _LOGGER.debug(
+            "Discovery watch-path refresh failed (exclude_entry_id=%s)",
+            exclude_entry_id,
+            exc_info=True,
+        )
+
+
 async def async_remove_entry(hass: HomeAssistant, entry: MyConfigEntry) -> None:
     """Handle removal of a config entry and purge persisted caches if requested."""
 
     _ensure_runtime_imports()
+
+    # Drop this entry's SECRETS_EXTRA_WATCH_PATHS from the running watcher. The
+    # update listener that normally recomputes them was unregistered by the
+    # unload that precedes removal, so without this the watcher keeps polling a
+    # path whose owning entry is gone until another entry update or a restart,
+    # and a bundle written there could still open a discovery flow. Runs before
+    # the teardown below so no earlier failure can skip it.
+    #
+    # The exclusion can only remove this entry's own contribution, and
+    # DiscoveryManager.async_refresh_watch_paths forces a scan only for paths
+    # that were ADDED. The ordinary removal -- the removed entry owned no extra
+    # path, or owned one that now disappears -- is therefore a strict no-op for
+    # the watcher's signature, and cannot re-import a bundle that some other
+    # account's entry is still using.
+    await _async_refresh_discovery_watch_paths(hass, exclude_entry_id=entry.entry_id)
 
     # Prefer entry.runtime_data (2026 standard), then clean up entries bucket.
     bucket = _domain_data(hass)

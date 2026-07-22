@@ -74,6 +74,56 @@ class _FakeHass:
         return asyncio.ensure_future(coro)
 
 
+class _EntriesHass(_FakeHass):
+    """``_FakeHass`` variant whose config entries are supplied by the test.
+
+    ``_FakeHass`` hard-codes exactly one entry, which is enough for the
+    collector tests but not for the watch-path recomputation tests: those need
+    to vary the entry set (extra path present/absent, entry disabled) between
+    two refreshes on the same manager.
+    """
+
+    def __init__(self, entries: list[Any]) -> None:
+        super().__init__()
+        self.entries: list[Any] = list(entries)
+        self.config_entries = SimpleNamespace(
+            async_entries=lambda domain: list(self.entries) if domain == DOMAIN else []
+        )
+
+
+def _record_watcher_calls(
+    monkeypatch: pytest.MonkeyPatch,
+) -> list[tuple[str, bool | None]]:
+    """Record ``async_update_paths``/``async_force_scan`` on every watcher.
+
+    Patched on the class because :class:`SecretsJSONWatcher` defines
+    ``__slots__``, so per-instance attribute injection is impossible. The real
+    implementations still run, so the recorded calls describe actual behaviour
+    rather than replacing it.
+    """
+
+    calls: list[tuple[str, bool | None]] = []
+    real_update = discovery.SecretsJSONWatcher.async_update_paths
+    real_scan = discovery.SecretsJSONWatcher.async_force_scan
+
+    async def _update(
+        watcher: discovery.SecretsJSONWatcher,
+        paths: list[Path],
+        *,
+        forget_signature: bool = True,
+    ) -> None:
+        calls.append(("update", forget_signature))
+        await real_update(watcher, paths, forget_signature=forget_signature)
+
+    async def _scan(watcher: discovery.SecretsJSONWatcher) -> None:
+        calls.append(("scan", None))
+        await real_scan(watcher)
+
+    monkeypatch.setattr(discovery.SecretsJSONWatcher, "async_update_paths", _update)
+    monkeypatch.setattr(discovery.SecretsJSONWatcher, "async_force_scan", _scan)
+    return calls
+
+
 def _bundle(email: str, token: str | None = None) -> dict[str, Any]:
     """Return the bundle payload ``_write_secrets`` persists."""
 
@@ -382,6 +432,185 @@ async def test_manager_collects_extra_watch_paths(tmp_path: Path) -> None:
 
     empty_hass = _FakeHass()
     assert discovery._collect_extra_watch_paths(empty_hass) == []
+
+
+async def test_collect_extra_watch_paths_honours_exclude_entry_id(
+    tmp_path: Path,
+) -> None:
+    """``exclude_entry_id`` drops the paths of exactly the named entry.
+
+    Entry removal uses this so a watch path does not outlive its owning entry.
+    An unrelated entry id must leave the result untouched.
+    """
+
+    extra = tmp_path / "data" / "secrets.json"
+    hass = _FakeHass(extra_watch_paths=[str(extra)])
+
+    assert discovery._collect_extra_watch_paths(hass, exclude_entry_id=None) == [extra]
+    assert discovery._collect_extra_watch_paths(hass, exclude_entry_id="other") == [
+        extra
+    ]
+    assert (
+        discovery._collect_extra_watch_paths(hass, exclude_entry_id="watcher-entry")
+        == []
+    )
+
+
+async def test_collect_extra_watch_paths_skips_disabled_entries(
+    tmp_path: Path,
+) -> None:
+    """A disabled entry's extra path is not collected.
+
+    ``ConfigEntries.async_entries`` returns disabled entries as well
+    (``include_disabled`` defaults to ``True``), so a deliberately switched-off
+    account would otherwise keep its secrets path polled.
+    """
+
+    enabled_path = tmp_path / "enabled" / "secrets.json"
+    disabled_path = tmp_path / "disabled" / "secrets.json"
+    hass = _EntriesHass(
+        [
+            make_config_entry(
+                entry_id="entry-enabled",
+                options={SECRETS_EXTRA_WATCH_PATHS: [str(enabled_path)]},
+            ),
+            make_config_entry(
+                entry_id="entry-disabled",
+                options={SECRETS_EXTRA_WATCH_PATHS: [str(disabled_path)]},
+                disabled_by="user",
+            ),
+        ]
+    )
+
+    assert discovery._collect_extra_watch_paths(hass) == [enabled_path]
+
+
+async def test_refresh_watch_paths_without_watchers_is_a_noop() -> None:
+    """A manager that was never started has nothing to recompute.
+
+    ``async_remove_entry`` calls this unconditionally (what it does is decided
+    here, not by the caller), so this is the state on an instance where the
+    discovery runtime failed to start.
+    """
+
+    manager = discovery.DiscoveryManager(_EntriesHass([]))
+
+    await manager.async_refresh_watch_paths(exclude_entry_id="entry-gone")
+
+    assert manager.watch_paths == ()
+
+
+async def test_refresh_watch_paths_is_a_noop_when_the_path_set_is_unchanged(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """An unchanged path set must not touch the watcher at all.
+
+    The removal hook refreshes on every entry removal, and in the normal case
+    the removed entry owned no extra path. Re-arming and rescanning there would
+    re-import a bundle that is already known, and the discovery update flow
+    applies such an import without asking the user.
+    """
+
+    default_path = tmp_path / "auth" / "secrets.json"
+    _write_secrets(default_path, "user@example.com", token="aas_et/ONLY")
+
+    hass = _EntriesHass([make_config_entry(entry_id="entry-plain")])
+    triggered: list[dict[str, Any]] = []
+    _patch_discovery(monkeypatch, triggered)
+    monkeypatch.setattr(discovery, "_default_watch_paths", lambda: [default_path])
+
+    manager = discovery.DiscoveryManager(hass)
+    await manager.async_start()
+    await asyncio.sleep(0)
+    assert len(triggered) == 1
+
+    calls = _record_watcher_calls(monkeypatch)
+    await manager.async_refresh_watch_paths(exclude_entry_id="entry-plain")
+
+    assert calls == []
+    assert len(triggered) == 1
+    assert manager.watch_paths == (default_path,)
+
+    await manager.async_stop()
+
+
+async def test_refresh_watch_paths_does_not_rescan_when_paths_only_disappear(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A shrinking path set updates the watcher but keeps signature and scan.
+
+    Nothing new can be discovered on a subset, so a forced scan there could only
+    re-import a bundle the watcher has already seen on a surviving path.
+    """
+
+    default_path = tmp_path / "auth" / "secrets.json"
+    extra_path = tmp_path / "extra" / "secrets.json"
+    _write_secrets(default_path, "user@example.com", token="aas_et/ONLY")
+
+    entry = make_config_entry(
+        entry_id="entry-extra",
+        options={SECRETS_EXTRA_WATCH_PATHS: [str(extra_path)]},
+    )
+    hass = _EntriesHass([entry])
+    triggered: list[dict[str, Any]] = []
+    _patch_discovery(monkeypatch, triggered)
+    monkeypatch.setattr(discovery, "_default_watch_paths", lambda: [default_path])
+
+    manager = discovery.DiscoveryManager(hass)
+    await manager.async_start()
+    await asyncio.sleep(0)
+    assert manager.watch_paths == (default_path, extra_path)
+    assert len(triggered) == 1
+
+    calls = _record_watcher_calls(monkeypatch)
+    await manager.async_refresh_watch_paths(exclude_entry_id="entry-extra")
+
+    assert calls == [("update", False)]
+    assert manager.watch_paths == (default_path,)
+    # The still-present default bundle must not be handed to discovery twice.
+    assert len(triggered) == 1
+
+    # The signature must still be armed, not merely un-scanned: the next
+    # periodic scan of the surviving path has to stay a no-op as well.
+    await manager.async_force_secrets_scan()
+    await asyncio.sleep(0)
+    assert len(triggered) == 1
+
+    await manager.async_stop()
+
+
+async def test_refresh_watch_paths_rescans_when_a_path_is_added(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A newly configured path is armed and scanned immediately."""
+
+    default_path = tmp_path / "auth" / "secrets.json"
+    extra_path = tmp_path / "extra" / "secrets.json"
+    _write_secrets(extra_path, "user@example.com", token="aas_et/ONLY")
+
+    entry = make_config_entry(entry_id="entry-extra")
+    hass = _EntriesHass([entry])
+    triggered: list[dict[str, Any]] = []
+    _patch_discovery(monkeypatch, triggered)
+    monkeypatch.setattr(discovery, "_default_watch_paths", lambda: [default_path])
+
+    manager = discovery.DiscoveryManager(hass)
+    await manager.async_start()
+    await asyncio.sleep(0)
+    assert manager.watch_paths == (default_path,)
+    assert triggered == []
+
+    calls = _record_watcher_calls(monkeypatch)
+    entry.options[SECRETS_EXTRA_WATCH_PATHS] = [str(extra_path)]
+    await manager.async_refresh_watch_paths()
+    await asyncio.sleep(0)
+
+    assert calls == [("update", True), ("scan", None)]
+    assert manager.watch_paths == (default_path, extra_path)
+    assert len(triggered) == 1
+    assert triggered[0]["email"] == "user@example.com"
+
+    await manager.async_stop()
 
 
 async def test_default_watch_paths_include_container_data_default() -> None:

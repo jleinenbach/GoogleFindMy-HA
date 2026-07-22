@@ -909,11 +909,21 @@ class SecretsJSONWatcher:
 
         return tuple(self._paths)
 
-    async def async_update_paths(self, paths: list[Path]) -> None:
+    async def async_update_paths(
+        self, paths: list[Path], *, forget_signature: bool = True
+    ) -> None:
         """Replace the observed paths using the same dedup/order as ``__init__``.
 
-        Lock-guarded against a concurrent scan. ``_last_signature`` is reset so
-        the next scan re-evaluates the (possibly changed) path set from scratch.
+        Lock-guarded against a concurrent scan.
+
+        ``forget_signature`` (default ``True``, the historic behaviour) resets
+        ``_last_signature`` *and* the retry budget via
+        :meth:`_forget_signature`, so the next scan re-evaluates the changed
+        path set from scratch. Callers that only *shrink* the path set pass
+        ``False``: nothing new can be discovered there, and re-arming would make
+        the watcher import a bundle it has already seen. Leaving the signature
+        in place is safe because :meth:`_scan` forgets it anyway as soon as no
+        bundle is found on the remaining paths.
         """
 
         async with self._lock:
@@ -925,7 +935,8 @@ class SecretsJSONWatcher:
                 seen.add(candidate)
                 deduped.append(candidate)
             self._paths = deduped
-            self._forget_signature()
+            if forget_signature:
+                self._forget_signature()
 
     async def async_start(self) -> None:
         """Begin watching for secrets.json updates."""
@@ -1195,12 +1206,31 @@ class SecretsJSONWatcher:
         return scan[0][1] if scan else None
 
 
-def _collect_extra_watch_paths(hass: HomeAssistant) -> list[Path]:
+def _collect_extra_watch_paths(
+    hass: HomeAssistant, *, exclude_entry_id: str | None = None
+) -> list[Path]:
     """Return additional secrets.json watch paths configured via options.
 
     The option ``SECRETS_EXTRA_WATCH_PATHS`` may hold a single path string or a
     list of path strings on any googlefindmy config entry. Empty, blank or
     non-string values are ignored so a missing/empty option is a strict no-op.
+
+    Disabled entries are skipped: ``ConfigEntries.async_entries`` defaults to
+    ``include_disabled=True``, so without the check a deliberately switched-off
+    account would keep its extra path polled. The check reads
+    ``entry.disabled_by`` defensively instead of narrowing the lookup, because
+    the duck-typed entry containers used by callers and tests do not all accept
+    the ``include_disabled`` keyword. Enabling or disabling an entry does not
+    itself run an options update (``async_set_disabled_by`` reloads the entry
+    instead of calling ``async_update_entry``), so the change takes effect at
+    the next recomputation: an options update, an entry removal or a restart.
+
+    ``exclude_entry_id`` leaves one entry's paths out of the result. Entry
+    removal passes the entry being removed. Home Assistant already deletes the
+    entry from its registry before it awaits ``async_remove_entry``, so the
+    ``async_entries`` lookup below normally no longer sees it; the explicit
+    exclusion is a defense-in-depth guard, because that ordering is a Home
+    Assistant internal that is neither documented nor stable across releases.
     """
 
     manager = getattr(hass, "config_entries", None)
@@ -1217,6 +1247,13 @@ def _collect_extra_watch_paths(hass: HomeAssistant) -> list[Path]:
         return []
 
     for entry in entries:
+        if (
+            exclude_entry_id is not None
+            and getattr(entry, "entry_id", None) == exclude_entry_id
+        ):
+            continue
+        if getattr(entry, "disabled_by", None) is not None:
+            continue
         options = getattr(entry, "options", None) or {}
         raw = options.get(SECRETS_EXTRA_WATCH_PATHS)
         if not raw:
@@ -1293,25 +1330,64 @@ class DiscoveryManager:
         for watcher in self._watchers:
             await watcher.async_force_scan()
 
-    async def async_refresh_watch_paths(self) -> None:
-        """Recompute and apply the watch paths after an options change.
+    async def async_refresh_watch_paths(
+        self, *, exclude_entry_id: str | None = None
+    ) -> None:
+        """Recompute and apply the watch paths after an entry set change.
 
-        Idempotent: it recomputes from ALL entries (defaults plus every entry's
-        ``SECRETS_EXTRA_WATCH_PATHS``), so it does not matter which entry
-        changed. After updating each watcher it forces an immediate scan so a
-        freshly configured path is picked up without a Home Assistant restart.
+        Idempotent: it recomputes from the defaults plus every *considered*
+        entry's ``SECRETS_EXTRA_WATCH_PATHS``, so with no ``exclude_entry_id``
+        it does not matter which entry changed. ``exclude_entry_id`` narrows
+        that set by exactly one entry and is passed while that entry is being
+        removed, so its extra paths are dropped instead of being polled until
+        the next entry update or restart. See :func:`_collect_extra_watch_paths`
+        for why the exclusion is explicit.
+
+        Only *added* paths justify re-arming and rescanning. A force scan
+        re-imports whatever bundle it finds, and the discovery update flow
+        applies such an import to the matching entry without any user
+        interaction, so an unconditional rescan on an unchanged or shrunken
+        path set would overwrite credentials and delete bundles that nobody
+        touched. Therefore, per watcher:
+
+        * identical path set: skip entirely (no update, no scan),
+        * paths only removed: update without forgetting the signature and
+          without scanning, since nothing new can be discovered there. A stale
+          ``_last_signature`` is harmless: :meth:`SecretsJSONWatcher._scan`
+          forgets it as soon as no bundle is found on the remaining paths.
+        * paths added: forget the signature and force an immediate scan, so a
+          freshly configured path is picked up without a Home Assistant restart.
+
+        The comparison is by set, not by order: the winning bundle is chosen by
+        modification time (see :meth:`SecretsJSONWatcher._read_bundle`), so a
+        pure reordering changes nothing observable.
         """
 
         if not self._watchers:
             return
 
-        watch_paths = [
-            *_default_watch_paths(),
-            *_collect_extra_watch_paths(self._hass),
-        ]
+        # ``dict.fromkeys`` mirrors the dedup/order semantics of
+        # ``async_update_paths`` so the comparison below sees exactly the list
+        # the watcher would end up storing.
+        watch_paths = list(
+            dict.fromkeys(
+                [
+                    *_default_watch_paths(),
+                    *_collect_extra_watch_paths(
+                        self._hass, exclude_entry_id=exclude_entry_id
+                    ),
+                ]
+            )
+        )
+        desired = set(watch_paths)
         for watcher in self._watchers:
-            await watcher.async_update_paths(list(watch_paths))
-            await watcher.async_force_scan()
+            current = set(watcher.watch_paths)
+            if desired == current:
+                continue
+            added = bool(desired - current)
+            await watcher.async_update_paths(list(watch_paths), forget_signature=added)
+            if added:
+                await watcher.async_force_scan()
 
     @property
     def watch_paths(self) -> tuple[Path, ...]:
