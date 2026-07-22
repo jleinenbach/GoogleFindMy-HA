@@ -9,9 +9,13 @@ silently and only surface in review. This guard fails loudly instead, mirroring 
 sibling ``test_guard_async_test_marker`` guard: the legacy files below are frozen as a
 documented backlog, and no new violations may be added outside the allowlist.
 
-Scope note: this guard covers ``tests/**`` only, matching the sibling test guards and
-the directory where the omission has recurred. Generated modules and the wider
-``custom_components`` tree retain the lenient retrofit posture described in AGENTS.md.
+Scope note: the sweeping part of this guard covers ``tests/**`` only, matching the
+sibling test guards and the directory where the omission has recurred. The wider
+``custom_components`` tree retains the lenient retrofit posture described in AGENTS.md
+(34 of its modules still lack the header), so it is deliberately not swept here.
+Modules that this repository adds new are pinned individually instead, see
+``NEW_PRODUCTION_MODULES`` below: for a file that is being written now there is no
+retrofit debate, and review already had to point the omission out once.
 """
 
 from __future__ import annotations
@@ -20,6 +24,13 @@ from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _TESTS_DIR = _REPO_ROOT / "tests"
+
+# Production modules this branch adds. They were written after the convention
+# existed, so the lenient retrofit posture does not apply to them.
+NEW_PRODUCTION_MODULES: set[str] = {
+    "custom_components/googlefindmy/container_login.py",
+    "custom_components/googlefindmy/docker-login/token_server.py",
+}
 
 # Pre-existing test files that predate this guard and still lack the path header.
 # Do not add new entries; add the header to new files instead. Shrinking this list
@@ -117,6 +128,37 @@ def test_new_test_files_carry_repository_path_header() -> None:
     assert not offenders, (
         "Test files missing the AGENTS.md repository-relative path header "
         f"(add `# <path>` as the first line): {offenders}"
+    )
+
+
+def test_new_production_modules_carry_repository_path_header() -> None:
+    """Newly added production modules must carry the header from the start.
+
+    Pinned explicitly rather than by sweeping ``custom_components/**``: the tree
+    still holds pre-existing modules without the header, and AGENTS.md asks for
+    those to be retrofitted opportunistically instead of blocking work. A module
+    added by this branch has no such history, so it is simply required to comply.
+    """
+    offenders = [
+        rel
+        for rel in sorted(NEW_PRODUCTION_MODULES)
+        if not _has_path_header(_REPO_ROOT / rel, rel)
+    ]
+    assert not offenders, (
+        "New production modules must start with their repository-relative path "
+        f"comment (after an optional shebang), see AGENTS.md: {offenders}"
+    )
+
+
+def test_pinned_production_modules_exist() -> None:
+    """A renamed or deleted pin must be updated, not silently pass."""
+    missing = [
+        rel
+        for rel in sorted(NEW_PRODUCTION_MODULES)
+        if not (_REPO_ROOT / rel).is_file()
+    ]
+    assert not missing, (
+        f"NEW_PRODUCTION_MODULES lists files that no longer exist: {missing}"
     )
 
 

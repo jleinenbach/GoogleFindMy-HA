@@ -1,3 +1,4 @@
+# custom_components/googlefindmy/container_login.py
 """Loopback container-login client (Track B one-click handoff).
 
 This is the Home-Assistant-side half of the "one-click" Docker login: it pulls a

@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# custom_components/googlefindmy/docker-login/token_server.py
 """One-shot loopback token endpoint for the container login (Track B).
 
 This runs *inside the login container*, after ``main.py`` produced a fresh
