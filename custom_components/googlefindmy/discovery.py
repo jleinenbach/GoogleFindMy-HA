@@ -11,6 +11,7 @@ import uuid
 from collections.abc import Callable, Coroutine, Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
+from enum import StrEnum
 from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
@@ -150,6 +151,168 @@ def _hass_is_stopping(hass: Any) -> bool:
     return getattr(hass, "is_stopping", False) is True
 
 
+class CloudDiscoveryOutcome(StrEnum):
+    """What a cloud discovery trigger achieved, seen from the *producer*.
+
+    The three members answer exactly one question -- "must the producer re-arm
+    its change detection?" -- and nothing else. They exist because the plain
+    "did the coroutine raise?" signal cannot answer it: a config flow reports a
+    refused import through its :class:`FlowResult`, not through an exception, so
+    a flow that aborted with ``cannot_connect`` looks byte-for-byte like a
+    successful import to a done-callback that only inspects the exception.
+
+    * ``ACCEPTED`` -- a flow was created or was already running for this
+      payload, and it ended in a state that no retry can improve. Nothing to
+      re-arm.
+    * ``SKIPPED`` -- the request never reached a flow because this integration
+      deduplicated it (``runtime.active_keys``) or the runtime container was
+      torn down mid-unload. Re-arming would schedule a second attempt for work
+      that is already running, so this deliberately does not re-arm either.
+    * ``RETRY`` -- a flow ran and aborted for a *transient* reason. The bundle
+      was not imported and the next scan should try again.
+    """
+
+    ACCEPTED = "accepted"
+    SKIPPED = "skipped"
+    RETRY = "retry"
+
+
+#: ``FlowResultType.ABORT`` as its wire value. Compared as a string on purpose:
+#: ``homeassistant.data_entry_flow.FlowResultType`` is a ``StrEnum``, and
+#: stripped test cores hand out plain strings, so both forms have to match.
+_ABORT_FLOW_RESULT_TYPE = "abort"
+
+#: Abort reasons that end a discovery flow in a state a retry cannot improve.
+#:
+#: Every entry is a *legitimate* end state, not a failure, and re-arming on it
+#: would burn the bounded retry budget (:data:`_MAX_SECRETS_RETRY_ATTEMPTS`) and
+#: recreate work at every scan interval:
+#:
+#: * ``already_configured`` -- Home Assistant's own unique-id guard
+#:   (``ConfigEntries._abort_if_unique_id_configured``) *and* the way this
+#:   integration's discovery-update path signals **success**: it applies the
+#:   updated credentials to the existing entry and then aborts with this reason
+#:   (see ``config_flow.ConfigFlow.async_step_discovery_update_info``). Treating
+#:   it as a failure would re-import an already imported bundle on every scan.
+#: * ``already_in_progress`` -- ``ConfigEntries`` raises it for a flow that is
+#:   already running, and *both* synthesis sites in ``config_flow`` produce it
+#:   when Home Assistant's fire-and-forget helper answers with ``None``: the
+#:   proxy ``config_flow.async_create_discovery_flow`` (used when
+#:   ``homeassistant.config_entries`` exports ``async_create_discovery_flow``)
+#:   and the module-level fallback ``config_flow._async_create_discovery_flow``
+#:   (used when it does not, which is the case on current cores and therefore
+#:   the ordinary production path). ``helpers.discovery_flow.async_create_flow``
+#:   is declared ``-> None`` and dispatches through
+#:   ``async_create_background_task``, so ``None`` means "a flow owns this
+#:   payload, its result is not observable from the caller" -- the normal
+#:   production outcome, not a failure.
+#: * ``single_instance_allowed`` -- ``ConfigEntriesFlowManager.async_finish_flow``
+#:   refuses a second entry for a single-instance integration. Permanent.
+#: * ``not_implemented`` -- ``ConfigFlow.async_step_*`` default. Permanent.
+#: * ``invalid_discovery_info`` -- this integration rejects the *payload* after
+#:   validating it. The next scan would submit the identical payload and be
+#:   rejected identically.
+#: * ``keys_missing`` -- same class as ``invalid_discovery_info``, one validation
+#:   rule further in: ``config_flow._normalize_and_validate_discovery_payload``
+#:   raises it for a bundle without a usable ``shared_key``, and
+#:   ``async_step_discovery`` forwards it verbatim as ``async_abort(reason=
+#:   err.reason)``. A bundle without a shared key is a non-renewable dead end
+#:   (the owner key can only be refreshed *with* the shared key), so the next
+#:   scan submits the identical bytes and is rejected identically.
+#: * ``reauth_successful`` / ``reconfigure_successful`` / ``migration_successful``
+#:   -- success reasons of the update paths, which finish by aborting on purpose.
+#:
+#: Deliberately **absent**, i.e. treated as transient, are the remaining reasons
+#: the discovery path can produce:
+#:
+#: * ``invalid_auth`` -- tempting to call terminal, but it is a *server verdict*,
+#:   not a payload property: ``config_flow._map_api_exc_to_error_key`` derives it
+#:   from an auth-shaped exception or a plain HTTP 401/403, and Google returns
+#:   those for rate limiting and temporary blocks as well as for genuinely dead
+#:   credentials. The error costs are asymmetric -- classifying it terminal by
+#:   mistake means never retrying a bundle that would have worked, while
+#:   classifying it transient by mistake costs the bounded retry budget and one
+#:   warning -- so the uncertain case belongs on the transient side. Contrast
+#:   ``keys_missing``: that one is decided by the bytes we hold, not by a peer.
+#: * ``cannot_connect`` -- network failure, and it doubles as the "payload
+#:   carried no usable token candidate" rejection, so it cannot be made terminal
+#:   without silencing genuine network retries.
+#: * ``dependency_not_ready`` -- a missing runtime dependency can become
+#:   available.
+#: * ``unknown`` -- an unclassified exception, which is exactly the case the
+#:   bounded retry budget exists for.
+#:
+#: Anything **not** listed here counts as transient (see
+#: :func:`_classify_discovery_flow_result` for why the default points that way).
+_TERMINAL_ABORT_REASONS: frozenset[str] = frozenset(
+    {
+        "already_configured",
+        "already_in_progress",
+        "single_instance_allowed",
+        "not_implemented",
+        "invalid_discovery_info",
+        "keys_missing",
+        "reauth_successful",
+        "reconfigure_successful",
+        "migration_successful",
+    }
+)
+
+
+def _flow_result_field(result: Mapping[str, Any], field_name: str) -> str:
+    """Return ``field_name`` of a FlowResult as plain text (``""`` if absent)."""
+
+    raw = result.get(field_name)
+    # ``StrEnum`` members compare equal to their value, but a plain ``Enum`` in a
+    # stripped test core does not, so unwrap ``.value`` before the comparison.
+    value = getattr(raw, "value", raw)
+    return value if isinstance(value, str) else ""
+
+
+def _classify_discovery_flow_result(result: Any) -> CloudDiscoveryOutcome:
+    """Map the FlowResult of a discovery flow onto a producer-facing outcome.
+
+    This is the whole point of the fix for "a completed coroutine is not a
+    completed import": ``ConfigEntries.flow.async_init`` and
+    ``config_flow.async_create_discovery_flow`` both *return* an abort instead
+    of raising one, so the outcome has to be read off the returned value.
+
+    Unknown abort reasons resolve to :attr:`CloudDiscoveryOutcome.RETRY`, and
+    that direction is chosen deliberately, from the asymmetry of the two error
+    costs (the same asymmetry :func:`_hass_is_stopping` argues from):
+
+    * Reading a *terminal* reason as transient costs at most
+      :data:`_MAX_SECRETS_RETRY_ATTEMPTS` extra scans, after which the watcher
+      gives up on the bundle with one warning. Bounded, and self-healing.
+    * Reading a *transient* reason as terminal stalls the import indefinitely --
+      until the bundle changes, the watch paths change or Home Assistant
+      restarts. Unbounded, and silent.
+
+    So the terminal set is enumerated explicitly (it is small, stable and
+    grounded in Home Assistant's own sources plus this integration's
+    ``strings.json``) while the open-ended remainder takes the recoverable
+    branch.
+
+    A result that is not a readable FlowResult mapping, or one that is not an
+    abort at all, is ``ACCEPTED``: only a *recognised* abort is evidence that
+    the import did not happen, and a missing/foreign shape is no such evidence.
+    """
+
+    if not isinstance(result, Mapping):
+        return CloudDiscoveryOutcome.ACCEPTED
+    if _flow_result_field(result, "type") != _ABORT_FLOW_RESULT_TYPE:
+        return CloudDiscoveryOutcome.ACCEPTED
+    reason = _flow_result_field(result, "reason")
+    if reason in _TERMINAL_ABORT_REASONS:
+        return CloudDiscoveryOutcome.ACCEPTED
+    _LOGGER.debug(
+        "Cloud discovery flow aborted with a transient reason (%s); "
+        "the payload was not imported",
+        reason or "<unknown>",
+    )
+    return CloudDiscoveryOutcome.RETRY
+
+
 def _handle_discovery_task_result(
     task: asyncio.Future[Any],
     *,
@@ -164,6 +327,19 @@ def _handle_discovery_task_result(
     detection gated the task, otherwise a transient flow-creation error would
     stall the import until the source file changes again.
 
+    A task that finished **without** raising is not proof that the payload was
+    imported. A config flow that hits a transient error handles it and returns
+    ``FlowResultType.ABORT``; the coroutine then completes normally and would,
+    if only the exception were inspected, be indistinguishable from a
+    successful import -- the failure hook would never fire, the watcher's
+    signature would stay armed and the documented bounded retries would never
+    happen. The outcome is therefore read off the returned
+    :class:`CloudDiscoveryOutcome`, and only
+    :attr:`CloudDiscoveryOutcome.RETRY` re-arms the producer. Any other value,
+    including a legacy ``bool`` or ``None`` from a test double, is treated as
+    "no retry warranted", which is the pre-existing behaviour for everything
+    that is not a recognised transient abort.
+
     ``asyncio.CancelledError`` counts as a failure *unless* Home Assistant is
     actually shutting down. Cancellation is not a reliable shutdown signal
     here: ``_cleanup_cloud_discovery_runtime`` cancels exactly these handles on
@@ -176,7 +352,7 @@ def _handle_discovery_task_result(
     """
 
     try:
-        task.result()
+        outcome = task.result()
     except asyncio.CancelledError:
         if _hass_is_stopping(hass):
             return
@@ -187,7 +363,12 @@ def _handle_discovery_task_result(
     except Exception as err:  # noqa: BLE001 - logging best effort
         _LOGGER.debug("Suppressed cloud discovery task exception: %s", err)
     else:
-        return
+        if outcome is not CloudDiscoveryOutcome.RETRY:
+            return
+        _LOGGER.debug(
+            "Cloud discovery flow ended in a transient abort; re-arming the "
+            "producer so the bundle is retried"
+        )
 
     _invoke_failure_hook(on_failure)
 
@@ -251,14 +432,17 @@ class _CloudDiscoveryResults(list[dict[str, Any]]):
 
         The promise is narrower than "the attempt did not succeed": the hook
         runs when the queued coroutine **raised**, when it was cancelled
-        outside a Home Assistant shutdown, or when its outcome cannot be
-        observed at all (no usable done-callback, no running loop). A ``False``
-        return value from :func:`_trigger_cloud_discovery` deliberately does
-        **not** run it. Every ``False`` path there is a *deduplication* path --
-        an identical flow is already in flight (``runtime.active_keys``) or the
-        runtime container was torn down mid-unload -- so re-arming the producer
-        would schedule a second attempt for work that is already running and
-        recreate exactly the duplicate flows the dedup exists to suppress.
+        outside a Home Assistant shutdown, when its outcome cannot be observed
+        at all (no usable done-callback, no running loop), or when the flow ran
+        and ended in a *transient* abort
+        (:attr:`CloudDiscoveryOutcome.RETRY`). A
+        :attr:`CloudDiscoveryOutcome.SKIPPED` result from
+        :func:`_trigger_cloud_discovery` deliberately does **not** run it. Every
+        ``SKIPPED`` path there is a *deduplication* path -- an identical flow is
+        already in flight (``runtime.active_keys``) or the runtime container was
+        torn down mid-unload -- so re-arming the producer would schedule a
+        second attempt for work that is already running and recreate exactly the
+        duplicate flows the dedup exists to suppress.
         """
 
         payload = dict(item)
@@ -539,8 +723,14 @@ async def _trigger_cloud_discovery(
     source: str | None = None,
     title: str | None = None,
     entry: ConfigEntry | None = None,
-) -> bool:
-    """Create or resume a config flow based on cloud-scan discovery data."""
+) -> CloudDiscoveryOutcome:
+    """Create or resume a config flow based on cloud-scan discovery data.
+
+    Returns a :class:`CloudDiscoveryOutcome` rather than a bare ``bool``,
+    because the two "nothing was imported" cases must stay distinguishable:
+    a locally deduplicated request (``SKIPPED``) must not re-arm the producer,
+    while a flow that ran and aborted transiently (``RETRY``) must.
+    """
 
     runtime = _cloud_discovery_runtime(hass, entry)
     ns = discovery_ns or CLOUD_DISCOVERY_NAMESPACE
@@ -571,8 +761,8 @@ async def _trigger_cloud_discovery(
             # ``CancelledError`` and never gets here. What can get here is a
             # producer whose task is not registered in ``retry_handles`` (the
             # cloud scanner), and that one passes no failure hook anyway, so
-            # returning ``False`` loses nothing.
-            return False
+            # returning ``SKIPPED`` loses nothing.
+            return CloudDiscoveryOutcome.SKIPPED
 
         results_list.append(payload, trigger=False)
         if stable_key in runtime.active_keys:
@@ -580,10 +770,11 @@ async def _trigger_cloud_discovery(
                 "Cloud discovery request deduplicated for %s (flow already active)",
                 _redact_account_for_log(email, stable_key),
             )
-            return False
+            return CloudDiscoveryOutcome.SKIPPED
         runtime.active_keys.add(stable_key)
 
     triggered = False
+    outcome = CloudDiscoveryOutcome.ACCEPTED
     try:
         helper = getattr(cf, "async_create_discovery_flow", None)
         try:
@@ -603,12 +794,14 @@ async def _trigger_cloud_discovery(
 
         if callable(helper):
             try:
-                await helper(
-                    hass,
-                    DOMAIN,
-                    context=context,
-                    data=payload,
-                    discovery_key=discovery_key,
+                outcome = _classify_discovery_flow_result(
+                    await helper(
+                        hass,
+                        DOMAIN,
+                        context=context,
+                        data=payload,
+                        discovery_key=discovery_key,
+                    )
                 )
                 triggered = True
             except (AttributeError, NotImplementedError) as err:
@@ -625,27 +818,30 @@ async def _trigger_cloud_discovery(
                 raise
 
         if not triggered:
-            await hass.config_entries.flow.async_init(
-                DOMAIN,
-                context=context,
-                data=payload,
+            outcome = _classify_discovery_flow_result(
+                await hass.config_entries.flow.async_init(
+                    DOMAIN,
+                    context=context,
+                    data=payload,
+                )
             )
             triggered = True
 
-        if triggered:
+        if outcome is CloudDiscoveryOutcome.RETRY:
+            _LOGGER.debug(
+                "Cloud discovery flow aborted transiently for %s (namespace=%s); "
+                "the producer is asked to retry",
+                _redact_account_for_log(email, stable_key),
+                ns,
+            )
+        else:
             _LOGGER.info(
                 "Cloud discovery flow queued for %s (namespace=%s)",
                 _redact_account_for_log(email, stable_key),
                 ns,
             )
-        else:
-            _LOGGER.debug(
-                "Cloud discovery flow skipped for %s (namespace=%s)",
-                _redact_account_for_log(email, stable_key),
-                ns,
-            )
 
-        return triggered
+        return outcome
     finally:
         async with lock:
             runtime.active_keys.discard(stable_key)
@@ -1426,6 +1622,7 @@ async def async_initialize_discovery_runtime(hass: HomeAssistant) -> DiscoveryMa
 __all__ = [
     "CLOUD_DISCOVERY_NAMESPACE",
     "SECRETS_DISCOVERY_NAMESPACE",
+    "CloudDiscoveryOutcome",
     "SecretsJSONWatcher",
     "DiscoveryManager",
     "async_initialize_discovery_runtime",

@@ -940,6 +940,117 @@ async def test_removing_a_flow_keeps_its_update_path_ticket(
     assert len(recorder.ack_calls) == 1
 
 
+async def test_removing_a_flow_keeps_the_ticket_of_a_retrying_entry_setup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A created entry whose FIRST setup retries must keep its ticket.
+
+    ``ConfigEntries.async_add`` awaits ``async_setup``, so the first
+    ``async_setup_entry`` runs *inside* ``async_finish_flow``, i.e. before Home
+    Assistant removes the flow. When that attempt raises
+    ``ConfigEntryNotReady`` it never reaches the ticket claim at the end of
+    setup: Home Assistant catches the exception, schedules a retry and removes
+    the flow all the same. Flow removal is therefore ambiguous -- "no entry,
+    ever" and "entry created, setup retrying" arrive through the very same
+    hook -- and dropping the ticket here would leave the imported
+    ``secrets.json`` on disk forever and the login container un-acked, because
+    the later successful retry finds nothing to claim.
+
+    Drives the *real* ``device_selection`` step to CREATE_ENTRY so the promise
+    marker is observed at its actual call site, not through a hand-set flag.
+    """
+
+    recorder = _Recorder()
+    _install_container_client(monkeypatch, recorder)
+    hass = _build_hass([])
+    flow = config_flow.ConfigFlow()
+    flow.hass = hass  # type: ignore[assignment]
+    flow.context = {}
+    flow._available_devices = [("Device", "device-id")]  # type: ignore[attr-defined]
+    flow._abort_if_unique_id_configured = lambda **_: None  # type: ignore[attr-defined]
+
+    await _maybe_await(
+        flow.async_step_container_login(
+            {
+                "host": "127.0.0.1",
+                "port": CONTAINER_TOKEN_PORT,
+                "pairing_code": _PAIRING_CODE,
+            }
+        )
+    )
+    created = await _maybe_await(flow.async_step_device_selection({}))
+    assert created.get("type") == "create_entry"
+
+    unique_id = flow.unique_id
+    staged = _staged_cleanup(hass)
+    assert len(staged) == 1
+    # No entry id yet -- the flow cannot know it -- but the promise is recorded.
+    assert staged[0].entry_id is None
+    assert staged[0].entry_promised is True
+
+    # First async_setup_entry raised ConfigEntryNotReady: nothing was claimed,
+    # and Home Assistant removes the flow anyway.
+    flow.async_remove()
+
+    kept = _staged_cleanup(hass)
+    assert len(kept) == 1, "a retrying entry setup must keep its cleanup ticket"
+    assert kept[0].flow_id == flow._async_cleanup_ticket_id()
+    assert recorder.ack_calls == []
+
+    # The retry succeeds and claims the surviving ticket exactly once.
+    await _run_staged_cleanup(hass, unique_id=unique_id)
+    assert len(recorder.ack_calls) == 1
+    assert _staged_cleanup(hass) == []
+    await _run_staged_cleanup(hass, unique_id=unique_id)
+    assert len(recorder.ack_calls) == 1
+
+
+async def test_removing_an_aborted_flow_still_drops_its_unpromised_ticket(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The promise marker must not blunt the abort path it shares a hook with.
+
+    Counterpart to the test above and the reason the marker is set at
+    CREATE_ENTRY rather than when the ticket is staged: a flow that staged its
+    jobs but never reached CREATE_ENTRY has no entry and never will, so its
+    ticket must still be dropped -- otherwise a competing same-account entry
+    inherits it and acks credentials that belong to the aborted flow.
+    """
+
+    recorder = _Recorder()
+    _install_container_client(monkeypatch, recorder)
+    hass = _build_hass([])
+
+    aborted = config_flow.ConfigFlow()
+    aborted.hass = hass  # type: ignore[assignment]
+    aborted.context = {}
+    aborted.flow_id = "flow-aborted"  # type: ignore[attr-defined]
+
+    _stage_ack_ticket(hass, flow_id="flow-aborted", unique_id=_EMAIL)
+    assert _staged_cleanup(hass)[0].entry_promised is False
+
+    aborted.async_remove()
+
+    assert _staged_cleanup(hass) == []
+    await _run_staged_cleanup(hass, unique_id=_EMAIL)
+    assert recorder.ack_calls == []
+
+
+async def test_marking_an_entry_promise_without_a_staging_area_is_a_noop() -> None:
+    """The promise marker must tolerate an empty staging area.
+
+    A flow can reach CREATE_ENTRY without ever staging a cleanup job (manual
+    credentials, no login container), so the marker has nothing to mark. It must
+    then stay silent instead of creating a bucket or raising.
+    """
+
+    hass = _build_hass([])
+
+    assert config_flow._async_mark_cleanup_ticket_entry_promised(hass, "flow-x") == 0
+    assert config_flow._async_mark_cleanup_ticket_entry_promised(None, "flow-x") == 0
+    assert _staged_cleanup(hass) == []
+
+
 async def test_removing_an_options_flow_drops_its_uncorrelated_ticket(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3594,3 +3705,61 @@ async def test_entry_drain_before_claim_discard_clears_both_ticket_kinds(
     assert _staged_cleanup(hass) == []
     # Discarding never executes: the credential files stay on disk.
     assert recorder.ack_calls == []
+
+
+async def test_discovery_create_branch_marks_its_own_late_staged_ticket() -> None:
+    """The post-CREATE_ENTRY staging in async_step_discovery must mark too.
+
+    ``async_step_discovery`` stages its delete-after-import job *after*
+    ``async_step_device_selection`` returned ``CREATE_ENTRY``, i.e. after the
+    create path already set the promise marker. If that late staging created the
+    flow's ticket (the discovery flow can reach CREATE_ENTRY without having
+    staged anything before), the earlier mark applied to nothing and the ticket
+    is born unmarked. Home Assistant removes the flow immediately afterwards,
+    ``_async_discard_cleanup_ticket_for_flow`` sees an unmarked, uncorrelated
+    ticket and drops it -- so an entry whose first ``async_setup_entry`` retries
+    loses the delete-after-import job it was promised.
+
+    Drives the real ``async_step_discovery`` confirm branch and replaces only
+    ``async_step_device_selection`` with its CREATE_ENTRY FlowResult, because
+    that is the input the branch reacts to.
+    """
+
+    hass = _build_hass([])
+    flow = config_flow.ConfigFlow()
+    flow.hass = hass  # type: ignore[assignment]
+    flow.context = {"source": "discovery"}
+    flow.flow_id = "flow-discovery"  # type: ignore[attr-defined]
+
+    payload = config_flow.CloudDiscoveryData(
+        email=_EMAIL,
+        unique_id=_EMAIL,
+        candidates=((_EMAIL, _TOKEN),),
+        secrets_bundle=_valid_bundle(),
+    )
+    flow._discovery_confirm_pending = True  # type: ignore[attr-defined]
+    flow._pending_discovery_payload = payload  # type: ignore[attr-defined]
+    flow._pending_discovery_updates = None  # type: ignore[attr-defined]
+    flow._pending_discovery_existing_entry = None  # type: ignore[attr-defined]
+
+    async def _created() -> Any:
+        # Mirrors what the create path does right before returning: mark, then
+        # hand the CREATE_ENTRY result back to async_step_discovery.
+        flow._async_mark_own_cleanup_ticket_entry_promised()
+        return {"type": config_flow.data_entry_flow.FlowResultType.CREATE_ENTRY}
+
+    flow.async_step_device_selection = _created  # type: ignore[assignment,method-assign]
+
+    result = await _maybe_await(flow.async_step_discovery(None))
+    assert result["type"] == config_flow.data_entry_flow.FlowResultType.CREATE_ENTRY
+
+    staged = _staged_cleanup(hass)
+    assert len(staged) == 1, "the discovery create branch should stage its job"
+    assert staged[0].entry_promised is True, (
+        "the job staged after CREATE_ENTRY must be marked at its own site"
+    )
+
+    # The consequence the marker exists for: the flow removal that Home
+    # Assistant performs next must leave the ticket alone.
+    flow.async_remove()
+    assert len(_staged_cleanup(hass)) == 1

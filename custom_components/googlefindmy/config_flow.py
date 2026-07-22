@@ -273,7 +273,15 @@ _discovery_flow_helper = cast(
 
 _fallback_discovery_flow_helper: _DiscoveryFlowHelper | None
 
-if _discovery_flow_helper is None:  # pragma: no cover - legacy fallback
+# NOT a legacy branch, despite its "fallback" name: Home Assistant does not
+# export ``async_create_discovery_flow`` from ``homeassistant.config_entries``
+# (verified against 2026.2.3), so ``_discovery_flow_helper`` is ``None`` and the
+# body below is the path every real discovery takes. It used to carry a
+# ``# pragma: no cover - legacy fallback``, which excluded the production path
+# from coverage and let a wrong abort synthesis inside it go unnoticed; the
+# pragma is deliberately gone. The ``else`` branch is the one that is currently
+# unreachable, and it is kept because the export may return.
+if _discovery_flow_helper is None:
 
     async def _async_create_discovery_flow(
         hass: HomeAssistant,
@@ -433,8 +441,18 @@ if _discovery_flow_helper is None:  # pragma: no cover - legacy fallback
                 },
             )
         if result is None:
+            # NOT an error, and therefore NOT ``unknown``: this branch is the
+            # normal outcome of the modern helper. ``helpers.discovery_flow.
+            # async_create_flow`` is declared ``-> None`` and hands the flow to
+            # ``async_create_background_task``, so "no result" means "a flow
+            # owns this payload, its outcome is not observable from here".
+            # Synthesizing a transient reason would make discovery.py classify
+            # every successful fire-and-forget creation as RETRY and re-arm the
+            # producer on each scan. Same wording and same reason as the proxy
+            # branch in ``async_create_discovery_flow`` below, so the two
+            # synthesis sites make one statement, not two.
             _LOGGER.debug(
-                "Discovery flow already in progress or skipped (domain=%s, context=%s)",
+                "Discovery flow helper returned None (domain=%s, context=%s) — treating as already in progress",
                 domain,
                 context,
             )
@@ -442,7 +460,7 @@ if _discovery_flow_helper is None:  # pragma: no cover - legacy fallback
                 FlowResult,
                 {
                     "type": data_entry_flow.FlowResultType.ABORT,
-                    "reason": "unknown",
+                    "reason": "already_in_progress",
                 },
             )
         return cast(FlowResult, result)
@@ -2021,6 +2039,17 @@ class _StagedCleanupTicket:
     that are still alive or that already produced an entry survive to be
     claimed.
 
+    ``entry_promised`` is what makes "already produced an entry" observable on
+    the create path, where ``entry_id`` cannot be. It is set once the flow has
+    returned a ``CREATE_ENTRY`` FlowResult (see
+    :func:`_async_mark_cleanup_ticket_entry_promised`), and it is the *only*
+    thing that distinguishes the two endings Home Assistant reports through the
+    very same hook: an aborted flow (nothing will ever exist) and a created
+    entry whose first ``async_setup_entry`` raised ``ConfigEntryNotReady``
+    (the entry exists and Home Assistant will retry its setup). Without it the
+    removal hook drops the ticket of an entry that is merely *retrying*, and the
+    later successful attempt finds nothing to claim.
+
     ``min_modified_at`` is the durability watermark. ``None`` means "the entry
     merely has to exist in storage" (create path). A value means "the stored
     record must additionally carry a ``modified_at`` at least this recent",
@@ -2031,6 +2060,7 @@ class _StagedCleanupTicket:
     flow_id: str
     unique_id: str | None
     entry_id: str | None = None
+    entry_promised: bool = False
     min_modified_at: datetime | None = None
     jobs: list[PendingContainerCleanup] = field(default_factory=list)
 
@@ -2175,11 +2205,24 @@ def _async_staged_cleanup_tickets(
 
     One place that knows the shape of the staging area, so the claim, the
     discard-on-flow-removal and the housekeeping below cannot drift apart.
+
+    ``hass.data`` is read through ``getattr`` and type-checked, not assumed.
+    The readers do not share one call context: the claim runs from
+    ``async_setup_entry``, the discards and the entry-promise marking run from
+    flow-lifecycle ``@callback`` hooks, and the ``hass`` object reaching them
+    ranges from a real core to a flow test double or a stripped core without a
+    ``data`` mapping at all. "No readable staging area" resolves to "nothing
+    staged", which is the fail-safe answer for every one of them: nothing is
+    claimed, nothing is dropped and nothing is marked, so the credential files
+    stay on disk.
     """
 
     if hass is None:
         return None
-    bucket = hass.data.get(DOMAIN)
+    data = getattr(hass, "data", None)
+    if not isinstance(data, Mapping):
+        return None
+    bucket = data.get(DOMAIN)
     if not isinstance(bucket, MutableMapping):
         return None
     tickets = bucket.get(PENDING_CONTAINER_CLEANUP_KEY)
@@ -2327,12 +2370,20 @@ def async_discard_pending_container_cleanup_for_entry(
     a *different*, still running same-account flow, leaving that flow's watched
     bundle undeleted and its container un-acked.
 
-    An entry being removed can only hold tickets that name it: an uncorrelated
-    create-path ticket is either already claimed by the first
-    ``async_setup_entry`` or dropped with its flow by
-    :func:`_async_discard_cleanup_ticket_for_flow`. Should one nevertheless
-    survive, keeping it is the fail-safe direction -- the credential files stay
-    on disk and the un-acked container falls back to its own TTL.
+    This addressing alone is therefore **not sufficient** on the removal path,
+    and callers must not treat it as such. An entry can outlive an uncorrelated
+    ticket that is about it: a create-path ticket marked ``entry_promised``
+    keeps ``entry_id is None`` on purpose (the flow could not know the id yet)
+    and is deliberately kept by
+    :func:`_async_discard_cleanup_ticket_for_flow`, so a setup that never
+    succeeded leaves it staged and invisible to this function. Left behind, it
+    is claimable by the *next* entry for the same account through rule 2 of
+    :func:`_async_claim_container_cleanup_ticket`. ``async_remove_entry``
+    therefore pairs this drain with a claim-based
+    :func:`async_discard_pending_container_cleanup` call, exactly as the
+    duplicate-account abort in ``async_setup_entry`` does. What this function
+    guarantees on its own is only the narrower half: every ticket that *names*
+    the entry is gone, and no ticket of a foreign flow was touched.
 
     Every matching ticket is dropped in one pass. There is no upper bound: the
     staging list is finite, and a cutoff would strand exactly the tickets this
@@ -2379,13 +2430,79 @@ def _async_discard_cleanup_ticket_for_flow(
     away says nothing about the pending cleanup. Discarding them here would
     silently disable the cleanup on every update path.
 
+    Tickets marked ``entry_promised`` are kept for the same reason, one step
+    earlier in the lifecycle. The docstring above says "on the successful create
+    path the entry already exists and ``async_setup_entry`` has already claimed
+    this flow's ticket" -- that holds only when the *first* setup attempt
+    succeeded. ``ConfigEntries.async_add`` awaits ``async_setup``, and a setup
+    that raises ``ConfigEntryNotReady`` is caught, scheduled for a retry and
+    returns normally, so the entry exists, the ticket is still staged and Home
+    Assistant removes the flow all the same. Flow removal is therefore an
+    ambiguous signal: it fires for "no entry, ever" *and* for "entry created,
+    setup retrying". Only the second one must survive, and
+    ``entry_promised`` is what tells them apart. Dropping it here would
+    contradict :func:`async_discard_pending_container_cleanup`, which already
+    states that a retryable abort must leave the job staged until the retry
+    succeeds.
+
     Returns the number of discarded jobs, for logging and tests.
     """
 
     return _async_drop_cleanup_tickets(
         hass,
-        lambda ticket: ticket.flow_id == flow_id and ticket.entry_id is None,
+        lambda ticket: (
+            ticket.flow_id == flow_id
+            and ticket.entry_id is None
+            and not ticket.entry_promised
+        ),
     )
+
+
+@_typed_callback
+def _async_mark_cleanup_ticket_entry_promised(
+    hass: HomeAssistant | None, flow_id: str
+) -> int:
+    """Mark the ticket(s) of ``flow_id`` as belonging to a promised entry.
+
+    Called by the create path immediately after ``async_create_entry`` produced
+    its FlowResult, i.e. at the last moment the flow is still executing and the
+    first moment an entry is certain to be created. The mark is what keeps the
+    ticket alive across the flow removal that Home Assistant performs right
+    after ``async_finish_flow`` (see
+    :func:`_async_discard_cleanup_ticket_for_flow`).
+
+    Ordering: every call must come *after* the staging it is meant to protect,
+    because a ticket is only created on first use, and it is idempotent, so a
+    later staging on the same flow can be followed by another call.
+
+    No claim of "the last thing this flow does" is made here, and none would
+    hold: ``async_step_discovery`` inspects the ``CREATE_ENTRY`` FlowResult of
+    ``async_step_device_selection`` and stages a further job *afterwards*,
+    inside the very same flow. Each site that can produce or follow a
+    ``CREATE_ENTRY`` therefore marks for itself; what makes that safe is the
+    idempotence above, not an ordering guarantee.
+
+    Deliberately does **not** set ``entry_id``: the flow cannot know it (Home
+    Assistant constructs the ``ConfigEntry`` afterwards, in
+    ``ConfigEntriesFlowManager.async_finish_flow``), and inventing one would
+    break the "a ticket that names its entry is claimable by no other"
+    invariant. The account correlation (``unique_id``) that the create path
+    already carries stays the selection key.
+
+    Returns the number of marked tickets, for logging and tests.
+    """
+
+    found = _async_staged_cleanup_tickets(hass)
+    if found is None:
+        return 0
+    _bucket, tickets = found
+
+    marked = 0
+    for ticket in tickets:
+        if isinstance(ticket, _StagedCleanupTicket) and ticket.flow_id == flow_id:
+            ticket.entry_promised = True
+            marked += 1
+    return marked
 
 
 def _parse_stored_modified_at(record: CollMapping[str, Any]) -> datetime | None:
@@ -3532,6 +3649,21 @@ class _ContainerLoginMixin:
         )
 
     @_typed_callback
+    def _async_mark_own_cleanup_ticket_entry_promised(self) -> int:
+        """Protect this flow's ticket from the removal hook (create path).
+
+        Thin binding of :func:`_async_mark_cleanup_ticket_entry_promised` to the
+        flow's own ticket id, mirroring
+        :meth:`_async_discard_own_cleanup_ticket`. Lives on the mixin because
+        the ticket id resolution does, and resolves ``hass`` through ``getattr``
+        for the same reason.
+        """
+
+        return _async_mark_cleanup_ticket_entry_promised(
+            getattr(self, "hass", None), self._async_cleanup_ticket_id()
+        )
+
+    @_typed_callback
     def _async_stage_container_ack_result(
         self, result: _ContainerFetchResult, *, entry: ConfigEntry | None = None
     ) -> None:
@@ -3636,14 +3768,18 @@ class ConfigFlow(
         ``async_finish_flow`` has run, so the two endings are distinguishable by
         what is still staged:
 
-        * Success: ``async_finish_flow`` created and added the entry, so
-          ``async_setup_entry`` already claimed this flow's ticket. Nothing is
-          left and this is a no-op.
+        * Success: ``async_finish_flow`` created and added the entry. When its
+          first ``async_setup_entry`` succeeded, that run already claimed this
+          flow's ticket and there is nothing left to drop. When it raised
+          ``ConfigEntryNotReady``, the entry exists, Home Assistant will retry
+          the setup and the ticket is still staged -- which is why the create
+          path marks it ``entry_promised`` and this hook keeps it.
         * Abort -- including the abort Home Assistant fires on a competing
           in-progress flow when a same-account flow wins -- there is no entry
-          and never will be, so the ticket is still staged. Dropping it here is
-          what stops the winning entry from claiming a ticket that was never
-          about it and acking credentials that belong to the aborted flow.
+          and never will be, so the ticket is still staged *and* unmarked.
+          Dropping it here is what stops the winning entry from claiming a
+          ticket that was never about it and acking credentials that belong to
+          the aborted flow.
 
         Update-path tickets carry an ``entry_id`` and are deliberately kept
         (see :func:`_async_discard_cleanup_ticket_for_flow`); those flows abort
@@ -4249,6 +4385,14 @@ class ConfigFlow(
                             ),
                         ),
                     )
+                    # This staging happens AFTER the CREATE_ENTRY result, so
+                    # the mark the create path set in async_step_device_selection
+                    # predates the ticket this call may just have created. Mark
+                    # again here, at the site that staged last: without it the
+                    # flow removal Home Assistant performs right after
+                    # async_finish_flow drops a ticket that belongs to an entry
+                    # which exists and whose setup may still be retrying.
+                    self._async_mark_own_cleanup_ticket_entry_promised()
                 return result
 
         try:
@@ -5103,6 +5247,16 @@ class ConfigFlow(
             # Entry *promised*, not yet stored: hand the deferred ack over to
             # async_setup_entry (two-phase delete, F4/P2).
             self._async_stage_container_ack()
+            # ... and pin the ticket to that promise BEFORE Home Assistant runs
+            # async_finish_flow. From here on the flow's removal no longer means
+            # "no entry": the first async_setup_entry runs inside
+            # ConfigEntries.async_add, so a ConfigEntryNotReady leaves the entry
+            # created, the ticket unclaimed and the flow removed all the same.
+            # Staging above, marking here: a ticket only exists once a job was
+            # staged. The mark is idempotent, so a caller that stages a further
+            # job after this result (async_step_discovery does) marks again at
+            # its own site rather than relying on this one.
+            self._async_mark_own_cleanup_ticket_entry_promised()
             return created
 
         return self.async_show_form(

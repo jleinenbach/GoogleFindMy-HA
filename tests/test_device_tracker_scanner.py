@@ -21,6 +21,7 @@ from custom_components.googlefindmy.const import (
 )
 from custom_components.googlefindmy.discovery import (
     CLOUD_DISCOVERY_NAMESPACE,
+    CloudDiscoveryOutcome,
     _cloud_discovery_stable_key,
 )
 
@@ -209,3 +210,41 @@ def test_scanner_triggers_cloud_discovery(
     ), "scanner should log redacted identifiers"
 
     assert any(callback for callback in entry._callbacks)
+
+
+@pytest.mark.parametrize(
+    ("outcome", "level", "fragment"),
+    [
+        (CloudDiscoveryOutcome.ACCEPTED, logging.INFO, "queued discovery"),
+        (CloudDiscoveryOutcome.SKIPPED, logging.DEBUG, "deduplicated discovery"),
+        (CloudDiscoveryOutcome.RETRY, logging.DEBUG, "aborted transiently"),
+    ],
+)
+def test_scanner_reports_the_flow_outcome_not_the_absence_of_an_exception(
+    caplog: pytest.LogCaptureFixture,
+    outcome: CloudDiscoveryOutcome,
+    level: int,
+    fragment: str,
+) -> None:
+    """A transiently aborted flow must not be reported as a queued discovery.
+
+    ``_trigger_cloud_discovery`` returns normally for an aborted config flow --
+    the flow handled its error and answered with ``FlowResultType.ABORT`` -- so
+    the scanner has to read the returned outcome. Judging by "the await did not
+    raise" would announce an import that never happened.
+    """
+
+    device_tracker = importlib.import_module(
+        "custom_components.googlefindmy.device_tracker"
+    )
+    caplog.set_level(logging.DEBUG, "custom_components.googlefindmy.device_tracker")
+
+    device_tracker._log_cloud_scan_outcome(outcome, "own***@example.com", 3)
+
+    matching = [
+        record
+        for record in caplog.records
+        if fragment in record.getMessage() and record.levelno == level
+    ]
+    assert matching, f"expected a {logging.getLevelName(level)} log for {outcome}"
+    assert all("own***@example.com" in record.getMessage() for record in matching)

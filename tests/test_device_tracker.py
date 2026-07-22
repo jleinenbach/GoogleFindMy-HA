@@ -23,6 +23,7 @@ from custom_components.googlefindmy.const import (
 )
 from custom_components.googlefindmy.coordinator import GoogleFindMyCoordinator
 from custom_components.googlefindmy.coordinator import registry as coordinator_registry
+from custom_components.googlefindmy.discovery import CloudDiscoveryOutcome
 from tests.helpers.config_entries_stub import make_config_entry
 
 
@@ -113,8 +114,13 @@ async def test_scanner_instantiates_tracker_for_known_registry_entry(
         "custom_components.googlefindmy.device_tracker"
     )
 
-    async def _fake_trigger_cloud_discovery(*args: Any, **kwargs: Any) -> bool:
-        return True
+    async def _fake_trigger_cloud_discovery(
+        *args: Any, **kwargs: Any
+    ) -> CloudDiscoveryOutcome:
+        # ACCEPTED is the three-state successor of the former ``True``: the
+        # trigger reached a flow. This test does not assert on the outcome, so
+        # only the type changes, not the statement.
+        return CloudDiscoveryOutcome.ACCEPTED
 
     monkeypatch.setattr(
         device_tracker,

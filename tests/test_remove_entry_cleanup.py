@@ -556,3 +556,113 @@ async def test_async_remove_entry_drains_only_this_entrys_cleanup_tickets() -> N
 
     survivors = hass.data[DOMAIN][PENDING_CONTAINER_CLEANUP_KEY]
     assert [ticket.entry_id for ticket in survivors] == ["entry-other"]
+
+
+@pytest.mark.asyncio
+async def test_async_remove_entry_discards_the_ticket_it_cannot_name() -> None:
+    """Removal must also drop the create-path ticket that names no entry.
+
+    An ``entry_promised`` ticket carries ``entry_id is None`` on purpose: the
+    flow that staged it could not know the id yet, and
+    ``_async_discard_cleanup_ticket_for_flow`` deliberately keeps it so a first
+    ``async_setup_entry`` that raised ``ConfigEntryNotReady`` can still claim it
+    on the retry. When that setup never succeeds and the user removes the entry,
+    the entry-id drain cannot see the ticket at all -- it names no entry -- so it
+    would sit in ``hass.data`` for the rest of the process lifetime. Rule 2 of
+    ``_async_claim_container_cleanup_ticket`` then hands it to the *next* entry
+    the user creates for the same account, which acks a foreign login container
+    and deletes credential copies it never imported.
+    """
+
+    from custom_components.googlefindmy import config_flow
+    from custom_components.googlefindmy.config_flow import (
+        PENDING_CONTAINER_CLEANUP_KEY,
+    )
+    from custom_components.googlefindmy.const import CONTAINER_TOKEN_PORT
+
+    entry = make_config_entry(
+        entry_id="entry-remove", unique_id="user@example.com", title="Find My Entry"
+    )
+    entry.options[OPT_DELETE_CACHES_ON_REMOVE] = False
+    _coordinator, _token_cache, _filter, runtime_data = _setup_runtime(entry)
+    hass = _HassStub(entry, runtime_data)
+
+    # Create path: no entry, so no entry id and no durability watermark.
+    config_flow._async_stage_container_cleanup_for(
+        hass,
+        flow_id="flow-create",
+        unique_id=entry.unique_id,
+        job=config_flow.PendingContainerCleanup(
+            ack=config_flow._ContainerAckTarget(
+                host="127.0.0.1",
+                port=CONTAINER_TOKEN_PORT,
+                pairing_code="pair-code",
+                delete_token="delete-token",
+            )
+        ),
+        entry=None,
+    )
+    # ... and the flow promised an entry, which is what kept the ticket alive
+    # across its own removal.
+    assert config_flow._async_mark_cleanup_ticket_entry_promised(hass, "flow-create")
+
+    staged = hass.data[DOMAIN][PENDING_CONTAINER_CLEANUP_KEY]
+    assert len(staged) == 1
+    assert staged[0].entry_id is None and staged[0].entry_promised is True
+
+    await integration.async_remove_entry(hass, entry)
+
+    assert PENDING_CONTAINER_CLEANUP_KEY not in hass.data[DOMAIN]
+
+    # The decisive consequence: a freshly created entry for the same account
+    # inherits nothing.
+    assert (
+        config_flow._async_claim_container_cleanup_ticket(
+            hass, unique_id="user@example.com", entry_id="entry-new"
+        )
+        is None
+    )
+
+
+@pytest.mark.asyncio
+async def test_async_remove_entry_leaves_a_foreign_accounts_ticket_alone() -> None:
+    """The claim-based second pass must not reach across accounts.
+
+    Counterpart to the test above and the reason the removal keeps using the
+    account correlation instead of a blanket sweep: a concurrent flow for a
+    *different* account holds an equally uncorrelated ticket, and discarding it
+    would leave that flow's watched bundle undeleted and its container un-acked.
+    """
+
+    from custom_components.googlefindmy import config_flow
+    from custom_components.googlefindmy.config_flow import (
+        PENDING_CONTAINER_CLEANUP_KEY,
+    )
+    from custom_components.googlefindmy.const import CONTAINER_TOKEN_PORT
+
+    entry = make_config_entry(
+        entry_id="entry-remove", unique_id="user@example.com", title="Find My Entry"
+    )
+    entry.options[OPT_DELETE_CACHES_ON_REMOVE] = False
+    _coordinator, _token_cache, _filter, runtime_data = _setup_runtime(entry)
+    hass = _HassStub(entry, runtime_data)
+
+    config_flow._async_stage_container_cleanup_for(
+        hass,
+        flow_id="flow-other-account",
+        unique_id="other@example.com",
+        job=config_flow.PendingContainerCleanup(
+            ack=config_flow._ContainerAckTarget(
+                host="127.0.0.1",
+                port=CONTAINER_TOKEN_PORT,
+                pairing_code="pair-code",
+                delete_token="delete-token",
+            )
+        ),
+        entry=None,
+    )
+
+    await integration.async_remove_entry(hass, entry)
+
+    survivors = hass.data[DOMAIN][PENDING_CONTAINER_CLEANUP_KEY]
+    assert [ticket.flow_id for ticket in survivors] == ["flow-other-account"]

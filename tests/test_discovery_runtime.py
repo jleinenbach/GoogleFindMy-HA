@@ -76,24 +76,32 @@ async def _settle() -> None:
         await asyncio.sleep(0)
 
 
-def _patch_watcher_environment(
-    monkeypatch: pytest.MonkeyPatch, trigger: Callable[..., Any]
-) -> None:
+def _patch_watcher_scaffolding(monkeypatch: pytest.MonkeyPatch) -> None:
     """Isolate a watcher from timers, entry lookups and translations.
 
-    Only the discovery trigger differs between the watcher regression tests;
-    the rest is the same inert scaffolding, so it lives here once.
+    Everything a watcher regression needs *around* the discovery trigger, and
+    nothing of the trigger itself, so a test can either replace the trigger
+    (:func:`_patch_watcher_environment`) or keep the production one and patch
+    the config-flow layer underneath it instead.
     """
 
     async def _fake_translations(*_args: Any, **_kwargs: Any) -> dict[str, str]:
         return {}
 
-    monkeypatch.setattr(discovery, "_trigger_cloud_discovery", trigger)
     monkeypatch.setattr(discovery, "async_track_time_interval", lambda *_: lambda: None)
     monkeypatch.setattr(discovery.cf, "_find_entry_by_email", lambda *_: None)
     monkeypatch.setattr(
         discovery.translation, "async_get_translations", _fake_translations
     )
+
+
+def _patch_watcher_environment(
+    monkeypatch: pytest.MonkeyPatch, trigger: Callable[..., Any]
+) -> None:
+    """Isolate a watcher and replace its discovery trigger with ``trigger``."""
+
+    monkeypatch.setattr(discovery, "_trigger_cloud_discovery", trigger)
+    _patch_watcher_scaffolding(monkeypatch)
 
 
 @pytest.mark.asyncio
@@ -883,3 +891,372 @@ def test_cleanup_cloud_discovery_runtime_cancels_handles() -> None:
     assert not runtime_container.active_keys
     assert not runtime_container.retry_handles
     assert runtime_container.results is None
+
+
+# ---------------------------------------------------------------------------
+# A completed coroutine is not a completed import (Codex P2, discovery.py)
+# ---------------------------------------------------------------------------
+# A config flow reports a refused import through its FlowResult, not through an
+# exception: ``hass.config_entries.flow.async_init`` returns ``type=ABORT`` and
+# the coroutine ends normally. Reading the outcome off "the task did not raise"
+# therefore counts a transient abort as a successful import, the failure hook
+# never fires, ``_last_signature`` stays armed and the documented bounded
+# retries never happen. The two tests below drive the *production* trigger,
+# classifier, done-callback and watcher, and only replace the config-flow layer
+# underneath them, so the FlowResult is the only thing that differs.
+
+
+async def _run_watcher_against_flow_result(
+    monkeypatch: pytest.MonkeyPatch,
+    secrets_path: Path,
+    flow_result: dict[str, Any],
+) -> tuple[discovery.SecretsJSONWatcher, list[Any]]:
+    """Start a watcher whose discovery flow answers with ``flow_result``."""
+
+    hass = _FakeHass()
+    flow_calls: list[Any] = []
+
+    async def _flow(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        flow_calls.append(kwargs.get("data"))
+        return flow_result
+
+    _patch_watcher_scaffolding(monkeypatch)
+    monkeypatch.setattr(config_flow, "async_create_discovery_flow", _flow)
+
+    _write_secrets(secrets_path, "abort@example.com", token="aas_et/ABORT")
+    watcher = discovery.SecretsJSONWatcher(hass, path=secrets_path, namespace="test.ns")
+    await watcher.async_start()
+    await _settle()
+    return watcher, flow_calls
+
+
+@pytest.mark.asyncio
+async def test_transient_flow_abort_rearms_the_bundle(
+    monkeypatch: pytest.MonkeyPatch, temp_secrets_path: Path
+) -> None:
+    """A flow that aborts transiently must leave the bundle retryable.
+
+    ``dependency_not_ready`` is one of this integration's own transient aborts
+    (``config_flow.ConfigFlow.async_step_user`` raises it when the token
+    validator's dependency is missing). The flow handled it, so no exception
+    reaches the done-callback -- yet nothing was imported, and the next scan
+    has to try again.
+    """
+
+    watcher, flow_calls = await _run_watcher_against_flow_result(
+        monkeypatch,
+        temp_secrets_path,
+        {
+            "type": config_flow.data_entry_flow.FlowResultType.ABORT,
+            "reason": "dependency_not_ready",
+        },
+    )
+
+    assert len(flow_calls) == 1
+    # Re-armed: the signature is dropped, so the identical bundle is retried.
+    assert watcher._last_signature is None
+
+    await watcher.async_force_scan()
+    await _settle()
+    assert len(flow_calls) == 2
+
+    await watcher.async_stop()
+
+
+@pytest.mark.asyncio
+async def test_terminal_flow_abort_consumes_the_bundle(
+    monkeypatch: pytest.MonkeyPatch, temp_secrets_path: Path
+) -> None:
+    """A flow that aborts terminally must NOT burn the retry budget.
+
+    ``already_configured`` is how the discovery-update path signals **success**:
+    it applies the credentials to the existing entry and then aborts on purpose.
+    Re-arming on it would re-import an already imported bundle at every scan
+    interval, which is exactly what the transient/terminal split exists to
+    prevent.
+    """
+
+    watcher, flow_calls = await _run_watcher_against_flow_result(
+        monkeypatch,
+        temp_secrets_path,
+        {
+            "type": config_flow.data_entry_flow.FlowResultType.ABORT,
+            "reason": "already_configured",
+        },
+    )
+
+    assert len(flow_calls) == 1
+    assert watcher._last_signature is not None
+
+    await watcher.async_force_scan()
+    await _settle()
+    assert len(flow_calls) == 1
+
+    await watcher.async_stop()
+
+
+@pytest.mark.parametrize(
+    ("flow_result", "expected"),
+    [
+        (None, discovery.CloudDiscoveryOutcome.ACCEPTED),
+        ({"type": "create_entry"}, discovery.CloudDiscoveryOutcome.ACCEPTED),
+        (
+            {"type": "abort", "reason": "already_in_progress"},
+            discovery.CloudDiscoveryOutcome.ACCEPTED,
+        ),
+        (
+            {"type": "abort", "reason": "invalid_discovery_info"},
+            discovery.CloudDiscoveryOutcome.ACCEPTED,
+        ),
+        (
+            {"type": "abort", "reason": "cannot_connect"},
+            discovery.CloudDiscoveryOutcome.RETRY,
+        ),
+        (
+            {"type": "abort", "reason": "unknown"},
+            discovery.CloudDiscoveryOutcome.RETRY,
+        ),
+        # Unknown reasons take the recoverable branch on purpose: a wrongly
+        # transient reason costs at most _MAX_SECRETS_RETRY_ATTEMPTS scans, a
+        # wrongly terminal one stalls the import until HA restarts.
+        (
+            {"type": "abort", "reason": "some_future_core_reason"},
+            discovery.CloudDiscoveryOutcome.RETRY,
+        ),
+    ],
+)
+def test_flow_result_classification(
+    flow_result: Any, expected: discovery.CloudDiscoveryOutcome
+) -> None:
+    """The reason table decides, and unknown reasons default to RETRY."""
+
+    assert discovery._classify_discovery_flow_result(flow_result) is expected
+
+
+# ---------------------------------------------------------------------------
+# The terminal set covers the whole discovery path, not one found reason
+# ---------------------------------------------------------------------------
+# The verdict table below is the classification contract for *every* abort
+# reason a googlefindmy discovery flow can end on. It is spelled out rather than
+# derived so that each entry can carry its justification, and the sweep test
+# underneath it re-derives the reason list from config_flow's own source, so a
+# newly introduced reason cannot slip past unclassified.
+
+#: reason -> (expected outcome, why)
+_DISCOVERY_ABORT_VERDICTS: dict[str, tuple[discovery.CloudDiscoveryOutcome, str]] = {
+    # -- produced by this integration -------------------------------------
+    "already_configured": (
+        discovery.CloudDiscoveryOutcome.ACCEPTED,
+        "the discovery-update path's success signal: credentials were applied "
+        "to the existing entry and the flow aborts on purpose",
+    ),
+    "invalid_discovery_info": (
+        discovery.CloudDiscoveryOutcome.ACCEPTED,
+        "the payload itself was rejected; the next scan submits identical bytes",
+    ),
+    "keys_missing": (
+        discovery.CloudDiscoveryOutcome.ACCEPTED,
+        "bundle without a usable shared_key: a non-renewable dead end, rejected "
+        "identically at every scan (same class as invalid_discovery_info)",
+    ),
+    "invalid_auth": (
+        discovery.CloudDiscoveryOutcome.RETRY,
+        "a server verdict, not a payload property: a plain 401/403 also covers "
+        "rate limiting and temporary blocks, and classifying it terminal by "
+        "mistake would never retry a bundle that would have worked",
+    ),
+    "cannot_connect": (
+        discovery.CloudDiscoveryOutcome.RETRY,
+        "transient network failure -- and the reason string is overloaded with "
+        "'payload carried no usable token candidate', so it cannot be made "
+        "terminal without silencing genuine network retries",
+    ),
+    "dependency_not_ready": (
+        discovery.CloudDiscoveryOutcome.RETRY,
+        "a missing runtime dependency can become available",
+    ),
+    "unknown": (
+        discovery.CloudDiscoveryOutcome.RETRY,
+        "an unclassified exception: exactly what the bounded retry budget is for",
+    ),
+    "reconfigure_successful": (
+        discovery.CloudDiscoveryOutcome.ACCEPTED,
+        "success reason of the update path (async_step_device_selection)",
+    ),
+    "migration_successful": (
+        discovery.CloudDiscoveryOutcome.ACCEPTED,
+        "success reason of the migration path",
+    ),
+    "reauth_successful": (
+        discovery.CloudDiscoveryOutcome.ACCEPTED,
+        "success reason of the reauth path",
+    ),
+    # -- injected by Home Assistant core, never literal in our source ------
+    "already_in_progress": (
+        discovery.CloudDiscoveryOutcome.ACCEPTED,
+        "a flow already owns this payload; also synthesized by BOTH "
+        "config_flow synthesis sites for the fire-and-forget helper's None",
+    ),
+    "single_instance_allowed": (
+        discovery.CloudDiscoveryOutcome.ACCEPTED,
+        "core refuses a second entry for a single-instance integration",
+    ),
+    "not_implemented": (
+        discovery.CloudDiscoveryOutcome.ACCEPTED,
+        "ConfigFlow.async_step_* default; permanent",
+    ),
+}
+
+
+@pytest.mark.parametrize("reason", sorted(_DISCOVERY_ABORT_VERDICTS))
+def test_every_discovery_abort_reason_is_classified_as_documented(reason: str) -> None:
+    """Each reason of the discovery path maps to its documented outcome."""
+
+    expected, rationale = _DISCOVERY_ABORT_VERDICTS[reason]
+    result = discovery._classify_discovery_flow_result(
+        {"type": "abort", "reason": reason}
+    )
+    assert result is expected, f"{reason} should be {expected.value}: {rationale}"
+
+
+def test_terminal_reason_set_matches_the_verdict_table() -> None:
+    """The production set and the documented table must not drift apart."""
+
+    expected_terminal = {
+        reason
+        for reason, (outcome, _why) in _DISCOVERY_ABORT_VERDICTS.items()
+        if outcome is discovery.CloudDiscoveryOutcome.ACCEPTED
+    }
+    assert set(discovery._TERMINAL_ABORT_REASONS) == expected_terminal
+
+
+def _discovery_path_reason_literals() -> set[str]:
+    """Re-derive the reason literals of the discovery path from the source.
+
+    A class sweep, not a fundort fix: the reasons are read back out of
+    ``config_flow.py`` instead of being remembered here, so a reason added to a
+    discovery step, to a reason whitelist or to a ``DiscoveryFlowError`` shows up
+    as an unclassified entry in the test below rather than as a silent RETRY in
+    production.
+    """
+
+    import ast
+    import inspect
+
+    source = inspect.getsource(config_flow)
+    tree = ast.parse(source)
+
+    reasons: set[str] = set()
+
+    def _literal_strings(node: ast.AST) -> set[str]:
+        return {
+            child.value
+            for child in ast.walk(node)
+            if isinstance(child, ast.Constant) and isinstance(child.value, str)
+        }
+
+    for node in ast.walk(tree):
+        # Every reason a payload/credential rejection can carry: DiscoveryFlowError
+        # is re-raised verbatim as async_abort(reason=err.reason).
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "DiscoveryFlowError"
+            and node.args
+            and isinstance(node.args[0], ast.Constant)
+            and isinstance(node.args[0].value, str)
+        ):
+            reasons.add(node.args[0].value)
+
+        # Everything the two discovery steps abort with directly, plus the
+        # literals of their reason whitelists (which is where the reasons
+        # produced by _map_api_exc_to_error_key are enumerated).
+        if isinstance(node, ast.AsyncFunctionDef) and node.name in {
+            "async_step_discovery",
+            "async_step_discovery_update_info",
+        }:
+            for child in ast.walk(node):
+                if isinstance(child, ast.Set):
+                    reasons |= _literal_strings(child)
+                if (
+                    isinstance(child, ast.Call)
+                    and isinstance(child.func, ast.Attribute)
+                    and child.func.attr == "async_abort"
+                ):
+                    for keyword in child.keywords:
+                        if keyword.arg == "reason" and isinstance(
+                            keyword.value, ast.Constant
+                        ):
+                            if isinstance(keyword.value.value, str):
+                                reasons.add(keyword.value.value)
+
+    return reasons
+
+
+def test_no_discovery_reason_escapes_the_verdict_table() -> None:
+    """Every reason literal on the discovery path carries a documented verdict."""
+
+    found = _discovery_path_reason_literals()
+    assert found, "the source sweep found no reason literals -- it stopped working"
+    unclassified = found - set(_DISCOVERY_ABORT_VERDICTS)
+    assert not unclassified, (
+        "config_flow's discovery path can abort with reasons that "
+        "_TERMINAL_ABORT_REASONS was never told about: "
+        f"{sorted(unclassified)}. Classify each one as terminal or transient."
+    )
+    # Guard the sweep itself: the two reasons this fix added must be visible to
+    # it, otherwise a broken extractor would silently accept anything.
+    assert {"keys_missing", "invalid_auth"} <= found
+
+
+# ---------------------------------------------------------------------------
+# FlowResult fields are unwrapped, not merely compared (Codex M7)
+# ---------------------------------------------------------------------------
+
+
+def test_classification_unwraps_plain_enum_flow_result_fields() -> None:
+    """A non-StrEnum FlowResult field must be read through ``.value``.
+
+    ``homeassistant.data_entry_flow.FlowResultType`` is a ``StrEnum`` today, so
+    every other test compares equal to the wire string by accident. A core (or a
+    stripped test core) that used a plain ``enum.Enum`` would make every abort
+    look like a non-abort and every terminal reason look transient -- silently,
+    because the classifier has no way to report an unreadable field.
+    """
+
+    import enum
+
+    class _PlainFlowResultType(enum.Enum):
+        ABORT = "abort"
+
+    class _PlainReason(enum.Enum):
+        ALREADY_CONFIGURED = "already_configured"
+        CANNOT_CONNECT = "cannot_connect"
+
+    assert _PlainFlowResultType.ABORT != "abort", "precondition: not a StrEnum"
+
+    # The type field: without unwrapping this reads as "not an abort" -> ACCEPTED.
+    assert (
+        discovery._classify_discovery_flow_result(
+            {"type": _PlainFlowResultType.ABORT, "reason": "cannot_connect"}
+        )
+        is discovery.CloudDiscoveryOutcome.RETRY
+    )
+
+    # The reason field: without unwrapping this reads as an unknown reason,
+    # which takes the recoverable branch -> RETRY instead of ACCEPTED.
+    assert (
+        discovery._classify_discovery_flow_result(
+            {
+                "type": _PlainFlowResultType.ABORT,
+                "reason": _PlainReason.ALREADY_CONFIGURED,
+            }
+        )
+        is discovery.CloudDiscoveryOutcome.ACCEPTED
+    )
+    assert (
+        discovery._classify_discovery_flow_result(
+            {"type": "abort", "reason": _PlainReason.CANNOT_CONNECT}
+        )
+        is discovery.CloudDiscoveryOutcome.RETRY
+    )

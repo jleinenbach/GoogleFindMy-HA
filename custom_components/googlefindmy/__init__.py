@@ -8759,16 +8759,40 @@ async def async_remove_entry(hass: HomeAssistant, entry: MyConfigEntry) -> None:
     # just removed.
     try:
         from .config_flow import (  # noqa: PLC0415 - lazy, avoids an import cycle
+            async_discard_pending_container_cleanup,
             async_discard_pending_container_cleanup_for_entry,
         )
 
-        # Addressed by entry id only, and in a single pass over the whole
-        # staging list: the account fallbacks of the claim helper belong to the
-        # create path and would let this removal discard a concurrent
-        # same-account flow's ticket, and any upper bound would strand exactly
-        # the tickets this call exists to clear.
+        # Two addressings, in this order and both needed -- the same pairing the
+        # duplicate-account abort in async_setup_entry uses.
+        #
+        # The entry-id drain first, in a single pass over the whole staging
+        # list: this entry may hold SEVERAL update-path tickets, the claim-based
+        # discard below takes at most one, and any upper bound would strand
+        # exactly the tickets this call exists to clear.
+        #
+        # The claim-based discard second, for the ticket that names no entry.
+        # A create-path ticket marked ``entry_promised`` deliberately carries
+        # ``entry_id is None`` (the flow could not know the id), so the drain
+        # above cannot see it. Without this second call such a ticket survives
+        # the removal for the rest of the process lifetime, and rule 2 of
+        # ``_async_claim_container_cleanup_ticket`` (uncorrelated ticket whose
+        # unique_id matches) hands it to the *next* entry the user creates for
+        # the same account, which then acks a container and deletes credential
+        # copies that belong to the removed one.
+        #
+        # It costs the account fallback of the claim helper: a concurrent,
+        # still-running same-account flow could have its ticket taken instead.
+        # That direction is the fail-safe one (the credential files stay on
+        # disk, the un-acked container falls back to its own TTL), whereas
+        # leaving the ticket is the direction that deletes foreign material.
         discarded = async_discard_pending_container_cleanup_for_entry(
             hass, entry_id=entry.entry_id
+        )
+        discarded += async_discard_pending_container_cleanup(
+            hass,
+            unique_id=getattr(entry, "unique_id", None),
+            entry_id=entry.entry_id,
         )
         if discarded:
             _LOGGER.debug(
