@@ -1361,6 +1361,11 @@ def test_login_sh_rejects_unbalanced_ipv6_brackets() -> None:
         ("12345::1", True),
         ("1:2:3:4:5:6:7:8:9", True),
         ("1:2:3:4:5:6:7", True),
+        # A compression run stands for at least one omitted group, so eight
+        # written-out groups next to it are already one too many.
+        ("1:2:3:4:5:6:7:8::", True),
+        ("::1:2:3:4:5:6:7:8", True),
+        ("1:2:3:4:5:6:7::", False),
         ("[::1", True),
         ("]::1[", True),
         ("[[::1]]", True),
@@ -1447,4 +1452,8 @@ def test_login_cmd_mirrors_the_full_ipv6_structural_rules() -> None:
     assert 'if not "%%i"=="" exit /b 1' in cmd, "a ninth group must be rejected."
     assert 'if not defined _HAS_RUN if "%%h"=="" exit /b 1' in cmd, (
         "without a compression run, all eight groups must be present."
+    )
+    assert 'if defined _HAS_RUN if not "%%h"=="" exit /b 1' in cmd, (
+        "with a compression run at most seven groups may be written out; "
+        "checking only the ninth token accepts `1:2:3:4:5:6:7:8::`."
     )

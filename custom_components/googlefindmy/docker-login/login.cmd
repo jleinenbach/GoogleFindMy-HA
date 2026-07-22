@@ -283,6 +283,10 @@ for /f "tokens=1-9 delims=:" %%a in ("%INNER%") do (
   call :v6_group "%%g" || exit /b 1
   call :v6_group "%%h" || exit /b 1
   if not defined _HAS_RUN if "%%h"=="" exit /b 1
+  rem With a compression run at most SEVEN groups may be written out,
+  rem since "::" stands for one or more omitted ones: "1:2:3:4:5:6:7:8::"
+  rem has eight explicit groups and is therefore already too long.
+  if defined _HAS_RUN if not "%%h"=="" exit /b 1
 )
 exit /b 0
 
