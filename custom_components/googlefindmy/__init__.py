@@ -941,7 +941,7 @@ async def async_coalesce_account_entries(
         _LOGGER.warning(
             "Cannot deduplicate config entry %s: missing normalized email (raw=%s)",
             canonical_entry.entry_id,
-            raw_email or "n/a",
+            _mask_email_for_logs(raw_email),
         )
         return canonical_entry
 
@@ -7908,14 +7908,14 @@ async def _async_save_secrets_data(
                 "own-device locations will fail when the owner key rotates "
                 "(it can only be refreshed with the shared_key). "
                 "Re-import a complete secrets.json.",
-                google_email or "(unknown)",
+                _mask_email_for_logs(google_email),
             )
         else:
             _LOGGER.warning(
                 "No 'shared_key' found in secrets bundle for %s. "
                 "No location can be decrypted. "
                 "Re-import a complete secrets.json.",
-                google_email or "(unknown)",
+                _mask_email_for_logs(google_email),
             )
     if google_email:
         email_key = str(google_email)
@@ -7929,7 +7929,7 @@ async def _async_save_secrets_data(
         except (OSError, TypeError) as err:
             _LOGGER.warning(
                 "Failed to save encrypted key bundle to persistent cache for %s: %s",
-                email_key,
+                _mask_email_for_logs(email_key),
                 err,
             )
 

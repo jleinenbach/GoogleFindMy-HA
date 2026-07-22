@@ -5973,7 +5973,7 @@ class ConfigFlow(
         await self._async_clear_cached_aas_token(entry)
         _LOGGER.info(
             "Container reauth for %s: shared_key present in secrets bundle",
-            fixed_email,
+            _mask_email_for_logs(fixed_email),
         )
         success_reason = self.context.get(
             "reauth_success_reason_override",
@@ -6202,7 +6202,7 @@ class ConfigFlow(
                                         # the key for operators.
                                         _LOGGER.info(
                                             "Reauth for %s: shared_key present in secrets bundle",
-                                            fixed_email,
+                                            _mask_email_for_logs(fixed_email),
                                         )
                                         success_reason = self.context.get(
                                             "reauth_success_reason_override",
