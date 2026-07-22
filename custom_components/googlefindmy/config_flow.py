@@ -155,6 +155,7 @@ from .container_login import (
     ContainerUnreachableError,
     ack_consumed,
     fetch_secrets_from_container,
+    normalise_host_literal,
 )
 from .email_utils import normalize_email, normalize_email_or_default, unique_account_id
 from .integration_modules import (
@@ -1679,11 +1680,11 @@ def _classify_novnc_host(host: str) -> str:
     resolve in the user's browser either. Both would be worse than no link.
     """
 
-    candidate = (host or "").strip()
+    candidate = normalise_host_literal(host or "")
     if not candidate:
         return "hostname"
     try:
-        address = ipaddress.ip_address(candidate.strip("[]"))
+        address = ipaddress.ip_address(candidate)
     except ValueError:
         return "hostname"
     if address.is_loopback or address.is_unspecified:
@@ -1700,18 +1701,21 @@ def _novnc_access_placeholder(host: str) -> str:
     itself, the other a fixed URL skeleton), so this value needs no translation
     while the surrounding sentence stays fully translatable.
 
-    The address is re-rendered from the parsed value rather than interpolated
-    raw, so an IPv6 literal is bracketed exactly once whether or not the user
-    typed the brackets. ``_classify_novnc_host`` accepts both spellings, so
-    interpolating ``host`` verbatim would emit ``http://2001:db8::1:7900``,
-    which no browser can parse.
+    The address is read through the shared ``normalise_host_literal`` (the same
+    one the token client uses, so classification and rendering can never
+    disagree) and re-rendered from the parsed value rather than interpolated
+    raw. An IPv6 literal is therefore bracketed exactly once in either
+    spelling; interpolating ``host`` verbatim would emit
+    ``http://2001:db8::1:7900``, which no browser can parse.
     """
 
-    candidate = (host or "").strip()
+    candidate = normalise_host_literal(host or "")
     if _classify_novnc_host(candidate) == "linkable":
-        address = ipaddress.ip_address(candidate.strip("[]"))
+        address = ipaddress.ip_address(candidate)
         literal = (
-            f"[{address.compressed}]" if address.version == 6 else address.compressed
+            f"[{address.compressed}]"
+            if isinstance(address, ipaddress.IPv6Address)
+            else address.compressed
         )
         url = f"http://{literal}:{CONTAINER_NOVNC_PORT}"
         return f"[{url}]({url})"

@@ -2841,3 +2841,75 @@ async def test_novnc_access_placeholder_brackets_ipv6_exactly_once() -> None:
 
     # Loopback IPv6 stays unlinked, like its IPv4 counterpart.
     assert "](http" not in config_flow._novnc_access_placeholder("::1")
+
+
+async def test_build_base_url_brackets_ipv6_exactly_once() -> None:
+    """The token endpoint URL must survive a bare IPv6 literal in the host field.
+
+    ``host`` is free text in the form and the flow accepts both IPv6 spellings,
+    so a bare ``::1`` interpolated raw yields ``http://::1:7901`` -- an authority
+    in which the port cannot be told from the address, making every fetch and
+    every acknowledgement fail as "unreachable". Bracketing unconditionally
+    would instead double the brackets of the already-bracketed spelling.
+    """
+
+    assert container_login._build_base_url("::1", 7901) == "http://[::1]:7901"
+    assert container_login._build_base_url("[::1]", 7901) == "http://[::1]:7901"
+    assert (
+        container_login._build_base_url("2001:db8::1", 7901)
+        == "http://[2001:db8::1]:7901"
+    )
+    # IPv4 and host names must stay byte-identical to the previous behaviour.
+    assert container_login._build_base_url("127.0.0.1", 7901) == "http://127.0.0.1:7901"
+    assert (
+        container_login._build_base_url("googlefindmy-login", 7901)
+        == "http://googlefindmy-login:7901"
+    )
+
+
+async def test_link_local_guard_sees_the_same_host_as_the_url_builder() -> None:
+    """Guard and URL builder must read the host field through one normalisation.
+
+    Regression: while ``_build_base_url`` learned to trim and unbracket, the
+    guard still parsed the raw text, so ``[169.254.169.254]`` was "not a literal
+    IP" to the guard while the builder produced
+    ``http://169.254.169.254:7901``. Before that change the malformed authority
+    ``http://[169.254.169.254]:7901`` had made yarl refuse the request, so the
+    hole was newly opened by the fix, not merely uncovered by it.
+
+    IPv6 link-local is asserted for the same reason: it used to be unreachable
+    by that same accident, so the rule now has to be stated rather than relied
+    upon.
+    """
+
+    for spelling in (
+        "169.254.169.254",
+        "[169.254.169.254]",
+        " 169.254.169.254 ",
+        "fe80::1",
+        "[fe80::1]",
+    ):
+        with pytest.raises(container_login.ContainerUnreachableError):
+            container_login._maybe_block_link_local(spelling)
+
+    # Ordinary targets must stay reachable in every spelling.
+    for spelling in ("127.0.0.1", "::1", "[::1]", "192.168.1.21", "googlefindmy-login"):
+        container_login._maybe_block_link_local(spelling)
+
+
+async def test_host_normalisation_is_shared_between_client_and_config_flow() -> None:
+    """One helper, so classification and request can never disagree.
+
+    ``config_flow`` previously used ``strip("[]")``, which also eats unbalanced
+    or repeated brackets; the client stripped exactly one pair. A host the flow
+    called "linkable" could therefore be a host the client refused to build a
+    URL for.
+    """
+
+    assert config_flow.normalise_host_literal is container_login.normalise_host_literal
+    assert container_login.normalise_host_literal("[::1]") == "::1"
+    assert container_login.normalise_host_literal("  192.168.1.21 ") == "192.168.1.21"
+    # Exactly one pair: an unbalanced or doubled spelling stays malformed and is
+    # therefore classified as a host name rather than silently repaired.
+    assert container_login.normalise_host_literal("[[::1]]") == "[::1]"
+    assert config_flow._classify_novnc_host("[::1") == "hostname"

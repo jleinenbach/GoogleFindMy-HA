@@ -60,15 +60,16 @@ echo [login] Unknown option: "%~1" 1>&2
 goto :usage_error
 :parse_ip
 if "%~2"=="" goto :ip_missing
-set "NOVNC_BIND=%~2"
-set "NOVNC_URL_HOST=%~2"
+call :validate_ip "%~2" || goto :ip_invalid
+call :set_novnc_from_ip "%~2"
 shift
 shift
 goto :parse_args
 :parse_ip_inline
-set "NOVNC_BIND=%ARG:~5%"
-if "%NOVNC_BIND%"=="" goto :ip_missing
-set "NOVNC_URL_HOST=%NOVNC_BIND%"
+set "CANDIDATE=%ARG:~5%"
+if "%CANDIDATE%"=="" goto :ip_missing
+call :validate_ip "%CANDIDATE%" || goto :ip_invalid
+call :set_novnc_from_ip "%CANDIDATE%"
 shift
 goto :parse_args
 :args_done
@@ -79,6 +80,7 @@ rem to loopback and tells the user to pass --ip.
 if "%NOVNC_URL_HOST%"=="" set "NOVNC_URL_HOST=%NOVNC_BIND%"
 if "%NOVNC_URL_HOST%"=="0.0.0.0" set "NOVNC_URL_HOST=127.0.0.1"
 if "%NOVNC_URL_HOST%"=="::" set "NOVNC_URL_HOST=127.0.0.1"
+if "%NOVNC_URL_HOST%"=="[::]" set "NOVNC_URL_HOST=127.0.0.1"
 
 rem Classify the BIND, never the printed address: with a wildcard bind the
 rem printed address is a concrete one, so branching on it would claim "only this
@@ -87,6 +89,15 @@ set "IS_LOOPBACK="
 if "%NOVNC_BIND:~0,4%"=="127." set "IS_LOOPBACK=1"
 if /i "%NOVNC_BIND%"=="localhost" set "IS_LOOPBACK=1"
 if "%NOVNC_BIND%"=="::1" set "IS_LOOPBACK=1"
+if "%NOVNC_BIND%"=="[::1]" set "IS_LOOPBACK=1"
+
+rem Bracket AFTER classifying, and here rather than in the --ip handler, so the
+rem GFMY_NOVNC_BIND / GFMY_NOVNC_URL_HOST environment inputs run through the
+rem same normalisation. login.sh normalises at the same point, for that reason.
+call :bracket_ipv6 "%NOVNC_BIND%"
+set "NOVNC_BIND=%BRACKETED%"
+call :bracket_ipv6 "%NOVNC_URL_HOST%"
+set "NOVNC_URL_HOST=%BRACKETED%"
 
 set "GFMY_NOVNC_BIND=%NOVNC_BIND%"
 
@@ -157,6 +168,13 @@ popd
 endlocal
 exit /b 2
 
+:ip_invalid
+echo [login] --ip needs an IP address of this Docker host, not a host name. 1>&2
+echo [login] The value becomes a docker port bind. Example: --ip 192.168.1.21 1>&2
+popd
+endlocal
+exit /b 2
+
 :print_usage
 echo Usage: login.cmd [--ip ^<ADDRESS^>] [--help]
 echo.
@@ -170,4 +188,63 @@ echo   (the token endpoint 7901 is pinned to 127.0.0.1 in the compose overlay)
 echo   GFMY_NOVNC_BIND       host bind for noVNC 7900          (default 127.0.0.1)
 echo   GFMY_NOVNC_URL_HOST   address printed for your browser  (default: the bind)
 echo   GFMY_ONECLICK=1       add the opt-in overlay that publishes port 7901
+goto :eof
+
+:validate_ip
+rem Accept only an IP literal, mirroring is_ip_literal() in login.sh. A host
+rem name, or a mistyped second option, would otherwise be printed as a working
+rem URL and then handed to docker as a port bind, failing much later with an
+rem opaque publish error.
+set "CAND=%~1"
+if not defined CAND exit /b 1
+if "%CAND:~0,1%"=="-" exit /b 1
+rem Character allowlist. It rejects host names outright AND makes the value safe
+rem to expand in the pipeline below, since no &, | or > can survive it.
+set "REST=%CAND%"
+for %%x in (0 1 2 3 4 5 6 7 8 9 a b c d e f A B C D E F . : [ ]) do call set "REST=%%REST:%%x=%%"
+if defined REST exit /b 1
+rem After the allowlist a colon can only come from an IPv6 literal.
+set "_NOCOLON=%CAND::=%"
+if not "%_NOCOLON%"=="%CAND%" exit /b 0
+rem IPv4 branch: the first allowlist still permits a-f (IPv6 needs them), so
+rem narrow it to digits and dots here. Without this, `1.2.3.0a` slips through:
+rem `if 0a GTR 255` falls back to a STRING compare, and "0a" sorts below "255".
+set "REST=%CAND%"
+for %%x in (0 1 2 3 4 5 6 7 8 9 .) do call set "REST=%%REST:%%x=%%"
+if defined REST exit /b 1
+rem Exactly four octets, none empty, none above 255. `for /f` skips a line that
+rem is nothing but delimiters, so "." or ".." would never enter the block at
+rem all: the OCTETS_OK flag turns that silence into a rejection.
+set "OCTETS_OK="
+for /f "tokens=1-5 delims=." %%a in ("%CAND%") do (
+  if not "%%e"=="" exit /b 1
+  if "%%d"=="" exit /b 1
+  if %%a GTR 255 exit /b 1
+  if %%b GTR 255 exit /b 1
+  if %%c GTR 255 exit /b 1
+  if %%d GTR 255 exit /b 1
+  set "OCTETS_OK=1"
+)
+if not defined OCTETS_OK exit /b 1
+exit /b 0
+
+:set_novnc_from_ip
+rem --ip sets BOTH roles, but stores the value RAW. Bracketing happens once,
+rem after the wildcard/loopback classification below, so that classification
+rem compares against the same spelling the operator typed and so the
+rem GFMY_NOVNC_BIND environment path gets normalised too.
+set "NOVNC_BIND=%~1"
+set "NOVNC_URL_HOST=%~1"
+goto :eof
+
+:bracket_ipv6
+rem An IPv6 literal needs brackets in the printed URL (so the port can be told
+rem from the address) and in docker's port syntax. Returns via BRACKETED.
+rem The colon test runs on a quoted substitution rather than `echo | find`,
+rem because this routine also sees the UNVALIDATED environment values.
+set "BRACKETED=%~1"
+set "_NOCOLON=%BRACKETED::=%"
+if "%_NOCOLON%"=="%BRACKETED%" goto :eof
+if "%BRACKETED:~0,1%"=="[" goto :eof
+set "BRACKETED=[%BRACKETED%]"
 goto :eof

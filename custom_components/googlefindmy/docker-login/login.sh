@@ -88,10 +88,22 @@ is_ip_literal() {
   # IPv6 literal. A hostname is rejected on purpose: it would be handed to
   # `docker compose` as a host bind and fail there with an opaque publish error,
   # long after we already printed it as a working URL.
+  local inner
   case "$1" in
     *:*)
       case "$1" in
         *[!0-9A-Fa-f:\[\]]*) return 1 ;;
+      esac
+      # Brackets, if present at all, must be exactly one enclosing pair.
+      # Otherwise `[::1` would be accepted and bracket_if_ipv6 would turn it
+      # into `[[::1]`, so "normalise to exactly one pair" would be a lie.
+      case "$1" in
+        \[*\]) inner="${1#\[}"; inner="${inner%\]}" ;;
+        *\[* | *\]*) return 1 ;;
+        *) inner="$1" ;;
+      esac
+      case "$inner" in
+        *\[* | *\]* | "") return 1 ;;
       esac
       return 0
       ;;
@@ -109,6 +121,21 @@ is_ip_literal() {
     [ "$octet" -le 255 ] 2>/dev/null || return 1
   done
   return 0
+}
+
+bracket_if_ipv6() {
+  # An IPv6 literal needs brackets in a URL (otherwise the port cannot be told
+  # from the address) and in a docker port publish. `is_ip_literal` accepts the
+  # bare and the bracketed spelling alike, so normalise to exactly one pair.
+  case "$1" in
+    *:*)
+      case "$1" in
+        \[*\]) printf '%s' "$1" ;;
+        *) printf '[%s]' "$1" ;;
+      esac
+      ;;
+    *) printf '%s' "$1" ;;
+  esac
 }
 
 is_wildcard_addr() {
@@ -214,6 +241,11 @@ if is_wildcard_addr "$novnc_url_host" || [ -z "$novnc_url_host" ]; then
   novnc_url_host="$(printf '%s\n' "$lan_ips" | head -n 1)"
   [ -n "$novnc_url_host" ] || novnc_url_host="127.0.0.1"
 fi
+
+# Both roles need the brackets: the URL so the port can be told from the
+# address, the bind because docker's port syntax demands them for IPv6.
+novnc_url_host="$(bracket_if_ipv6 "$novnc_url_host")"
+novnc_bind="$(bracket_if_ipv6 "$novnc_bind")"
 
 export GFMY_NOVNC_BIND="$novnc_bind"
 

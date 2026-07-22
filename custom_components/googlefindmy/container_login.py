@@ -164,27 +164,71 @@ class ContainerTimeoutError(ContainerLoginError):
     """The request exceeded its timeout budget."""
 
 
+def normalise_host_literal(host: str) -> str:
+    """Return ``host`` trimmed and stripped of exactly ONE bracket pair.
+
+    The single source of truth for how a host field is read, so the link-local
+    guard and the URL builder can never disagree about what the operator typed.
+    Exactly one pair, not ``strip("[]")``: the latter would also eat unbalanced
+    or repeated brackets and thereby accept spellings the guard should see as
+    malformed.
+    """
+
+    candidate = host.strip()
+    if candidate.startswith("[") and candidate.endswith("]"):
+        return candidate[1:-1]
+    return candidate
+
+
 def _maybe_block_link_local(host: str) -> None:
-    """Reject a literal IPv4 link-local/metadata host (best-effort only)."""
+    """Reject a literal link-local/metadata host (best-effort only).
+
+    Normalises through :func:`normalise_host_literal` FIRST. Without that, a
+    bracketed spelling such as ``[169.254.169.254]`` slipped past as "not a
+    literal IP" while the URL builder, which does normalise, happily produced
+    ``http://169.254.169.254:7901`` -- the guard and the request would have
+    disagreed about the very same input.
+
+    IPv6 link-local is covered too, via ``is_link_local`` rather than an
+    IPv4-only network membership test. Those targets used to be unreachable by
+    accident (``yarl`` rejected the malformed authority the old raw
+    interpolation produced); once the URL is built correctly that accident is
+    gone, so the guard has to state the rule explicitly.
+    """
+
     try:
-        ip = ipaddress.ip_address(host)
+        ip = ipaddress.ip_address(normalise_host_literal(host))
     except ValueError:
-        # Not a literal IP (a hostname / IPv6-with-brackets). We do NOT resolve
-        # here; see the module docstring for the honest scope of this guard.
+        # Not a literal IP (a hostname). We do NOT resolve here; see the module
+        # docstring for the honest scope of this guard.
         return
-    if isinstance(ip, ipaddress.IPv4Address) and ip in _LINK_LOCAL_V4:
+    if ip.is_link_local:
         raise ContainerUnreachableError(
-            "refusing to contact an IPv4 link-local/metadata address"
+            "refusing to contact a link-local/metadata address"
         )
 
 
 def _build_base_url(host: str, port: int) -> str:
     """Build the pinned ``http://host:port`` base URL.
 
-    Scheme is fixed to ``http`` here; a bracketed IPv6 literal is passed through
-    unchanged (aiohttp/yarl handle the brackets).
+    Scheme is fixed to ``http`` here. The host is read through
+    :func:`normalise_host_literal` (trim plus one optional bracket pair) and,
+    when it parses as an IP literal, re-rendered from the parsed value; a host
+    name keeps the normalised text. So an IPv6 literal ends up bracketed exactly
+    once in either spelling: a bare ``::1`` interpolated raw would yield
+    ``http://::1:7901``, an authority in which the port cannot be told from the
+    address, so every request fails as unreachable. IPv4 literals and host names
+    come out unchanged apart from that normalisation.
     """
-    return f"http://{host}:{port}"
+
+    candidate = normalise_host_literal(host)
+    try:
+        address = ipaddress.ip_address(candidate)
+    except ValueError:
+        return f"http://{candidate}:{port}"
+    if isinstance(address, ipaddress.IPv6Address):
+        return f"http://[{address.compressed}]:{port}"
+    return f"http://{address.compressed}:{port}"
 
 
 def _make_timeout(timeout: float) -> aiohttp.ClientTimeout:

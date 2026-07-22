@@ -1237,3 +1237,136 @@ def test_login_cmd_argument_parser_handles_both_ip_spellings() -> None:
     defined.add("eof")  # `goto :eof` is a cmd.exe builtin, never a real label
     missing = sorted(targets - defined)
     assert not missing, f"login.cmd jumps to undefined labels: {missing}"
+
+
+def test_launchers_bracket_ipv6_before_printing_or_binding() -> None:
+    """Both launchers must normalise an IPv6 literal to exactly one bracket pair.
+
+    The ``--ip`` validators accept the bare and the bracketed spelling, so a bare
+    ``2001:db8::1`` copied straight into the URL yields
+    ``http://2001:db8::1:7900``, which no browser can parse, and docker's port
+    syntax needs the brackets as well.
+    """
+
+    sh = _read("login.sh")
+    assert "bracket_if_ipv6()" in sh, "login.sh must define bracket_if_ipv6()"
+    for target in (
+        'novnc_url_host="$(bracket_if_ipv6 "$novnc_url_host")"',
+        'novnc_bind="$(bracket_if_ipv6 "$novnc_bind")"',
+    ):
+        assert target in sh, f"login.sh must normalise through {target!r}"
+
+    cmd = _read("login.cmd")
+    assert re.search(r"^:bracket_ipv6$", cmd, re.MULTILINE), (
+        "login.cmd must define the :bracket_ipv6 subroutine."
+    )
+    assert 'set "BRACKETED=[%BRACKETED%]"' in cmd, (
+        "login.cmd must add the IPv6 brackets when they are absent."
+    )
+    # The bracketing must run on BOTH roles and AFTER the classification, so the
+    # GFMY_NOVNC_BIND environment path is normalised too and the loopback /
+    # wildcard comparisons still see the spelling the operator typed.
+    assert cmd.count("call :bracket_ipv6 ") == 2, (
+        "login.cmd must bracket the bind AND the printed address (found "
+        f"{cmd.count('call :bracket_ipv6 ')} call sites)."
+    )
+    classify_at = cmd.index('set "IS_LOOPBACK="')
+    bracket_at = cmd.index("call :bracket_ipv6 ")
+    assert classify_at < bracket_at, (
+        "login.cmd must classify the bind BEFORE bracketing it; otherwise "
+        "`--ip ::1` becomes `[::1]` and no longer matches the loopback test."
+    )
+
+
+def test_login_cmd_classifies_both_ipv6_spellings() -> None:
+    """Every spelling that can reach a comparison must be covered by it.
+
+    ``login.sh`` folds the spellings inside ``is_loopback_addr`` /
+    ``is_wildcard_addr``; batch has no such helper, so each literal appears in
+    the comparison chain and both spellings have to be listed explicitly. A
+    missing one is a silent false all-clear (`--ip ::1` warning that the viewer
+    is LAN-reachable) or a wildcard printed as a URL.
+    """
+
+    cmd = _read("login.cmd")
+    for literal in ('"::1"', '"[::1]"'):
+        assert f'if "%NOVNC_BIND%"=={literal} set "IS_LOOPBACK=1"' in cmd, (
+            f"login.cmd must treat {literal} as a loopback bind."
+        )
+    for literal in ('"::"', '"[::]"', '"0.0.0.0"'):
+        assert (
+            f'if "%NOVNC_URL_HOST%"=={literal} set "NOVNC_URL_HOST=127.0.0.1"' in cmd
+        ), f"login.cmd must replace the wildcard {literal} in the printed URL."
+
+
+def test_login_cmd_validates_the_ip_value_like_login_sh() -> None:
+    """``login.cmd --ip`` must reject a non-IP value, as ``login.sh`` does.
+
+    Without it a mistyped host name, or a second option swallowed as the value,
+    is printed as a working URL and then handed to docker as a port bind, where
+    it fails much later with an opaque publish error. Both spellings (``--ip X``
+    and ``--ip=X``) must be validated, and the failure must leave through the
+    dedicated exit path rather than falling into the normal run.
+    """
+
+    cmd = _read("login.cmd")
+    assert cmd.count("call :validate_ip ") == 2, (
+        "both --ip spellings must call :validate_ip (found "
+        f"{cmd.count('call :validate_ip ')} call sites)."
+    )
+    assert cmd.count("goto :ip_invalid") == 2, (
+        "each validation call must route a rejected value to :ip_invalid."
+    )
+    assert re.search(r"^:ip_invalid$", cmd, re.MULTILINE), (
+        "login.cmd must define the :ip_invalid exit path."
+    )
+    # The exit path must unwind like every other one: popd, endlocal, exit /b 2.
+    # Anchor on the LABEL DEFINITION at line start, not on the first `goto`.
+    invalid_block = cmd.split("\n:ip_invalid\n", 1)[1].split("\n:", 1)[0]
+    for token in ("popd", "endlocal", "exit /b 2"):
+        assert token in invalid_block, (
+            f":ip_invalid must {token} like the other early exits."
+        )
+    # An IP-literal allowlist, not a substring check: a host name must not pass.
+    assert 'if "%CAND:~0,1%"=="-" exit /b 1' in cmd, (
+        "login.cmd must reject a value that is actually the next option."
+    )
+    assert "if defined REST exit /b 1" in cmd, (
+        "login.cmd must reject any character outside the IP-literal allowlist."
+    )
+
+
+def test_login_sh_rejects_unbalanced_ipv6_brackets() -> None:
+    """``is_ip_literal`` must not accept a spelling ``bracket_if_ipv6`` cannot fix.
+
+    Accepting ``[::1`` would let the normaliser produce ``[[::1]``, so the
+    promise "exactly one pair" in both comment blocks would be untrue and the
+    value would still reach docker as a malformed port bind.
+    """
+
+    # Absolute: the script cd's to its own directory, and the run below sets a
+    # cwd, so a repo-relative path would not resolve there.
+    script = (DOCKER_LOGIN / "login.sh").resolve()
+    for value, expected_reject in (
+        ("::1", False),
+        ("[::1]", False),
+        ("2001:db8::1", False),
+        ("[::1", True),
+        ("]::1[", True),
+        ("[[::1]]", True),
+        ("1.2.3.0a", True),
+        (".", True),
+        ("not an ip", True),
+    ):
+        proc = subprocess.run(
+            ["bash", str(script), "--ip", value],
+            capture_output=True,
+            text=True,
+            check=False,
+            cwd=str(DOCKER_LOGIN),
+        )
+        rejected = proc.returncode == 2 and "--ip needs an IP address" in proc.stderr
+        assert rejected is expected_reject, (
+            f"login.sh --ip {value!r}: rejected={rejected}, expected "
+            f"{expected_reject} (rc={proc.returncode}, stderr={proc.stderr!r})"
+        )
