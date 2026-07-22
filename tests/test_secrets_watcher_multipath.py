@@ -1035,18 +1035,26 @@ def _staged_cleanup(hass: Any) -> list[Any]:
     return staged
 
 
-async def _run_staged_cleanup(hass: Any, *, unique_id: str | None) -> None:
+async def _run_staged_cleanup(
+    hass: Any, *, unique_id: str | None, entry_id: str | None = None
+) -> None:
     """Claim one staged ticket and execute it, as the durability gate does.
 
     Production never runs the jobs inline: ``async_setup_entry`` only claims the
-    ticket and arms a background task that waits for proof that the config entry
-    reached Home Assistant's storage (see
+    ticket and arms a background task that waits for proof that Home Assistant's
+    storage holds the state that authorises the cleanup (see
     ``config_flow.async_schedule_pending_container_cleanup``). These tests cover
     the job semantics *after* that proof, so they drive the two halves directly
     instead of standing up HA's storage against a hand-built ``hass`` double.
+
+    ``entry_id`` is required for the tickets of the *update* paths: those name
+    their entry, and a claim that does not name the same entry must not get
+    them.
     """
 
-    jobs = config_flow._async_claim_container_cleanup(hass, unique_id=unique_id)
+    jobs = config_flow._async_claim_container_cleanup(
+        hass, unique_id=unique_id, entry_id=entry_id
+    )
     await config_flow._async_execute_container_cleanup(hass, jobs)
 
 
@@ -1255,18 +1263,21 @@ class _UpdateFlowHass:
         return asyncio.ensure_future(coro)
 
 
-async def test_discovery_update_case_still_deletes_inline(
+async def test_discovery_update_case_stages_the_delete_behind_the_gate(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """Regression guard: the REAL persist point keeps its inline delete.
+    """The discovery-*update* case stages its delete instead of running it.
 
-    ``hass.config_entries.async_update_entry`` writes through synchronously, so
-    the update case may delete immediately. Only the create case had to be
-    deferred; nothing may be staged here.
+    ``hass.config_entries.async_update_entry`` does not write through: it
+    mutates the in-memory entry and schedules Home Assistant's debounced store
+    save. Deleting the imported bundle inside that window would mean a crash
+    there restores the OLD credentials while the newly imported file is already
+    gone -- the exact failure direction this subsystem exists to exclude
+    (Codex P2, fund A).
 
     Drives the *production* step (``async_step_discovery_update_info`` with an
     existing entry), not the delete helper: calling the helper directly would
-    keep passing even if the step lost its inline delete altogether. Only the
+    keep passing even if the step lost its staging altogether. Only the
     credential ingestion is mocked out, because that one talks to Google.
     """
 
@@ -1313,9 +1324,22 @@ async def test_discovery_update_case_still_deletes_inline(
     assert result["type"] == "abort"
     assert result["reason"] == "already_configured"
     assert ingested, "the update path never reached the credential ingest"
-    # The entry really was written through before the delete.
+    # The entry update happened, and the reload that will arm the gate was
+    # scheduled.
     assert [target for target, _ in hass.config_entries.updated] == [entry]
-    # Deleted inline, in the step itself.
+    assert hass.config_entries.reloaded == [entry.entry_id]
+    # NOT deleted in the step: the save is still pending at this point.
+    assert watched.exists()
+    # Staged instead, addressed to this entry and gated on its watermark, so
+    # the proof cannot be satisfied by the entry id that was stored all along.
+    staged = _staged_cleanup(hass)
+    assert len(staged) == 1
+    assert staged[0].entry_id == entry.entry_id
+    assert staged[0].min_modified_at == entry.modified_at
+    assert len(staged[0].jobs) == 1
+    assert staged[0].jobs[0].imported_digest is not None
+
+    # And the staged job is the real one: running it through the executor half
+    # of the gate removes exactly the file the import consumed.
+    await _run_staged_cleanup(hass, unique_id=entry.unique_id, entry_id=entry.entry_id)
     assert not watched.exists()
-    # ... and therefore nothing left for async_setup_entry to redo.
-    assert _staged_cleanup(hass) == []

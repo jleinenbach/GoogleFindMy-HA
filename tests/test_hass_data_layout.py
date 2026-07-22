@@ -598,6 +598,13 @@ async def test_async_setup_entry_leaves_modern_entries_intact(
 # jobs run once the entry is provably in Home Assistant's storage, because
 # ``ConfigEntries.async_add`` awaits ``async_setup_entry`` and schedules the
 # (debounced) save only afterwards.
+#
+# The paths that update an *existing* entry stage through the same area, but
+# their tickets name the entry and carry a ``modified_at`` watermark, because
+# for them the entry id was in storage long before the update. Those semantics
+# are covered in ``tests/test_config_flow_container_login.py`` and
+# ``tests/test_container_cleanup_persist_probe.py``; the tests here stay on the
+# ``async_setup_entry`` side of the seam.
 # ---------------------------------------------------------------------------
 
 
@@ -627,9 +634,18 @@ def _install_persistence_probe(
     The production probe reads Home Assistant's own config-entry store; the
     setup stub here has no such storage, so the observation is pinned instead
     of faked at the filesystem level. The gate logic around it stays real.
+
+    ``min_modified_at`` is accepted and ignored: what the watermark *means* is
+    pinned against real Home Assistant storage in
+    ``tests/test_container_cleanup_persist_probe.py``. Accepting it here is not
+    cosmetic -- a stub that rejected the keyword would turn every gate call into
+    a ``TypeError``, which the runner swallows as "could not verify", i.e. these
+    tests would silently stop exercising the path they are about.
     """
 
-    async def _probe(_hass: Any, _entry_id: str) -> bool:
+    async def _probe(
+        _hass: Any, _entry_id: str, *, min_modified_at: Any = None
+    ) -> bool:
         return persisted
 
     monkeypatch.setattr(config_flow, "_async_config_entry_is_persisted", _probe)
@@ -731,7 +747,9 @@ async def test_cleanup_is_dropped_when_the_storage_probe_raises(
     acked: list[str] = []
     _install_ack_recorder(monkeypatch, acked)
 
-    async def _exploding_probe(_hass: Any, _entry_id: str) -> bool:
+    async def _exploding_probe(
+        _hass: Any, _entry_id: str, *, min_modified_at: Any = None
+    ) -> bool:
         raise OSError("storage unreadable")
 
     monkeypatch.setattr(
@@ -1017,7 +1035,9 @@ async def test_cleanup_task_cancellation_keeps_the_credentials(
 
     probe_reached = asyncio.Event()
 
-    async def _never_persisted(_hass: Any, _entry_id: str) -> bool:
+    async def _never_persisted(
+        _hass: Any, _entry_id: str, *, min_modified_at: Any = None
+    ) -> bool:
         probe_reached.set()
         await asyncio.sleep(3600)
         return True  # pragma: no cover - the sleep is always cancelled

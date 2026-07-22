@@ -600,6 +600,13 @@ CONFIG_SCHEMA: vol.Schema = getattr(
 
 _LOGGER = logging.getLogger(__name__)
 
+# Upper bound for draining staged container-login cleanup tickets of a single
+# entry on removal. One discard call claims at most one ticket, and an entry can
+# legitimately hold more than one (a create flow plus later update flows). The
+# bound only exists so a corrupted staging area cannot spin here; it is not a
+# semantic limit.
+_MAX_CLEANUP_TICKETS_PER_ENTRY = 16
+
 
 async def _async_self_heal_duplicate_entities(
     hass: HomeAssistant,
@@ -2398,13 +2405,16 @@ class GoogleFindMyDomainData(TypedDict, total=False):
     _subentry_setup_history: dict[str, set[str]]
     pending_reconfigure_device_list_refresh: set[str]
     recent_reconfigure_markers: dict[str, float]
-    # In-memory only, NEVER persisted: post-create cleanup jobs staged by the
-    # config flow (watched-secrets delete, login-container ack). A FIFO list of
-    # per-flow tickets, NOT a mapping keyed by account: two overlapping create
-    # flows for the same account must not share one list, and every
-    # ``async_setup_entry`` run claims at most one ticket. The claimed jobs run
-    # only after the entry is provably in Home Assistant's storage. See
-    # ``config_flow._StagedCleanupTicket`` and
+    # In-memory only, NEVER persisted: irreversible cleanup jobs staged by a
+    # config or options flow (watched-secrets delete, login-container ack). A
+    # FIFO list of per-flow tickets, NOT a mapping keyed by account: two
+    # overlapping flows for the same account must not share one list, and every
+    # ``async_setup_entry`` run claims at most one ticket. Create-path tickets
+    # are correlated by account and dropped again when their flow is removed
+    # without producing an entry; update-path tickets (reauth, reconfigure,
+    # options, discovery update) name their entry and additionally carry the
+    # ``modified_at`` the storage has to catch up to. The claimed jobs run only
+    # after that proof. See ``config_flow._StagedCleanupTicket`` and
     # ``config_flow.async_schedule_pending_container_cleanup``.
     pending_container_cleanup: list[_StagedCleanupTicket]
 
@@ -7145,7 +7155,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
             )
 
             discarded = async_discard_pending_container_cleanup(
-                hass, unique_id=getattr(entry, "unique_id", None)
+                hass,
+                unique_id=getattr(entry, "unique_id", None),
+                entry_id=getattr(entry, "entry_id", None),
             )
             if discarded:
                 _LOGGER.debug(
@@ -8733,6 +8745,43 @@ async def async_remove_entry(hass: HomeAssistant, entry: MyConfigEntry) -> None:
     # the watcher's signature, and cannot re-import a bundle that some other
     # account's entry is still using.
     await _async_refresh_discovery_watch_paths(hass, exclude_entry_id=entry.entry_id)
+
+    # A staged container-login cleanup addressed to THIS entry can never be
+    # claimed again once the entry is gone, so it would sit in hass.data for the
+    # rest of the process lifetime holding a pairing nonce and a delete token.
+    # Discard it instead of running it: dropping keeps the fail-safe direction
+    # (credential files stay on disk, the un-acked container falls back to its
+    # own TTL), whereas executing would delete credentials for an entry the user
+    # just removed.
+    try:
+        from .config_flow import (  # noqa: PLC0415 - lazy, avoids an import cycle
+            async_discard_pending_container_cleanup,
+        )
+
+        # One call claims at most one ticket, so drain under a hard bound
+        # rather than assuming a single ticket per entry.
+        discarded = 0
+        for _ in range(_MAX_CLEANUP_TICKETS_PER_ENTRY):
+            dropped = async_discard_pending_container_cleanup(
+                hass,
+                unique_id=getattr(entry, "unique_id", None),
+                entry_id=getattr(entry, "entry_id", None),
+            )
+            if not dropped:
+                break
+            discarded += dropped
+        if discarded:
+            _LOGGER.debug(
+                "[%s] Discarded %s staged container-login cleanup job(s) on entry removal; credential files are kept on disk",
+                entry.entry_id,
+                discarded,
+            )
+    except Exception as err:  # noqa: BLE001 - housekeeping must never raise
+        _LOGGER.debug(
+            "[%s] Could not discard staged container-login cleanup on removal: %s",
+            entry.entry_id,
+            err,
+        )
 
     # Prefer entry.runtime_data (2026 standard), then clean up entries bucket.
     bucket = _domain_data(hass)

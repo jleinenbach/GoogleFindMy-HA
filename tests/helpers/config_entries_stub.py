@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 from collections.abc import Mapping
+from datetime import UTC, datetime
 from itertools import count
 from types import MappingProxyType, ModuleType, SimpleNamespace
 from typing import Any
@@ -326,6 +327,7 @@ def make_config_entry(
     pref_disable_new_entities: bool = False,
     pref_disable_polling: bool = False,
     disabled_by: str | None = None,
+    modified_at: datetime | None = None,
     **extra: Any,
 ) -> SimpleNamespace:
     """Canonical config-entry stub for tests.
@@ -344,9 +346,16 @@ def make_config_entry(
     the module fresh, so IDs are worker-isolated but not deterministic across
     test runs. Tests that assert on ``entry_id`` MUST pass ``entry_id=...``
     explicitly.
+
+    ``modified_at`` mirrors the real ``ConfigEntry`` field and defaults to an
+    aware UTC "now", because production reads it as the durability watermark of
+    an entry update (``config_flow._entry_modified_at``). A stub without it
+    would silently take the fail-safe branch there, so update-path tests would
+    pass while asserting nothing. Tests that need a specific watermark pass one.
     """
     return SimpleNamespace(
         entry_id=entry_id or f"entry-test-{next(_ENTRY_COUNTER)}",
+        modified_at=modified_at or datetime.now(UTC),
         domain=domain,
         data=dict(data or {}),
         options=dict(options or {}),

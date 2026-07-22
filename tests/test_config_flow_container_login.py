@@ -120,6 +120,7 @@ here are local fakes, never a real client session).
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import json
 import logging
@@ -489,14 +490,17 @@ async def test_initial_setup_happy_path_persists_token_and_defers_ack(
     assert recorder.ack_calls == []
 
 
-async def test_pending_ack_flushes_once_entry_created(
+async def test_pending_ack_is_handed_over_exactly_once(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The deferred ack fires exactly once when the entry is actually created (F4).
+    """The deferred ack is handed to the durability gate exactly once (F4/P2).
 
-    Drives ``container_login`` to stage the pending ack, then invokes the flush
-    helper that ``device_selection`` calls right after ``async_create_entry``.
-    The ack must be sent once and the pending slot cleared (no double-ack).
+    Drives ``container_login`` to stage the pending ack, then invokes the
+    hand-over helper that ``device_selection`` calls right after
+    ``async_create_entry``. The ack must land on exactly one staged job and the
+    pending slot must be cleared, so a second hand-over is a no-op (no
+    double-ack). Nothing may be sent: at this point Home Assistant has not
+    stored anything yet.
     """
 
     recorder = _Recorder()
@@ -524,14 +528,24 @@ async def test_pending_ack_flushes_once_entry_created(
     assert recorder.ack_calls == []
     assert flow._container_pending_ack is not None
 
-    # Simulate device_selection reaching CREATE_ENTRY and flushing the ack.
-    await flow._async_flush_container_ack()
-    assert len(recorder.ack_calls) == 1
-    assert recorder.ack_calls[0]["delete_token"] == _DELETE_TOKEN
-    # Cleared: a second flush is a no-op (no double-ack).
+    # Simulate device_selection reaching CREATE_ENTRY and handing the ack over.
+    flow._async_stage_container_ack()
+    staged = _staged_cleanup(hass)
+    assert len(staged) == 1
+    assert len(staged[0].jobs) == 1
+    assert staged[0].jobs[0].ack is not None
+    assert staged[0].jobs[0].ack.delete_token == _DELETE_TOKEN
+    # A create-path ticket names no entry: the gate only has to see the entry
+    # appear in storage at all.
+    assert staged[0].entry_id is None
+    assert staged[0].min_modified_at is None
+    # Still nothing sent to the container.
+    assert recorder.ack_calls == []
+    # Cleared: a second hand-over is a no-op (no double-ack, no second job).
     assert flow._container_pending_ack is None
-    await flow._async_flush_container_ack()
-    assert len(recorder.ack_calls) == 1
+    flow._async_stage_container_ack()
+    assert len(_staged_cleanup(hass)[0].jobs) == 1
+    assert recorder.ack_calls == []
 
 
 async def test_aborted_flow_before_entry_keeps_bundle_no_ack(
@@ -585,18 +599,26 @@ def _staged_cleanup(hass: Any) -> list[Any]:
     return staged
 
 
-async def _run_staged_cleanup(hass: Any, *, unique_id: str | None) -> None:
+async def _run_staged_cleanup(
+    hass: Any, *, unique_id: str | None, entry_id: str | None = None
+) -> None:
     """Claim one staged ticket and execute it, as the durability gate does.
 
     Production never runs the jobs inline: ``async_setup_entry`` only claims the
-    ticket and arms a background task that waits for proof that the config entry
-    reached Home Assistant's storage (see
+    ticket and arms a background task that waits for proof that Home Assistant's
+    storage holds the state that authorises the cleanup (see
     ``config_flow.async_schedule_pending_container_cleanup``). These tests cover
     the job semantics *after* that proof, so they drive the two halves directly
     instead of standing up HA's storage against a hand-built ``hass`` double.
+
+    ``entry_id`` is required for the tickets of the *update* paths: those name
+    their entry, and a claim that does not name the same entry must not get
+    them.
     """
 
-    jobs = config_flow._async_claim_container_cleanup(hass, unique_id=unique_id)
+    jobs = config_flow._async_claim_container_cleanup(
+        hass, unique_id=unique_id, entry_id=entry_id
+    )
     await config_flow._async_execute_container_cleanup(hass, jobs)
 
 
@@ -758,6 +780,378 @@ async def test_cleanup_runner_ignores_jobs_of_other_accounts(
 
     await _run_staged_cleanup(hass, unique_id="account-a@example.com")
     assert len(recorder.ack_calls) == 1
+
+
+# ---------------------------------------------------------------------------
+# Ticket correlation: an aborted flow must not leave a ticket behind
+# ---------------------------------------------------------------------------
+#
+# Home Assistant aborts every competing in-progress flow with the same unique id
+# when one flow finishes (``ConfigEntriesFlowManager.async_finish_flow``:
+# ``self.async_abort(progress_flow_id)``), and every flow ending -- abort and
+# success alike -- runs through ``FlowManager._async_remove_flow_progress``,
+# which calls the overridable ``FlowHandler.async_remove`` hook. Selecting a
+# ticket by "same account, oldest first" therefore cannot separate two
+# overlapping flows: the loser's ticket outlives it and the winner's entry would
+# claim it. The flow drops its own ticket instead.
+
+
+def _stage_ack_ticket(hass: Any, *, flow_id: str, unique_id: str | None) -> None:
+    """Stage one ack job on ``flow_id``'s ticket, as a create flow would."""
+
+    config_flow._async_stage_container_cleanup(
+        hass,
+        flow_id=flow_id,
+        unique_id=unique_id,
+        job=config_flow.PendingContainerCleanup(
+            ack=config_flow._ContainerAckTarget(
+                host="127.0.0.1",
+                port=CONTAINER_TOKEN_PORT,
+                pairing_code=_PAIRING_CODE,
+                delete_token=_DELETE_TOKEN,
+            )
+        ),
+    )
+
+
+async def test_aborted_flow_takes_its_ticket_with_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The loser of two same-account flows must not leave its ticket behind.
+
+    The exact interleaving Home Assistant produces: two flows for one account
+    stage a ticket each, the second one is aborted (Core aborts the competing
+    in-progress flow when the first finishes) and only the first ever produces
+    an entry. Without the removal hook that entry would find TWO claimable
+    tickets for its account and, on this or a later reload, ack credentials that
+    belong to a flow which never created anything.
+    """
+
+    recorder = _Recorder()
+    _install_container_client(monkeypatch, recorder)
+    hass = _build_hass([])
+
+    winner = config_flow.ConfigFlow()
+    winner.hass = hass  # type: ignore[assignment]
+    winner.context = {}
+    winner.flow_id = "flow-winner"  # type: ignore[attr-defined]
+    loser = config_flow.ConfigFlow()
+    loser.hass = hass  # type: ignore[assignment]
+    loser.context = {}
+    loser.flow_id = "flow-loser"  # type: ignore[attr-defined]
+
+    _stage_ack_ticket(hass, flow_id=winner._async_cleanup_ticket_id(), unique_id=_EMAIL)
+    _stage_ack_ticket(hass, flow_id=loser._async_cleanup_ticket_id(), unique_id=_EMAIL)
+    assert len(_staged_cleanup(hass)) == 2
+
+    # Home Assistant removes the aborted flow; the hook drops its ticket.
+    loser.async_remove()
+    assert [ticket.flow_id for ticket in _staged_cleanup(hass)] == ["flow-winner"]
+
+    # The winner's entry claims its own ticket -- and there is nothing else to
+    # claim afterwards, on this reload or any later one.
+    await _run_staged_cleanup(hass, unique_id=_EMAIL)
+    assert len(recorder.ack_calls) == 1
+    assert _staged_cleanup(hass) == []
+    await _run_staged_cleanup(hass, unique_id=_EMAIL)
+    assert len(recorder.ack_calls) == 1
+
+
+async def test_removing_a_successful_flow_is_a_noop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Removal after a successful create must not touch anyone else's ticket.
+
+    Home Assistant calls ``async_remove`` for a successful flow too, but only
+    after ``async_finish_flow`` added the entry, i.e. after
+    ``async_setup_entry`` claimed this flow's ticket. The hook must therefore
+    find nothing of its own -- and must leave a concurrent flow's ticket alone
+    rather than clearing the staging area.
+    """
+
+    recorder = _Recorder()
+    _install_container_client(monkeypatch, recorder)
+    hass = _build_hass([])
+
+    done = config_flow.ConfigFlow()
+    done.hass = hass  # type: ignore[assignment]
+    done.context = {}
+    done.flow_id = "flow-done"  # type: ignore[attr-defined]
+
+    _stage_ack_ticket(hass, flow_id="flow-done", unique_id=_EMAIL)
+    _stage_ack_ticket(hass, flow_id="flow-other", unique_id="other@example.com")
+
+    # The entry created by this flow already claimed its ticket.
+    await _run_staged_cleanup(hass, unique_id=_EMAIL)
+    assert len(recorder.ack_calls) == 1
+
+    done.async_remove()
+    assert [ticket.flow_id for ticket in _staged_cleanup(hass)] == ["flow-other"]
+
+
+async def test_removing_a_flow_keeps_its_update_path_ticket(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An update-path ticket survives the removal of the flow that staged it.
+
+    Reauth, reconfigure and the options credential refresh all *end* by aborting
+    the flow on purpose, right after they updated the entry and scheduled its
+    reload. Their ticket names that entry and is waiting for the reload's
+    ``async_setup_entry``; discarding it on removal would disable the cleanup on
+    every update path. The distinction is exactly ``entry_id is None``.
+    """
+
+    recorder = _Recorder()
+    _install_container_client(monkeypatch, recorder)
+    hass = _build_hass([])
+
+    flow = config_flow.ConfigFlow()
+    flow.hass = hass  # type: ignore[assignment]
+    flow.context = {}
+    flow.flow_id = "flow-update"  # type: ignore[attr-defined]
+
+    entry = make_config_entry(entry_id="entry-update", unique_id=_EMAIL)
+    config_flow._async_stage_container_cleanup_for(
+        hass,
+        flow_id=flow._async_cleanup_ticket_id(),
+        unique_id=_EMAIL,
+        job=config_flow.PendingContainerCleanup(
+            ack=config_flow._ContainerAckTarget(
+                host="127.0.0.1",
+                port=CONTAINER_TOKEN_PORT,
+                pairing_code=_PAIRING_CODE,
+                delete_token=_DELETE_TOKEN,
+            )
+        ),
+        entry=entry,
+    )
+
+    flow.async_remove()
+    staged = _staged_cleanup(hass)
+    assert len(staged) == 1
+    assert staged[0].entry_id == "entry-update"
+
+    await _run_staged_cleanup(hass, unique_id=_EMAIL, entry_id="entry-update")
+    assert len(recorder.ack_calls) == 1
+
+
+async def test_removing_an_options_flow_drops_its_uncorrelated_ticket(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``OptionsFlowHandler`` needs the same removal guard as ``ConfigFlow``.
+
+    Today the options credential refresh only ever stages a ticket that names
+    its entry, so this override is a no-op there. It exists for the next options
+    path that stages an uncorrelated ticket, and without a test the guard could
+    be deleted or moved without anything turning red.
+    """
+
+    recorder = _Recorder()
+    _install_container_client(monkeypatch, recorder)
+    hass = _build_hass([])
+
+    # Bypass __init__: the handler's constructor wants a config entry, and this
+    # test is about the removal hook, not about flow construction.
+    flow = object.__new__(config_flow.OptionsFlowHandler)
+    flow.hass = hass  # type: ignore[attr-defined]
+    flow.context = {}  # type: ignore[attr-defined]
+    flow.flow_id = "options-flow"  # type: ignore[attr-defined]
+    flow._container_cleanup_ticket_id = None  # type: ignore[attr-defined]
+
+    staged_ok = config_flow._async_stage_container_cleanup_for(
+        hass,
+        flow_id=flow._async_cleanup_ticket_id(),
+        unique_id=_EMAIL,
+        job=config_flow.PendingContainerCleanup(
+            ack=config_flow._ContainerAckTarget(
+                host="127.0.0.1",
+                port=CONTAINER_TOKEN_PORT,
+                pairing_code=_PAIRING_CODE,
+                delete_token=_DELETE_TOKEN,
+            )
+        ),
+        entry=None,
+    )
+    assert staged_ok is True
+    assert len(_staged_cleanup(hass)) == 1
+
+    # Without a hass there is nowhere to stage, and the helper must say so
+    # instead of reporting a job it silently dropped.
+    assert (
+        config_flow._async_stage_container_cleanup_for(
+            None,
+            flow_id="flow-without-hass",
+            unique_id=_EMAIL,
+            job=config_flow.PendingContainerCleanup(
+                ack=config_flow._ContainerAckTarget(
+                    host="127.0.0.1",
+                    port=CONTAINER_TOKEN_PORT,
+                    pairing_code=_PAIRING_CODE,
+                    delete_token=_DELETE_TOKEN,
+                )
+            ),
+            entry=None,
+        )
+        is False
+    )
+    assert len(_staged_cleanup(hass)) == 1
+
+    flow.async_remove()
+
+    assert _staged_cleanup(hass) == []
+    assert recorder.ack_calls == []
+
+
+async def test_options_flow_defines_the_removal_hook_ahead_of_the_mixin() -> None:
+    """Pin *why* the hook has to sit on the concrete class.
+
+    ``data_entry_flow.FlowHandler`` precedes ``_ContainerLoginMixin`` in this
+    MRO, so a mixin-level override would never be reached: Python would keep
+    finding the base class's no-op first. Moving the method to the mixin would
+    silently disable it, and only this assertion notices.
+    """
+
+    assert "async_remove" in config_flow.OptionsFlowHandler.__dict__
+
+    fallback = next(
+        (
+            klass
+            for klass in config_flow.OptionsFlowHandler.__mro__[1:]
+            if "async_remove" in klass.__dict__
+        ),
+        None,
+    )
+    assert fallback is not None
+    assert fallback is not config_flow._ContainerLoginMixin
+
+
+async def test_an_update_ticket_is_never_claimed_by_another_entry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A ticket that names its entry is invisible to every other entry.
+
+    Two entries of the same account can coexist during a replace, and an entry
+    without a unique id claims the account-less fallback. Neither may reach a
+    ticket that was addressed to a specific entry.
+    """
+
+    recorder = _Recorder()
+    _install_container_client(monkeypatch, recorder)
+    hass = _build_hass([])
+
+    entry = make_config_entry(entry_id="entry-a", unique_id=_EMAIL)
+    config_flow._async_stage_container_cleanup_for(
+        hass,
+        flow_id="flow-update",
+        unique_id=_EMAIL,
+        job=config_flow.PendingContainerCleanup(
+            ack=config_flow._ContainerAckTarget(
+                host="127.0.0.1",
+                port=CONTAINER_TOKEN_PORT,
+                pairing_code=_PAIRING_CODE,
+                delete_token=_DELETE_TOKEN,
+            )
+        ),
+        entry=entry,
+    )
+
+    # Same account, different entry: no.
+    await _run_staged_cleanup(hass, unique_id=_EMAIL, entry_id="entry-b")
+    # Account-less fallback: no.
+    await _run_staged_cleanup(hass, unique_id=None)
+    # Right account, no entry id at all (the create-path claim): still no.
+    await _run_staged_cleanup(hass, unique_id=_EMAIL)
+    assert recorder.ack_calls == []
+    assert len(_staged_cleanup(hass)) == 1
+
+    await _run_staged_cleanup(hass, unique_id=_EMAIL, entry_id="entry-a")
+    assert len(recorder.ack_calls) == 1
+
+
+async def test_update_cleanup_is_dropped_without_a_durability_watermark(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No ``modified_at`` means no proof, so the job is never staged at all.
+
+    The gate for an update path can only be honest with a watermark: the entry
+    id has been in storage since long before the update, so "the entry exists"
+    would authorise the irreversible cleanup on no evidence. An entry that
+    cannot supply one therefore loses its cleanup -- credentials survive, the
+    container falls back to its TTL delete.
+    """
+
+    recorder = _Recorder()
+    _install_container_client(monkeypatch, recorder)
+    hass = _build_hass([])
+
+    entry = make_config_entry(entry_id="entry-no-watermark", unique_id=_EMAIL)
+    del entry.modified_at
+
+    staged = config_flow._async_stage_container_cleanup_for(
+        hass,
+        flow_id="flow-update",
+        unique_id=_EMAIL,
+        job=config_flow.PendingContainerCleanup(imported_digest="deadbeef"),
+        entry=entry,
+    )
+    assert staged is False
+    assert _staged_cleanup(hass) == []
+
+    await _run_staged_cleanup(hass, unique_id=_EMAIL, entry_id="entry-no-watermark")
+    assert recorder.ack_calls == []
+
+
+async def test_scheduler_hands_the_watermark_to_the_gate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``async_setup_entry`` must pass the ticket's watermark to the probe.
+
+    The claim and the proof live in two different functions; if the watermark
+    were dropped between them the update paths would silently fall back to the
+    vacuous "entry id exists" proof, and every test above would still pass.
+    """
+
+    hass = _build_hass([])
+    entry = make_config_entry(entry_id="entry-gate", unique_id=_EMAIL)
+    watermark = entry.modified_at
+
+    config_flow._async_stage_container_cleanup_for(
+        hass,
+        flow_id="flow-update",
+        unique_id=_EMAIL,
+        job=config_flow.PendingContainerCleanup(imported_digest="deadbeef"),
+        entry=entry,
+    )
+
+    seen: list[tuple[str, Any]] = []
+
+    async def _fake_probe(
+        _hass: Any, entry_id: str, *, min_modified_at: Any = None
+    ) -> bool:
+        seen.append((entry_id, min_modified_at))
+        return True
+
+    executed: list[list[Any]] = []
+
+    async def _fake_execute(_hass: Any, jobs: list[Any]) -> None:
+        executed.append(jobs)
+
+    monkeypatch.setattr(config_flow, "_async_config_entry_is_persisted", _fake_probe)
+    monkeypatch.setattr(config_flow, "_async_execute_container_cleanup", _fake_execute)
+
+    def _create_background_task(_hass: Any, coro: Any, **_kw: Any) -> Any:
+        return asyncio.ensure_future(coro)
+
+    entry.async_create_background_task = _create_background_task
+
+    task = config_flow.async_schedule_pending_container_cleanup(hass, entry)
+    assert task is not None
+    await task
+    # The entry id AND the watermark reached the probe, and only then did the
+    # irreversible half run.
+    assert seen == [("entry-gate", watermark)]
+    assert len(executed) == 1
+    assert executed[0][0].imported_digest == "deadbeef"
 
 
 async def test_cleanup_runner_is_a_noop_without_staged_jobs(
@@ -983,21 +1377,24 @@ async def test_stage_container_ack_without_pending_result_is_a_noop(
     assert recorder.ack_calls == []
 
 
-async def test_reconfigure_persist_still_acks_inline_and_stages_nothing(
+async def test_reconfigure_persist_stages_the_ack_behind_the_gate(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Regression guard for the REAL persist points (unchanged behaviour).
+    """The reconfigure path stages its ack; it must not send it (Codex P2, fund A).
 
-    ``hass.config_entries.async_update_entry`` writes the entry inline, so the
-    reconfigure path may ack immediately. Only the ``async_create_entry`` path
-    had to be deferred; this pins that the inline flush was not deferred along
-    with it.
+    ``hass.config_entries.async_update_entry`` does NOT write through: it
+    mutates the in-memory entry and schedules Home Assistant's debounced store
+    save (``_async_save_and_notify`` -> ``_async_schedule_save`` ->
+    ``Store.async_delay_save``). Acking inside that window would tell the login
+    container to drop the only other copy of the credentials before Home
+    Assistant committed them.
 
-    Drives the *production* branch, not the helper: a container login followed
-    by ``async_step_device_selection`` with ``is_reconfigure`` in the flow
-    context, which is the only caller of
-    ``ConfigFlow._async_flush_container_ack``. Calling that helper directly
-    would keep passing even if the branch stopped calling it.
+    Drives the *production* branch, not a helper: a container login followed by
+    ``async_step_device_selection`` with ``is_reconfigure`` in the flow context.
+    Also pins the correlation, because that is what makes the deferred proof
+    non-vacuous: the ticket names this entry and carries its ``modified_at``, so
+    the gate waits for a stored record at least that recent instead of for the
+    entry id, which was in storage all along.
     """
 
     recorder = _Recorder()
@@ -1041,14 +1438,19 @@ async def test_reconfigure_persist_still_acks_inline_and_stages_nothing(
     assert isinstance(result, dict)
     assert result.get("type") == "abort"
     assert result.get("reason") == "reconfigure_successful"
-    # The entry was written through synchronously by this branch.
+    # The entry update really happened in this branch.
     assert any(update["entry"] is entry for update in hass.config_entries.updated)
-    # Acked inline, right after that write.
-    assert len(recorder.ack_calls) == 1
-    assert recorder.ack_calls[0]["delete_token"] == _DELETE_TOKEN
+    # NOT acked: the container still holds its copy while the save is pending.
+    assert recorder.ack_calls == []
     assert flow._container_pending_ack is None
-    # Sent, not staged: nothing is left for async_setup_entry to do.
-    assert _staged_cleanup(hass) == []
+    # Staged instead, addressed to this entry and gated on its watermark.
+    staged = _staged_cleanup(hass)
+    assert len(staged) == 1
+    assert staged[0].entry_id == entry.entry_id
+    assert staged[0].min_modified_at == entry.modified_at
+    assert len(staged[0].jobs) == 1
+    assert staged[0].jobs[0].ack is not None
+    assert staged[0].jobs[0].ack.delete_token == _DELETE_TOKEN
 
 
 # ---------------------------------------------------------------------------
@@ -1313,7 +1715,12 @@ async def test_ack_not_called_when_token_selection_fails(
 async def test_reauth_container_branch_happy_path(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The reauth container branch fetches, persists, and acks for the bound email."""
+    """The reauth container branch fetches, updates, and STAGES the ack.
+
+    ``async_update_reload_and_abort`` wraps ``async_update_entry``, whose save is
+    debounced, so the ack has to wait behind the durability gate that the reload
+    it schedules will arm (Codex P2, fund A).
+    """
 
     recorder = _Recorder()
     _install_container_client(monkeypatch, recorder)
@@ -1357,7 +1764,13 @@ async def test_reauth_container_branch_happy_path(
     # Persisted the validated bundle and acked the container.
     assert captured["data"][DATA_SECRET_BUNDLE]["shared_key"] == _SHARED_HEX
     assert captured["data"][CONF_OAUTH_TOKEN] == _TOKEN
-    assert len(recorder.ack_calls) == 1
+    # Staged, not sent, and addressed to the entry it belongs to.
+    assert recorder.ack_calls == []
+    staged = _staged_cleanup(hass)
+    assert len(staged) == 1
+    assert staged[0].entry_id == entry.entry_id
+    assert staged[0].min_modified_at == entry.modified_at
+    assert staged[0].jobs[0].ack is not None
 
 
 async def test_reauth_container_branch_error_does_not_ack(
@@ -1558,7 +1971,12 @@ async def test_reauth_with_only_secrets_json_takes_the_secrets_path(
 async def test_options_container_branch_happy_path(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The options container branch persists via async_update_entry and acks."""
+    """The options container branch updates the entry and STAGES the ack.
+
+    ``async_update_entry`` only schedules the debounced store save, so the ack
+    goes to the durability gate that the reload scheduled here will arm
+    (Codex P2, fund A).
+    """
 
     recorder = _Recorder()
     _install_container_client(monkeypatch, recorder)
@@ -1606,10 +2024,15 @@ async def test_options_container_branch_happy_path(
     assert result.get("type") == "abort"
     assert result.get("reason") == "reconfigure_successful"
     assert errors == {}
-    # Persisted the validated bundle onto the entry and acked the container.
+    # Wrote the validated bundle onto the entry and staged (not sent) the ack.
     assert entry.data[DATA_SECRET_BUNDLE]["shared_key"] == _SHARED_HEX
     assert entry.data[CONF_OAUTH_TOKEN] == _TOKEN
-    assert len(recorder.ack_calls) == 1
+    assert recorder.ack_calls == []
+    staged = _staged_cleanup(hass)
+    assert len(staged) == 1
+    assert staged[0].entry_id == entry.entry_id
+    assert staged[0].min_modified_at == entry.modified_at
+    assert staged[0].jobs[0].ack is not None
 
 
 async def test_options_container_branch_error_does_not_ack(
@@ -1659,12 +2082,13 @@ async def test_options_container_branch_error_does_not_ack(
 async def test_options_handler_inherits_container_helpers(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """F-N4: OptionsFlowHandler must inherit the shared container fetch/ack helpers.
+    """F-N4: OptionsFlowHandler must inherit the shared container helpers.
 
     The options credential-refresh path calls ``_async_container_fetch`` and
-    ``_async_container_ack`` (both extracted to ``_ContainerLoginMixin``). If they
-    were reachable only on ``ConfigFlow`` the options persist would raise
-    ``AttributeError`` before any request. This asserts both are bound callables
+    ``_async_stage_container_ack_result`` (both on ``_ContainerLoginMixin``), and
+    the latter needs ``_async_cleanup_ticket_id`` from the same mixin. If any of
+    them were reachable only on ``ConfigFlow`` the options persist would raise
+    ``AttributeError`` before any request. This asserts they are bound callables
     on the handler and that a full ``_async_options_container_persist`` run does
     not raise ``AttributeError``.
     """
@@ -1685,7 +2109,8 @@ async def test_options_handler_inherits_container_helpers(
 
     # The shared helpers are inherited from _ContainerLoginMixin.
     assert callable(getattr(flow, "_async_container_fetch", None))
-    assert callable(getattr(flow, "_async_container_ack", None))
+    assert callable(getattr(flow, "_async_stage_container_ack_result", None))
+    assert callable(getattr(flow, "_async_cleanup_ticket_id", None))
 
     async def _clear_cached_aas_token(_entry: Any) -> None:
         return None
@@ -1714,22 +2139,22 @@ async def test_options_handler_inherits_container_helpers(
     )
     assert isinstance(result, dict)
     assert result.get("reason") == "reconfigure_successful"
-    # fetch validated the bundle and the ack fired after persist (order: fetch ->
-    # update_entry -> ack), so exactly one of each ran.
+    # fetch validated the bundle and the ack was staged after the update
+    # (order: fetch -> update_entry -> stage), so exactly one of each ran.
     assert len(recorder.fetch_calls) == 1
-    assert len(recorder.ack_calls) == 1
+    assert recorder.ack_calls == []
+    assert len(_staged_cleanup(hass)) == 1
 
 
-async def test_options_container_persist_acks_inline_and_stages_nothing(
+async def test_options_container_persist_stages_before_it_reloads(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Regression guard for the options persist point (unchanged behaviour).
+    """The options branch stages the ack, and stages it BEFORE the reload.
 
-    The options branch writes through ``hass.config_entries.async_update_entry``
-    and never returns ``async_create_entry``, so its entry exists the moment the
-    ack is sent. Deferring it to ``async_setup_entry`` would be wrong here (the
-    reload happens *after* the ack), and the P2 change must not have leaked into
-    this path.
+    Order matters as much as the staging itself: the reload this branch
+    schedules is what runs ``async_setup_entry`` and therefore what claims the
+    ticket. A ticket staged after the reload was scheduled would sit unclaimed
+    until some later reload, which silently turns the cleanup into a leak.
     """
 
     recorder = _Recorder()
@@ -1755,6 +2180,18 @@ async def test_options_container_persist_acks_inline_and_stages_nothing(
     flow._async_clear_cached_aas_token = _clear_cached_aas_token  # type: ignore[attr-defined]
     flow.async_abort = _abort  # type: ignore[assignment]
 
+    # Observe the staging area at the exact moment the reload is scheduled.
+    # ``async_setup_entry`` claims the ticket during that reload, so a ticket
+    # that is not staged yet at this point would never be claimed by it.
+    observed: list[int] = []
+    inner_create_task = hass.async_create_task
+
+    def _recording_create_task(coro: Any, *args: Any, **kwargs: Any) -> Any:
+        observed.append(len(_staged_cleanup(hass)))
+        return inner_create_task(coro, *args, **kwargs)
+
+    hass.async_create_task = _recording_create_task  # type: ignore[method-assign]
+
     errors: dict[str, str] = {}
     result = await flow._async_options_container_persist(
         entry=entry,
@@ -1768,9 +2205,10 @@ async def test_options_container_persist_acks_inline_and_stages_nothing(
     )
     assert isinstance(result, dict)
     assert result.get("reason") == "reconfigure_successful"
-    assert len(recorder.ack_calls) == 1
-    # Acked inline, so nothing is left for async_setup_entry to redo.
-    assert _staged_cleanup(hass) == []
+    assert recorder.ack_calls == []
+    # Staged for async_setup_entry, and staged before the reload was scheduled.
+    assert len(_staged_cleanup(hass)) == 1
+    assert observed == [1]
 
 
 # ---------------------------------------------------------------------------

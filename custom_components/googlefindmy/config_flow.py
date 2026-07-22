@@ -11,16 +11,22 @@ Key design decisions (Best Practice):
   as soon as it is known, to avoid duplicate flows and duplicate entries.
 - No persistence during the flow: We never write tokens/secrets to disk during
   the flow. All flow-time validation uses ephemeral clients only.
-- No irreversible cleanup on the *create* path: `async_create_entry` only
-  *builds* a FlowResult; Home Assistant stores the entry afterwards in
-  `ConfigEntriesFlowManager.async_finish_flow`. Deleting imported secrets files
-  or acking the login container is therefore staged in memory
-  (`hass.data[DOMAIN]["pending_container_cleanup"]`, one ticket per flow) and
-  handed to a durability gate by `async_setup_entry`, which executes the jobs
-  only once the entry has provably reached Home Assistant's storage. The paths
-  that update an *existing* entry (`async_update_entry` in the discovery-update,
-  reconfigure and options flows) keep their inline cleanup: there the entry
-  already exists, so there is nothing to wait for.
+- No irreversible cleanup inside a flow step, on *any* path. `async_create_entry`
+  only *builds* a FlowResult; Home Assistant stores the entry afterwards in
+  `ConfigEntriesFlowManager.async_finish_flow`. And `async_update_entry` only
+  mutates the in-memory entry and schedules Home Assistant's *debounced* store
+  save (`ConfigEntries._async_save_and_notify` -> `_async_schedule_save` ->
+  `Store.async_delay_save(SAVE_DELAY)`); it does not commit before returning.
+  Deleting imported secrets files or acking the login container is therefore
+  always staged in memory (`hass.data[DOMAIN]["pending_container_cleanup"]`, one
+  ticket per flow) and handed to a durability gate by `async_setup_entry`, which
+  executes the jobs only once the *relevant* state has provably reached Home
+  Assistant's storage. The create case waits for the entry to appear at all; the
+  paths that update an *existing* entry (discovery-update, reconfigure, reauth
+  and options) additionally pin a `modified_at` watermark, because for them the
+  entry id alone was already in storage before the update and would prove
+  nothing. Every update path schedules a reload of that entry, so the gate is
+  re-armed by the very `async_setup_entry` run that reload triggers.
 - Duplicate protection: If a config entry for the same Google account already
   exists, we abort the flow using `_abort_if_unique_id_configured()`.
 - Guard handling: If the API raises a "multiple config entries" guard (e.g.,
@@ -61,6 +67,7 @@ from collections.abc import Mapping as CollMapping
 from contextlib import suppress
 from copy import deepcopy
 from dataclasses import dataclass, field
+from datetime import datetime
 from functools import lru_cache
 from pathlib import Path
 from types import MappingProxyType, ModuleType
@@ -809,13 +816,14 @@ async def _async_delete_watched_secrets(
     once the bundle has been persisted into the config entry the on-disk copies
     are transient secrets and must not linger.
 
-    **When this runs.** Only after the entry is provably stored: either right
-    after an ``async_update_entry`` on an already existing entry (discovery
-    update case), or from the durability gate that ``async_setup_entry`` arms
-    via :func:`async_schedule_pending_container_cleanup` for the create case,
-    where the flow can only *stage* the job (a ``CREATE_ENTRY`` FlowResult is
-    not yet an entry). Never call this directly from a step that ends in
-    ``async_create_entry``.
+    **When this runs.** Only from the durability gate that ``async_setup_entry``
+    arms via :func:`async_schedule_pending_container_cleanup`, i.e. only after
+    Home Assistant's storage has been *observed* to hold the state that
+    authorises the deletion. A flow step may only ever *stage* the job. That
+    holds for the update paths as much as for the create path: a ``CREATE_ENTRY``
+    FlowResult is not yet an entry, and ``async_update_entry`` only schedules a
+    debounced save, so neither has committed anything when the step returns.
+    Never call this from a config-flow step.
 
     Two things make the deletion unsafe to do blindly, so the hook is both
     *account-aware* and *content-aware*:
@@ -1945,9 +1953,10 @@ config-entry store, which is a six-figure byte count on a well-populated
 installation. On the path this gate exists for, the initial create, the first
 probe is necessarily a miss (the save is not even scheduled while
 ``async_setup_entry`` runs), so a shorter interval buys nothing there but extra
-parses of a file that cannot have changed yet. On a reload that still carries a
-ticket the entry is stored long since and the first probe already succeeds, so
-the interval never applies at all.
+parses of a file that cannot have changed yet. The update paths behave the same
+way for a different reason: the entry id is stored long since, but the
+``modified_at`` watermark still has to be flushed, so the first probe is
+normally a miss there too and the interval does apply.
 """
 
 
@@ -1980,25 +1989,49 @@ class PendingContainerCleanup:
 
 @dataclass(slots=True)
 class _StagedCleanupTicket:
-    """All cleanup jobs staged by exactly ONE config flow.
+    """All cleanup jobs staged by exactly ONE flow, plus what must be proven.
 
     The staging area is a FIFO list of tickets keyed by ``flow_id``, not a
     mapping keyed by account unique id. That distinction is the whole point:
-    two overlapping create flows for the same account produce two tickets, and
-    every ``async_setup_entry`` run claims **at most one** of them. Bucketing by
+    two overlapping flows for the same account produce two tickets, and every
+    ``async_setup_entry`` run claims **at most one** of them. Bucketing by
     unique id merged both flows' jobs into one list, so the first entry that
     reached setup executed the second flow's irreversible cleanup as well -- for
     an entry that might never materialise.
 
-    ``unique_id`` is the flow's unique id, which Home Assistant copies verbatim
-    onto the new entry (``ConfigEntry(unique_id=flow.unique_id)``), so it is the
-    correlation key an entry matches against. It stays ``None`` for a flow that
-    had not resolved its account yet; such a ticket is claimable by any entry of
-    this integration, but still only by one.
+    Correlation, in order of strength:
+
+    * ``entry_id`` -- set by the paths that update an entry that *already
+      exists* (discovery-update, reconfigure, reauth, options). Such a ticket
+      belongs to exactly one entry and is claimable by no other, so no
+      ordering heuristic is involved at all.
+    * ``unique_id`` -- the flow's unique id, which Home Assistant copies
+      verbatim onto a newly created entry
+      (``ConfigEntry(unique_id=flow.unique_id)``). Used by the create path,
+      where the entry id cannot be known while the flow is still running. It
+      stays ``None`` for a flow that had not resolved its account yet; such a
+      ticket is claimable by any entry of this integration, but still only by
+      one.
+
+    FIFO order alone does **not** keep two overlapping create flows apart: Home
+    Assistant may abort the loser at any point, and its ticket would otherwise
+    be inherited by the winner. What keeps them apart is that a removed flow
+    drops its own ticket (``ConfigFlow.async_remove`` ->
+    :func:`_async_discard_cleanup_ticket_for_flow`), so only tickets of flows
+    that are still alive or that already produced an entry survive to be
+    claimed.
+
+    ``min_modified_at`` is the durability watermark. ``None`` means "the entry
+    merely has to exist in storage" (create path). A value means "the stored
+    record must additionally carry a ``modified_at`` at least this recent",
+    which is what makes the proof non-vacuous for an entry that was already
+    stored before the update.
     """
 
     flow_id: str
     unique_id: str | None
+    entry_id: str | None = None
+    min_modified_at: datetime | None = None
     jobs: list[PendingContainerCleanup] = field(default_factory=list)
 
 
@@ -2009,11 +2042,21 @@ def _async_stage_container_cleanup(
     flow_id: str,
     unique_id: str | None,
     job: PendingContainerCleanup,
+    entry_id: str | None = None,
+    min_modified_at: datetime | None = None,
 ) -> None:
     """Stage ``job`` on the ticket of the flow identified by ``flow_id``.
 
     Appends to the calling flow's own ticket, creating it on first use, so a
     concurrent flow for the same account can never end up sharing the list.
+
+    ``entry_id``/``min_modified_at`` are the correlation and the durability
+    watermark of an *existing-entry update* (see :class:`_StagedCleanupTicket`).
+    When a ticket already exists, both are merged towards the *stricter* value:
+    a correlation is only ever added, never dropped, and the watermark only ever
+    moves forward. Merging that way keeps the fail-safe direction, because a
+    stricter proof can only ever delay or cancel a cleanup, never authorise one
+    that the individual jobs would not have authorised on their own.
     """
 
     if hass is None:
@@ -2028,69 +2071,295 @@ def _async_stage_container_cleanup(
             if ticket.unique_id is None and unique_id:
                 # The flow resolved its account between two staged jobs.
                 ticket.unique_id = unique_id
+            if entry_id and ticket.entry_id is None:
+                ticket.entry_id = entry_id
+            if min_modified_at is not None and (
+                ticket.min_modified_at is None
+                or min_modified_at > ticket.min_modified_at
+            ):
+                ticket.min_modified_at = min_modified_at
             ticket.jobs.append(job)
             return
     tickets.append(
-        _StagedCleanupTicket(flow_id=flow_id, unique_id=unique_id or None, jobs=[job])
+        _StagedCleanupTicket(
+            flow_id=flow_id,
+            unique_id=unique_id or None,
+            entry_id=entry_id or None,
+            min_modified_at=min_modified_at,
+            jobs=[job],
+        )
     )
 
 
+def _entry_modified_at(entry: Any) -> datetime | None:
+    """Return ``entry.modified_at`` if it is a usable durability watermark.
+
+    ``ConfigEntries._async_update_entry`` stamps a fresh ``modified_at``
+    immediately before it schedules the debounced store save, so reading it
+    straight off the entry the flow just updated yields the value the storage
+    has to catch up to. An update that changes nothing returns early and keeps
+    the previous stamp (``if not changed: return False`` sits before the
+    stamping); that older value is still a valid watermark, because the stored
+    record already carries exactly that state. ``None`` means "this entry
+    cannot tell me what to wait for", which callers must treat as "do not stage
+    an irreversible job at all".
+    """
+
+    value = getattr(entry, "modified_at", None)
+    return value if isinstance(value, datetime) else None
+
+
 @_typed_callback
-def _async_claim_container_cleanup(
-    hass: HomeAssistant, *, unique_id: str | None
-) -> list[PendingContainerCleanup]:
-    """Claim at most ONE staged ticket for this entry and return its jobs.
+def _async_stage_container_cleanup_for(
+    hass: HomeAssistant | None,
+    *,
+    flow_id: str,
+    unique_id: str | None,
+    job: PendingContainerCleanup,
+    entry: Any | None = None,
+) -> bool:
+    """Stage ``job`` for the create path (``entry`` is ``None``) or an update.
+
+    The one place that turns "which entry is this cleanup about" into a ticket
+    correlation plus a durability watermark, so no call site has to get that
+    pairing right on its own.
+
+    Returns whether the job was staged. It is dropped, with a debug log and
+    without ever being executed, when an update-path entry cannot supply a
+    ``modified_at``: without it the gate would degrade to "the entry id exists",
+    which was already true before the update and would therefore authorise the
+    irreversible cleanup on no evidence at all. Dropping is the fail-safe
+    outcome -- the credential file stays on disk and the login container falls
+    back to its TTL delete.
+    """
+
+    if hass is None:
+        # ``_async_stage_container_cleanup`` drops the job in this case, so
+        # reporting "staged" here would be a false positive.
+        return False
+
+    if entry is None:
+        _async_stage_container_cleanup(
+            hass, flow_id=flow_id, unique_id=unique_id, job=job
+        )
+        return True
+
+    entry_id = getattr(entry, "entry_id", None)
+    modified_at = _entry_modified_at(entry)
+    if not isinstance(entry_id, str) or not entry_id or modified_at is None:
+        _LOGGER.debug(
+            "Not staging the container-login cleanup for an updated entry "
+            "without a usable durability watermark (entry_id=%s, modified_at=%s); "
+            "credential files are kept on disk",
+            entry_id,
+            type(getattr(entry, "modified_at", None)).__name__,
+        )
+        return False
+
+    _async_stage_container_cleanup(
+        hass,
+        flow_id=flow_id,
+        unique_id=unique_id,
+        job=job,
+        entry_id=entry_id,
+        min_modified_at=modified_at,
+    )
+    return True
+
+
+@_typed_callback
+def _async_staged_cleanup_tickets(
+    hass: HomeAssistant | None,
+) -> tuple[MutableMapping[str, Any], list[Any]] | None:
+    """Return the staging bucket and its ticket list, or ``None`` if absent.
+
+    One place that knows the shape of the staging area, so the claim, the
+    discard-on-flow-removal and the housekeeping below cannot drift apart.
+    """
+
+    if hass is None:
+        return None
+    bucket = hass.data.get(DOMAIN)
+    if not isinstance(bucket, MutableMapping):
+        return None
+    tickets = bucket.get(PENDING_CONTAINER_CLEANUP_KEY)
+    if not isinstance(tickets, list):
+        return None
+    return bucket, tickets
+
+
+@_typed_callback
+def _async_claim_container_cleanup_ticket(
+    hass: HomeAssistant, *, unique_id: str | None, entry_id: str | None = None
+) -> _StagedCleanupTicket | None:
+    """Claim at most ONE staged ticket for this entry.
 
     Claiming, never peeking: ``async_setup_entry`` runs again on every reload,
     and an irreversible cleanup must fire exactly once per staged job.
 
-    Selection order: the oldest ticket whose ``unique_id`` matches the entry,
-    otherwise the oldest account-less ticket. Taking a single ticket is what
-    keeps two overlapping same-account flows apart -- the first entry claims the
-    first flow's ticket, the second entry the second flow's, in staging order.
+    Selection order, strongest correlation first:
+
+    1. the oldest ticket carrying exactly this ``entry_id``. Those are the
+       existing-entry update tickets; they name their entry, so no heuristic is
+       involved and no other entry can ever take them.
+    2. the oldest *uncorrelated* ticket whose ``unique_id`` matches the entry.
+    3. the oldest uncorrelated ticket without an account.
+
+    Rules 2 and 3 skip every ticket that carries an ``entry_id``: a ticket that
+    already names its entry must never be inherited by a different one, not even
+    when the accounts match.
+
+    Rules 2 and 3 are the create path, where the entry id cannot be known while
+    the flow is still running. They are only sound because a flow that Home
+    Assistant removes without producing an entry takes its own ticket with it
+    (:func:`_async_discard_cleanup_ticket_for_flow`). Without that, an aborted
+    same-account flow would leave a ticket behind for the winning entry to claim
+    and to ack -- which is what the FIFO order alone was wrongly assumed to
+    prevent.
     """
 
-    bucket = hass.data.get(DOMAIN)
-    if not isinstance(bucket, MutableMapping):
-        return []
-    tickets = bucket.get(PENDING_CONTAINER_CLEANUP_KEY)
-    if not isinstance(tickets, list):
-        return []
+    found = _async_staged_cleanup_tickets(hass)
+    if found is None:
+        return None
+    bucket, tickets = found
+
+    def _first(predicate: Callable[[_StagedCleanupTicket], bool]) -> int | None:
+        return next(
+            (
+                position
+                for position, ticket in enumerate(tickets)
+                if isinstance(ticket, _StagedCleanupTicket) and predicate(ticket)
+            ),
+            None,
+        )
 
     index: int | None = None
-    if unique_id:
-        index = next(
-            (
-                position
-                for position, ticket in enumerate(tickets)
-                if isinstance(ticket, _StagedCleanupTicket)
-                and ticket.unique_id == unique_id
-            ),
-            None,
+    if entry_id:
+        index = _first(lambda ticket: ticket.entry_id == entry_id)
+    if index is None and unique_id:
+        index = _first(
+            lambda ticket: ticket.entry_id is None and ticket.unique_id == unique_id
         )
     if index is None:
-        index = next(
-            (
-                position
-                for position, ticket in enumerate(tickets)
-                if isinstance(ticket, _StagedCleanupTicket) and ticket.unique_id is None
-            ),
-            None,
+        index = _first(
+            lambda ticket: ticket.entry_id is None and ticket.unique_id is None
         )
 
-    jobs: list[PendingContainerCleanup] = []
+    claimed: _StagedCleanupTicket | None = None
     if index is not None:
         claimed = cast(_StagedCleanupTicket, tickets.pop(index))
-        jobs = [
-            item for item in claimed.jobs if isinstance(item, PendingContainerCleanup)
-        ]
     if not tickets:
         bucket.pop(PENDING_CONTAINER_CLEANUP_KEY, None)
-    return jobs
+    return claimed
 
 
-async def _async_config_entry_is_persisted(hass: HomeAssistant, entry_id: str) -> bool:
+@_typed_callback
+def _async_claim_container_cleanup(
+    hass: HomeAssistant, *, unique_id: str | None, entry_id: str | None = None
+) -> list[PendingContainerCleanup]:
+    """Claim one ticket (see above) and return its jobs, dropping the rest."""
+
+    claimed = _async_claim_container_cleanup_ticket(
+        hass, unique_id=unique_id, entry_id=entry_id
+    )
+    if claimed is None:
+        return []
+    return [item for item in claimed.jobs if isinstance(item, PendingContainerCleanup)]
+
+
+@_typed_callback
+def _async_discard_cleanup_ticket_for_flow(
+    hass: HomeAssistant | None, flow_id: str
+) -> int:
+    """Drop the *uncorrelated* ticket of a flow Home Assistant just removed.
+
+    Home Assistant removes a flow from its progress index when the flow ends,
+    for **both** endings: ``FlowManager._async_handle_step`` calls
+    ``_async_remove_flow_progress`` (and through it the overridable
+    ``FlowHandler.async_remove`` hook) only *after* ``async_finish_flow`` has
+    run, and ``FlowManager.async_abort`` calls it directly. So on the successful
+    create path the entry already exists and ``async_setup_entry`` has already
+    claimed this flow's ticket, which makes this a no-op; on the abort path the
+    ticket is still staged and is exactly the one that would otherwise be
+    mis-claimed by a competing same-account entry.
+
+    Tickets that carry an ``entry_id`` are deliberately **kept**. Those come
+    from the update paths, which finish by aborting the flow on purpose
+    (``async_update_reload_and_abort`` and friends): their entry exists, the
+    update has been applied and a reload is already scheduled, so the flow going
+    away says nothing about the pending cleanup. Discarding them here would
+    silently disable the cleanup on every update path.
+
+    Returns the number of discarded jobs, for logging and tests.
+    """
+
+    found = _async_staged_cleanup_tickets(hass)
+    if found is None:
+        return 0
+    bucket, tickets = found
+
+    discarded = 0
+    kept: list[Any] = []
+    for ticket in tickets:
+        if (
+            isinstance(ticket, _StagedCleanupTicket)
+            and ticket.flow_id == flow_id
+            and ticket.entry_id is None
+        ):
+            discarded += len(ticket.jobs)
+            continue
+        kept.append(ticket)
+    # Removal is decided by the ticket count, not by the job count: a matching
+    # ticket that happens to carry no jobs must still be dropped.
+    if len(kept) != len(tickets):
+        tickets[:] = kept
+    if not tickets:
+        bucket.pop(PENDING_CONTAINER_CLEANUP_KEY, None)
+    return discarded
+
+
+def _parse_stored_modified_at(record: CollMapping[str, Any]) -> datetime | None:
+    """Return the ``modified_at`` of a *stored* config-entry record.
+
+    Home Assistant serialises config entries through ``ConfigEntry.as_dict``,
+    which writes ``modified_at`` as an ISO 8601 string (see
+    ``ConfigEntry.as_storage_fragment``). Anything else -- a missing field, a
+    non-string, an unparsable value -- yields ``None``, which the caller reads
+    as "no proof", never as "proof".
+    """
+
+    raw = record.get("modified_at")
+    if not isinstance(raw, str):
+        return None
+    try:
+        return datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+
+
+async def _async_config_entry_is_persisted(
+    hass: HomeAssistant, entry_id: str, *, min_modified_at: datetime | None = None
+) -> bool:
     """Return whether ``entry_id`` is present in Home Assistant's entry storage.
+
+    With ``min_modified_at`` the bar is raised from "the entry exists" to "the
+    stored record is at least this recent". That is what makes the proof mean
+    anything on an *update* path: the entry id was in storage long before the
+    update, so mere presence would authorise the irreversible cleanup while the
+    debounced save of the new credentials is still pending, and a crash in that
+    window would restore the old credentials with the imported bundle already
+    deleted. ``ConfigEntries._async_update_entry`` bumps ``modified_at`` right
+    before it schedules that save, so the flow can capture the value it has to
+    wait for straight off the entry it just updated.
+
+    The deliberate limit of that proof: it establishes "a state at least this
+    recent reached storage", not "*our* state reached storage". A second writer
+    updating the same entry inside the debounce window lifts the stored
+    ``modified_at`` past the watermark on its own. Both writes share that one
+    debounced save, so in practice they land together, and the competing writer
+    leaves valid credentials behind either way; an exact proof would have to
+    carry a digest of the expected payload, which is not worth the coupling
+    here. The residue is named rather than hidden.
 
     This is an *observation*, not a timing assumption: it reads the very file
     Home Assistant writes its config entries to, through the public
@@ -2124,16 +2393,35 @@ async def _async_config_entry_is_persisted(hass: HomeAssistant, entry_id: str) -
     entries = data.get("entries")
     if not isinstance(entries, list):
         return False
-    return any(
-        isinstance(item, CollMapping) and item.get("entry_id") == entry_id
-        for item in entries
+    record = next(
+        (
+            item
+            for item in entries
+            if isinstance(item, CollMapping) and item.get("entry_id") == entry_id
+        ),
+        None,
     )
+    if record is None:
+        return False
+    if min_modified_at is None:
+        return True
+    stored_modified_at = _parse_stored_modified_at(record)
+    if stored_modified_at is None:
+        return False
+    try:
+        return stored_modified_at >= min_modified_at
+    except TypeError:
+        # One side naive, the other aware. Home Assistant stamps ``modified_at``
+        # with ``dt_util.utcnow()`` (aware), so this cannot happen against a
+        # real core; if it ever does, "cannot compare" must read as "no proof".
+        return False
 
 
 async def _async_wait_for_persisted_entry(
     hass: HomeAssistant,
     entry_id: str,
     *,
+    min_modified_at: datetime | None = None,
     timeout: float | None = None,
     interval: float | None = None,
 ) -> bool:
@@ -2154,7 +2442,9 @@ async def _async_wait_for_persisted_entry(
     delay = PERSIST_PROOF_POLL_INTERVAL if interval is None else interval
     deadline = time.monotonic() + max(budget, 0.0)
     while True:
-        if await _async_config_entry_is_persisted(hass, entry_id):
+        if await _async_config_entry_is_persisted(
+            hass, entry_id, min_modified_at=min_modified_at
+        ):
             return True
         if time.monotonic() >= deadline:
             return False
@@ -2162,9 +2452,17 @@ async def _async_wait_for_persisted_entry(
 
 
 async def _async_run_container_cleanup_when_persisted(
-    hass: HomeAssistant, entry_id: str, jobs: list[PendingContainerCleanup]
+    hass: HomeAssistant,
+    entry_id: str,
+    jobs: list[PendingContainerCleanup],
+    *,
+    min_modified_at: datetime | None = None,
 ) -> None:
     """Run ``jobs`` once the entry is provably in Home Assistant's storage.
+
+    ``min_modified_at`` carries the ticket's durability watermark: ``None`` for
+    the create path ("the entry must exist"), a timestamp for the update paths
+    ("the stored record must be at least this recent").
 
     Every path that is not a positive durability proof drops the jobs. That is
     the invariant this whole subsystem exists for: it must always fail towards
@@ -2173,7 +2471,9 @@ async def _async_run_container_cleanup_when_persisted(
     """
 
     try:
-        persisted = await _async_wait_for_persisted_entry(hass, entry_id)
+        persisted = await _async_wait_for_persisted_entry(
+            hass, entry_id, min_modified_at=min_modified_at
+        )
     except asyncio.CancelledError:
         # Home Assistant cancels an entry's background tasks on shutdown and on
         # unload. Exactly the case Codex flagged: dropping the jobs here is what
@@ -2197,10 +2497,13 @@ async def _async_run_container_cleanup_when_persisted(
     if not persisted:
         _LOGGER.warning(
             "[%s] The config entry did not reach Home Assistant storage within "
-            "%.0fs; the deferred container-login cleanup is skipped and the "
+            "%.0fs (%s); the deferred container-login cleanup is skipped and the "
             "credential files are kept on disk",
             entry_id,
             PERSIST_PROOF_TIMEOUT,
+            "no stored record"
+            if min_modified_at is None
+            else "the stored record stayed older than the update",
         )
         return
 
@@ -2213,8 +2516,9 @@ def async_schedule_pending_container_cleanup(
 ) -> asyncio.Task[None] | None:
     """Claim this entry's staged cleanup and arm it behind the durability gate.
 
-    Called from ``async_setup_entry`` after the setup core succeeded. Two things
-    happen here, and the split matters:
+    Called from ``async_setup_entry`` after the setup core succeeded -- on the
+    initial setup for the create path, and on the reload that every update path
+    schedules for itself. Two things happen here, and the split matters:
 
     * The ticket is claimed **synchronously**, so a reload that runs
       ``async_setup_entry`` again cannot claim it a second time (an irreversible
@@ -2229,20 +2533,32 @@ def async_schedule_pending_container_cleanup(
       turns "HA stopped mid-setup" into a dropped cleanup instead of a destroyed
       credential.
 
+    The update paths do not deadlock either way -- their save was scheduled
+    before the reload -- but they run through the same background task on
+    purpose: one gate, one cancellation semantics, one place where the proof is
+    defined.
+
     Returns the task, or ``None`` when nothing was staged for this entry.
     """
 
-    jobs = _async_claim_container_cleanup(
-        hass, unique_id=getattr(entry, "unique_id", None)
+    entry_id = getattr(entry, "entry_id", "") or ""
+    ticket = _async_claim_container_cleanup_ticket(
+        hass,
+        unique_id=getattr(entry, "unique_id", None),
+        entry_id=entry_id or None,
     )
+    if ticket is None:
+        return None
+    jobs = [item for item in ticket.jobs if isinstance(item, PendingContainerCleanup)]
     if not jobs:
         return None
-    entry_id = getattr(entry, "entry_id", "") or ""
     return cast(
         "asyncio.Task[None]",
         entry.async_create_background_task(
             hass,
-            _async_run_container_cleanup_when_persisted(hass, entry_id, jobs),
+            _async_run_container_cleanup_when_persisted(
+                hass, entry_id, jobs, min_modified_at=ticket.min_modified_at
+            ),
             name=f"{DOMAIN} deferred container-login cleanup",
         ),
     )
@@ -2278,7 +2594,7 @@ async def _async_execute_container_cleanup(
 
 @_typed_callback
 def async_discard_pending_container_cleanup(
-    hass: HomeAssistant, *, unique_id: str | None
+    hass: HomeAssistant, *, unique_id: str | None, entry_id: str | None = None
 ) -> int:
     """Drop the staged cleanup jobs of an entry *without* executing them.
 
@@ -2306,6 +2622,8 @@ def async_discard_pending_container_cleanup(
     Args:
         hass: The Home Assistant instance holding the staging bucket.
         unique_id: The unique id of the entry whose jobs are dropped.
+        entry_id: The id of that entry, so an existing-entry update ticket
+            addressed to it is dropped in preference to an uncorrelated one.
 
     Returns:
         The number of discarded jobs (0 when nothing was staged).
@@ -2314,7 +2632,9 @@ def async_discard_pending_container_cleanup(
     # Reuses the claim helper on purpose: the ticket selection and the
     # bookkeeping (account-less fallback, dropping the empty container) live
     # there and must not be duplicated.
-    return len(_async_claim_container_cleanup(hass, unique_id=unique_id))
+    return len(
+        _async_claim_container_cleanup(hass, unique_id=unique_id, entry_id=entry_id)
+    )
 
 
 def _secrets_key_status(parsed: dict[str, Any]) -> tuple[bool, bool]:
@@ -2985,12 +3305,19 @@ class _ContainerLoginMixin:
     """Shared one-click container-login helpers for config and options flows.
 
     Both ``ConfigFlow`` and ``OptionsFlowHandler`` refresh credentials through the
-    login container, so the fetch/ack pair lives here as the single source. The
-    methods only touch ``self.hass`` plus module-global helpers, so the mixin
-    needs no extra state.
+    login container, so the fetch and the cleanup staging live here as the single
+    source.
+
+    The two annotated slots below are *declarations*, not defaults: the concrete
+    handlers create them in their ``__init__`` (``ConfigFlow`` uses both,
+    ``OptionsFlowHandler`` only the ticket id), and every read here goes through
+    ``getattr`` with a default so a directly instantiated handler cannot trip
+    over a missing attribute.
     """
 
     hass: HomeAssistant
+    _container_pending_ack: _ContainerFetchResult | None
+    _container_cleanup_ticket_id: str | None
 
     # ------------------ Step: one-click container login ------------------
     async def _async_container_fetch(
@@ -3097,16 +3424,94 @@ class _ContainerLoginMixin:
             fetched_monotonic=fetched_monotonic,
         )
 
-    async def _async_container_ack(self, result: _ContainerFetchResult) -> None:
-        """Best-effort second phase of the two-phase delete after persist.
+    @_typed_callback
+    def _async_cleanup_ticket_id(self) -> str:
+        """Return a stable, per-flow id for this flow's cleanup ticket.
 
-        Only for call sites that have *already* persisted synchronously
-        (``async_update_entry`` in the reconfigure and options paths). A path
-        that ends in ``async_create_entry`` must stage the ack instead, because
-        the entry does not exist yet at that point.
+        Prefers Home Assistant's own ``flow_id``, which is unique per flow and
+        therefore separates two concurrent flows for the same account. Falls
+        back to a random id for a directly instantiated handler (a flow that
+        never went through the flow manager has no ``flow_id``); the fallback
+        must stay per-instance, otherwise the fallback itself would re-merge the
+        tickets it exists to keep apart.
+
+        Lives on the mixin because both ``ConfigFlow`` and ``OptionsFlowHandler``
+        stage cleanup tickets, and resolves through ``getattr``/``setattr`` so it
+        does not depend on either class's ``__init__``.
         """
 
-        await _async_send_container_ack(self.hass, result.ack_target)
+        ticket_id = getattr(self, "_container_cleanup_ticket_id", None)
+        if not isinstance(ticket_id, str) or not ticket_id:
+            flow_id = getattr(self, "flow_id", None)
+            ticket_id = flow_id if isinstance(flow_id, str) and flow_id else uuid4().hex
+            self._container_cleanup_ticket_id = ticket_id
+        return ticket_id
+
+    @_typed_callback
+    def _async_discard_own_cleanup_ticket(self) -> int:
+        """Drop this flow's own, still uncorrelated ticket (abort path).
+
+        Bound to :meth:`data_entry_flow.FlowHandler.async_remove` by the two
+        concrete handlers. It cannot be *defined* as ``async_remove`` here:
+        ``FlowHandler`` sits before this mixin in both MROs, so its no-op
+        default would win.
+        """
+
+        return _async_discard_cleanup_ticket_for_flow(
+            getattr(self, "hass", None), self._async_cleanup_ticket_id()
+        )
+
+    @_typed_callback
+    def _async_stage_container_ack_result(
+        self, result: _ContainerFetchResult, *, entry: ConfigEntry | None = None
+    ) -> None:
+        """Stage the ack of an explicit fetch result (reauth/options paths).
+
+        Those paths hold the fetch result in a local variable instead of the
+        flow-bound ``_container_pending_ack`` slot, so they hand it in directly.
+        See :meth:`_async_stage_container_ack` for why the ack is staged rather
+        than sent, and for the meaning of ``entry``.
+        """
+
+        _async_stage_container_cleanup_for(
+            getattr(self, "hass", None),
+            flow_id=self._async_cleanup_ticket_id(),
+            unique_id=getattr(self, "unique_id", None),
+            job=PendingContainerCleanup(ack=result.ack_target),
+            entry=entry,
+        )
+
+    @_typed_callback
+    def _async_stage_container_ack(self, entry: ConfigEntry | None = None) -> None:
+        """Hand a deferred container ack over to ``async_setup_entry``.
+
+        The ack is the second phase of the two-phase delete: it tells the login
+        container to drop its on-disk ``secrets.json``. It must therefore never
+        be sent from inside a flow step, because no flow step has a durable
+        entry behind it:
+
+        * ``async_create_entry`` only builds a FlowResult; Home Assistant adds
+          and stores the entry afterwards, in
+          ``ConfigEntriesFlowManager.async_finish_flow``.
+        * ``async_update_entry`` (and ``async_update_reload_and_abort``, which
+          wraps it) mutates the in-memory entry and schedules a **debounced**
+          store save; it does not commit before returning either.
+
+        ``entry`` selects between the two: ``None`` is the create path (the
+        ticket is correlated by account only, and the gate waits for the entry
+        to appear at all), an entry is an update path (the ticket names the
+        entry and the gate additionally waits for a stored ``modified_at`` at
+        least as recent as the update that just happened).
+
+        Clearing ``self._container_pending_ack`` first keeps the no-double-ack
+        guarantee: a second call is a no-op.
+        """
+
+        pending = getattr(self, "_container_pending_ack", None)
+        if pending is None:
+            return
+        self._container_pending_ack = None
+        self._async_stage_container_ack_result(pending, entry=entry)
 
 
 # ---------------------------
@@ -3153,23 +3558,35 @@ class ConfigFlow(
         self._container_cleanup_ticket_id: str | None = None
 
     @_typed_callback
-    def _async_cleanup_ticket_id(self) -> str:
-        """Return a stable, per-flow id for this flow's cleanup ticket.
+    def async_remove(self) -> None:
+        """Drop this flow's staged cleanup when Home Assistant removes the flow.
 
-        Prefers Home Assistant's own ``flow_id``, which is unique per flow and
-        therefore separates two concurrent create flows for the same account.
-        Falls back to a random id for a directly instantiated handler (a flow
-        that never went through the flow manager has no ``flow_id``); the
-        fallback must stay per-instance, otherwise the fallback itself would
-        re-merge the tickets it exists to keep apart.
+        Overrides the no-op hook of ``data_entry_flow.FlowHandler``. Home
+        Assistant calls it for *every* ending of a flow, but only ever after
+        ``async_finish_flow`` has run, so the two endings are distinguishable by
+        what is still staged:
+
+        * Success: ``async_finish_flow`` created and added the entry, so
+          ``async_setup_entry`` already claimed this flow's ticket. Nothing is
+          left and this is a no-op.
+        * Abort -- including the abort Home Assistant fires on a competing
+          in-progress flow when a same-account flow wins -- there is no entry
+          and never will be, so the ticket is still staged. Dropping it here is
+          what stops the winning entry from claiming a ticket that was never
+          about it and acking credentials that belong to the aborted flow.
+
+        Update-path tickets carry an ``entry_id`` and are deliberately kept
+        (see :func:`_async_discard_cleanup_ticket_for_flow`); those flows abort
+        on purpose after a successful update.
         """
 
-        if self._container_cleanup_ticket_id is None:
-            flow_id = getattr(self, "flow_id", None)
-            self._container_cleanup_ticket_id = (
-                flow_id if isinstance(flow_id, str) and flow_id else uuid4().hex
+        discarded = self._async_discard_own_cleanup_ticket()
+        if discarded:
+            _LOGGER.debug(
+                "Discarded %s staged container-login cleanup job(s) of a removed "
+                "config flow; credential files are kept on disk",
+                discarded,
             )
-        return self._container_cleanup_ticket_id
 
     async def async_step_subentry(
         self, user_input: dict[str, Any] | None = None
@@ -3950,14 +4367,27 @@ class ConfigFlow(
                     data=update_payload.get("data", existing_entry.data),
                 )
 
-            # Delete-after-import (update case): the entry update succeeded, so
-            # remove the watched copies this import actually consumed. See
-            # _async_delete_watched_secrets; a co-located bundle of a different
+            # Delete-after-import (update case): STAGED here, executed from the
+            # durability gate in async_setup_entry. `async_update_entry` only
+            # mutates the in-memory entry and schedules Home Assistant's
+            # DEBOUNCED store save, so deleting the imported bundle here would
+            # drop the credentials inside the save window: a crash there would
+            # bring back the old credentials with the new bundle already gone.
+            # The ticket therefore names this entry and carries the entry's
+            # fresh `modified_at`, and the reload scheduled a few lines below
+            # runs the very async_setup_entry that arms the gate. Only the copies
+            # the import actually consumed are removed (see
+            # _async_delete_watched_secrets): a co-located bundle of a different
             # account and a newer same-account bundle are kept.
-            await _async_delete_watched_secrets(
+            _async_stage_container_cleanup_for(
                 hass,
-                imported_stable_key=_stable_key_for_discovery_payload(normalized),
-                imported_digest=_digest_for_discovery_payload(normalized),
+                flow_id=self._async_cleanup_ticket_id(),
+                unique_id=getattr(existing_entry, "unique_id", None),
+                job=PendingContainerCleanup(
+                    imported_stable_key=_stable_key_for_discovery_payload(normalized),
+                    imported_digest=_digest_for_discovery_payload(normalized),
+                ),
+                entry=existing_entry,
             )
 
             def _normalize_tracking_lists() -> None:
@@ -4257,53 +4687,6 @@ class ConfigFlow(
 
         return self.async_show_form(
             step_id="secrets_json", data_schema=schema, errors=errors
-        )
-
-    async def _async_flush_container_ack(self) -> None:
-        """Send + clear a deferred container ack after a *synchronous* persist (F4).
-
-        A no-op unless a container-login fetch staged a result in
-        ``self._container_pending_ack``. The pending result is cleared *before*
-        the ack call so a caller cannot double-ack, and the ack itself is
-        best-effort (its own errors normally fall back to the container's TTL
-        delete; :func:`_async_send_container_ack` grades the exceptions that do
-        not).
-
-        Only valid where the entry has already been written through
-        ``hass.config_entries.async_update_entry``, which persists inline (the
-        reconfigure path). After ``async_create_entry`` the entry does not
-        exist yet, so that path must use
-        :meth:`_async_stage_container_ack` instead.
-        """
-
-        pending = self._container_pending_ack
-        if pending is None:
-            return
-        self._container_pending_ack = None
-        await self._async_container_ack(pending)
-
-    @_typed_callback
-    def _async_stage_container_ack(self) -> None:
-        """Hand a deferred container ack over to ``async_setup_entry`` (P2).
-
-        The counterpart of :meth:`_async_flush_container_ack` for the
-        ``async_create_entry`` path, where the entry is only created *after*
-        this step returns (``ConfigEntriesFlowManager.async_finish_flow`` ->
-        ``async_add``). Sending the ack here would tell the login container to
-        drop its copy of the credentials while Home Assistant might still fail
-        to store them. Clearing ``self._container_pending_ack`` keeps the
-        no-double-ack guarantee of the flush helper.
-        """
-
-        pending = self._container_pending_ack
-        if pending is None:
-            return
-        self._container_pending_ack = None
-        _async_stage_container_cleanup(
-            getattr(self, "hass", None),
-            flow_id=self._async_cleanup_ticket_id(),
-            unique_id=self.unique_id,
-            job=PendingContainerCleanup(ack=pending.ack_target),
         )
 
     async def async_step_container_login(
@@ -4615,9 +4998,15 @@ class ConfigFlow(
                     self.context.pop("is_reconfigure", None)
                     self.context.pop("reauth_success_reason_override", None)
                     self.context.pop("reconfigure_options", None)
+                    # Two-phase-delete ack (F4): STAGED, not sent. The update
+                    # above only scheduled Home Assistant's debounced save, so
+                    # the ack has to wait behind the same durability gate as the
+                    # create path. Staged BEFORE the reload on purpose: the
+                    # reload runs the async_setup_entry that claims the ticket,
+                    # so a ticket staged afterwards would sit unclaimed until
+                    # some later reload.
+                    self._async_stage_container_ack(entry_for_update)
                     await self._async_reload_entry_after_reconfigure(entry_for_update)
-                    # Persist succeeded: now honour the two-phase-delete ack (F4).
-                    await self._async_flush_container_ack()
                     return self.async_abort(reason="reconfigure_successful")
             else:
                 subentry_context.setdefault(self._subentry_key_core_tracking, None)
@@ -4966,15 +5355,20 @@ class ConfigFlow(
             "reauth_success_reason_override",
             "reauth_successful",
         )
-        # Persist the reauth data first, THEN ack (two-phase delete, F4): the
-        # container keeps its on-disk secret until Home Assistant has committed
-        # the update, so a persist failure leaves the bundle retryable.
+        # Update first, then STAGE the two-phase-delete ack (F4). Staging, not
+        # sending: `async_update_reload_and_abort` calls `async_update_entry`,
+        # which only bumps the in-memory entry and schedules the debounced store
+        # save, so nothing is committed when it returns. It also schedules the
+        # reload of this entry, and that reload's `async_setup_entry` is what
+        # arms the durability gate for the ticket staged here. Both calls are
+        # `@callback`s with no await between them, so the ticket is in place
+        # before the reload can run.
         persist_result = self.async_update_reload_and_abort(
             entry=entry,
             data=updated_data,
             reason=success_reason,
         )
-        await self._async_container_ack(result)
+        self._async_stage_container_ack_result(result, entry=entry)
         return persist_result
 
     async def async_step_reauth_confirm(
@@ -6209,6 +6603,30 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin, _ContainerLoginMixi
 
         super().__init__(*args, **kwargs)
         self._semantic_location_editing: str | None = None
+        # Identity of this flow's cleanup ticket (see _StagedCleanupTicket),
+        # resolved lazily because Home Assistant assigns ``flow_id`` only when
+        # the flow manager starts the flow, i.e. after ``__init__``.
+        self._container_cleanup_ticket_id: str | None = None
+
+    @_typed_callback
+    def async_remove(self) -> None:
+        """Drop this flow's staged cleanup when Home Assistant removes the flow.
+
+        Same contract as ``ConfigFlow.async_remove``, and needed separately
+        because ``data_entry_flow.FlowHandler`` precedes ``_ContainerLoginMixin``
+        in this class's MRO, so a mixin-level override would never be reached.
+        In practice this is a no-op for the options credential refresh, whose
+        ticket names its entry and is therefore kept; it exists so that a future
+        options path staging an uncorrelated ticket cannot leak it.
+        """
+
+        discarded = self._async_discard_own_cleanup_ticket()
+        if discarded:
+            _LOGGER.debug(
+                "Discarded %s staged container-login cleanup job(s) of a removed "
+                "options flow; credential files are kept on disk",
+                discarded,
+            )
 
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
@@ -7379,7 +7797,13 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin, _ContainerLoginMixi
         self.hass.config_entries.async_update_entry(entry, data=updated_data)
         if selected_option is not None:
             await self._async_refresh_subentry_entry_title(entry, selected_option)
-        await self._async_container_ack(result)
+        # STAGE the ack (F4), do not send it: `async_update_entry` only schedules
+        # the debounced store save. Staged after the title refresh, because that
+        # may update the entry again and would then move the watermark forward;
+        # reading `modified_at` here always yields the latest scheduled write.
+        # Staged before the reload for the same reason as the reconfigure path:
+        # the reload's `async_setup_entry` is what claims the ticket.
+        self._async_stage_container_ack_result(result, entry=entry)
         self.hass.async_create_task(
             self.hass.config_entries.async_reload(entry.entry_id)
         )
