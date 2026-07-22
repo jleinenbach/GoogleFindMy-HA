@@ -1351,9 +1351,17 @@ def test_login_sh_rejects_unbalanced_ipv6_brackets() -> None:
         ("::1", False),
         ("[::1]", False),
         ("2001:db8::1", False),
+        ("1:2:3:4:5:6:7:8", False),
+        ("::", False),
+        ("192.168.1.21", False),
         ("[::1", True),
         ("]::1[", True),
         ("[[::1]]", True),
+        # A lone colon passes a pure character allowlist, which is why the
+        # structural checks exist: it would reach docker as a port bind.
+        (":", True),
+        (":::", True),
+        ("abc:", True),
         ("1.2.3.0a", True),
         (".", True),
         ("not an ip", True),
@@ -1370,3 +1378,34 @@ def test_login_sh_rejects_unbalanced_ipv6_brackets() -> None:
             f"login.sh --ip {value!r}: rejected={rejected}, expected "
             f"{expected_reject} (rc={proc.returncode}, stderr={proc.stderr!r})"
         )
+
+
+def test_login_cmd_validates_ipv6_structure_not_just_a_colon() -> None:
+    """The batch validator must mirror the IPv6 half of ``is_ip_literal()``.
+
+    A character allowlist alone accepts a lone ``:``, and ``:bracket_ipv6``
+    leaves any value that already starts with ``[`` untouched, so ``[::1``
+    would survive unbalanced. Both would be printed as a working URL and then
+    handed to Compose as a port bind. ``login.cmd`` cannot be executed here (no
+    Windows), so the structural checks are pinned by text.
+    """
+
+    cmd = _read("login.cmd")
+    assert re.search(r"^:validate_ipv6$", cmd, re.MULTILINE), (
+        "login.cmd must route colon-bearing values into a :validate_ipv6 block "
+        "instead of accepting them outright."
+    )
+    assert 'if not "%INNER:~-1%"=="]" exit /b 1' in cmd, (
+        "an opening bracket must require the matching closing bracket."
+    )
+    for residual in ('set "_T=%INNER:[=%"', 'set "_T=%INNER:]=%"'):
+        assert residual in cmd, (
+            f"login.cmd must reject residual brackets ({residual!r})."
+        )
+    assert 'set "_T=%INNER::::=%"' in cmd, "login.cmd must forbid a ':::' run."
+    assert 'set "_T=%INNER:::=%"' in cmd, (
+        "login.cmd must detect the '::' run before falling back to counting separators."
+    )
+    assert 'if "%INNER%"=="::" exit /b 0' in cmd, (
+        "'::' is the one addressable-digit exception and must be spelled out."
+    )

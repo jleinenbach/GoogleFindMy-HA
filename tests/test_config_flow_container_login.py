@@ -2913,3 +2913,22 @@ async def test_host_normalisation_is_shared_between_client_and_config_flow() -> 
     # therefore classified as a host name rather than silently repaired.
     assert container_login.normalise_host_literal("[[::1]]") == "[::1]"
     assert config_flow._classify_novnc_host("[::1") == "hostname"
+
+
+async def test_link_local_guard_rejects_residual_brackets() -> None:
+    """Nested or unbalanced brackets must not become a way around the guard.
+
+    ``normalise_host_literal`` strips exactly ONE pair, so ``[[fe80::1]]``
+    becomes ``[fe80::1]``. That is not an IP literal, so the guard would have
+    fallen through to its host-name branch and stayed silent, while
+    ``_build_base_url`` produced ``http://[fe80::1]:7901`` -- an authority
+    ``yarl`` accepts. The bearer nonce would then have gone to a link-local
+    target the guard exists to refuse.
+    """
+
+    for spelling in ("[[fe80::1]]", "[[169.254.169.254]]", "[::1", "]::1["):
+        with pytest.raises(container_login.ContainerUnreachableError):
+            container_login._maybe_block_link_local(spelling)
+
+    # The one legal bracket pair must still pass.
+    container_login._maybe_block_link_local("[::1]")

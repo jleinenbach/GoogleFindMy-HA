@@ -205,7 +205,7 @@ for %%x in (0 1 2 3 4 5 6 7 8 9 a b c d e f A B C D E F . : [ ]) do call set "RE
 if defined REST exit /b 1
 rem After the allowlist a colon can only come from an IPv6 literal.
 set "_NOCOLON=%CAND::=%"
-if not "%_NOCOLON%"=="%CAND%" exit /b 0
+if not "%_NOCOLON%"=="%CAND%" goto :validate_ipv6
 rem IPv4 branch: the first allowlist still permits a-f (IPv6 needs them), so
 rem narrow it to digits and dots here. Without this, `1.2.3.0a` slips through:
 rem `if 0a GTR 255` falls back to a STRING compare, and "0a" sorts below "255".
@@ -226,6 +226,39 @@ for /f "tokens=1-5 delims=." %%a in ("%CAND%") do (
   set "OCTETS_OK=1"
 )
 if not defined OCTETS_OK exit /b 1
+exit /b 0
+
+:validate_ipv6
+rem Mirrors the IPv6 half of is_ip_literal() in login.sh. The character
+rem allowlist alone would accept a lone ":" (and `[::1`, since :bracket_ipv6
+rem leaves a leading bracket untouched), and both would reach docker as a port
+rem bind after being printed as a working URL.
+set "INNER=%CAND%"
+if not "%INNER:~0,1%"=="[" goto :v6_unbracketed
+if not "%INNER:~-1%"=="]" exit /b 1
+set "INNER=%INNER:~1,-1%"
+:v6_unbracketed
+if not defined INNER exit /b 1
+rem No residual brackets: exactly one enclosing pair, or none at all.
+set "_T=%INNER:[=%"
+if not "%_T%"=="%INNER%" exit /b 1
+set "_T=%INNER:]=%"
+if not "%_T%"=="%INNER%" exit /b 1
+rem Forbid a ":::" run.
+set "_T=%INNER::::=%"
+if not "%_T%"=="%INNER%" exit /b 1
+rem Require a "::" run, or at least two separators.
+set "_T=%INNER:::=%"
+if not "%_T%"=="%INNER%" goto :v6_has_digits
+set "_TWO_SEP="
+for /f "tokens=1-3 delims=:" %%a in ("%INNER%") do if not "%%c"=="" set "_TWO_SEP=1"
+if not defined _TWO_SEP exit /b 1
+:v6_has_digits
+rem Something addressable must be present; "::" itself is the exception.
+if "%INNER%"=="::" exit /b 0
+set "_T=%INNER%"
+for %%x in (0 1 2 3 4 5 6 7 8 9 a b c d e f A B C D E F) do call set "_T=%%_T:%%x=%%"
+if "%_T%"=="%INNER%" exit /b 1
 exit /b 0
 
 :set_novnc_from_ip

@@ -105,6 +105,23 @@ is_ip_literal() {
       case "$inner" in
         *\[* | *\]* | "") return 1 ;;
       esac
+      # Minimal IPv6 structure. The character allowlist alone would accept a
+      # lone ":" and hand it to docker as a port bind, so require either a "::"
+      # run or at least two separators, and forbid a ":::" run.
+      case "$inner" in
+        *:::*) return 1 ;;
+      esac
+      case "$inner" in
+        *::* | *:*:*) ;;
+        *) return 1 ;;
+      esac
+      # Something addressable has to be in there; "::" itself is the one
+      # exception (the unspecified address, handled as a wildcard elsewhere).
+      case "$inner" in
+        "::") ;;
+        *[0-9A-Fa-f]*) ;;
+        *) return 1 ;;
+      esac
       return 0
       ;;
   esac

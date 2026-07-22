@@ -196,8 +196,19 @@ def _maybe_block_link_local(host: str) -> None:
     gone, so the guard has to state the rule explicitly.
     """
 
+    candidate = normalise_host_literal(host)
+    if "[" in candidate or "]" in candidate:
+        # Residual brackets after stripping the one allowed pair. Refuse instead
+        # of falling through to the hostname branch: `[[fe80::1]]` normalises to
+        # `[fe80::1]`, which `ip_address` rejects (so the guard would stay
+        # silent) while `_build_base_url` emits the perfectly valid authority
+        # `http://[fe80::1]:7901`. Doubled brackets would therefore have been a
+        # way around this very guard.
+        raise ContainerUnreachableError(
+            "refusing a malformed host literal (unbalanced or nested brackets)"
+        )
     try:
-        ip = ipaddress.ip_address(normalise_host_literal(host))
+        ip = ipaddress.ip_address(candidate)
     except ValueError:
         # Not a literal IP (a hostname). We do NOT resolve here; see the module
         # docstring for the honest scope of this guard.
