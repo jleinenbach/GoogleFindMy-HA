@@ -528,6 +528,17 @@ class TestPartitionAndConstraints:
         )
         assert specifiers == ["aiohttp==3.12.15", "cryptography==45.0.3"]
 
+    def test_ha_pin_preserves_extras_and_marker(self) -> None:
+        # The same reconstruction class as floor pinning: a governed manifest
+        # entry with extras or a marker must keep both when pinned to HA's
+        # version, not collapse to a bare ``name==pin``.
+        (specifier,) = audit_manifest.ha_pin_requirements(
+            ["aiohttp[speedups]>=3.11.8; python_version >= '3.0'"],
+            {"aiohttp": "3.12.15"},
+        )
+        assert "aiohttp[speedups]==3.12.15" in specifier
+        assert "python_version >= " in specifier
+
 
 class TestFloorPin:
     """Floor pinning: audit the minimum allowed version, not the newest pick."""
@@ -567,6 +578,31 @@ class TestFloorPin:
         specifiers, unbounded = audit_manifest.floor_pin_requirements(["!!bogus!!"])
         assert specifiers == ["!!bogus!!"]
         assert unbounded == []
+
+    def test_floor_excluded_by_specifier_is_unbounded(self) -> None:
+        # ``>=1.0,!=1.0`` names 1.0 as its lower bound yet forbids it. Pinning
+        # ``foo==1.0`` would be a version the requirement excludes and pip-audit
+        # would fail to resolve (tooling exit 2). No exact floor is derivable, so
+        # the entry is passed through as declared and surfaced as unbounded.
+        specifiers, unbounded = audit_manifest.floor_pin_requirements(
+            ["foo>=1.0,!=1.0"]
+        )
+        assert specifiers == ["foo>=1.0,!=1.0"]
+        assert unbounded == ["foo"]
+
+    def test_floor_pin_preserves_extras_and_marker(self) -> None:
+        # Reconstructing a pinned entry must keep extras (so extra-only
+        # transitive deps and their CVEs are still audited) and the environment
+        # marker (so a platform-inapplicable entry is skipped, not blocked).
+        (specifier,), unbounded = audit_manifest.floor_pin_requirements(
+            ["foo[crypto]>=1.0; sys_platform == 'linux'"]
+        )
+        assert "foo[crypto]==1.0" in specifier
+        assert 'sys_platform == "linux"' in specifier
+        assert unbounded == []
+        # A bare entry is still rendered exactly as before (no regression).
+        (bare,), _ = audit_manifest.floor_pin_requirements(["aiohttp>=3.11.8"])
+        assert bare == "aiohttp==3.11.8"
 
 
 class TestMainDecision:

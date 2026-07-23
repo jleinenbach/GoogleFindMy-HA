@@ -77,6 +77,7 @@ from typing import Any
 
 from packaging.markers import Marker
 from packaging.requirements import InvalidRequirement, Requirement
+from packaging.specifiers import SpecifierSet
 from packaging.utils import canonicalize_name
 from packaging.version import InvalidVersion, Version
 
@@ -116,6 +117,13 @@ def _requirement_floor(requirement: Requirement) -> str | None:
     None; the caller then audits it at the resolver's newest pick and flags it,
     rather than fabricating a wrong ``==X`` pin. Every real manifest entry uses
     ``>=``.
+
+    The chosen bound must also satisfy the *complete* specifier set: a
+    requirement such as ``foo>=1.0,!=1.0`` names ``1.0`` as its lower bound yet
+    explicitly excludes it, so pinning ``foo==1.0`` would be a version the
+    requirement forbids and pip-audit would fail to resolve (tooling exit 2).
+    When the candidate floor is excluded by another specifier, no exact floor is
+    derivable and None is returned so the caller audits it as declared instead.
     """
     best: Version | None = None
     best_text: str | None = None
@@ -129,7 +137,31 @@ def _requirement_floor(requirement: Requirement) -> str | None:
         if best is None or candidate > best:
             best = candidate
             best_text = spec.version
+    if best_text is not None and not requirement.specifier.contains(
+        best_text, prereleases=True
+    ):
+        # Another specifier (e.g. ``!=floor``) excludes the lower bound; no exact
+        # floor can be derived. prereleases=True so a legitimate prerelease floor
+        # is not itself rejected -- only a genuine exclusion returns None.
+        return None
     return best_text
+
+
+def _pin_requirement(requirement: Requirement, version: str) -> str:
+    """Rebuild ``requirement`` pinned to ``version``, preserving extras and marker.
+
+    Only the version specifier is replaced. Extras (``foo[crypto]``) and an
+    environment marker (``; sys_platform == 'linux'``) are retained so pip-audit
+    still pulls extra-only transitive dependencies and still skips a
+    platform-inapplicable entry, rather than auditing a bare ``foo==version``
+    unconditionally (which would drop extra-only vulnerabilities and produce
+    false blocks for entries the marker excludes). Reconstruction goes through
+    :class:`Requirement` so the rendering matches packaging's own canonical form;
+    a bare ``name>=x`` entry is therefore still rendered exactly as ``name==x``.
+    """
+    pinned = Requirement(str(requirement))
+    pinned.specifier = SpecifierSet(f"=={version}")
+    return str(pinned)
 
 
 def floor_pin_requirements(requirements: list[str]) -> tuple[list[str], list[str]]:
@@ -137,8 +169,9 @@ def floor_pin_requirements(requirements: list[str]) -> tuple[list[str], list[str
 
     Returns ``(audit_specifiers, unbounded_names)``:
       - ``audit_specifiers``: one entry per requirement. A requirement with a
-        determinable floor becomes ``name==floor`` so pip-audit evaluates the
-        minimum a user may install rather than the resolver's newest pick. A
+        determinable floor becomes ``name==floor`` (extras and marker preserved,
+        see :func:`_pin_requirement`) so pip-audit evaluates the minimum a user
+        may install rather than the resolver's newest pick. A
         requirement without a floor, or one that cannot be parsed, is passed
         through unchanged (audited as declared) rather than dropped.
       - ``unbounded_names``: the canonical names whose floor could not be pinned;
@@ -158,7 +191,7 @@ def floor_pin_requirements(requirements: list[str]) -> tuple[list[str], list[str
             audit_specifiers.append(raw)
             unbounded.append(canonicalize_name(requirement.name))
             continue
-        audit_specifiers.append(f"{requirement.name}=={floor}")
+        audit_specifiers.append(_pin_requirement(requirement, floor))
     return audit_specifiers, unbounded
 
 
@@ -169,8 +202,9 @@ def ha_pin_requirements(
 
     ``requirements`` are the manifest entries Home Assistant pins itself;
     ``governed_pins`` is the ``name -> version`` map from
-    :func:`parse_ha_governed_pins`. Each entry becomes ``name==pin`` so the
-    audit reflects the version the declared-minimum Home Assistant installs, not
+    :func:`parse_ha_governed_pins`. Each entry becomes ``name==pin`` (extras and
+    marker preserved, see :func:`_pin_requirement`) so the audit reflects the
+    version the declared-minimum Home Assistant installs, not
     the manifest floor (which HA overrides at install time). This is what lets
     the report state truthfully whether HA's pinned version is itself
     vulnerable, instead of blindly assuming the floor's finding is "resolved".
@@ -186,7 +220,7 @@ def ha_pin_requirements(
         if pin is None:  # pragma: no cover - governed set is derived from pins
             specifiers.append(raw)
             continue
-        specifiers.append(f"{requirement.name}=={pin}")
+        specifiers.append(_pin_requirement(requirement, pin))
     return specifiers
 
 
