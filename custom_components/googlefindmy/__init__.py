@@ -338,6 +338,7 @@ if TYPE_CHECKING:
         unregister_fcm_receiver_provider as ApiUnregisterFcmProviderType,
     )
     from .Auth.fcm_receiver_ha import FcmReceiverHA as FcmReceiverHAType
+    from .config_flow import _StagedCleanupTicket
     from .coordinator import GoogleFindMyCoordinator as GoogleFindMyCoordinatorType
     from .discovery import (
         DiscoveryManager as DiscoveryManagerType,
@@ -940,7 +941,7 @@ async def async_coalesce_account_entries(
         _LOGGER.warning(
             "Cannot deduplicate config entry %s: missing normalized email (raw=%s)",
             canonical_entry.entry_id,
-            raw_email or "n/a",
+            _mask_email_for_logs(raw_email),
         )
         return canonical_entry
 
@@ -2375,6 +2376,7 @@ class GoogleFindMyDomainData(TypedDict, total=False):
     ecdsa_acceleration_info: dict[str, str | None]
     entries: dict[str, RuntimeData]
     eid_resolver: GoogleFindMyEIDResolver
+    discovery_manager: DiscoveryManager
     fcm_lock: asyncio.Lock
     fcm_receiver: FcmReceiverHAType
     fcm_receivers: dict[str, FcmReceiverHAType]
@@ -2396,6 +2398,18 @@ class GoogleFindMyDomainData(TypedDict, total=False):
     _subentry_setup_history: dict[str, set[str]]
     pending_reconfigure_device_list_refresh: set[str]
     recent_reconfigure_markers: dict[str, float]
+    # In-memory only, NEVER persisted: irreversible cleanup jobs staged by a
+    # config or options flow (watched-secrets delete, login-container ack). A
+    # FIFO list of per-flow tickets, NOT a mapping keyed by account: two
+    # overlapping flows for the same account must not share one list, and every
+    # ``async_setup_entry`` run claims at most one ticket. Create-path tickets
+    # are correlated by account and dropped again when their flow is removed
+    # without producing an entry; update-path tickets (reauth, reconfigure,
+    # options, discovery update) name their entry and additionally carry the
+    # ``modified_at`` the storage has to catch up to. The claimed jobs run only
+    # after that proof. See ``config_flow._StagedCleanupTicket`` and
+    # ``config_flow.async_schedule_pending_container_cleanup``.
+    pending_container_cleanup: list[_StagedCleanupTicket]
 
 
 # Typed hass.data key for the global domain bucket (HA 2024.6+ HassKey).
@@ -6322,6 +6336,19 @@ async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
     bucket["ecdsa_acceleration_info"] = ecdsa_info
     _log_ecdsa_acceleration(ecdsa_info)
 
+    # Arm the secrets.json discovery watcher exactly once per Home Assistant
+    # instance. The watcher polls the bundled Auth/secrets.json (plus any extra
+    # paths configured via options) and triggers discovery/reauth flows when a
+    # freshly minted bundle appears, so same-machine login containers hand off
+    # without manual copy-paste. DiscoveryManager owns its own EVENT_HOMEASSISTANT_STOP
+    # listener and _started guard; the bucket handle keeps the singleton alive and
+    # makes the start idempotent across racey setups.
+    if bucket.get("discovery_manager") is None:
+        try:
+            bucket["discovery_manager"] = await async_initialize_discovery_runtime(hass)
+        except Exception:  # noqa: BLE001 - discovery is best-effort, never fatal
+            _LOGGER.debug("Discovery runtime initialization failed", exc_info=True)
+
     return True
 
 
@@ -7107,6 +7134,47 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
             entry.entry_id,
             _mask_email_for_logs(normalized_email),
         )
+        # Final abort (not a retryable ConfigEntryNotReady): this return never
+        # reaches the cleanup runner at the end of the function, so any job the
+        # config flow staged for this account would linger in hass.data for the
+        # whole process lifetime, holding a pairing nonce and a delete token.
+        # Discard it instead of running it: the entry is not set up, so the
+        # credentials must stay put. The secrets watcher re-imports the file on
+        # its next scan and the un-acked login container drops its copy on its
+        # own TTL.
+        try:
+            from .config_flow import (  # noqa: PLC0415 - lazy, avoids an import cycle
+                async_discard_pending_container_cleanup,
+                async_discard_pending_container_cleanup_for_entry,
+            )
+
+            # Two addressings, in this order and both needed. The entry-id drain
+            # first, because this entry may hold SEVERAL update-path tickets and
+            # the claim-based discard below takes at most one; running it first
+            # would consume one of those and leave the create-path ticket behind.
+            # The claim-based discard second, for exactly that uncorrelated
+            # create-path ticket, which carries no entry id and is therefore
+            # invisible to the drain.
+            discarded = async_discard_pending_container_cleanup_for_entry(
+                hass, entry_id=getattr(entry, "entry_id", None)
+            )
+            discarded += async_discard_pending_container_cleanup(
+                hass,
+                unique_id=getattr(entry, "unique_id", None),
+                entry_id=getattr(entry, "entry_id", None),
+            )
+            if discarded:
+                _LOGGER.debug(
+                    "[%s] Discarded %s staged container-login cleanup job(s) after the duplicate-account abort; credential files are kept on disk",
+                    entry.entry_id,
+                    discarded,
+                )
+        except Exception as err:  # noqa: BLE001 - housekeeping must never raise
+            _LOGGER.debug(
+                "[%s] Could not discard staged container-login cleanup: %s",
+                entry.entry_id,
+                err,
+            )
         return False
 
     pm_setup_start = time.monotonic()
@@ -7133,6 +7201,21 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
     entry.async_on_unload(
         hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STOP, _flush_on_stop)
     )
+
+    # Refresh the running discovery watcher's paths when SECRETS_EXTRA_WATCH_PATHS
+    # changes at runtime (options flow), so a newly configured path is observed
+    # without a Home Assistant restart. The manager is a per-instance singleton and
+    # recomputes from every enabled entry, so the listener is idempotent regardless
+    # of which entry changed. It deliberately passes no exclude_entry_id: the entry
+    # that just changed is exactly the one whose new path must be adopted. This
+    # closure is only the listener adapter for Home Assistant's (hass, entry)
+    # signature; the refresh itself lives in the shared helper.
+    async def _async_refresh_watch_paths(
+        hass_arg: HomeAssistant, updated_entry: MyConfigEntry
+    ) -> None:
+        await _async_refresh_discovery_watch_paths(hass_arg)
+
+    entry.async_on_unload(entry.add_update_listener(_async_refresh_watch_paths))
 
     # Early, idempotent seeding of TokenCache from entry.data (authoritative SSOT)
     try:
@@ -7732,6 +7815,59 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
     await _async_normalize_device_names(hass)
     await _async_refresh_device_urls(hass)
 
+    # Post-persist cleanup (P2): the config flow can only *stage* irreversible
+    # cleanups (deleting the imported secrets.json copies, acking the login
+    # container so it drops its copy), because `ConfigFlow.async_create_entry`
+    # merely builds a FlowResult -- Home Assistant creates and stores the entry
+    # afterwards in `ConfigEntriesFlowManager.async_finish_flow`. Deliberately
+    # behind the whole setup core: every `ConfigEntryNotReady` above must leave
+    # the credentials on disk for the next attempt.
+    #
+    # Reaching this line proves the entry exists *in memory*, not that it has
+    # been stored: `ConfigEntries.async_add` awaits this very coroutine and only
+    # calls `_async_schedule_save` afterwards, which then saves debounced. So
+    # the jobs are only CLAIMED here (synchronously, so a reload cannot claim
+    # them twice) and executed later, by a background task that first waits for
+    # proof that the entry reached Home Assistant's storage. Everything that is
+    # not such a proof -- shutdown, unload, timeout, error -- drops the jobs and
+    # keeps the credentials on disk.
+    #
+    # Best effort in both directions: the runner isolates each job, and this
+    # guard makes sure a cleanup failure can never turn a successful setup into
+    # a failed one (the container falls back to its TTL delete, and the secrets
+    # watcher re-imports a surviving file on its next scan).
+    try:
+        from .config_flow import (  # noqa: PLC0415 - lazy, avoids an import cycle
+            async_schedule_pending_container_cleanup,
+        )
+
+        async_schedule_pending_container_cleanup(hass, entry)
+    except Exception as err:  # noqa: BLE001 - cleanup must never fail setup
+        _LOGGER.warning(
+            "[%s] Deferred container-login cleanup could not be armed: %s",
+            entry.entry_id,
+            err,
+        )
+
+    # Counterpart to the refresh in `async_remove_entry`: bring this entry's
+    # SECRETS_EXTRA_WATCH_PATHS back into the running watcher. Needed because
+    # `_collect_extra_watch_paths` skips disabled entries while Home Assistant
+    # fires no update listener when an entry is enabled again, and because the
+    # discovery singleton is armed once per instance, so an entry set up later
+    # would otherwise contribute nothing until the next options update.
+    # Cheap and safe: `async_refresh_watch_paths` skips watchers whose path set
+    # is unchanged, which is the normal case for a plain setup or reload, so no
+    # rescan is triggered there. Only runs on a successful setup: every
+    # `ConfigEntryNotReady` above returns before this point.
+    #
+    # Note on ordering: the deferred cleanup above is now armed, not executed,
+    # so a rescan triggered here can still see a bundle that the cleanup will
+    # delete moments later. That is harmless -- a re-import of the very bundle
+    # this entry was created from is idempotent (same account, same content),
+    # and the delete stays account- and content-aware, so it only removes the
+    # copies the import actually consumed.
+    await _async_refresh_discovery_watch_paths(hass)
+
     return True
 
 
@@ -7772,14 +7908,14 @@ async def _async_save_secrets_data(
                 "own-device locations will fail when the owner key rotates "
                 "(it can only be refreshed with the shared_key). "
                 "Re-import a complete secrets.json.",
-                google_email or "(unknown)",
+                _mask_email_for_logs(google_email),
             )
         else:
             _LOGGER.warning(
                 "No 'shared_key' found in secrets bundle for %s. "
                 "No location can be decrypted. "
                 "Re-import a complete secrets.json.",
-                google_email or "(unknown)",
+                _mask_email_for_logs(google_email),
             )
     if google_email:
         email_key = str(google_email)
@@ -7793,7 +7929,7 @@ async def _async_save_secrets_data(
         except (OSError, TypeError) as err:
             _LOGGER.warning(
                 "Failed to save encrypted key bundle to persistent cache for %s: %s",
-                email_key,
+                _mask_email_for_logs(email_key),
                 err,
             )
 
@@ -8559,10 +8695,117 @@ async def async_unload_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
     return await _async_unload_parent_entry(hass, entry)
 
 
+async def _async_refresh_discovery_watch_paths(
+    hass: HomeAssistant, *, exclude_entry_id: str | None = None
+) -> None:
+    """Tell the discovery singleton to recompute its secrets watch paths.
+
+    Single owner of that step for every caller (the per-entry options update
+    listener and config entry removal), so both agree on the lookup of the
+    manager and on the failure policy. Watch-path bookkeeping is housekeeping
+    and must never break a setup, an options update or a removal:
+
+    * a missing manager or a manager without the hook (discovery never armed,
+      or a foreign object in the bucket) is ignored silently, because that is
+      the ordinary state on an instance where discovery did not start,
+    * an error raised by the hook is debug-logged with the caller's
+      ``exclude_entry_id``, which is what tells a failed removal refresh apart
+      from a failed options-update refresh in a debug log.
+
+    ``exclude_entry_id`` is forwarded to the manager and leaves that entry out
+    of the recomputation; removal passes the entry being removed.
+    """
+
+    manager = _domain_data(hass).get("discovery_manager")
+    refresh = getattr(manager, "async_refresh_watch_paths", None)
+    if not callable(refresh):
+        return
+    try:
+        await refresh(exclude_entry_id=exclude_entry_id)
+    except Exception:  # noqa: BLE001 - watcher refresh is best-effort, never fatal
+        _LOGGER.debug(
+            "Discovery watch-path refresh failed (exclude_entry_id=%s)",
+            exclude_entry_id,
+            exc_info=True,
+        )
+
+
 async def async_remove_entry(hass: HomeAssistant, entry: MyConfigEntry) -> None:
     """Handle removal of a config entry and purge persisted caches if requested."""
 
     _ensure_runtime_imports()
+
+    # Drop this entry's SECRETS_EXTRA_WATCH_PATHS from the running watcher. The
+    # update listener that normally recomputes them was unregistered by the
+    # unload that precedes removal, so without this the watcher keeps polling a
+    # path whose owning entry is gone until another entry update or a restart,
+    # and a bundle written there could still open a discovery flow. Runs before
+    # the teardown below so no earlier failure can skip it.
+    #
+    # The exclusion can only remove this entry's own contribution, and
+    # DiscoveryManager.async_refresh_watch_paths forces a scan only for paths
+    # that were ADDED. The ordinary removal -- the removed entry owned no extra
+    # path, or owned one that now disappears -- is therefore a strict no-op for
+    # the watcher's signature, and cannot re-import a bundle that some other
+    # account's entry is still using.
+    await _async_refresh_discovery_watch_paths(hass, exclude_entry_id=entry.entry_id)
+
+    # A staged container-login cleanup addressed to THIS entry can never be
+    # claimed again once the entry is gone, so it would sit in hass.data for the
+    # rest of the process lifetime holding a pairing nonce and a delete token.
+    # Discard it instead of running it: dropping keeps the fail-safe direction
+    # (credential files stay on disk, the un-acked container falls back to its
+    # own TTL), whereas executing would delete credentials for an entry the user
+    # just removed.
+    try:
+        from .config_flow import (  # noqa: PLC0415 - lazy, avoids an import cycle
+            async_discard_pending_container_cleanup,
+            async_discard_pending_container_cleanup_for_entry,
+        )
+
+        # Two addressings, in this order and both needed -- the same pairing the
+        # duplicate-account abort in async_setup_entry uses.
+        #
+        # The entry-id drain first, in a single pass over the whole staging
+        # list: this entry may hold SEVERAL update-path tickets, the claim-based
+        # discard below takes at most one, and any upper bound would strand
+        # exactly the tickets this call exists to clear.
+        #
+        # The claim-based discard second, for the ticket that names no entry.
+        # A create-path ticket marked ``entry_promised`` deliberately carries
+        # ``entry_id is None`` (the flow could not know the id), so the drain
+        # above cannot see it. Without this second call such a ticket survives
+        # the removal for the rest of the process lifetime, and rule 2 of
+        # ``_async_claim_container_cleanup_ticket`` (uncorrelated ticket whose
+        # unique_id matches) hands it to the *next* entry the user creates for
+        # the same account, which then acks a container and deletes credential
+        # copies that belong to the removed one.
+        #
+        # It costs the account fallback of the claim helper: a concurrent,
+        # still-running same-account flow could have its ticket taken instead.
+        # That direction is the fail-safe one (the credential files stay on
+        # disk, the un-acked container falls back to its own TTL), whereas
+        # leaving the ticket is the direction that deletes foreign material.
+        discarded = async_discard_pending_container_cleanup_for_entry(
+            hass, entry_id=entry.entry_id
+        )
+        discarded += async_discard_pending_container_cleanup(
+            hass,
+            unique_id=getattr(entry, "unique_id", None),
+            entry_id=entry.entry_id,
+        )
+        if discarded:
+            _LOGGER.debug(
+                "[%s] Discarded %s staged container-login cleanup job(s) on entry removal; credential files are kept on disk",
+                entry.entry_id,
+                discarded,
+            )
+    except Exception as err:  # noqa: BLE001 - housekeeping must never raise
+        _LOGGER.debug(
+            "[%s] Could not discard staged container-login cleanup on removal: %s",
+            entry.entry_id,
+            err,
+        )
 
     # Prefer entry.runtime_data (2026 standard), then clean up entries bucket.
     bucket = _domain_data(hass)

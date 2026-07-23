@@ -20,9 +20,11 @@ Empiricism trace (CA-MOCK-001 / CA-ASSERTION-EMPIRIE-001):
 
 from __future__ import annotations
 
+import ast
 import json
 import logging
 import re
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -1249,3 +1251,117 @@ class TestModuleConstants:
     def test_step_secrets_schema_passes_through_string(self) -> None:
         validated = cf.STEP_SECRETS_DATA_SCHEMA({"secrets_json": "{}"})
         assert validated == {"secrets_json": "{}"}
+
+
+class TestLoggingNeverLeaksAccountAddresses:
+    """No log call in the account-facing modules may pass a raw address.
+
+    `AGENTS.md` section 5 forbids logging email addresses outright. Written as
+    an AST walk rather than as a pin on the sites that were found, because the
+    leak reappears with every new log line, in a shape nobody predicted: the
+    two sites fixed here were a bare name, but an f-string, an attribute, a
+    subscript or a helpfully wrapping `str()` leak exactly as much. A value is
+    considered handled only when a *masking* helper wraps it; any other call
+    around it is treated as still leaking.
+
+    Scope is the modules this feature owns. Older subsystems (`NovaApi`,
+    `SpotApi`, `Auth`) carry the same class of leak and are deliberately NOT
+    silently included here: widening the rule without fixing them would only
+    produce a red suite, and fixing them belongs in its own change.
+    """
+
+    _MODULES = (
+        "config_flow.py",
+        "__init__.py",
+        "container_login.py",
+        "discovery.py",
+    )
+    _EMAIL_NAMES = frozenset(
+        {
+            "account_email",
+            "email",
+            "email_key",
+            "extracted_email",
+            "fixed_email",
+            "google_email",
+            "normalised_email",
+            "normalized_email",
+            "raw_email",
+            "user_email",
+            "username",
+        }
+    )
+    _MASKERS = frozenset({"_mask_email_for_logs", "_redact_account_for_log"})
+
+    @classmethod
+    def _leaks(cls, node: ast.AST) -> list[str]:
+        """Names of address-carrying leaves reachable without a masker."""
+
+        if isinstance(node, ast.Call):
+            func = node.func
+            name = (
+                func.attr
+                if isinstance(func, ast.Attribute)
+                else getattr(func, "id", "")
+            )
+            if name in cls._MASKERS:
+                return []
+
+        found: list[str] = []
+        for child in ast.iter_child_nodes(node):
+            found.extend(cls._leaks(child))
+        if isinstance(node, ast.Name) and node.id in cls._EMAIL_NAMES:
+            found.append(node.id)
+        elif isinstance(node, ast.Attribute) and node.attr in cls._EMAIL_NAMES:
+            found.append(node.attr)
+        elif (
+            isinstance(node, ast.Subscript)
+            and isinstance(node.slice, ast.Constant)
+            and node.slice.value in cls._EMAIL_NAMES
+        ):
+            found.append(str(node.slice.value))
+        return found
+
+    def test_no_log_call_passes_an_unmasked_address(self) -> None:
+        component = Path(cf.__file__).resolve().parent
+
+        offenders: list[str] = []
+        masked_calls = 0
+        for module in self._MODULES:
+            path = component / module
+            assert path.is_file(), f"{module} not found; the guard would be vacuous"
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call):
+                    continue
+                func = node.func
+                receiver = (
+                    func.value.id
+                    if isinstance(func, ast.Attribute)
+                    and isinstance(func.value, ast.Name)
+                    else ""
+                )
+                if "LOG" not in receiver.upper():
+                    continue
+                arguments: list[ast.AST] = [
+                    *node.args,
+                    *(kw.value for kw in node.keywords),
+                ]
+                if any(
+                    isinstance(a, ast.Call)
+                    and getattr(a.func, "id", getattr(a.func, "attr", ""))
+                    in self._MASKERS
+                    for a in arguments
+                ):
+                    masked_calls += 1
+                for argument in arguments:
+                    for leaf in self._leaks(argument):
+                        offenders.append(f"{module}:{argument.lineno}: {leaf}")
+
+        # Vacuum control: a renamed logger or a moved module would make the walk
+        # find nothing and report success. The masked calls prove it arrived.
+        assert masked_calls, "the walk reached no masked log call; the guard is vacuous"
+        assert not offenders, (
+            "log calls interpolate an unmasked address; wrap it in one of "
+            f"{sorted(self._MASKERS)}:\n" + "\n".join(sorted(set(offenders)))
+        )

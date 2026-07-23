@@ -61,6 +61,7 @@ from .coordinator import (
 )
 from .discovery import (
     CLOUD_DISCOVERY_NAMESPACE,
+    CloudDiscoveryOutcome,
     _cloud_discovery_stable_key,
     _redact_account_for_log,
     _trigger_cloud_discovery,
@@ -95,6 +96,39 @@ class _TrackerScope:
     subentry_key: str
     config_subentry_id: str | None
     identifier: str | None
+
+
+def _log_cloud_scan_outcome(
+    outcome: CloudDiscoveryOutcome, account_ref: str, new_count: int
+) -> None:
+    """Report what the scanner's discovery trigger actually achieved.
+
+    Reads the returned :class:`CloudDiscoveryOutcome` instead of "the await did
+    not raise": a config flow reports a refused import through its FlowResult,
+    so an aborted flow would otherwise be logged as a queued discovery. Kept at
+    module level (rather than inline in the scheduling closure) so the three
+    outcomes are reachable from a test without standing up a whole platform
+    setup.
+    """
+
+    if outcome is CloudDiscoveryOutcome.SKIPPED:
+        _LOGGER.debug(
+            "Cloud tracker scanner deduplicated discovery for %s",
+            account_ref,
+        )
+    elif outcome is CloudDiscoveryOutcome.RETRY:
+        _LOGGER.debug(
+            "Cloud tracker scanner discovery for %s aborted transiently; "
+            "the next scan retries",
+            account_ref,
+        )
+    else:
+        _LOGGER.info(
+            "Cloud tracker scanner queued discovery for %s after %d newly "
+            "available tracker(s)",
+            account_ref,
+            new_count,
+        )
 
 
 def _subentry_type(subentry: Any | None) -> str | None:
@@ -526,7 +560,7 @@ async def async_setup_entry(
                 )
 
                 async def _async_trigger_cloud_scan(new_count: int) -> None:
-                    triggered = await _trigger_cloud_discovery(
+                    outcome = await _trigger_cloud_discovery(
                         hass,
                         email=email,
                         token=token_value,
@@ -536,18 +570,9 @@ async def async_setup_entry(
                         source="cloud_scanner",
                         entry=config_entry,
                     )
-                    account_ref = _redact_account_for_log(email, stable_key)
-                    if triggered:
-                        _LOGGER.info(
-                            "Cloud tracker scanner queued discovery for %s after %d newly available tracker(s)",
-                            account_ref,
-                            new_count,
-                        )
-                    else:
-                        _LOGGER.debug(
-                            "Cloud tracker scanner deduplicated discovery for %s",
-                            account_ref,
-                        )
+                    _log_cloud_scan_outcome(
+                        outcome, _redact_account_for_log(email, stable_key), new_count
+                    )
 
                 hass_async_create_task = getattr(hass, "async_create_task", None)
                 if callable(hass_async_create_task):

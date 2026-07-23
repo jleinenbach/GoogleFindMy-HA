@@ -369,3 +369,56 @@ def test_main_test_exception_handling_with_mock() -> None:
             assert (
                 "missing strings for" in str(e).lower() or "missing" in str(e).lower()
             )
+
+
+# Mirrors ``RE_URL`` from home-assistant/core ``script/hassfest/translations.py``.
+# hassfest is the authority in CI and rejects a literal URL in *any* translation
+# value ("the string should not contain URLs, please use description
+# placeholders instead"), which is a hard error, not a warning. The rule is
+# reproduced here so the violation surfaces in the local suite instead of after
+# a push, and so the fix stays the sanctioned one: put the address in a
+# ``description_placeholders`` entry, never in the translated text.
+_HASSFEST_URL_PATTERN = re.compile(
+    r"(((ftp|ftps|scp|http|https|mqtt|mqtts|socket|socks5):\/\/|www\.)"
+    r"[a-z0-9]+([\-\.]{1}[a-z0-9]+)*\.[a-z]{2,5}(:[0-9]{1,5})?(\/.*)?)",
+    re.IGNORECASE,
+)
+
+
+def test_translation_values_contain_no_literal_urls() -> None:
+    """No translated string may embed a URL; hassfest fails the build on it."""
+    # Negative control first: a silently broken pattern would let the real check
+    # pass on everything, so pin that it still recognises the shape it guards.
+    assert _HASSFEST_URL_PATTERN.search("see https://github.com/example/repo")
+    assert _HASSFEST_URL_PATTERN.search("www.example.com/docs")
+    # ...and that the sanctioned replacement does NOT trip it.
+    assert not _HASSFEST_URL_PATTERN.search("full instructions: {docs_url}")
+
+    component_dir = (
+        Path(__file__).resolve().parent.parent / "custom_components" / "googlefindmy"
+    )
+    files = [
+        component_dir / "strings.json",
+        *sorted((component_dir / "translations").glob("*.json")),
+    ]
+    assert len(files) > 1, "no translation files found"
+
+    offenders: list[str] = []
+    for json_file in files:
+        with json_file.open("r", encoding="utf-8") as handle:
+            data = json.load(handle)
+        paths: set[tuple[str, ...]] = set()
+        _collect_string_paths(data, tuple(), paths)
+        for path in sorted(paths):
+            value = _resolve_path(data, path)
+            if isinstance(value, str) and (
+                match := _HASSFEST_URL_PATTERN.search(value)
+            ):
+                offenders.append(
+                    f"{json_file.name}:{'.'.join(path)} -> {match.group(0)}"
+                )
+
+    assert not offenders, (
+        "Literal URLs in translation values (hassfest rejects these; use a "
+        "description placeholder instead):\n" + "\n".join(offenders)
+    )

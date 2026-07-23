@@ -50,12 +50,51 @@ itself.
   ssh -L 7900:127.0.0.1:7900 <docker-host>
   ```
   Then open `http://localhost:7900` on your own machine.
-- **Trusted LAN opt-in.** Only on a network you trust, bind noVNC to all
-  interfaces by setting `GFMY_NOVNC_BIND=0.0.0.0` before starting:
+- **Trusted LAN opt-in.** Only on a network you trust, bind noVNC to a
+  **concrete** address of the Docker host:
   ```bash
-  GFMY_NOVNC_BIND=0.0.0.0 ./login.sh
+  ./login.sh --ip 192.168.1.21
   ```
-  Then browse to `http://<docker-host-ip>:7900`. Prefer the tunnel over this.
+  The launcher then prints exactly that address as the URL to open. Prefer this
+  over the `GFMY_NOVNC_BIND=0.0.0.0` wildcard, which publishes on every
+  interface; prefer the SSH tunnel over both.
+
+  Run `./login.sh` without arguments first: when noVNC stays on loopback the
+  launcher lists the addresses it detected on this host, each with the
+  ready-to-paste `--ip` command. Container and VPN interfaces (`docker0`,
+  `br-*`, `veth*`, `tun*`, `wg*`) are left out, but the list is still a
+  suggestion: pick the one your browser can actually reach. (`login.cmd` on
+  Windows takes the same `--ip` flag, in both the `--ip X` and `--ip=X`
+  spellings, but does not auto-detect, because parsing `ipconfig` output in
+  batch is locale-dependent.)
+
+### The three address roles
+
+The token endpoint and the noVNC viewer serve **different consumers**, so they
+have separate settings. Never collapse them into one value.
+
+| Setting | Port | Consumer | Default | Why |
+|---|---|---|---|---|
+| *(none, pinned)* | 7901 | Home Assistant, machine-to-machine | `127.0.0.1`, **not configurable** | **Security boundary.** The endpoint serves Google credentials in cleartext, so it gets no environment override surface at all: the bind is written literally into `docker-compose.oneclick.yml`, so one stray variable in a shell, `.env` file or compose wrapper cannot widen it. |
+| `GFMY_NOVNC_BIND` | 7900 | the browser, via the host's network stack | `127.0.0.1` | Where the viewer actually listens. Everything the launchers print about reachability is derived from **this** value, never from the printed one. |
+| `GFMY_NOVNC_URL_HOST` | 7900 | printed text only | the noVNC bind | The address you are told to open. A wildcard bind is never printed as a URL: `login.sh` substitutes the first detected address, `login.cmd` (which does not auto-detect) falls back to `127.0.0.1` and asks you to pass `--ip`. |
+
+Home Assistant cannot derive the noVNC address for you: that link is opened by
+**your browser**, which usually runs on a different machine than the Docker
+host, and no machine on the LAN can know where you are clicking from. The
+config flow therefore only renders a clickable noVNC link when the host you
+entered is a non-loopback IP address; otherwise it shows the guidance above.
+
+> **Does the loopback token endpoint reach your Home Assistant?**
+> Yes when HA shares the host's network namespace (Home Assistant OS, HA Core,
+> or a container started with `network_mode: host`), because then HA's
+> `127.0.0.1` *is* the host loopback. A HA container in a bridge network has its **own**
+> loopback and cannot reach it; use the shared-network route below or the file
+> handoff instead. Check the mode without guessing the container name:
+> ```bash
+> docker ps --format '{{.Names}}' | while read n; do \
+>   printf '%-28s %s\n' "$n" "$(docker inspect -f '{{.HostConfig.NetworkMode}}' "$n")"; done
+> ```
 
 ## Which setup can run this?
 
@@ -86,14 +125,22 @@ Then follow [First run (Google login)](#first-run-google-login-required) from
 step 3.
 
 The launcher runs a single command:
-`docker compose run --build --service-ports --rm googlefindmy-login`. `run`
-builds (if needed) **and** starts a fresh one-shot container in the foreground
-with your terminal attached (so the "Press Enter" prompt reaches Python);
-`--rm` removes it on exit, so repeated logins never stack containers; and
-`--service-ports` publishes the noVNC port declared in `docker-compose.yml`.
+`docker compose -f docker-compose.yml run --build --service-ports --rm googlefindmy-login`.
+`run` builds (if needed) **and** starts a fresh one-shot container in the
+foreground with your terminal attached (so the "Press Enter" prompt reaches
+Python); `--rm` removes it on exit, so repeated logins never stack containers;
+and `--service-ports` publishes the ports declared by the selected compose
+files, which in this default case is only **noVNC on 7900**.
 On Linux/QNAP the launcher also exports your `GFMY_HOST_UID`/`GFMY_HOST_GID` so
 the finished `secrets.json` is handed back to you (see
 [Using `secrets.json`](#using-secretsjson-in-home-assistant)).
+
+Only if you ask for the one-click handoff (`GFMY_ONECLICK=1`) does the launcher
+add a second compose file, `docker-compose.oneclick.yml`, which publishes the
+token endpoint on `127.0.0.1:7901`. Without that opt-in **no 7901 port is
+published at all**, so a host that already uses port 7901 cannot stop the login
+container from starting (see
+[One-click handoff](#one-click-handoff-optional-no-manual-copy)).
 
 ### Manual alternative (`docker compose`)
 
@@ -104,6 +151,10 @@ cd config/custom_components/googlefindmy/docker-login
 mkdir -p data
 docker compose run --build --service-ports --rm googlefindmy-login
 ```
+
+This publishes noVNC only; the one-click token port stays closed unless you add
+the overlay file shown under
+[One-click handoff](#one-click-handoff-optional-no-manual-copy).
 
 No host `chmod` is needed: the container takes ownership of `./data` for the run
 (it has passwordless `sudo` in the selenium base image) and writes
@@ -193,6 +244,184 @@ GFMY_ARGS="--reauth" ./login.sh
 `--debug` (verbose bootstrap/FCM logging), `--entry <id>` (select one config
 entry when the cache holds several).
 
+## One-click handoff (optional, no manual copy)
+
+By default the login writes `data/secrets.json` and you import that file into
+Home Assistant. Two optional switches automate the handoff so you never touch
+the file yourself — pick the one that matches your setup. Both are off unless you
+opt in, and neither changes the classic file behaviour.
+
+### Container login over a loopback endpoint (`GFMY_ONECLICK=1`)
+
+After a successful login the container serves the freshly minted bundle on a
+one-shot, nonce-authenticated endpoint that is reachable **only on the Docker
+host's loopback** (`127.0.0.1:7901`). The file is then deleted on whichever of
+two equally normal outcomes comes first: Home Assistant confirms the bundle, or
+the 300 s TTL of the endpoint elapses. Both delete the same file, so both are a
+correct ending.
+
+Which one you see is mostly a matter of timing, and the TTL branch is common by
+design: Home Assistant only confirms **after** the config entry has been set up
+end to end (credential validation, coordinator refresh, FCM registration,
+platform setup), and on a slow or busy instance that takes longer than the TTL.
+The TTL is deliberately the fallback guarantee: the secret disappears from the
+container even if Home Assistant never gets around to confirming (aborted setup,
+restart, network hiccup). A TTL delete is therefore not an error and needs no
+action from you; the bundle already lives in the config entry at that point.
+
+The endpoint is strictly single-use: once the bundle has been handed out, every
+further request is refused, and repeated wrong pairing codes lock it out. A
+lockout closes the endpoint but **keeps** `secrets.json`, so you never have to
+repeat the Google login: fall back to the file handoff (Track A) or the
+clear-text output (Track C), or simply run the container again for a fresh code.
+Those two fallbacks are alternatives, not cumulative: Track C is ephemeral by
+contract and deletes the file right after printing it, so if `GFMY_CLEARTEXT=1`
+is set as well, the clear-text output replaces the file handoff.
+
+> **How the loopback guarantee is enforced.** Under Docker's default *bridge*
+> network the published port is DNAT'd onto the container's `eth0`, not onto the
+> container's loopback, so the server inside the container binds `0.0.0.0` (all
+> container interfaces) on purpose — otherwise the published port would be
+> unreachable. The "no LAN exposure" boundary is the **host-side publish**
+> `127.0.0.1:7901:7901` in `docker-compose.oneclick.yml`, which is pinned to
+> loopback and has, deliberately, no LAN opt-in switch.
+>
+> **`network_mode: host` is NOT supported for this service.** In host networking
+> there is no bridge and no publish indirection: the `0.0.0.0` bind would then be
+> LAN-visible and expose the clear-text token endpoint to the whole network. Keep
+> the default bridge network with the loopback publish; use the SSH tunnel below
+> for the split-machine case.
+
+```bash
+GFMY_ONECLICK=1 ./login.sh
+```
+
+On Windows, run the two lines `set GFMY_ONECLICK=1` and `login.cmd`.
+
+**The 7901 publish is opt-in.** Compose cannot leave a `ports:` entry out
+conditionally, so the token-port publish lives in a separate overlay file,
+`docker-compose.oneclick.yml`, which the launcher adds **only** when
+`GFMY_ONECLICK=1`. Every other run (file handoff, `GFMY_CLEARTEXT=1`) starts
+with no 7901 publish at all and therefore also starts on a host where port 7901
+is already taken. By hand, the one-click start is:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.oneclick.yml \
+  run --build --service-ports --rm googlefindmy-login
+```
+
+The overlay switches `GFMY_ONECLICK` on by default, so that command needs no
+extra environment variable. Note that passing any `-f` disables Compose's
+implicit auto-load of a `docker-compose.override.yml`; if you keep such a file,
+list it explicitly as a further `-f` (the launchers do this for you). The
+overlay pins the publish to `127.0.0.1:7901:7901`; there is no supported way to
+put this port on the LAN.
+
+The container prints a **pairing code** (generated at runtime — there is no
+default) **in the terminal you started the launcher from**, right after the
+Google sign-in completes; it is not shown in the noVNC viewer, which only ever
+displays Chrome's own window. In Home Assistant, choose the *Container login*
+auth method and enter host `127.0.0.1`, port `7901`, and that pairing code. The endpoint is
+loopback-only by design (it carries the tokens in the clear); to drive it from
+another machine, tunnel it:
+
+```bash
+ssh -L 7901:127.0.0.1:7901 <docker-host>
+```
+
+There is deliberately **no LAN opt-in** for this port — the split-machine path
+is the SSH tunnel above.
+
+> **If Home Assistant itself runs in a bridged Docker container** (the *HA
+> Container* install method), `127.0.0.1` inside Home Assistant points at the
+> **HA container**, not at the Docker host — so the host-published
+> `127.0.0.1:7901` is unreachable and the SSH tunnel only helps if its local end
+> is opened inside HA's own network namespace. Two supported routes:
+>
+> 1. **Same Docker network (no LAN exposure).** This needs two deliberate steps,
+>    because the shipped launchers (`login.sh` / `login.cmd`) start a throwaway
+>    one-off container that gets a *generated* name and, by default, **no network
+>    alias** you could dial:
+>
+>    a. Put both containers on one user-defined network. Create a
+>       `docker-compose.override.yml` next to `docker-compose.yml`:
+>
+>    ```yaml
+>    services:
+>      googlefindmy-login:
+>        networks: [gfmy]
+>    networks:
+>      gfmy:
+>        external: true   # the network your Home Assistant container is on
+>    ```
+>
+>    b. Start it **with** the service alias instead of using `login.sh`:
+>
+>    ```bash
+>    GFMY_ONECLICK=1 docker compose run --use-aliases --build --service-ports --rm googlefindmy-login
+>    ```
+>
+>    This route needs **no** `docker-compose.oneclick.yml`: Home Assistant talks
+>    to the container directly over the shared network, so no host port has to be
+>    published at all. Leaving the overlay out of this command also keeps
+>    Compose's automatic pickup of the `docker-compose.override.yml` you just
+>    created (an explicit `-f` would switch that off).
+>
+>    Then enter `googlefindmy-login` (the **service** name, which `--use-aliases`
+>    turns into a resolvable DNS alias, not the generated container name) as the
+>    host, port `7901`. The server binds `0.0.0.0` *inside* the container, so a
+>    peer container on the shared network reaches it directly, without publishing
+>    anything to the LAN. Without `--use-aliases` the name does not resolve and
+>    Home Assistant reports `container_unreachable`.
+>
+>    If that is more plumbing than you want, use route 2 instead: it is simpler
+>    and needs no network at all.
+> 2. **File handoff instead (Track A, no network at all).** Point the integration
+>    at `docker-login/data/secrets.json` via the options and let the secrets
+>    watcher pick it up — this needs no reachable port.
+>
+> For **HA OS, HA Core, or host-networked HA on the same machine**, the plain
+> `127.0.0.1:7901` above is correct.
+
+### Terminal clear-text copy fallback (`GFMY_CLEARTEXT=1`)
+
+If you cannot share a filesystem *and* cannot open a port (or you simply prefer
+copy/paste), this switch prints the full `secrets.json` at the end of the login
+**in the terminal you started the launcher from** (equivalently: in
+`docker logs` for that run). Select, copy, and paste it straight into Home
+Assistant's *secrets.json* field. No port is opened.
+
+> The block is printed on the entrypoint's stdout, which is a different sink
+> from the noVNC viewer: that viewer shows the container's X display, and a
+> terminal opened inside that desktop is a separate shell that never sees this
+> output. Copy the block where the launcher runs.
+
+```bash
+GFMY_CLEARTEXT=1 ./login.sh
+```
+
+The block is framed by `BEGIN secrets.json` / `END secrets.json` markers so it is
+easy to select. The file is **ephemeral**: it is deleted immediately after it is
+displayed, so nothing lingers on disk. This switch is independent of
+`GFMY_ONECLICK` and of the plain file handoff.
+
+Combined with `GFMY_ONECLICK=1`, the clear-text block runs *after* the one-click
+endpoint has returned, and only if `secrets.json` is still there. Home Assistant
+acknowledging the handoff, and the token TTL expiring, both delete the file, so
+in those cases there is deliberately nothing left to print. The combination
+therefore matters in exactly the case it was meant for: the endpoint's attempt
+lockout, where the file is kept on purpose so that the file and clear-text
+tracks still work.
+
+> **Worth knowing before you combine the two.** The lockout is what someone
+> *else* on the machine triggers by guessing the pairing code five times. In
+> that situation this switch is what puts the full bundle into the launcher's
+> terminal output, which also means into `docker logs` for that run: it is only
+> as private as shell access to that host and access to the Docker daemon are.
+> `GFMY_NOVNC_BIND` does **not** limit it, that setting only governs the noVNC
+> viewer on port 7900. On a shared host, or wherever the container logs are
+> collected, prefer the file handoff and leave `GFMY_CLEARTEXT` unset.
+
 ## Using `secrets.json` in Home Assistant
 
 Copy `data/secrets.json` to the machine running Home Assistant (on a single-host
@@ -229,6 +458,12 @@ there is no separate image to rebuild for code changes.
   foreground with stdin attached.
 - **noVNC page won't load:** give the container a few seconds; check
   `docker compose logs` for `[entrypoint] Display ready.`
+- **`port is already allocated` on 7900 or 7901:** another process on the Docker
+  host holds that port. Port 7901 is only requested when you opt into the
+  one-click handoff, so plain logins, the file handoff, and `GFMY_CLEARTEXT=1`
+  are unaffected by a busy 7901; just start without `GFMY_ONECLICK=1`. For a
+  busy 7900, stop the conflicting process (a leftover login container:
+  `docker compose ps` / `docker compose down`).
 - **noVNC password:** it is `secret` — a fixed default of the base image.
 - **`SessionNotCreatedException` / chromedriver version mismatch:** set
   `GOOGLEFINDMY_CHROME_VERSION` to the container's Chrome major version

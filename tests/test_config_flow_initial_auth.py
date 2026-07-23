@@ -6,9 +6,13 @@ from __future__ import annotations
 import asyncio
 import importlib
 import inspect
+import json
 import logging
+import os
 import sys
+import time
 from collections.abc import Awaitable, Callable, Mapping
+from pathlib import Path
 from types import MappingProxyType, SimpleNamespace
 from typing import Any
 
@@ -39,6 +43,7 @@ from custom_components.googlefindmy.const import (
     SERVICE_SUBENTRY_KEY,
     TRACKER_SUBENTRY_KEY,
 )
+from tests.helpers.config_entries_stub import make_config_entry
 from tests.helpers.config_flow import (
     ConfigEntriesDomainUniqueIdLookupMixin,
     attach_config_entries_flow_manager,
@@ -87,7 +92,9 @@ def test_async_step_hub_requires_home_assistant_context() -> None:
 
 
 @pytest.mark.asyncio
-async def test_user_step_allows_additional_accounts() -> None:
+async def test_user_step_allows_additional_accounts(
+    hass_executor_stub: Callable[..., SimpleNamespace],
+) -> None:
     """User step should stay available when entries already exist."""
 
     class _Entry:
@@ -97,7 +104,10 @@ async def test_user_step_allows_additional_accounts() -> None:
 
     entry = _Entry()
 
-    hass = SimpleNamespace()
+    # ``hass_executor_stub`` (not a bare namespace): the user step scans the
+    # default watch paths through ``async_add_executor_job``, and a double
+    # without it would make the preflight skip itself instead of running.
+    hass = hass_executor_stub()
     hass.config_entries = SimpleNamespace(
         async_entries=lambda domain: [entry] if domain == DOMAIN else []
     )
@@ -1609,3 +1619,490 @@ async def test_async_step_reconfigure_resets_context_and_prunes_stale_ids(
         stale_tracker.subentry_id,
         stale_service.subentry_id,
     }
+
+
+# ---------------------------------------------------------------------------
+# Preflight: a secrets bundle already lying at a default watch path
+# ---------------------------------------------------------------------------
+
+_PREFLIGHT_SHARED_HEX = (
+    "a1b2c3d4e5f60718293a4b5c6d7e8f90112233445566778899aabbccddeeff00"
+)
+
+
+def _write_local_bundle(
+    path: Path,
+    *,
+    email: str,
+    token: str = "aas_et/FROM_DISK",
+    age_seconds: float | None = None,
+) -> Path:
+    """Write an importable secrets bundle to ``path``.
+
+    ``age_seconds`` back-dates the file. The preflight has no age limit, so this
+    exists to *prove* age-blindness, not to select a bundle.
+    """
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {
+                "google_email": email,
+                "aas_token": token,
+                "shared_key": _PREFLIGHT_SHARED_HEX,
+            }
+        ),
+        encoding="utf-8",
+    )
+    if age_seconds is not None:
+        stamp = time.time() - age_seconds
+        os.utime(path, (stamp, stamp))
+    return path
+
+
+def _preflight_hass(entries: list[Any]) -> Any:
+    """Build a hass double with an executor and a configurable entry list."""
+
+    class _ConfigEntries(ConfigEntriesDomainUniqueIdLookupMixin):
+        def __init__(self) -> None:
+            attach_config_entries_flow_manager(self)
+
+        def async_entries(self, domain: str) -> list[Any]:
+            assert domain == config_flow.DOMAIN
+            return list(entries)
+
+        def async_get_entry(self, entry_id: str) -> Any | None:
+            return next((e for e in entries if e.entry_id == entry_id), None)
+
+    class _Hass:
+        def __init__(self) -> None:
+            self.data: dict[str, Any] = {}
+            self.config_entries = _ConfigEntries()
+
+        async def async_add_executor_job(
+            self, func: Any, *args: Any, **kwargs: Any
+        ) -> Any:
+            result = func(*args, **kwargs)
+            if inspect.isawaitable(result):
+                return await result
+            return result
+
+    return _Hass()
+
+
+def _configured_entry(email: str) -> SimpleNamespace:
+    """An existing config entry for ``email``, keyed like the flow keys itself."""
+
+    return make_config_entry(
+        entry_id=f"entry-{email}",
+        unique_id=config_flow.unique_account_id(config_flow.normalize_email(email)),
+        data={CONF_GOOGLE_EMAIL: email},
+        options={},
+        subentries={},
+    )
+
+
+def _pin_watch_paths(monkeypatch: pytest.MonkeyPatch, paths: list[Path]) -> None:
+    """Point ``discovery._default_watch_paths`` at ``paths``.
+
+    ``raising=True`` is the pin: the preflight is specified to scan exactly the
+    paths this private helper returns, so renaming or removing it must make this
+    setup fail loudly instead of leaving the tests silently scanning the real
+    installation paths.
+    """
+
+    from custom_components.googlefindmy import discovery  # noqa: PLC0415
+
+    monkeypatch.setattr(
+        discovery, "_default_watch_paths", lambda: list(paths), raising=True
+    )
+
+
+@pytest.mark.asyncio
+async def test_preflight_scan_never_runs_inside_the_event_loop(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The bundle scan is handed to ``async_add_executor_job``, not run inline.
+
+    Measured at the production call, not mimicked in the test: the hass double
+    dispatches to a real worker thread, and the patched scanner reports where it
+    executed. A thread has no running event loop, so ``get_running_loop`` must
+    raise there; if the flow ever called ``_scan()`` inline again, the loop would
+    still be visible and this test fails.
+
+    The other preflight tests cannot catch that regression: their executor double
+    simply calls ``func()`` itself, which is indistinguishable from the flow
+    calling it directly.
+    """
+
+    from custom_components.googlefindmy import discovery  # noqa: PLC0415
+
+    bundle = _write_local_bundle(
+        tmp_path / "Auth" / "secrets.json", email="offloaded@example.com"
+    )
+    _pin_watch_paths(monkeypatch, [bundle])
+
+    real_scan = discovery.scan_secrets_bundles
+    where: list[str] = []
+
+    def _scan_recording_its_context(paths: Any) -> Any:
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            where.append("worker-thread")
+        else:
+            where.append("event-loop")
+        return real_scan(paths)
+
+    monkeypatch.setattr(
+        discovery, "scan_secrets_bundles", _scan_recording_its_context, raising=True
+    )
+
+    hass = _preflight_hass([])
+    # Real off-loop dispatch; the shared double would run the job inline.
+    hass.async_add_executor_job = asyncio.to_thread  # type: ignore[method-assign]
+
+    flow = config_flow.ConfigFlow()
+    flow.hass = hass  # type: ignore[assignment]
+    flow.context = {}
+    set_config_flow_unique_id(flow, None)
+
+    result = await flow.async_step_user(None)
+
+    assert where == ["worker-thread"]
+    assert result["step_id"] == "found_local_bundle"
+
+
+@pytest.mark.asyncio
+async def test_user_step_offers_an_unconfigured_local_bundle(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A bundle of an unknown account is offered, no matter how old it is."""
+
+    bundle = _write_local_bundle(
+        tmp_path / "Auth" / "secrets.json",
+        email="fresh-install@example.com",
+        age_seconds=400 * 24 * 3600,
+    )
+    _pin_watch_paths(monkeypatch, [bundle])
+
+    flow = config_flow.ConfigFlow()
+    flow.hass = _preflight_hass([])  # type: ignore[assignment]
+    flow.context = {}
+    set_config_flow_unique_id(flow, None)
+
+    with caplog.at_level(logging.DEBUG, logger="custom_components.googlefindmy"):
+        result = await flow.async_step_user(None)
+
+    assert result["type"] == "form"
+    assert result["step_id"] == "found_local_bundle"
+    placeholders = result["description_placeholders"]
+    assert placeholders["bundle_path"] == str(bundle)
+    assert placeholders["email"] == "fresh-install@example.com"
+    # Age is displayed, never used as a filter: a bundle older than a year is
+    # still offered, and the placeholder reports its age.
+    assert placeholders["bundle_age"].startswith("400d")
+    # The single field defaults to "yes".
+    schema = result["data_schema"].schema
+    marker = next(iter(schema))
+    assert marker.schema == "use_found_bundle"
+    assert marker.default() is True
+    # No plaintext account in the log (redaction is the only permitted form).
+    assert "fresh-install@example.com" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_user_step_skips_a_bundle_of_an_already_configured_account(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Every found bundle already configured -> the plain auth-method form."""
+
+    bundle = _write_local_bundle(
+        tmp_path / "Auth" / "secrets.json", email="known@example.com"
+    )
+    _pin_watch_paths(monkeypatch, [bundle])
+
+    flow = config_flow.ConfigFlow()
+    flow.hass = _preflight_hass([_configured_entry("known@example.com")])  # type: ignore[assignment]
+    flow.context = {}
+    set_config_flow_unique_id(flow, None)
+
+    result = await flow.async_step_user(None)
+
+    assert result["type"] == "form"
+    assert result["step_id"] == "user"
+
+
+@pytest.mark.asyncio
+async def test_user_step_offers_the_foreign_bundle_next_to_a_configured_one(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Multi-account: the still unknown account wins, the known one is skipped."""
+
+    configured = _write_local_bundle(
+        tmp_path / "Auth" / "secrets.json",
+        email="known@example.com",
+        age_seconds=10,
+    )
+    foreign = _write_local_bundle(
+        tmp_path / "data" / "secrets.json",
+        email="second@example.com",
+        age_seconds=5000,
+    )
+    # Newest first, so the CONFIGURED bundle is the scan winner here: skipping
+    # it must not end the search.
+    _pin_watch_paths(monkeypatch, [configured, foreign])
+
+    flow = config_flow.ConfigFlow()
+    flow.hass = _preflight_hass([_configured_entry("known@example.com")])  # type: ignore[assignment]
+    flow.context = {}
+    set_config_flow_unique_id(flow, None)
+
+    result = await flow.async_step_user(None)
+
+    assert result["step_id"] == "found_local_bundle"
+    assert result["description_placeholders"]["email"] == "second@example.com"
+    assert result["description_placeholders"]["bundle_path"] == str(foreign)
+
+
+@pytest.mark.asyncio
+async def test_reconfigure_context_never_scans_for_local_bundles(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A reconfigure of an existing entry must not run the preflight scan.
+
+    What is measured is the *effect* -- no scan, no marker, straight into the
+    reconfigure step -- not one particular guard: ``async_step_user`` returns
+    into ``async_step_reconfigure`` before the preflight block, so the block's
+    own ``not is_reconfigure_context`` condition is unreachable from here and
+    deliberately redundant (see the comment at that condition).
+    """
+
+    bundle = _write_local_bundle(
+        tmp_path / "Auth" / "secrets.json", email="other@example.com"
+    )
+    scans: list[int] = []
+
+    from custom_components.googlefindmy import discovery  # noqa: PLC0415
+
+    def _watch_paths() -> list[Path]:
+        scans.append(1)
+        return [bundle]
+
+    monkeypatch.setattr(discovery, "_default_watch_paths", _watch_paths, raising=True)
+
+    entry = _configured_entry("known@example.com")
+    flow = config_flow.ConfigFlow()
+    flow.hass = _preflight_hass([entry])  # type: ignore[assignment]
+    flow.context = {
+        "source": getattr(ha_config_entries, "SOURCE_RECONFIGURE", "reconfigure"),
+        "entry_id": entry.entry_id,
+    }
+    set_config_flow_unique_id(flow, None)
+
+    async def _fake_reconfigure(user_input: dict[str, Any] | None = None) -> Any:
+        return {"type": "form", "step_id": "reconfigure"}
+
+    monkeypatch.setattr(flow, "async_step_reconfigure", _fake_reconfigure)
+
+    result = await flow.async_step_user(None)
+
+    assert result["step_id"] == "reconfigure"
+    assert scans == []
+    assert flow._local_bundle_preflight_done is False
+
+
+@pytest.mark.asyncio
+async def test_declining_the_found_bundle_returns_to_the_user_step_once(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Rejection lands on the auth-method form and does not loop back."""
+
+    bundle = _write_local_bundle(
+        tmp_path / "Auth" / "secrets.json", email="decline@example.com"
+    )
+    _pin_watch_paths(monkeypatch, [bundle])
+
+    flow = config_flow.ConfigFlow()
+    flow.hass = _preflight_hass([])  # type: ignore[assignment]
+    flow.context = {}
+    set_config_flow_unique_id(flow, None)
+
+    offered = await flow.async_step_user(None)
+    assert offered["step_id"] == "found_local_bundle"
+
+    declined = await flow.async_step_found_local_bundle({"use_found_bundle": False})
+    assert declined["step_id"] == "user"
+
+    # And the one-shot marker keeps a second visit on the auth-method form.
+    again = await flow.async_step_user(None)
+    assert again["step_id"] == "user"
+
+
+@pytest.mark.asyncio
+async def test_unusable_local_bundle_reshows_the_same_form_with_an_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """An import failure must not abort the flow; the rejection stays reachable."""
+
+    bundle = _write_local_bundle(
+        tmp_path / "Auth" / "secrets.json", email="broken@example.com"
+    )
+    _pin_watch_paths(monkeypatch, [bundle])
+
+    async def _no_working_token(
+        hass: Any,
+        email: str,
+        candidates: list[tuple[str, str]],
+        *,
+        secrets_bundle: dict[str, Any] | None = None,
+    ) -> str | None:
+        return None
+
+    monkeypatch.setattr(config_flow, "async_pick_working_token", _no_working_token)
+
+    flow = config_flow.ConfigFlow()
+    flow.hass = _preflight_hass([])  # type: ignore[assignment]
+    flow.context = {}
+    set_config_flow_unique_id(flow, None)
+
+    await flow.async_step_user(None)
+    failed = await flow.async_step_found_local_bundle({"use_found_bundle": True})
+
+    assert failed["type"] == "form"
+    assert failed["step_id"] == "found_local_bundle"
+    assert failed["errors"] == {"base": "cannot_connect"}
+    assert failed["description_placeholders"]["email"] == "broken@example.com"
+
+    # The offer is still declinable after the failure.
+    declined = await flow.async_step_found_local_bundle({"use_found_bundle": False})
+    assert declined["step_id"] == "user"
+
+
+@pytest.mark.asyncio
+async def test_accepted_local_bundle_stages_the_watcher_delete_primitive(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The preflight import deletes through the SAME staged job as the watcher.
+
+    Not a second delete implementation: the job carries the imported bundle's
+    account + content identity, which is exactly what
+    ``_async_delete_watched_secrets`` consumes behind the durability gate.
+    """
+
+    from custom_components.googlefindmy import discovery  # noqa: PLC0415
+
+    bundle = _write_local_bundle(
+        tmp_path / "Auth" / "secrets.json", email="import@example.com"
+    )
+    _pin_watch_paths(monkeypatch, [bundle])
+
+    async def _pick(
+        hass: Any,
+        email: str,
+        candidates: list[tuple[str, str]],
+        *,
+        secrets_bundle: dict[str, Any] | None = None,
+    ) -> str | None:
+        return candidates[0][1] if candidates else None
+
+    monkeypatch.setattr(config_flow, "async_pick_working_token", _pick)
+
+    flow = config_flow.ConfigFlow()
+    flow.hass = _preflight_hass([])  # type: ignore[assignment]
+    flow.context = {}
+    set_config_flow_unique_id(flow, None)
+
+    reached: list[str] = []
+
+    async def _fake_device_selection(user_input: dict[str, Any] | None = None) -> Any:
+        reached.append("device_selection")
+        return {"type": "form", "step_id": "device_selection"}
+
+    monkeypatch.setattr(flow, "async_step_device_selection", _fake_device_selection)
+
+    await flow.async_step_user(None)
+    await flow.async_step_found_local_bundle({"use_found_bundle": True})
+
+    assert reached == ["device_selection"]
+    assert flow._auth_data[CONF_GOOGLE_EMAIL] == "import@example.com"
+
+    # Staged, not executed: the file is still there while no entry exists.
+    assert bundle.exists()
+    pending = flow._local_bundle_pending_cleanup
+    assert pending is not None
+    scanned = discovery.read_secrets_bundle(bundle)
+    assert scanned is not None
+    assert pending.imported_stable_key == scanned.stable_key
+    assert pending.imported_digest == scanned.digest
+    assert pending.ack is None
+
+    # The hand-over the create path performs is the generic staging primitive.
+    flow._async_stage_local_bundle_cleanup()
+    tickets = flow.hass.data[config_flow.DOMAIN][
+        config_flow.PENDING_CONTAINER_CLEANUP_KEY
+    ]
+    jobs = [job for ticket in tickets for job in ticket.jobs]
+    assert len(jobs) == 1
+    assert jobs[0].imported_digest == scanned.digest
+    # Cleared: a second hand-over is a no-op.
+    assert flow._local_bundle_pending_cleanup is None
+    flow._async_stage_local_bundle_cleanup()
+    assert sum(len(ticket.jobs) for ticket in tickets) == 1
+
+
+@pytest.mark.asyncio
+async def test_creating_the_entry_hands_the_preflight_delete_to_the_gate(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The create path really calls the hand-over -- wiring, not primitive.
+
+    The test above drives ``_async_stage_local_bundle_cleanup`` itself and would
+    stay green if the single production call in ``async_step_device_selection``
+    were deleted; the accepted bundle would then never be removed and nothing
+    would notice. So this one runs the real step to CREATE_ENTRY and looks for
+    the job in the gate's bucket.
+    """
+
+    from custom_components.googlefindmy import discovery  # noqa: PLC0415
+
+    bundle = _write_local_bundle(
+        tmp_path / "Auth" / "secrets.json", email="wired@example.com"
+    )
+    _pin_watch_paths(monkeypatch, [bundle])
+
+    async def _pick(
+        hass: Any,
+        email: str,
+        candidates: list[tuple[str, str]],
+        *,
+        secrets_bundle: dict[str, Any] | None = None,
+    ) -> str | None:
+        return candidates[0][1] if candidates else None
+
+    monkeypatch.setattr(config_flow, "async_pick_working_token", _pick)
+
+    flow = config_flow.ConfigFlow()
+    flow.hass = _preflight_hass([])  # type: ignore[assignment]
+    flow.context = {}
+    set_config_flow_unique_id(flow, None)
+
+    await flow.async_step_user(None)
+    await flow.async_step_found_local_bundle({"use_found_bundle": True})
+    # No patching of async_step_device_selection here: this is the point.
+    created = await flow.async_step_device_selection({})
+    if inspect.isawaitable(created):
+        created = await created
+
+    assert created["type"] == "create_entry"
+    tickets = flow.hass.data[config_flow.DOMAIN][
+        config_flow.PENDING_CONTAINER_CLEANUP_KEY
+    ]
+    jobs = [job for ticket in tickets for job in ticket.jobs]
+    scanned = discovery.read_secrets_bundle(bundle)
+    assert scanned is not None
+    assert [job.imported_digest for job in jobs] == [scanned.digest]
+    # Staged, not executed: only the durability gate may remove the file.
+    assert bundle.exists()

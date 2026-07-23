@@ -118,11 +118,22 @@ class _StubConfigEntry:
         self.state: ConfigEntryState = ConfigEntryState.LOADED
         self.disabled_by: str | None = None
         self._unload_callbacks: list[Callable[[], None]] = []
+        self._update_listeners: list[Callable[..., Any]] = []
         self._hass: _StubHass | None = None
         self._background_tasks: list[asyncio.Task[Any]] = []
 
     def async_on_unload(self, callback: Callable[[], None]) -> None:
         self._unload_callbacks.append(callback)
+
+    def add_update_listener(self, listener: Callable[..., Any]) -> Callable[[], None]:
+        """Register an options-update listener; return a no-op unsub.
+
+        Mirrors ``homeassistant.config_entries.ConfigEntry.add_update_listener``
+        so ``async_setup_entry``'s ``async_on_unload(add_update_listener(...))``
+        watch-path refresh wiring works against the stub.
+        """
+        self._update_listeners.append(listener)
+        return lambda: None
 
     def _attach_hass(self, hass: _StubHass) -> None:
         self._hass = hass

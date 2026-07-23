@@ -8,16 +8,48 @@
     "step": {
       "user": {
         "title": "Autenticação do Google Encontrar Meu Dispositivo",
-        "description": "Escolha seu método de autenticação. ",
+        "description": "Escolha como você quer fazer login. O login por contêiner em um clique inicia para você um contêiner de navegador já preparado e precisa de uma máquina com Docker. GoogleFindMyTools secrets.json é a escolha certa se você já tem esse arquivo ou pode executar o GoogleFindMyTools com o Chrome em um computador.",
         "data": {
           "auth_method": "Método de autenticação"
         }
       },
+      "found_local_bundle": {
+        "title": "Credenciais existentes encontradas",
+        "description": "Já existe um arquivo de credenciais para {email} neste sistema:\n\n`{bundle_path}` (escrito pela última vez há {bundle_age})\n\nImporte-o agora para concluir a configuração sem fazer login no Google de novo.",
+        "data": {
+          "use_found_bundle": "Importar as credenciais encontradas"
+        },
+        "data_description": {
+          "use_found_bundle": "Mantenha esta opção ativada para importar o arquivo mostrado acima. Desative-a para escolher você mesmo um método de autenticação."
+        }
+      },
       "secrets_json": {
-        "title": "Método 1: secrets.json do GoogleFindMyTools",
+        "title": "GoogleFindMyTools secrets.json",
         "description": "Execute o GoogleFindMyTools (Chrome) para gerar os tokens de autenticação, depois cole abaixo o conteúdo completo do arquivo Auth/secrets.json.",
         "data": {
           "secrets_json": "Conteúdo do arquivo secrets.json"
+        }
+      },
+      "container_login": {
+        "title": "One-click container login",
+        "description": "Faça login pelo contêiner de login incluído. Execute-o no próprio host Docker; o contêiner do Home Assistant não tem socket do Docker.\n\n1. Abra um shell no host Docker e entre na pasta `custom_components/googlefindmy/docker-login/` desta integração.\n2. Inicie-o com `GFMY_ONECLICK=1 ./login.sh` (Windows: `set GFMY_ONECLICK=1 && login.cmd`).\n3. Conclua o login do Google na janela do noVNC.\n4. Em seguida, o contêiner imprime um código de pareamento nesse mesmo terminal. A próxima etapa pede esse código.\n\nVisualizador noVNC (senha: `secret`): {novnc_access}\n\nO visualizador é aberto pelo seu navegador, que muitas vezes roda em uma máquina diferente do host Docker, por isso ele só é vinculado quando o host acima é um endereço IP fora do loopback. Com um bind de loopback, abra-o no próprio host Docker, faça um túnel com `ssh -L 7900:127.0.0.1:7900 DOCKER-HOST` ou execute o inicializador novamente com `--ip ENDERECO` e use o endereço exibido.\n\nInstruções completas: {docs_url} (pasta `custom_components/googlefindmy/docker-login/`).",
+        "data": {
+          "host": "Container host",
+          "port": "Container port"
+        },
+        "data_description": {
+          "host": "Nome de host ou endereço IP do contêiner de login. O padrão `127.0.0.1` é o loopback do host Docker, então ele só funciona se o Home Assistant compartilhar o espaço de rede desse host; um Home Assistant em modo bridge não o alcança. Duas saídas: colocar os dois contêineres na mesma rede Docker, iniciar o inicializador de modo que `docker compose run` receba `--use-aliases` (sem essa opção o nome de serviço não é resolvido, veja o README) e informar aqui o nome de serviço do contêiner, ou dispensar a rede e deixar o contêiner entregar o arquivo por `docker-login/data/secrets.json`, que esta integração importa sozinha. A porta das credenciais está fixada nesse loopback em `docker-compose.oneclick.yml`; não há configuração para alterá-la.",
+          "port": "Porta em que o contêiner de login fornece as credenciais. Ela só é publicada quando o inicializador roda com a sobreposição `docker-compose.oneclick.yml`; o arquivo compose simples não a publica."
+        }
+      },
+      "container_pairing": {
+        "title": "Digite o código de pareamento",
+        "description": "Conclua primeiro o login do Google na janela do noVNC. Em seguida, o contêiner imprime o código de pareamento no terminal em que o inicializador roda (ou em `docker logs`, se você o iniciou em segundo plano).",
+        "data": {
+          "pairing_code": "Código de pareamento"
+        },
+        "data_description": {
+          "pairing_code": "O código que o contêiner imprime no terminal do inicializador assim que o login termina. Ele é gerado novamente a cada execução, vale 5 minutos e bloqueia após 5 tentativas erradas; nesse caso, pare o contêiner e inicie o inicializador de novo."
         }
       },
       "device_selection": {
@@ -45,9 +77,17 @@
       },
       "reauth_confirm": {
         "title": "Reautenticar",
-        "description": "Suas credenciais para **{email}** parecem ser inválidas ou expiradas. ",
+        "description": "Your credentials for **{email}** appear to be invalid or expired. Provide new credentials below.\n\nPaste the full contents of a new **secrets.json** (generated by running GoogleFindMyTools), or sign in again through the login container by entering a pairing code.\n\nNote: The account email is fixed for this reauthentication; to use a different account, remove and re-add the integration.",
         "data": {
-          "secrets_json": "Novo secrets.json (conteúdo completo)"
+          "secrets_json": "New secrets.json (full contents)",
+          "container_host": "Container host",
+          "container_port": "Container port",
+          "pairing_code": "Pairing code"
+        },
+        "data_description": {
+          "container_host": "Hostname or IP address of the login container. Leave the default unless you run the container elsewhere.",
+          "container_port": "Port the login container serves credentials on. Leave the default unless you changed it.",
+          "pairing_code": "Enter a pairing code to reauthenticate through the login container instead of pasting secrets.json."
         }
       },
       "migrate_complete": {
@@ -68,7 +108,13 @@
       "choose_one": "Forneça exatamente um método de credencial.",
       "required": "Este campo é obrigatório.",
       "unknown": "Ocorreu um erro inesperado.",
-      "email_mismatch": "As credenciais fornecidas pertencem a uma conta Google diferente. "
+      "email_mismatch": "As credenciais fornecidas pertencem a uma conta Google diferente. ",
+      "container_unreachable": "Could not reach the login container. Make sure it is running and the host and port are correct.",
+      "container_timeout": "The login container did not respond in time. Please try again.",
+      "container_auth_failed": "Authentication with the login container failed. Check the pairing code and try again.",
+      "container_code_used": "This pairing code has already been used or has expired. Restart the login container and use the new code.",
+      "container_code_too_short": "The pairing code is too short. Copy the complete code from the login container.",
+      "container_login_failed": "The container login could not be completed. Please try again."
     },
     "abort": {
       "already_configured": "O Google Encontrar Meu Dispositivo já está configurado.",
@@ -232,13 +278,19 @@
       },
       "credentials": {
         "title": "Atualizar credenciais (opcional)",
-        "description": "Atualize as credenciais sem expor os valores existentes. ",
+        "description": "Update your credentials. Existing values are not shown for security.\n\nPaste the full contents of a new **secrets.json** (generated by running GoogleFindMyTools), or sign in again through the login container by entering a pairing code.\n\nOnce submitted, the credentials are validated and stored; the integration reloads without changing your entity names.",
         "data": {
-          "new_secrets_json": "Novo secrets.json (conteúdo completo)",
-          "subentry": "Grupo de recursos"
+          "new_secrets_json": "New secrets.json (full contents)",
+          "container_host": "Container host",
+          "container_port": "Container port",
+          "pairing_code": "Pairing code",
+          "subentry": "Feature group"
         },
         "data_description": {
-          "subentry": "Aplique atualizações de credenciais ao grupo de recursos selecionado. Consulte o guia [Subentradas e grupos de recursos]({subentries_docs_url}) para detalhes."
+          "container_host": "Hostname or IP address of the login container. Leave the default unless you run the container elsewhere.",
+          "container_port": "Port the login container serves credentials on. Leave the default unless you changed it.",
+          "pairing_code": "Enter a pairing code to update credentials through the login container instead of pasting secrets.json.",
+          "subentry": "Apply credential updates to the selected feature group. Review the [Subentries and feature groups]({subentries_docs_url}) guide for workflow details."
         }
       },
       "settings": {
@@ -257,7 +309,8 @@
           "delete_caches_on_remove": "Exclua caches ao remover entrada",
           "map_view_token_expiration": "Ativar a expiração do token de visualização do mapa",
           "contributor_mode": "Modo de contribuidor de localização",
-          "subentry": "Grupo de recursos"
+          "subentry": "Grupo de recursos",
+          "secrets_extra_watch_paths": "Additional secrets.json watch paths (one per line)"
         },
         "data_description": {
           "stale_threshold": "Após este número de segundos sem atualização de localização, o status do rastreador muda para desconhecido. Use a entidade 'Última localização' para ver sempre a última posição conhecida. Padrão: 1800 (30 minutos).",
@@ -267,7 +320,8 @@
           "delete_caches_on_remove": "Remova os tokens armazenados em cache e os metadados do dispositivo quando esta entrada for excluída.",
           "map_view_token_expiration": "Quando ativado, os tokens de visualização do mapa expiram após 1 semana. ",
           "contributor_mode": "Escolha como seu dispositivo contribui para a rede do Google (todas as áreas por padrão para relatórios de crowdsourcing ou apenas áreas de alto tráfego).",
-          "subentry": "Armazene essas opções no grupo de recursos selecionado. Consulte [Subentradas e grupos de recursos]({subentries_docs_url}) para exemplos."
+          "subentry": "Armazene essas opções no grupo de recursos selecionado. Consulte [Subentradas e grupos de recursos]({subentries_docs_url}) para exemplos.",
+          "secrets_extra_watch_paths": "Optional. Extra absolute paths to secrets.json files the integration should watch for automatic pickup, one per line. Leave empty to watch only the default locations."
         }
       },
       "visibility": {
@@ -319,7 +373,13 @@
       "duplicate_name": "O nome semântico já existe. Escolha um nome diferente.",
       "duplicate_semantic_location": "O nome semântico já existe. Escolha um nome diferente.",
       "unknown": "Ocorreu um erro inesperado.",
-      "invalid_subentry": "Escolha um grupo de recursos válido."
+      "invalid_subentry": "Escolha um grupo de recursos válido.",
+      "container_unreachable": "Could not reach the login container. Make sure it is running and the host and port are correct.",
+      "container_timeout": "The login container did not respond in time. Please try again.",
+      "container_auth_failed": "Authentication with the login container failed. Check the pairing code and try again.",
+      "container_code_used": "This pairing code has already been used or has expired. Restart the login container and use the new code.",
+      "container_code_too_short": "The pairing code is too short. Copy the complete code from the login container.",
+      "container_login_failed": "The container login could not be completed. Please try again."
     },
     "abort": {
       "reconfigure_successful": "Reconfiguração bem-sucedida.",
@@ -797,6 +857,12 @@
       "options": {
         "high_traffic": "Apenas áreas de alto tráfego",
         "in_all_areas": "Todas as áreas (crowdsourcing)"
+      }
+    },
+    "auth_method": {
+      "options": {
+        "container_login": "One-click container login",
+        "secrets_json": "GoogleFindMyTools secrets.json"
       }
     }
   }
