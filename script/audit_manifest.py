@@ -33,12 +33,17 @@ Scope and policy:
       fixable -> bump the direct parent dependency or add a constraint that
       pulls in the fix.
   Unfixable (won't-fix) integration-owned findings such as the ``ecdsa`` Minerva
-  side-channel, unfixable transitive findings, and *all* Home Assistant-pinned
-  findings are reported but never block. HA-pinned findings never block because
-  the integration cannot lower Home Assistant's runtime ``==`` pin; the only
-  remediation for a fixable one is to raise the ``hacs.json`` Home Assistant
-  floor to a release whose pin ships the fix, which is an integration-level
-  decision surfaced honestly rather than a silent "already resolved" claim.
+  side-channel, unfixable transitive findings, and *all* Home Assistant-governed
+  findings are reported but never block. A finding in a package HA pins
+  *exactly* (``name==X``) never blocks because the integration cannot lower Home
+  Assistant's runtime ``==`` pin; the only remediation for a fixable one is to
+  raise the ``hacs.json`` Home Assistant floor to a release whose pin ships the
+  fix. A finding in a package HA governs with only a *range* floor (e.g.
+  ``urllib3>=2.0``) is separated into its own ``governed_range`` report bucket:
+  it is likewise non-blocking, but honestly labelled as actionable, since the
+  integration *could* declare a tighter manifest floor -- the gate deliberately
+  defers these HA-ecosystem transitives to Home Assistant rather than making a
+  silent "already resolved" claim.
 
 The gate turns red the first time a shipped package a user actually installs
 carries a fixable CVE the integration can act on, which is exactly the case the
@@ -184,6 +189,46 @@ def ha_pin_requirements(
     return specifiers
 
 
+def _governed_constraint(raw_line: str) -> tuple[str, str, bool] | None:
+    """Parse one HA constraints line into ``(canonical_name, floor, is_exact)``.
+
+    Shared single-line parser for the governed-constraint helpers so the pin
+    map, the name set, and the exact-name subset can never diverge. Returns
+    ``None`` for a comment, a blank line, or a constraint with no inclusive
+    lower bound (a bare name, a pure ``!=`` exclusion, an upper-bound-only ``<``
+    cap, or a non-concrete ``==1.*`` prefix / ``===`` arbitrary equality): no
+    worst-case version can be derived from them.
+
+    ``is_exact`` is ``True`` only when Home Assistant pins the package to a
+    single concrete ``==`` version (a zero-width floor the integration cannot
+    tighten), including a non-PEP 508 line salvaged as a bare ``name==version``.
+    A range such as ``urllib3>=2.0`` yields its inclusive floor with
+    ``is_exact`` ``False``: HA sets only a lower bound the integration *could*
+    raise in its own manifest.
+    """
+    line = raw_line.strip()
+    if not line or line.startswith("#"):
+        return None
+    try:
+        requirement = Requirement(line)
+    except InvalidRequirement:
+        # Non-PEP 508 line: salvage a bare ``name==version`` so a non-standard
+        # exact constraint still governs (an exact pin). A range floor cannot be
+        # recovered without a parseable specifier, so such a line is dropped
+        # rather than guessed.
+        name, separator, rhs = line.partition("==")
+        name = name.strip()
+        version = rhs.split(";", 1)[0].split(",", 1)[0].strip()
+        if not separator or not name or not version:
+            return None
+        return canonicalize_name(name), version, True
+    floor = _requirement_floor(requirement)
+    if floor is None:
+        return None
+    operators = {spec.operator for spec in requirement.specifier}
+    return canonicalize_name(requirement.name), floor, operators == {"=="}
+
+
 def parse_ha_governed_pins(constraints_text: str) -> dict[str, str]:
     """Return the canonical ``name -> audit-floor`` map from an HA constraints file.
 
@@ -199,30 +244,19 @@ def parse_ha_governed_pins(constraints_text: str) -> dict[str, str]:
     non-concrete ``==1.*`` prefix / ``===`` arbitrary equality) are ignored: no
     worst-case version can be derived from them. On a duplicate the last wins,
     mirroring how a constraints file is applied top to bottom.
+
+    The floor is retained for *every* governed package, exact or range, because
+    the governed-transitive re-audit re-pins each reachable package to this
+    worst-case version. Whether a *finding* against that package blocks or how it
+    is labelled is a separate concern handled in :func:`classify_audit`.
     """
     pins: dict[str, str] = {}
     for raw_line in constraints_text.splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("#"):
+        parsed = _governed_constraint(raw_line)
+        if parsed is None:
             continue
-        try:
-            requirement = Requirement(line)
-        except InvalidRequirement:
-            # Non-PEP 508 line: salvage a bare ``name==version`` so a
-            # non-standard exact constraint still governs. A range floor cannot
-            # be recovered without a parseable specifier, so such a line is
-            # dropped rather than guessed.
-            name, separator, rhs = line.partition("==")
-            name = name.strip()
-            version = rhs.split(";", 1)[0].split(",", 1)[0].strip()
-            if not separator or not name or not version:
-                continue
-            pins[canonicalize_name(name)] = version
-            continue
-        floor = _requirement_floor(requirement)
-        if floor is None:
-            continue
-        pins[canonicalize_name(requirement.name)] = floor
+        name, floor, _is_exact = parsed
+        pins[name] = floor
     return pins
 
 
@@ -233,6 +267,29 @@ def parse_ha_governed_names(constraints_text: str) -> set[str]:
     from the pin mapping so the two never diverge.
     """
     return set(parse_ha_governed_pins(constraints_text))
+
+
+def parse_ha_exact_governed_names(constraints_text: str) -> set[str]:
+    """Return the governed names Home Assistant pins with an *exact* ``==`` version.
+
+    A strict subset of :func:`parse_ha_governed_names`: only a single concrete
+    ``==`` pin qualifies (a zero-width floor the integration cannot tighten in
+    its own manifest). Range-governed packages such as ``urllib3>=2.0`` are
+    governed but excluded here, because HA sets only a lower bound the
+    integration *could* raise (``urllib3>=<fixed>``); their findings are routed
+    to the actionable ``governed_range`` bucket in :func:`classify_audit`
+    instead of the unfixable-by-the-integration ``governed`` bucket. A non-PEP
+    508 line salvaged as a bare ``name==version`` counts as exact.
+    """
+    exact: set[str] = set()
+    for raw_line in constraints_text.splitlines():
+        parsed = _governed_constraint(raw_line)
+        if parsed is None:
+            continue
+        name, _floor, is_exact = parsed
+        if is_exact:
+            exact.add(name)
+    return exact
 
 
 def partition_requirements(
@@ -262,39 +319,53 @@ def classify_audit(
     audit: dict[str, Any],
     owned_names: set[str],
     governed_names: set[str] | None = None,
+    exact_governed_names: set[str] | None = None,
 ) -> dict[str, list[Record]]:
     """Classify a pip-audit JSON report against the manifest name sets.
 
-    Returns a mapping with five deterministic, sorted lists of findings, each a
+    Returns a mapping with six deterministic, sorted lists of findings, each a
     ``{"name","version","id","fix_versions"}`` record:
       - ``blocking``: integration-owned package with a fixable vulnerability
         (remediation: bump the manifest floor).
       - ``unfixable``: integration-owned package with no available fix.
-      - ``governed``: a package Home Assistant pins itself, whether a direct
-        manifest entry (audited at HA's own pin) or a transitive dependency that
-        HA still governs; reported for transparency, never blocking. The
-        integration cannot lower HA's runtime pin, so blocking would be a
-        permanent red the contributor cannot clear; a fixable one is actionable
-        only by raising the ``hacs.json`` HA floor.
+      - ``governed``: a package Home Assistant pins *exactly* (``name==X``),
+        whether a direct manifest entry (audited at HA's own pin) or a
+        transitive dependency that HA still governs; reported for transparency,
+        never blocking. HA fixes the version with a zero-width pin, so the
+        integration cannot tighten it -- blocking would be a permanent red the
+        contributor cannot clear; a fixable one is actionable only by raising
+        the ``hacs.json`` HA floor to a release whose pin ships the fix.
+      - ``governed_range``: a package Home Assistant governs with only a *range*
+        lower bound (e.g. ``urllib3>=2.0``), never blocking. Unlike the exact
+        case this finding IS actionable by the integration -- HA fixes only a
+        floor, so the manifest *could* declare a tighter ``name>=<fixed>`` -- but
+        the gate deliberately defers HA-ecosystem transitives to Home Assistant
+        and reports it for visibility rather than blocking.
       - ``transitive_blocking``: a *fixable* vulnerability in a package that is
         neither a direct manifest entry nor HA-governed (a truly transitive
-        dependency the integration can reach). Unlike the governed case this IS
-        actionable, by bumping the direct parent dependency or adding a
-        constraint, so it blocks.
+        dependency the integration can reach). Unlike the governed cases this IS
+        blocked, by bumping the direct parent dependency or adding a constraint.
       - ``transitive``: an *unfixable*, non-governed transitive-dependency
         vulnerability; reported, never blocking.
 
     ``owned_names`` and ``governed_names`` decide the bucket. ``governed_names``
     is the *full* set of names Home Assistant pins (not only the HA-governed
     manifest entries), so a transitive package HA governs is never mistaken for
-    an actionable transitive finding. Whether a non-owned, non-governed
-    (truly transitive) finding blocks then depends on whether it carries a fix,
-    mirroring the owned fixable/unfixable split.
+    an actionable transitive finding. ``exact_governed_names`` is the subset of
+    ``governed_names`` HA pins with an exact ``==`` version; a governed name in
+    it routes to ``governed``, a governed name outside it (a range constraint)
+    routes to ``governed_range``. When ``exact_governed_names`` is ``None`` the
+    whole governed set is treated as exact (``governed_range`` stays empty),
+    preserving the pre-Option-B behaviour for callers that do not distinguish.
+    Whether a non-owned, non-governed (truly transitive) finding blocks then
+    depends on whether it carries a fix, mirroring the owned split.
     """
     governed = governed_names or set()
+    exact_governed = governed if exact_governed_names is None else exact_governed_names
     blocking: list[Record] = []
     unfixable: list[Record] = []
     governed_findings: list[Record] = []
+    governed_range: list[Record] = []
     transitive_blocking: list[Record] = []
     transitive: list[Record] = []
     for dependency in audit.get("dependencies", []):
@@ -312,8 +383,10 @@ def classify_audit(
                     blocking.append(record)
                 else:
                     unfixable.append(record)
-            elif name in governed:
+            elif name in exact_governed:
                 governed_findings.append(record)
+            elif name in governed:
+                governed_range.append(record)
             elif record["fix_versions"]:
                 transitive_blocking.append(record)
             else:
@@ -326,6 +399,7 @@ def classify_audit(
         "blocking": sorted(blocking, key=sort_key),
         "unfixable": sorted(unfixable, key=sort_key),
         "governed": sorted(governed_findings, key=sort_key),
+        "governed_range": sorted(governed_range, key=sort_key),
         "transitive_blocking": sorted(transitive_blocking, key=sort_key),
         "transitive": sorted(transitive, key=sort_key),
     }
@@ -512,6 +586,18 @@ def render_report(
     )
     lines.extend(
         _info_section(
+            f"INFO ({len(findings.get('governed_range', []))}) - vulnerabilities "
+            "in Home Assistant range-governed dependencies (HA permits an older "
+            "version satisfying its range, e.g. name>=X). A fixable one the "
+            "integration COULD pin tighter via name>=<fixed> (an unfixable one, "
+            "shown as no fix, has no such floor), but the gate deliberately "
+            "defers HA-ecosystem transitives to Home Assistant. Reported for "
+            "visibility, non-blocking:",
+            findings.get("governed_range", []),
+        )
+    )
+    lines.extend(
+        _info_section(
             f"INFO ({len(findings['transitive'])}) - unfixable transitive "
             "dependency vulnerabilities (not a direct manifest entry, no fix "
             "available):",
@@ -557,6 +643,20 @@ def emit_github_annotations(findings: dict[str, list[Record]]) -> None:
             f"minimum-version pin; the integration cannot bump these. Raising the "
             f"hacs.json Home Assistant floor to a release whose pin ships the fix "
             f"is the only remediation."
+        )
+    governed_range = findings.get("governed_range", [])
+    if governed_range:
+        # Same ten-notice cap applies; the full list is in the report. Distinct
+        # remediation from the exact case: HA fixes only a floor, so the manifest
+        # COULD tighten it -- deliberately deferred, hence a notice, not a block.
+        packages = ", ".join(sorted({record["name"] for record in governed_range}))
+        print(
+            f"::notice title=Vulnerabilities in Home Assistant range-governed "
+            f"dependencies::{len(governed_range)} finding(s) in {packages}; Home "
+            f"Assistant permits an older version satisfying its range. The "
+            f"integration could declare a tighter manifest floor name>=<fixed>, "
+            f"but deliberately defers these HA-ecosystem transitives to Home "
+            f"Assistant. Reported for visibility, non-blocking."
         )
 
 
@@ -692,15 +792,16 @@ def _canonical_names(requirements: list[str]) -> set[str]:
     return names
 
 
-def apply_governed_transitive_reaudit(
+def apply_governed_transitive_reaudit(  # noqa: PLR0913 - 6 irreducible inputs; see docstring
     findings: dict[str, list[Record]],
     reachable: dict[str, str],
     *,
     governed_audit_json: Path | None,
     governed: set[str],
+    exact_governed: set[str],
     owned_names: set[str],
 ) -> int | None:
-    """Fold a governed-transitive re-audit into ``findings['governed']`` in place.
+    """Fold a governed-transitive re-audit into the governed buckets in place.
 
     ``reachable`` is the ``name -> pin`` map from
     :func:`reachable_governed_transitive_pins`: governed packages that reach the
@@ -709,8 +810,14 @@ def apply_governed_transitive_reaudit(
     living in HA's pinned version but fixed in the newer release would drop out
     of the report. This runs a second, deterministic ``--no-deps`` pip-audit pass
     over ``name==pin`` specifiers for exactly those packages and merges the
-    result authoritatively into the governed bucket (re-audited names replace
+    result authoritatively into the governed buckets (re-audited names replace
     their pass-1 entries).
+
+    Because a re-audited package may be exact-governed (``governed``) or
+    range-governed (``governed_range``), ``exact_governed`` is forwarded to
+    :func:`classify_audit` and *both* governed buckets are merged: a range-
+    governed transitive such as ``urllib3>=2.0`` lands in ``governed_range``, and
+    dropping either merge would silently lose its finding.
 
     Returns ``None`` on success (``findings`` possibly updated in place), or a
     tooling exit code when the second pass could not run, mirroring
@@ -725,14 +832,20 @@ def apply_governed_transitive_reaudit(
     )
     if reaudit is None:
         return reaudit_exit
-    # Every re-audited name is HA-governed, so classify_audit routes each finding
-    # into the governed bucket at HA's own pin.
-    reaudit_findings = classify_audit(reaudit, owned_names, governed)
+    # Every re-audited name is HA-governed; classify_audit routes each finding
+    # into ``governed`` (exact pin) or ``governed_range`` (range floor) at HA's
+    # own worst-case version.
+    reaudit_findings = classify_audit(reaudit, owned_names, governed, exact_governed)
     reaudited = set(reachable)
-    findings["governed"] = _dedup_sorted_records(
-        [record for record in findings["governed"] if record["name"] not in reaudited]
-        + reaudit_findings["governed"]
-    )
+    for bucket in ("governed", "governed_range"):
+        findings[bucket] = _dedup_sorted_records(
+            [
+                record
+                for record in findings.get(bucket, [])
+                if record["name"] not in reaudited
+            ]
+            + reaudit_findings[bucket]
+        )
     return None
 
 
@@ -755,10 +868,13 @@ def main(argv: list[str] | None = None) -> int:
         print(f"error: cannot read manifest {args.manifest}: {exc}", file=sys.stderr)
         return 2
 
-    governed_pins = parse_ha_governed_pins(
-        args.ha_constraints.read_text(encoding="utf-8")
-    )
+    constraints_text = args.ha_constraints.read_text(encoding="utf-8")
+    governed_pins = parse_ha_governed_pins(constraints_text)
     governed = set(governed_pins)
+    # The exact-``==`` subset is what the integration truly cannot tighten; a
+    # range-governed finding (HA sets only a floor) is actionable and routed to
+    # the visible ``governed_range`` bucket instead of the unfixable-INFO bucket.
+    exact_governed = parse_ha_exact_governed_names(constraints_text)
     owned, ha_governed = partition_requirements(requirements, governed)
 
     owned_names: set[str] = set()
@@ -790,7 +906,7 @@ def main(argv: list[str] | None = None) -> int:
     # pins): a package HA governs which surfaces only transitively must not be
     # treated as an actionable transitive finding, since the integration cannot
     # bump HA's runtime pin any more than it can for a direct governed entry.
-    findings = classify_audit(audit, owned_names, governed)
+    findings = classify_audit(audit, owned_names, governed, exact_governed)
 
     # Re-audit governed packages that reach the manifest only transitively at
     # Home Assistant's own pin: pass 1 resolved them to the newest compatible
@@ -804,6 +920,7 @@ def main(argv: list[str] | None = None) -> int:
         reachable,
         governed_audit_json=args.governed_audit_json,
         governed=governed,
+        exact_governed=exact_governed,
         owned_names=owned_names,
     )
     if reaudit_exit is not None:

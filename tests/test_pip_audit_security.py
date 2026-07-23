@@ -239,16 +239,56 @@ class TestClassifyAudit:
         # "bump the parent" remediation is infeasible and blocking would be a
         # permanent red. This locks the governed check ahead of the fixable
         # transitive branch and requires the FULL HA name set, not only the
-        # HA-governed manifest entries.
+        # HA-governed manifest entries. yarl is EXACT-``==``-pinned by HA, so it
+        # belongs in the ``governed`` bucket (not ``governed_range``); the exact
+        # subset is passed explicitly so the Option B exact/range split is
+        # exercised rather than relying on the None default.
         findings = audit_manifest.classify_audit(
             _audit("yarl", "1.9.0", "CVE-YARL", ["1.10.0"]),
             {"selenium"},
+            {"yarl"},
             {"yarl"},
         )
         assert findings["blocking"] == []
         assert findings["transitive_blocking"] == []
         assert findings["transitive"] == []
+        assert findings["governed_range"] == []
         assert [r["id"] for r in findings["governed"]] == ["CVE-YARL"]
+
+    def test_exact_governed_and_range_governed_route_to_distinct_buckets(
+        self,
+    ) -> None:
+        # Option B core: of two governed packages, ``foo`` is exact-``==``-pinned
+        # (unfixable by the integration -> ``governed``) and ``bar`` is only
+        # range-floored (the integration COULD tighten its manifest ->
+        # ``governed_range``). Both stay out of ``blocking``. Collapsing the
+        # exact/range split (passing the full governed set as "exact") would send
+        # bar back into ``governed`` and empty ``governed_range`` -- the mutation
+        # this test is built to catch.
+        audit = {
+            "dependencies": [
+                {
+                    "name": "foo",
+                    "version": "1.0",
+                    "vulns": [{"id": "CVE-FOO", "fix_versions": ["1.1"]}],
+                },
+                {
+                    "name": "bar",
+                    "version": "2.0",
+                    "vulns": [{"id": "CVE-BAR", "fix_versions": ["2.1"]}],
+                },
+            ]
+        }
+        findings = audit_manifest.classify_audit(
+            audit,
+            {"selenium"},
+            {"foo", "bar"},
+            {"foo"},
+        )
+        assert findings["blocking"] == []
+        assert findings["transitive_blocking"] == []
+        assert [r["id"] for r in findings["governed"]] == ["CVE-FOO"]
+        assert [r["id"] for r in findings["governed_range"]] == ["CVE-BAR"]
 
 
 class TestReachableGovernedTransitivePins:
@@ -375,6 +415,33 @@ class TestPartitionAndConstraints:
             "typing-extensions": "4.15.0",
             "certifi": "2021.5.30",
             "compat": "1.4.5",
+        }
+
+    def test_parse_ha_exact_governed_names_splits_exact_and_range(self) -> None:
+        # Option B: only a single concrete ``==`` pin is exact (the integration
+        # cannot tighten it); a range floor (>=, ~=, or ==+cap), even though it
+        # is governed and keeps its floor for the re-audit, is NOT exact. A
+        # non-PEP 508 salvaged ``==`` counts as exact; a floor-less constraint is
+        # neither governed nor exact.
+        text = (
+            "foo==1.0\n"  # exact
+            "bar>=2.0\n"  # range -> not exact
+            "compat~=1.4.5\n"  # compatible-release range -> not exact
+            "capped==1.0,<2.0\n"  # == plus a cap -> not a lone == -> not exact
+            "weird!name==2.0\n"  # non-PEP 508 salvage -> exact
+            "gql<4.0.0\n"  # no inclusive floor -> not governed at all
+        )
+        # Exact is a strict subset of the full governed name set.
+        assert audit_manifest.parse_ha_exact_governed_names(text) == {
+            "foo",
+            "weird!name",
+        }
+        assert audit_manifest.parse_ha_governed_names(text) == {
+            "foo",
+            "bar",
+            "compat",
+            "capped",
+            "weird!name",
         }
 
     def test_no_manifest_dependency_is_ha_range_governed(self) -> None:
@@ -662,13 +729,17 @@ class TestMainDecision:
     def test_range_floored_governed_transitive_reaudited_at_floor(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        # Codex fix: HA range-constrains urllib3 (>=2.0), a transitive reached
-        # via gpsoauth. Pass 1 resolves urllib3 to 2.5.0 (above the 2.0 floor)
-        # with no vuln, so a CVE living in the still-permitted 2.0 would vanish.
-        # The range floor now enters the governed pins, so reachable selection
-        # picks urllib3 up and the second --no-deps pass re-audits urllib3==2.0,
-        # surfacing the CVE as non-blocking governed. Reverting the range-floor
-        # parse drops urllib3 from governed, skips pass 2, and loses the CVE.
+        # Option B: HA range-constrains urllib3 (>=2.0), a transitive reached via
+        # gpsoauth. Pass 1 resolves urllib3 to 2.5.0 (above the 2.0 floor) with
+        # no vuln, so a CVE living in the still-permitted 2.0 would vanish. The
+        # range floor still enters the governed pins (so reachable selection
+        # picks urllib3 up and the second --no-deps pass re-audits urllib3==2.0),
+        # but because HA governs it only with a *range* -- not an exact ``==`` --
+        # the surfaced CVE belongs in the actionable ``governed_range`` bucket,
+        # NOT the unfixable exact-``==`` governed-INFO bucket. It stays
+        # non-blocking (HA-ecosystem transitives are deliberately deferred to
+        # HA), and the report offers the honest ``name>=<fixed>`` remedy rather
+        # than the false "the integration cannot bump these".
         constraints = tmp_path / "ha_constraints.txt"
         constraints.write_text("aiohttp==3.13.3\nurllib3>=2.0\n", encoding="utf-8")
         pass1 = _write_json(
@@ -696,6 +767,20 @@ class TestMainDecision:
         assert rc == 0
         assert "BLOCKING (0)" in out
         assert "CVE-URLLIB3-FLOOR" in out
+        # The CVE is rendered under the range-governed section...
+        assert "range-governed dependencies" in out
+        assert out.index("range-governed dependencies") < out.index("CVE-URLLIB3-FLOOR")
+        assert "COULD pin tighter" in out
+        # ...and NOT under the unfixable exact-``==`` governed-INFO section: with
+        # no exact-governed finding present, its "cannot bump" header must be
+        # absent entirely, proving the CVE did not land in the old bucket.
+        assert "cannot bump these" not in out
+        # The GitHub annotation branch for range-governed findings is emitted as
+        # a ``::notice`` (not the render section title, which shares the
+        # "range-governed dependencies" phrase); asserting the annotation prefix
+        # keeps the emit_github_annotations branch mutation-covered, not merely
+        # line-covered.
+        assert "::notice title=Vulnerabilities in Home Assistant range-governed" in out
 
     def test_no_governed_transitive_skips_second_pass(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
