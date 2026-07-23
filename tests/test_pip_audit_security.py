@@ -378,13 +378,16 @@ class TestPartitionAndConstraints:
     def test_parse_ha_governed_pins_retains_versions(self) -> None:
         # Fund 2: the pin *version* is kept (not discarded), because governed
         # packages are audited at HA's own pin, not at the manifest floor. A
-        # range constraint keeps its inclusive floor (somerange>=1.0 -> 1.0).
+        # range constraint keeps its inclusive floor (somerange>=1.0 -> 1.0). A
+        # constraint whose environment marker *holds* on this runtime is honored
+        # like any other; the always-true ``python_version >= '3.0'`` keeps
+        # ``marked`` governed (a false marker is exercised separately below).
         text = (
             "# generated constraints\n"
             "aiohttp==3.12.15\n"
             "cryptography==45.0.3\n"
             "somerange>=1.0\n"
-            "marked==1.2.3 ; python_version < '3.13'\n"
+            "marked==1.2.3 ; python_version >= '3.0'\n"
             "\n"
         )
         assert audit_manifest.parse_ha_governed_pins(text) == {
@@ -397,6 +400,28 @@ class TestPartitionAndConstraints:
         assert audit_manifest.parse_ha_governed_names(text) == set(
             audit_manifest.parse_ha_governed_pins(text)
         )
+
+    def test_marker_gated_constraints_respect_runtime(self) -> None:
+        # A PEP 508 environment marker gates whether HA imposes the pin. A
+        # constraint whose marker is false on this runtime is NOT governed: HA
+        # does not impose it here, so it must not be diverted into the
+        # non-blocking governed maps. A satisfied marker is governed like any
+        # other. The markers below are interpreter-independent (always
+        # true/false on Python 3) so the assertion does not drift with the CI
+        # Python version. All three governed views must agree, since they share
+        # ``_governed_constraint``.
+        text = (
+            "plain==4.0\n"  # no marker -> governed
+            "kept==1.0 ; python_version >= '3.0'\n"  # true marker -> governed
+            "dropped==2.0 ; python_version < '3.0'\n"  # false marker -> skipped
+            "droppedrange>=3.0 ; python_version < '3.0'\n"  # false marker -> skipped
+        )
+        assert audit_manifest.parse_ha_governed_pins(text) == {
+            "plain": "4.0",
+            "kept": "1.0",
+        }
+        assert audit_manifest.parse_ha_governed_names(text) == {"plain", "kept"}
+        assert audit_manifest.parse_ha_exact_governed_names(text) == {"plain", "kept"}
 
     def test_parse_ha_governed_pins_skips_empty_and_falls_back(self) -> None:
         # An empty name or empty version on a ``==`` line is skipped; a line
@@ -593,6 +618,44 @@ class TestMainDecision:
         # The old false assurance must be gone: HA's pinned version may itself
         # be vulnerable, so "resolved by the user's HA version" was untrue.
         assert "resolved by" not in out
+
+    def test_marker_false_governed_manifest_dependency_stays_blocking(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # The finding's end-to-end scenario: HA governs a manifest dependency
+        # (aiohttp) with a PEP 508 environment marker. The SAME fixable audit is
+        # classified twice, flipping only the marker, to prove the marker alone
+        # drives the routing (interpreter-independent markers avoid CI drift).
+        audit = _audit("aiohttp", "3.13.3", "CVE-MARKER-1", ["3.14.1"])
+
+        def run(marker: str) -> tuple[int, str]:
+            constraints = tmp_path / "ha_constraints.txt"
+            constraints.write_text(f"aiohttp==3.13.3 ; {marker}\n", encoding="utf-8")
+            audit_path = _write_json(tmp_path / "audit.json", audit)
+            rc = audit_manifest.main(
+                [
+                    "--manifest",
+                    str(MANIFEST),
+                    "--ha-constraints",
+                    str(constraints),
+                    "--audit-json",
+                    str(audit_path),
+                    "--verbose",
+                ]
+            )
+            return rc, capsys.readouterr().out
+
+        # True marker: HA imposes the pin here -> governed -> non-blocking INFO.
+        rc_true, out_true = run("python_version >= '3.0'")
+        assert rc_true == 0
+        assert "Home Assistant's own minimum-version pin" in out_true
+
+        # False marker: HA does NOT impose the pin on this runtime, so aiohttp is
+        # integration-owned and its fixable finding blocks, instead of being
+        # silently suppressed at a version Home Assistant never imposes here.
+        rc_false, out_false = run("python_version < '3.0'")
+        assert rc_false == 1
+        assert "BLOCKING (1)" in out_false
 
     def test_fixable_transitive_finding_blocks(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]

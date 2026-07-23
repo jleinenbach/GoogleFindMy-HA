@@ -75,6 +75,7 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+from packaging.markers import Marker
 from packaging.requirements import InvalidRequirement, Requirement
 from packaging.utils import canonicalize_name
 from packaging.version import InvalidVersion, Version
@@ -189,15 +190,37 @@ def ha_pin_requirements(
     return specifiers
 
 
+def _marker_applies(marker: Marker) -> bool:
+    """Return whether an HA constraint's environment marker holds on this runtime.
+
+    Home Assistant's constraints file may gate an entry with a PEP 508
+    environment marker (for example ``python_version < '3.13'``). The pin only
+    applies where the marker is true, so a governed classification must respect
+    it. The marker is evaluated against the current interpreter -- the same
+    environment pip-audit resolves and audits in -- so a constraint Home
+    Assistant does not impose here is never mistaken for one it does.
+
+    ``Marker.evaluate`` does not raise for a marker that survived
+    :class:`Requirement` parsing: an undefined marker variable is already
+    rejected there as ``InvalidRequirement`` (routing the line to the salvage
+    path below), and a defined-but-empty variable such as ``extra`` evaluates to
+    a boolean. There is therefore no unresolvable-marker branch to guard.
+    """
+    return bool(marker.evaluate())
+
+
 def _governed_constraint(raw_line: str) -> tuple[str, str, bool] | None:
     """Parse one HA constraints line into ``(canonical_name, floor, is_exact)``.
 
     Shared single-line parser for the governed-constraint helpers so the pin
     map, the name set, and the exact-name subset can never diverge. Returns
-    ``None`` for a comment, a blank line, or a constraint with no inclusive
-    lower bound (a bare name, a pure ``!=`` exclusion, an upper-bound-only ``<``
-    cap, or a non-concrete ``==1.*`` prefix / ``===`` arbitrary equality): no
-    worst-case version can be derived from them.
+    ``None`` for a comment, a blank line, a valid PEP 508 constraint whose
+    environment marker is false on the auditing runtime (Home Assistant does not
+    impose it here, see :func:`_marker_applies`; the non-PEP 508 salvage path
+    below deliberately does not evaluate markers), or a constraint with no
+    inclusive lower bound (a bare name, a pure ``!=`` exclusion, an
+    upper-bound-only ``<`` cap, or a non-concrete ``==1.*`` prefix / ``===``
+    arbitrary equality): no worst-case version can be derived from them.
 
     ``is_exact`` is ``True`` only when Home Assistant pins the package to a
     single concrete ``==`` version (a zero-width floor the integration cannot
@@ -215,13 +238,25 @@ def _governed_constraint(raw_line: str) -> tuple[str, str, bool] | None:
         # Non-PEP 508 line: salvage a bare ``name==version`` so a non-standard
         # exact constraint still governs (an exact pin). A range floor cannot be
         # recovered without a parseable specifier, so such a line is dropped
-        # rather than guessed.
+        # rather than guessed. An environment marker is deliberately NOT
+        # evaluated on this path: the marker filter below applies only to valid
+        # PEP 508 lines, and a marker-gated constraint whose *name* is not PEP
+        # 508 valid cannot occur in Home Assistant's machine-generated
+        # constraints file (nor could such a package be a manifest dependency).
         name, separator, rhs = line.partition("==")
         name = name.strip()
         version = rhs.split(";", 1)[0].split(",", 1)[0].strip()
         if not separator or not name or not version:
             return None
         return canonicalize_name(name), version, True
+    if requirement.marker is not None and not _marker_applies(requirement.marker):
+        # Home Assistant only pins this package where the environment marker
+        # holds. When it is false on the auditing runtime the pin is absent, so
+        # the package must not enter the non-blocking governed maps: an
+        # integration-owned manifest dependency then stays in the blocking
+        # bucket and is audited at its own floor, instead of being suppressed at
+        # a version Home Assistant never imposes here.
+        return None
     floor = _requirement_floor(requirement)
     if floor is None:
         return None
