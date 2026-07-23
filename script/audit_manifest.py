@@ -835,17 +835,24 @@ def _validate_audit_shape(data: object) -> str | None:
     report would raise ``AttributeError``/``TypeError`` deep inside processing
     instead of yielding the documented tooling-error exit code 2. The exhaustive
     set of type-specific leaf uses is:
-      - a dependency ``name`` -> ``canonicalize_name`` (needs a string);
+      - a dependency ``name`` -> ``canonicalize_name`` and the classification
+        bucket decision (needs a *non-empty* string: an absent/empty name
+        canonicalizes to ``""``, matches no owned/governed set, and a fixable
+        vuln on it is misrouted into ``transitive_blocking`` -- a spurious
+        exit 1 under an empty package name instead of the tooling-error exit 2);
       - a vuln ``id`` -> ``sort_key`` order comparison and the
-        :func:`_dedup_sorted_records` ``set`` key (needs a hashable, mutually
-        comparable string);
+        :func:`_dedup_sorted_records` ``set`` key (needs a *non-empty*,
+        hashable, mutually comparable string; empty ids collapse distinct
+        advisories into one dedup key);
       - a vuln ``fix_versions`` -> ``list(...)`` and ``", ".join(...)`` in the
         report (needs a list of strings).
     ``version`` is the only stored field never coerced (it is compared only with
     ``==`` in :func:`reachable_governed_transitive_pins`, an order-/hash-free
-    operation), so it is deliberately not policed. Absent optional keys stay
-    tolerated, exactly as the consumers tolerate them through ``dict.get``
-    defaults; only a present-but-wrong-typed field is rejected. Validating at the
+    operation), so it is deliberately not policed and stays tolerated when
+    absent. The required identifiers ``name`` and ``id`` are rejected when
+    absent, empty, or wrong-typed; every other absent optional key stays
+    tolerated exactly as the consumers tolerate it through ``dict.get``
+    defaults. Validating at the
     single JSON boundary both the pass-1 and the governed re-audit share keeps a
     malformed report from silently degrading either pass.
     """
@@ -876,6 +883,11 @@ def _validate_dependency(index: int, dependency: object) -> str | None:
     name = dependency.get("name", "")
     if not isinstance(name, str):
         return f"dependencies[{index}].name is {type(name).__name__}, expected a string"
+    if not name:
+        return (
+            f"dependencies[{index}].name is missing or empty, "
+            "expected a non-empty string"
+        )
     vulns = dependency.get("vulns", [])
     if not isinstance(vulns, list):
         return f"dependencies[{index}].vulns is {type(vulns).__name__}, expected a list"
@@ -890,8 +902,8 @@ def _validate_vuln(index: int, vuln_index: int, vuln: object) -> str | None:
     """Return an error string if one ``vulns`` entry is unusable.
 
     Guards the two vuln leaves the consumers dereference type-specifically: an
-    ``id`` used as an order/``set`` key (needs a string) and ``fix_versions``
-    joined into the report (needs a list of strings).
+    ``id`` used as an order/``set`` key (needs a non-empty string) and
+    ``fix_versions`` joined into the report (needs a list of strings).
     """
     where = f"dependencies[{index}].vulns[{vuln_index}]"
     if not isinstance(vuln, dict):
@@ -899,6 +911,8 @@ def _validate_vuln(index: int, vuln_index: int, vuln: object) -> str | None:
     vuln_id = vuln.get("id", "")
     if not isinstance(vuln_id, str):
         return f"{where}.id is {type(vuln_id).__name__}, expected a string"
+    if not vuln_id:
+        return f"{where}.id is missing or empty, expected a non-empty string"
     fix_versions = vuln.get("fix_versions", [])
     if not isinstance(fix_versions, list):
         return f"{where}.fix_versions is {type(fix_versions).__name__}, expected a list"

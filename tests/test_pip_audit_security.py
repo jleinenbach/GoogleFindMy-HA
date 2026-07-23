@@ -833,6 +833,18 @@ class TestMainDecision:
                 id="name-not-string",
             ),
             pytest.param(
+                {"dependencies": [{"vulns": [{"id": "V", "fix_versions": ["1.0"]}]}]},
+                id="name-missing",
+            ),
+            pytest.param(
+                {
+                    "dependencies": [
+                        {"name": "", "vulns": [{"id": "V", "fix_versions": ["1.0"]}]}
+                    ]
+                },
+                id="name-empty",
+            ),
+            pytest.param(
                 {"dependencies": [{"name": "x", "vulns": [{"fix_versions": None}]}]},
                 id="fix-versions-null",
             ),
@@ -847,6 +859,18 @@ class TestMainDecision:
             pytest.param(
                 {"dependencies": [{"name": "x", "vulns": [{"id": ["a"]}]}]},
                 id="id-unhashable",
+            ),
+            pytest.param(
+                {"dependencies": [{"name": "x", "vulns": [{"fix_versions": ["1.0"]}]}]},
+                id="id-missing",
+            ),
+            pytest.param(
+                {
+                    "dependencies": [
+                        {"name": "x", "vulns": [{"id": "", "fix_versions": ["1.0"]}]}
+                    ]
+                },
+                id="id-empty",
             ),
             pytest.param(
                 {
