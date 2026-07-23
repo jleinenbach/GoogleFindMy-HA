@@ -346,67 +346,34 @@ if _discovery_flow_helper is None:
                     )
                 return cast(FlowResult, result)
 
-        try:
-            from homeassistant.helpers.discovery_flow import (
-                async_create_flow as _async_create_flow,
-            )
-        except Exception:  # noqa: BLE001
-            flow_manager = cast(
-                "ConfigEntriesFlowManager",
-                getattr(hass.config_entries, "flow"),
-            )
-            init = getattr(flow_manager, "async_init", None)
-            if not callable(init):
-                return cast(
-                    FlowResult,
-                    {
-                        "type": data_entry_flow.FlowResultType.ABORT,
-                        "reason": "unknown",
-                    },
-                )
-            try:
-                init_result = await init(
-                    domain,
-                    context=context,
-                    data=data,
-                )
-            except Exception:
-                _LOGGER.error(
-                    "Legacy discovery flow init failed (domain=%s, context=%s)",
-                    domain,
-                    context,
-                    exc_info=True,
-                )
-                return cast(
-                    FlowResult,
-                    {
-                        "type": data_entry_flow.FlowResultType.ABORT,
-                        "reason": "unknown",
-                    },
-                )
-
-            if init_result is None:
-                _LOGGER.error(
-                    "Legacy discovery flow init returned None (domain=%s, context=%s)",
-                    domain,
-                    context,
-                )
-                return cast(
-                    FlowResult,
-                    {
-                        "type": data_entry_flow.FlowResultType.ABORT,
-                        "reason": "unknown",
-                    },
-                )
-
-            return cast(FlowResult, init_result)
-
-        create_flow: Callable[..., Awaitable[FlowResult] | FlowResult] = (
-            _async_create_flow
+        # The modern production path used to defer to
+        # ``homeassistant.helpers.discovery_flow.async_create_flow``. That
+        # helper is *fire-and-forget*: it is declared ``-> None`` and dispatches
+        # the flow through ``async_create_background_task``, so its ``None``
+        # means "a flow was scheduled", never "the import succeeded". A flow
+        # that later aborted transiently (``cannot_connect``/``invalid_auth``/
+        # ``unknown``) stayed invisible here, so ``discovery`` classified the
+        # creation as ACCEPTED and ``SecretsJSONWatcher`` settled the bundle
+        # signature for good — the user then had to rewrite ``secrets.json`` or
+        # restart Home Assistant to recover.
+        #
+        # We therefore reproduce the helper's *observable* core ourselves and
+        # ``await`` ``flow.async_init`` directly, exactly as
+        # ``helpers.discovery_flow._async_init_flow`` does, so the real
+        # ``FlowResult`` reaches ``discovery._classify_discovery_flow_result``:
+        # a transient abort becomes ``RETRY`` and re-arms the producer instead
+        # of vanishing. ``already_in_progress`` is now synthesized ONLY for the
+        # two conditions under which HA's own helper returns ``None`` (a
+        # matching in-progress flow already owns the payload, or the core is
+        # stopping), not for every creation.
+        flow_manager = cast(
+            "ConfigEntriesFlowManager",
+            getattr(hass.config_entries, "flow", None),
         )
-        if not callable(create_flow):
+        init = getattr(flow_manager, "async_init", None)
+        if not callable(init):
             _LOGGER.error(
-                "Discovery flow helper 'async_create_flow' is not callable (domain=%s, context=%s)",
+                "Discovery flow manager exposes no async_init (domain=%s, context=%s)",
                 domain,
                 context,
             )
@@ -418,18 +385,57 @@ if _discovery_flow_helper is None:
                 },
             )
 
-        try:
-            result = create_flow(
-                hass,
+        # discovery_key parity: HA's helper merges it into the context before
+        # creating the flow (``context | {"discovery_key": discovery_key}``), so
+        # Home Assistant's rediscovery/ignore bookkeeping keys off the same
+        # value and the matcher below sees the same context HA would.
+        merged_context: dict[str, Any] = dict(context or {})
+        if discovery_key:
+            merged_context["discovery_key"] = discovery_key
+
+        # Dedup / shutdown parity with ``helpers.discovery_flow._async_init_flow``:
+        # it returns ``None`` (no flow) when a matching discovery flow already
+        # owns this payload or when the core is stopping. Both are legitimate,
+        # non-retryable end states, so — and ONLY for them — synthesize the
+        # terminal ``already_in_progress`` reason. The matcher is a synchronous
+        # ``@callback`` on the flow manager; guard it for stripped test cores.
+        matcher = getattr(flow_manager, "async_has_matching_discovery_flow", None)
+        matching = False
+        if callable(matcher):
+            try:
+                matching = bool(matcher(domain, merged_context, data))
+            except Exception:  # noqa: BLE001 - a matcher failure must not abort
+                _LOGGER.debug(
+                    "async_has_matching_discovery_flow raised (domain=%s); "
+                    "assuming no match",
+                    domain,
+                    exc_info=True,
+                )
+        if matching or bool(getattr(hass, "is_stopping", False)):
+            _LOGGER.debug(
+                "Discovery flow already owned or core stopping "
+                "(domain=%s, context=%s, matching=%s) — already in progress",
                 domain,
                 context,
-                data,
-                discovery_key=discovery_key,
+                matching,
             )
-            result = await _resolve_flow_result(result)
+            return cast(
+                FlowResult,
+                {
+                    "type": data_entry_flow.FlowResultType.ABORT,
+                    "reason": "already_in_progress",
+                },
+            )
+
+        try:
+            init_result = await init(
+                domain,
+                context=merged_context,
+                data=data,
+            )
         except Exception:
             _LOGGER.error(
-                "Discovery flow creation failed (domain=%s, context=%s)",
+                "Discovery flow init failed (domain=%s, context=%s)",
                 domain,
                 context,
                 exc_info=True,
@@ -441,19 +447,12 @@ if _discovery_flow_helper is None:
                     "reason": "unknown",
                 },
             )
-        if result is None:
-            # NOT an error, and therefore NOT ``unknown``: this branch is the
-            # normal outcome of the modern helper. ``helpers.discovery_flow.
-            # async_create_flow`` is declared ``-> None`` and hands the flow to
-            # ``async_create_background_task``, so "no result" means "a flow
-            # owns this payload, its outcome is not observable from here".
-            # Synthesizing a transient reason would make discovery.py classify
-            # every successful fire-and-forget creation as RETRY and re-arm the
-            # producer on each scan. Same wording and same reason as the proxy
-            # branch in ``async_create_discovery_flow`` below, so the two
-            # synthesis sites make one statement, not two.
-            _LOGGER.debug(
-                "Discovery flow helper returned None (domain=%s, context=%s) — treating as already in progress",
+        if init_result is None:
+            # ``flow.async_init`` returns a FlowResult; a ``None`` here is an
+            # anomaly, not "already in progress". Treat it as transient so the
+            # watcher retries rather than settling on an unverified import.
+            _LOGGER.error(
+                "Discovery flow init returned None (domain=%s, context=%s)",
                 domain,
                 context,
             )
@@ -461,10 +460,10 @@ if _discovery_flow_helper is None:
                 FlowResult,
                 {
                     "type": data_entry_flow.FlowResultType.ABORT,
-                    "reason": "already_in_progress",
+                    "reason": "unknown",
                 },
             )
-        return cast(FlowResult, result)
+        return cast(FlowResult, init_result)
 
     _fallback_discovery_flow_helper = cast(
         _DiscoveryFlowHelper,
@@ -538,8 +537,16 @@ async def async_create_discovery_flow(
             else:
                 if resolved is not None:
                     return cast(FlowResult, resolved)
+                # Dormant sibling of the observable fix: this branch only runs if
+                # Home Assistant re-exports
+                # ``config_entries.async_create_discovery_flow`` (it does not on
+                # current cores — the test suite asserts this). That helper is
+                # Home Assistant's own; we cannot observe its background flow, so
+                # a None here still maps to the terminal ``already_in_progress``.
+                # If HA ever ships a fire-and-forget export, this default must be
+                # revisited (tracked as a follow-up, not this PR's defect).
                 _LOGGER.debug(
-                    "Discovery flow helper returned None (domain=%s, context=%s) — treating as already in progress",
+                    "Exported discovery flow helper returned None (domain=%s, context=%s) — treating as already in progress",
                     domain,
                     context,
                 )
@@ -572,20 +579,23 @@ async def async_create_discovery_flow(
                 discovery_key=discovery_key,
             )
         )
-        if fallback_result is not None:
-            return cast(FlowResult, fallback_result)
-        _LOGGER.debug(
-            "Fallback discovery flow helper returned None (domain=%s, context=%s) — treating as already in progress",
-            domain,
-            context,
-        )
-        return cast(
-            FlowResult,
-            {
-                "type": data_entry_flow.FlowResultType.ABORT,
-                "reason": "already_in_progress",
-            },
-        )
+        # The observable fallback ``_async_create_discovery_flow`` always yields
+        # a real FlowResult or a classified abort — it no longer returns None —
+        # so the ``None`` -> ``already_in_progress`` synthesis that used to live
+        # here is gone (the Codex-flagged pattern is removed from this site too).
+        # A None would now be a future anomaly; fail safe to ``unknown`` (the
+        # watcher then retries) rather than settling on an unverified import.
+        if (
+            fallback_result is None
+        ):  # pragma: no cover - unreachable after the observable fix
+            return cast(
+                FlowResult,
+                {
+                    "type": data_entry_flow.FlowResultType.ABORT,
+                    "reason": "unknown",
+                },
+            )
+        return cast(FlowResult, fallback_result)
 
     _LOGGER.debug(
         "Discovery flow helper unavailable; aborting flow creation (domain=%s, context=%s)",

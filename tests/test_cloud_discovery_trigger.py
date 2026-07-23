@@ -328,29 +328,30 @@ async def test_async_create_discovery_flow_treats_none_as_abort(
 
 
 # ---------------------------------------------------------------------------
-# The fallback helper IS the production path (Codex P1)
+# The fallback helper IS the production path (Codex P1/P2)
 # ---------------------------------------------------------------------------
 # ``homeassistant.config_entries`` does not export ``async_create_discovery_flow``
 # on current cores, so ``config_flow._discovery_flow_helper`` is None and every
 # real discovery goes through the module-level fallback
-# ``config_flow._async_create_discovery_flow`` -- the branch that used to carry a
-# "legacy fallback" pragma. That branch ends in Home Assistant's
-# ``helpers.discovery_flow.async_create_flow``, which is declared ``-> None``
-# and dispatches the flow through ``async_create_background_task``. Its ``None``
-# therefore means "a flow owns this payload", not "something failed", and
-# synthesizing a transient abort for it classified *every successful discovery*
-# as RETRY. A test that monkeypatches ``config_entries.async_create_discovery_flow``
-# cannot see this: it exercises the proxy branch, which is dead in production.
+# ``config_flow._async_create_discovery_flow``. That branch used to defer to
+# Home Assistant's fire-and-forget ``helpers.discovery_flow.async_create_flow``
+# (declared ``-> None``, dispatched through ``async_create_background_task``),
+# whose ``None`` says "a flow was scheduled", never "the import succeeded". A
+# flow that later aborted transiently stayed invisible, so discovery classified
+# the creation as ACCEPTED and ``SecretsJSONWatcher`` settled the signature for
+# good. The fallback now reproduces the helper's *observable* core: it awaits
+# ``flow.async_init`` directly, so the real FlowResult is classified and a
+# transient abort re-arms the producer. ``already_in_progress`` is synthesized
+# ONLY for the two conditions under which HA's helper returns ``None`` (a
+# matching in-progress flow, or a stopping core).
 
 
-async def test_fire_and_forget_flow_creation_is_accepted_not_retried(
+async def test_observable_discovery_success_is_accepted(
+    monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """The real fire-and-forget helper must yield ACCEPTED, never RETRY."""
+    """A successful async_init yields ACCEPTED with no fire-and-forget helper."""
 
-    # Read CoreState off the helper module rather than from homeassistant.core:
-    # the test suite installs a stripped core stub whose CoreState members are
-    # plain strings, and the helper compares with ``is`` against its own.
     from homeassistant.helpers import discovery_flow as ha_discovery_flow
 
     # Grounding for the whole test: this is why the fallback is production.
@@ -358,56 +359,237 @@ async def test_fire_and_forget_flow_creation_is_accepted_not_retried(
         getattr(config_flow.config_entries, "async_create_discovery_flow", None) is None
     ), (
         "Home Assistant re-introduced config_entries.async_create_discovery_flow; "
-        "re-check which of the two synthesis sites in config_flow is the "
-        "production path before trusting this test"
+        "re-check which synthesis site in config_flow is the production path "
+        "before trusting this test"
     )
     assert config_flow._fallback_discovery_flow_helper is not None
 
-    hass = _make_hass({"type": config_flow.data_entry_flow.FlowResultType.CREATE_ENTRY})
-    # Surface Home Assistant's own async_create_flow reads. ``running`` keeps it
-    # out of the start-up dispatcher queue so the flow is initialised right away.
-    hass.state = ha_discovery_flow.CoreState.running
-    hass.is_stopping = False
-    hass.config_entries.flow.async_has_matching_discovery_flow = (
-        lambda *_args, **_kwargs: False
+    # Any call to the fire-and-forget helper is a regression back to the
+    # unobservable path; spy on it and assert it stays untouched.
+    fire_and_forget_calls: list[tuple] = []
+
+    def _spy_async_create_flow(*args, **kwargs):  # type: ignore[no-untyped-def]
+        fire_and_forget_calls.append((args, kwargs))
+
+    monkeypatch.setattr(
+        ha_discovery_flow, "async_create_flow", _spy_async_create_flow, raising=False
     )
 
-    background: list[asyncio.Task[object]] = []
-
-    def _async_create_background_task(coro, name, *, eager_start=False):  # type: ignore[no-untyped-def]
-        task = asyncio.create_task(coro, name=name)
-        background.append(task)
-        return task
-
-    hass.async_create_background_task = _async_create_background_task
-
+    hass = _make_hass({"type": config_flow.data_entry_flow.FlowResultType.CREATE_ENTRY})
     caplog.set_level(logging.INFO, "custom_components.googlefindmy.discovery")
 
     outcome = await integration._trigger_cloud_discovery(
         hass,
-        email="fireforget@example.com",
-        token="aas_et/FF",
+        email="observable@example.com",
+        token="aas_et/OBS",
         secrets_bundle=None,
     )
 
-    # Nothing was monkeypatched below config_flow: the payload travelled through
-    # the proxy, the module fallback and Home Assistant's real helper.
-    assert outcome is CloudDiscoveryOutcome.ACCEPTED, (
-        "a flow that was successfully handed to the fire-and-forget helper must "
-        "not be reported as a transient failure"
+    assert outcome is CloudDiscoveryOutcome.ACCEPTED
+    hass.config_entries.flow.async_init.assert_awaited_once()
+    assert not fire_and_forget_calls, (
+        "the observable path must not fall back to the fire-and-forget helper"
     )
 
-    # ... and a flow really was created, even though nothing was returned.
-    assert background, "the helper should have dispatched a flow-init task"
-    for task in background:
-        await task
-    hass.config_entries.flow.async_init.assert_awaited_once()
-
     assert any(
-        "fir***@example.com" in record.getMessage()
+        "obs***@example.com" in record.getMessage()
         for record in caplog.records
         if record.levelno == logging.INFO
-    ), "the success path should log the queued discovery with a redacted account"
+    ), "the success path should log the discovery with a redacted account"
+
+
+async def test_observable_discovery_transient_abort_is_retried(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A transient async_init abort must yield RETRY, not a settled ACCEPTED.
+
+    This is the Codex P1/P2 regression guard. The old fire-and-forget synthesis
+    turned every creation into an ``already_in_progress`` (ACCEPTED) outcome and
+    lost the later transient failure, so the watcher settled the signature for
+    good. Mutating the fix back to that synthesis flips this outcome to ACCEPTED
+    and kills this test.
+    """
+
+    from homeassistant.helpers import discovery_flow as ha_discovery_flow
+
+    fire_and_forget_calls: list[tuple] = []
+
+    def _spy_async_create_flow(*args, **kwargs):  # type: ignore[no-untyped-def]
+        fire_and_forget_calls.append((args, kwargs))
+
+    monkeypatch.setattr(
+        ha_discovery_flow, "async_create_flow", _spy_async_create_flow, raising=False
+    )
+
+    hass = _make_hass(
+        {
+            "type": config_flow.data_entry_flow.FlowResultType.ABORT,
+            "reason": "cannot_connect",
+        }
+    )
+
+    outcome = await integration._trigger_cloud_discovery(
+        hass,
+        email="transient@example.com",
+        token="aas_et/TR",
+        secrets_bundle=None,
+    )
+
+    assert outcome is CloudDiscoveryOutcome.RETRY, (
+        "a transiently aborted discovery flow must re-arm the producer"
+    )
+    hass.config_entries.flow.async_init.assert_awaited_once()
+    assert not fire_and_forget_calls
+
+
+async def test_observable_discovery_skips_when_matching_flow_in_progress() -> None:
+    """A matching in-progress flow yields ACCEPTED without a second async_init."""
+
+    hass = _make_hass({"type": config_flow.data_entry_flow.FlowResultType.CREATE_ENTRY})
+    hass.config_entries.flow.async_has_matching_discovery_flow = (
+        lambda *_args, **_kwargs: True
+    )
+
+    outcome = await integration._trigger_cloud_discovery(
+        hass,
+        email="matching@example.com",
+        token="aas_et/MATCH",
+        secrets_bundle=None,
+    )
+
+    assert outcome is CloudDiscoveryOutcome.ACCEPTED
+    hass.config_entries.flow.async_init.assert_not_awaited()
+
+
+async def test_observable_discovery_skips_when_core_is_stopping() -> None:
+    """A stopping core yields ACCEPTED without initialising a doomed flow."""
+
+    hass = _make_hass({"type": config_flow.data_entry_flow.FlowResultType.CREATE_ENTRY})
+    hass.is_stopping = True
+
+    outcome = await integration._trigger_cloud_discovery(
+        hass,
+        email="stopping@example.com",
+        token="aas_et/STOP",
+        secrets_bundle=None,
+    )
+
+    assert outcome is CloudDiscoveryOutcome.ACCEPTED
+    hass.config_entries.flow.async_init.assert_not_awaited()
+
+
+async def test_observable_discovery_creates_flow_when_no_match(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Production mainline: a present matcher returning False creates the flow."""
+
+    from homeassistant.helpers import discovery_flow as ha_discovery_flow
+
+    fire_and_forget_calls: list[tuple] = []
+
+    def _spy_async_create_flow(*args, **kwargs):  # type: ignore[no-untyped-def]
+        fire_and_forget_calls.append((args, kwargs))
+
+    monkeypatch.setattr(
+        ha_discovery_flow, "async_create_flow", _spy_async_create_flow, raising=False
+    )
+
+    hass = _make_hass({"type": config_flow.data_entry_flow.FlowResultType.CREATE_ENTRY})
+    seen: list[tuple] = []
+
+    def _matcher(*args: object, **_kwargs: object) -> bool:
+        seen.append(args)
+        return False
+
+    hass.config_entries.flow.async_has_matching_discovery_flow = _matcher
+
+    outcome = await integration._trigger_cloud_discovery(
+        hass,
+        email="nomatch@example.com",
+        token="aas_et/NM",
+        secrets_bundle=None,
+    )
+
+    assert outcome is CloudDiscoveryOutcome.ACCEPTED
+    assert seen, "the matcher must be consulted on the mainline"
+    hass.config_entries.flow.async_init.assert_awaited_once()
+    assert not fire_and_forget_calls
+
+
+async def test_observable_discovery_tolerates_matcher_error() -> None:
+    """A raising matcher is non-fatal: creation proceeds via async_init."""
+
+    hass = _make_hass({"type": config_flow.data_entry_flow.FlowResultType.CREATE_ENTRY})
+
+    def _raising_matcher(*_args: object, **_kwargs: object) -> bool:
+        raise RuntimeError("matcher exploded")
+
+    hass.config_entries.flow.async_has_matching_discovery_flow = _raising_matcher
+
+    outcome = await integration._trigger_cloud_discovery(
+        hass,
+        email="matchererr@example.com",
+        token="aas_et/ME",
+        secrets_bundle=None,
+    )
+
+    # The matcher failure must not abort the import; it degrades to "no match"
+    # and the observable flow is still created.
+    assert outcome is CloudDiscoveryOutcome.ACCEPTED
+    hass.config_entries.flow.async_init.assert_awaited_once()
+
+
+async def test_observable_discovery_init_exception_is_transient() -> None:
+    """An async_init exception is reported as transient (RETRY), not ACCEPTED."""
+
+    hass = _make_hass()
+    hass.config_entries.flow.async_init = AsyncMock(
+        side_effect=RuntimeError("init exploded")
+    )
+
+    outcome = await integration._trigger_cloud_discovery(
+        hass,
+        email="initerr@example.com",
+        token="aas_et/IE",
+        secrets_bundle=None,
+    )
+
+    assert outcome is CloudDiscoveryOutcome.RETRY
+    hass.config_entries.flow.async_init.assert_awaited_once()
+
+
+async def test_observable_discovery_init_none_is_transient() -> None:
+    """An async_init that returns None is an anomaly, treated as transient."""
+
+    hass = _make_hass()
+    hass.config_entries.flow.async_init = AsyncMock(return_value=None)
+
+    outcome = await integration._trigger_cloud_discovery(
+        hass,
+        email="initnone@example.com",
+        token="aas_et/IN",
+        secrets_bundle=None,
+    )
+
+    assert outcome is CloudDiscoveryOutcome.RETRY
+    hass.config_entries.flow.async_init.assert_awaited_once()
+
+
+async def test_observable_discovery_without_async_init_is_transient() -> None:
+    """A flow manager missing async_init aborts as transient, never crashes."""
+
+    hass = _make_hass()
+    # A stripped flow manager with no async_init at all (defensive path).
+    hass.config_entries.flow = SimpleNamespace()
+
+    outcome = await integration._trigger_cloud_discovery(
+        hass,
+        email="noinit@example.com",
+        token="aas_et/NI",
+        secrets_bundle=None,
+    )
+
+    assert outcome is CloudDiscoveryOutcome.RETRY
 
 
 async def test_trigger_cloud_discovery_deduplicates(
