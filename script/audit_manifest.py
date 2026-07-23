@@ -10,27 +10,39 @@ never blocks a merge. This script closes that gap with a narrow, *actionable*
 gate.
 
 Scope and policy:
-- It audits the ``manifest.json`` ``requirements`` (the end-user surface) at
-  their declared *floor* versions: each ``pkg>=X`` is pinned to ``pkg==X`` before
-  auditing. Auditing the floor rather than the resolver's newest pick is what
-  makes the gate demand a floor bump when the *minimum* a user may install is
-  vulnerable; a plain ``>=`` audit would resolve to a newer clean release and
-  silently hide a vulnerable floor.
 - Every manifest requirement is audited; Home Assistant governance decides only
-  whether a finding *blocks*, not whether it is audited. Packages Home Assistant
-  pins in its ``package_constraints.txt`` for the declared-minimum HA version
-  (e.g. aiohttp, cryptography) are reported for transparency but never block: the
-  integration cannot raise its floor above Home Assistant's ``==`` pin without
-  making installation impossible, so such a finding is not actionable.
-- Among the integration-owned packages it blocks (exit 1) only when a finding has
-  at least one ``fix_versions`` entry, i.e. the CVE is fixable by bumping the
-  manifest floor. Unfixable (won't-fix) findings such as the ``ecdsa`` Minerva
-  side-channel are reported as warnings and never block.
+  *how* a finding is classified, not whether it is audited. Each package is
+  audited at the version an end user actually runs:
+    * Integration-owned packages are audited at their declared *floor*: each
+      ``pkg>=X`` is pinned to ``pkg==X`` before auditing. Auditing the floor
+      rather than the resolver's newest pick is what makes the gate demand a
+      floor bump when the *minimum* a user may install is vulnerable; a plain
+      ``>=`` audit would resolve to a newer clean release and silently hide a
+      vulnerable floor.
+    * Packages Home Assistant pins in its ``package_constraints.txt`` for the
+      declared-minimum HA version (e.g. aiohttp, cryptography) are audited at
+      Home Assistant's own ``==`` pin, not at the manifest floor. Home Assistant
+      overrides the floor at install time, so auditing the floor would report
+      vulnerabilities in a version no user ever runs; auditing HA's pin reflects
+      what the declared-minimum HA actually installs.
+- Blocking (exit 1) is reserved for *fixable* findings the integration can act
+  on:
+    * an integration-owned package whose floor carries a CVE with a
+      ``fix_versions`` entry -> bump the manifest floor;
+    * a transitive dependency (not a direct manifest entry) whose finding is
+      fixable -> bump the direct parent dependency or add a constraint that
+      pulls in the fix.
+  Unfixable (won't-fix) integration-owned findings such as the ``ecdsa`` Minerva
+  side-channel, unfixable transitive findings, and *all* Home Assistant-pinned
+  findings are reported but never block. HA-pinned findings never block because
+  the integration cannot lower Home Assistant's runtime ``==`` pin; the only
+  remediation for a fixable one is to raise the ``hacs.json`` Home Assistant
+  floor to a release whose pin ships the fix, which is an integration-level
+  decision surfaced honestly rather than a silent "already resolved" claim.
 
-The gate turns red the first time a shipped, integration-owned package's floor
-carries a fixable CVE, which is exactly the case the report-only job waves
-through. The remediation it prints is the required action: bump that package's
-manifest floor to the fix version.
+The gate turns red the first time a shipped package a user actually installs
+carries a fixable CVE the integration can act on, which is exactly the case the
+report-only job waves through.
 
 Usage:
     python script/audit_manifest.py --ha-constraints ha_constraints.txt
@@ -43,7 +55,8 @@ Usage:
 
 Exit status:
     0  no blocking findings (may still print warnings)
-    1  at least one integration-owned, fixable vulnerability -> block the PR
+    1  at least one fixable vulnerability the integration can act on, in an
+       integration-owned floor or a transitive dependency -> block the PR
     2  tooling error (missing input, pip-audit failure, malformed report)
 """
 
@@ -143,29 +156,74 @@ def floor_pin_requirements(requirements: list[str]) -> tuple[list[str], list[str
     return audit_specifiers, unbounded
 
 
-def parse_ha_governed_names(constraints_text: str) -> set[str]:
-    """Return the canonical names Home Assistant pins in its constraints file.
+def ha_pin_requirements(
+    requirements: list[str], governed_pins: dict[str, str]
+) -> list[str]:
+    """Pin each HA-governed requirement to Home Assistant's own ``==`` version.
+
+    ``requirements`` are the manifest entries Home Assistant pins itself;
+    ``governed_pins`` is the ``name -> version`` map from
+    :func:`parse_ha_governed_pins`. Each entry becomes ``name==pin`` so the
+    audit reflects the version the declared-minimum Home Assistant installs, not
+    the manifest floor (which HA overrides at install time). This is what lets
+    the report state truthfully whether HA's pinned version is itself
+    vulnerable, instead of blindly assuming the floor's finding is "resolved".
+    """
+    specifiers: list[str] = []
+    for raw in requirements:
+        try:
+            requirement = Requirement(raw)
+        except InvalidRequirement:  # pragma: no cover - governed entries parse
+            specifiers.append(raw)
+            continue
+        pin = governed_pins.get(canonicalize_name(requirement.name))
+        if pin is None:  # pragma: no cover - governed set is derived from pins
+            specifiers.append(raw)
+            continue
+        specifiers.append(f"{requirement.name}=={pin}")
+    return specifiers
+
+
+def parse_ha_governed_pins(constraints_text: str) -> dict[str, str]:
+    """Return the canonical ``name -> version`` pins from an HA constraints file.
 
     Only ``name==version`` pins are treated as governed; comments, blank lines
     and range/marker entries are ignored. Home Assistant's generated
-    ``package_constraints.txt`` uses exact ``==`` pins throughout.
+    ``package_constraints.txt`` uses exact ``==`` pins throughout. The *version*
+    is retained (unlike a bare name set) because the audit pins each governed
+    manifest entry to Home Assistant's own pin rather than to the manifest
+    floor: HA overrides the floor at install time, so the pin is the version a
+    user under the declared-minimum HA actually runs. On a duplicate pin the
+    last wins, mirroring how a constraints file is applied top to bottom.
     """
-    governed: set[str] = set()
+    pins: dict[str, str] = {}
     for raw_line in constraints_text.splitlines():
         line = raw_line.strip()
         if not line or line.startswith("#"):
             continue
         if "==" not in line:
             continue
-        name = line.split("==", 1)[0].strip()
-        if not name:
+        lhs, _, rhs = line.partition("==")
+        name = lhs.strip()
+        version = rhs.split(";", 1)[0].split(",", 1)[0].strip()
+        if not name or not version:
             continue
         try:
-            governed.add(canonicalize_name(Requirement(line).name))
+            canonical = canonicalize_name(Requirement(line).name)
         except InvalidRequirement:
             # Fall back to the bare left-hand side for non-PEP 508 lines.
-            governed.add(canonicalize_name(name))
-    return governed
+            canonical = canonicalize_name(name)
+        pins[canonical] = version
+    return pins
+
+
+def parse_ha_governed_names(constraints_text: str) -> set[str]:
+    """Return the canonical names Home Assistant pins in its constraints file.
+
+    Thin wrapper over :func:`parse_ha_governed_pins`; the name set is derived
+    from the pin mapping so the two never diverge.
+    """
+    return set(parse_ha_governed_pins(constraints_text))
 
 
 def partition_requirements(
@@ -198,24 +256,37 @@ def classify_audit(
 ) -> dict[str, list[Record]]:
     """Classify a pip-audit JSON report against the manifest name sets.
 
-    Returns a mapping with four deterministic, sorted lists of findings, each a
+    Returns a mapping with five deterministic, sorted lists of findings, each a
     ``{"name","version","id","fix_versions"}`` record:
-      - ``blocking``: integration-owned package with a fixable vulnerability.
+      - ``blocking``: integration-owned package with a fixable vulnerability
+        (remediation: bump the manifest floor).
       - ``unfixable``: integration-owned package with no available fix.
-      - ``governed``: a direct manifest entry Home Assistant pins itself;
-        reported for transparency, never blocking (the integration cannot act
-        on it).
-      - ``transitive``: a vulnerability in a package that is not a direct
-        manifest entry (a transitive dependency); reported, never blocking.
+      - ``governed``: a package Home Assistant pins itself, whether a direct
+        manifest entry (audited at HA's own pin) or a transitive dependency that
+        HA still governs; reported for transparency, never blocking. The
+        integration cannot lower HA's runtime pin, so blocking would be a
+        permanent red the contributor cannot clear; a fixable one is actionable
+        only by raising the ``hacs.json`` HA floor.
+      - ``transitive_blocking``: a *fixable* vulnerability in a package that is
+        neither a direct manifest entry nor HA-governed (a truly transitive
+        dependency the integration can reach). Unlike the governed case this IS
+        actionable, by bumping the direct parent dependency or adding a
+        constraint, so it blocks.
+      - ``transitive``: an *unfixable*, non-governed transitive-dependency
+        vulnerability; reported, never blocking.
 
-    ``owned_names`` alone decides whether a finding blocks; ``governed_names``
-    only labels the non-blocking transparency findings for HA-pinned manifest
-    entries, so those packages can be audited without ever blocking the gate.
+    ``owned_names`` and ``governed_names`` decide the bucket. ``governed_names``
+    is the *full* set of names Home Assistant pins (not only the HA-governed
+    manifest entries), so a transitive package HA governs is never mistaken for
+    an actionable transitive finding. Whether a non-owned, non-governed
+    (truly transitive) finding blocks then depends on whether it carries a fix,
+    mirroring the owned fixable/unfixable split.
     """
     governed = governed_names or set()
     blocking: list[Record] = []
     unfixable: list[Record] = []
     governed_findings: list[Record] = []
+    transitive_blocking: list[Record] = []
     transitive: list[Record] = []
     for dependency in audit.get("dependencies", []):
         name = canonicalize_name(dependency.get("name", ""))
@@ -234,6 +305,8 @@ def classify_audit(
                     unfixable.append(record)
             elif name in governed:
                 governed_findings.append(record)
+            elif record["fix_versions"]:
+                transitive_blocking.append(record)
             else:
                 transitive.append(record)
 
@@ -244,8 +317,19 @@ def classify_audit(
         "blocking": sorted(blocking, key=sort_key),
         "unfixable": sorted(unfixable, key=sort_key),
         "governed": sorted(governed_findings, key=sort_key),
+        "transitive_blocking": sorted(transitive_blocking, key=sort_key),
         "transitive": sorted(transitive, key=sort_key),
     }
+
+
+def blocking_records(findings: dict[str, list[Record]]) -> list[Record]:
+    """Return every finding that must fail the gate (owned + transitive fixable).
+
+    Both buckets are fixable and actionable, so the exit decision and the
+    ``--verbose`` trigger treat them alike; the report and annotations still
+    name the distinct remediation per bucket.
+    """
+    return findings["blocking"] + findings["transitive_blocking"]
 
 
 def run_pip_audit(requirements: list[str], output_path: Path) -> int:
@@ -306,7 +390,11 @@ def render_report(
     findings: dict[str, list[Record]],
 ) -> str:
     """Return a human-facing summary of the audit result."""
-    lines: list[str] = ["Manifest pip-audit at declared floor versions", ""]
+    lines: list[str] = [
+        "Manifest pip-audit (integration-owned at declared floor, "
+        "HA-governed at Home Assistant's pin)",
+        "",
+    ]
 
     lines.append(f"Integration-owned packages (block on fixable): {len(owned)}")
     lines.extend(f"  - {req}" for req in sorted(owned))
@@ -325,17 +413,29 @@ def render_report(
         lines.extend(f"  - {name}" for name in sorted(unbounded))
         lines.append("")
 
-    blocking = findings["blocking"]
-    if blocking:
-        lines.append(f"BLOCKING ({len(blocking)}) - fixable, integration-owned:")
-        for record in blocking:
+    owned_blocking = findings["blocking"]
+    transitive_blocking = findings["transitive_blocking"]
+    total_blocking = len(owned_blocking) + len(transitive_blocking)
+    if total_blocking:
+        lines.append(
+            f"BLOCKING ({total_blocking}) - fixable vulnerabilities that must be "
+            "resolved before merge:"
+        )
+        for record in owned_blocking:
             fixes = ", ".join(record["fix_versions"])
             lines.append(
-                f"  - {record['name']} {record['version']}: "
-                f"{record['id']} (fix: {fixes})"
+                f"  - {record['name']} {record['version']}: {record['id']} "
+                f"(fix: {fixes}; bump the manifest floor)"
+            )
+        for record in transitive_blocking:
+            fixes = ", ".join(record["fix_versions"])
+            lines.append(
+                f"  - {record['name']} {record['version']}: {record['id']} "
+                f"(fix: {fixes}; bump the direct parent dependency or add a "
+                "constraint)"
             )
     else:
-        lines.append("BLOCKING (0) - no fixable integration-owned vulnerability.")
+        lines.append("BLOCKING (0) - no fixable owned or transitive vulnerability.")
     lines.append("")
 
     unfixable = findings["unfixable"]
@@ -348,15 +448,18 @@ def render_report(
 
     lines.extend(
         _info_section(
-            f"INFO ({len(findings.get('governed', []))}) - Home Assistant-pinned "
-            "dependency vulnerabilities (resolved by the user's HA version):",
+            f"INFO ({len(findings.get('governed', []))}) - vulnerabilities in "
+            "Home Assistant's own minimum-version pins; the integration cannot "
+            "bump these. Fixable ones require raising the hacs.json Home "
+            "Assistant floor to a release whose pin contains the fix:",
             findings.get("governed", []),
         )
     )
     lines.extend(
         _info_section(
-            f"INFO ({len(findings['transitive'])}) - transitive dependency "
-            "vulnerabilities (not a direct manifest entry):",
+            f"INFO ({len(findings['transitive'])}) - unfixable transitive "
+            "dependency vulnerabilities (not a direct manifest entry, no fix "
+            "available):",
             findings["transitive"],
         )
     )
@@ -373,6 +476,14 @@ def emit_github_annotations(findings: dict[str, list[Record]]) -> None:
             f"{record['name']} {record['version']} is affected by "
             f"{record['id']}; bump the manifest floor to {fixes}."
         )
+    for record in findings["transitive_blocking"]:
+        fixes = ", ".join(record["fix_versions"])
+        print(
+            f"::error title=Fixable vulnerability in transitive dependency::"
+            f"{record['name']} {record['version']} is affected by "
+            f"{record['id']}; it is not a direct manifest entry, so bump the "
+            f"direct parent dependency or add a constraint to reach {fixes}."
+        )
     for record in findings["unfixable"]:
         print(
             f"::warning title=Unfixable vulnerability in shipped dependency::"
@@ -381,14 +492,16 @@ def emit_github_annotations(findings: dict[str, list[Record]]) -> None:
         )
     governed = findings.get("governed", [])
     if governed:
-        # Summarize rather than emit one annotation per finding: HA-pinned floors
-        # carry many CVEs that the user's Home Assistant version resolves, and
-        # GitHub caps notices at ten per step. The full list is in the report.
+        # Summarize rather than emit one annotation per finding: HA's own pins
+        # carry many CVEs, and GitHub caps notices at ten per step. The full
+        # list is in the report.
         packages = ", ".join(sorted({record["name"] for record in governed}))
         print(
             f"::notice title=Vulnerabilities in Home Assistant-pinned dependencies::"
-            f"{len(governed)} finding(s) in {packages} at their manifest floor; "
-            f"resolved by the user's Home Assistant version, not by this integration."
+            f"{len(governed)} finding(s) in {packages} at Home Assistant's own "
+            f"minimum-version pin; the integration cannot bump these. Raising the "
+            f"hacs.json Home Assistant floor to a release whose pin ships the fix "
+            f"is the only remediation."
         )
 
 
@@ -438,7 +551,8 @@ def obtain_audit(
     """Return ``(audit, 0)`` or ``(None, exit_code)`` on a tooling error.
 
     Reads a pre-generated report when ``audit_json`` is given; otherwise runs
-    pip-audit over ``audit_requirements`` (the floor-pinned manifest). A
+    pip-audit over ``audit_requirements`` (integration-owned entries pinned to
+    their floor, HA-governed entries pinned to Home Assistant's own version). A
     missing/malformed report or a pip-audit exit code > 1 yields ``(None, 2)``
     (tooling error), never a spurious block.
     """
@@ -492,7 +606,10 @@ def main(argv: list[str] | None = None) -> int:
         print(f"error: cannot read manifest {args.manifest}: {exc}", file=sys.stderr)
         return 2
 
-    governed = parse_ha_governed_names(args.ha_constraints.read_text(encoding="utf-8"))
+    governed_pins = parse_ha_governed_pins(
+        args.ha_constraints.read_text(encoding="utf-8")
+    )
+    governed = set(governed_pins)
     owned, ha_governed = partition_requirements(requirements, governed)
 
     owned_names: set[str] = set()
@@ -506,35 +623,42 @@ def main(argv: list[str] | None = None) -> int:
             # INFO finding rather than a silent drop.
             continue
 
-    governed_names: set[str] = set()
-    for requirement in ha_governed:
-        try:
-            governed_names.add(requirement_project_name(requirement))
-        except InvalidRequirement:  # pragma: no cover - HA pins are well-formed
-            continue
-
-    # Audit every manifest requirement at its declared floor; governance decides
-    # only whether a finding blocks (owned) or is informational (HA-pinned).
-    audit_requirements, unbounded = floor_pin_requirements(requirements)
+    # Audit each package at the version a user actually runs: integration-owned
+    # requirements at their declared floor, HA-governed requirements at Home
+    # Assistant's own == pin (which overrides the floor at install time). This
+    # is the core of Fund 2: auditing the governed floor would report CVEs in a
+    # version no user runs and let a blind "resolved by HA" label hide whether
+    # HA's pinned version is itself vulnerable.
+    owned_audit, unbounded = floor_pin_requirements(owned)
+    governed_audit = ha_pin_requirements(ha_governed, governed_pins)
+    audit_requirements = owned_audit + governed_audit
 
     audit, exit_code = obtain_audit(args.audit_json, audit_requirements)
     if audit is None:
         return exit_code
 
-    findings = classify_audit(audit, owned_names, governed_names)
+    # Pass the *full* HA-governed name set (not only the manifest entries HA
+    # pins): a package HA governs which surfaces only transitively must not be
+    # treated as an actionable transitive finding, since the integration cannot
+    # bump HA's runtime pin any more than it can for a direct governed entry.
+    findings = classify_audit(audit, owned_names, governed)
     report = render_report(owned, ha_governed, unbounded, findings)
 
-    if args.verbose or findings["blocking"]:
+    blocking = blocking_records(findings)
+    if args.verbose or blocking:
         print(report)
     emit_github_annotations(findings)
 
-    if findings["blocking"]:
+    if blocking:
         print(
-            f"FAIL: {len(findings['blocking'])} fixable vulnerability/"
-            "vulnerabilities in shipped integration-owned dependencies."
+            f"FAIL: {len(blocking)} fixable vulnerability/vulnerabilities in "
+            "shipped integration-owned or transitive dependencies."
         )
         return 1
-    print("OK: no fixable vulnerability in shipped integration-owned dependencies.")
+    print(
+        "OK: no fixable vulnerability in shipped integration-owned or transitive "
+        "dependencies."
+    )
     return 0
 
 

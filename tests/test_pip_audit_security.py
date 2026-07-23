@@ -189,9 +189,11 @@ class TestClassifyAudit:
         assert findings["blocking"] == []
         assert [r["id"] for r in findings["unfixable"]] == ["PYSEC-2026-1325"]
 
-    def test_non_owned_is_transitive(self) -> None:
-        # A vulnerable package that is neither owned nor governed (e.g. a
-        # transitive dependency) is reported, never blocking.
+    def test_fixable_transitive_blocks(self) -> None:
+        # A *fixable* vulnerability in a package that is neither owned nor
+        # governed (a transitive dependency) is actionable -- the direct parent
+        # can be bumped or a constraint added -- so it blocks. This is Fund 1:
+        # a fixable transitive finding must not be waved through as INFO.
         findings = audit_manifest.classify_audit(
             _audit("idna", "3.4", "CVE-TEST-2", ["3.7"]),
             {"selenium"},
@@ -199,7 +201,19 @@ class TestClassifyAudit:
         assert findings["blocking"] == []
         assert findings["unfixable"] == []
         assert findings["governed"] == []
-        assert [r["id"] for r in findings["transitive"]] == ["CVE-TEST-2"]
+        assert findings["transitive"] == []
+        assert [r["id"] for r in findings["transitive_blocking"]] == ["CVE-TEST-2"]
+
+    def test_unfixable_transitive_is_info(self) -> None:
+        # An *unfixable* transitive finding stays a non-blocking INFO: there is
+        # no fix to pull in, so blocking would be a permanent red.
+        findings = audit_manifest.classify_audit(
+            _audit("idna", "3.4", "CVE-TEST-2b", []),
+            {"selenium"},
+        )
+        assert findings["blocking"] == []
+        assert findings["transitive_blocking"] == []
+        assert [r["id"] for r in findings["transitive"]] == ["CVE-TEST-2b"]
 
     def test_governed_finding_is_reported_not_blocking(self) -> None:
         # A fixable CVE in an HA-governed direct manifest entry is surfaced for
@@ -214,7 +228,27 @@ class TestClassifyAudit:
         assert findings["blocking"] == []
         assert findings["unfixable"] == []
         assert findings["transitive"] == []
+        assert findings["transitive_blocking"] == []
         assert [r["id"] for r in findings["governed"]] == ["CVE-TEST-GOV"]
+
+    def test_ha_governed_transitive_is_not_blocking(self) -> None:
+        # A fixable CVE in a package HA governs but which is NOT a direct
+        # manifest entry (a transitive such as yarl) must be classified as
+        # governed, never transitive_blocking: the integration cannot bump HA's
+        # runtime pin for it any more than for a direct governed entry, so the
+        # "bump the parent" remediation is infeasible and blocking would be a
+        # permanent red. This locks the governed check ahead of the fixable
+        # transitive branch and requires the FULL HA name set, not only the
+        # HA-governed manifest entries.
+        findings = audit_manifest.classify_audit(
+            _audit("yarl", "1.9.0", "CVE-YARL", ["1.10.0"]),
+            {"selenium"},
+            {"yarl"},
+        )
+        assert findings["blocking"] == []
+        assert findings["transitive_blocking"] == []
+        assert findings["transitive"] == []
+        assert [r["id"] for r in findings["governed"]] == ["CVE-YARL"]
 
 
 class TestPartitionAndConstraints:
@@ -246,6 +280,47 @@ class TestPartitionAndConstraints:
             "aiohttp",
             "cryptography",
         }
+
+    def test_parse_ha_governed_pins_retains_versions(self) -> None:
+        # Fund 2: the pin *version* is kept (not discarded), because governed
+        # packages are audited at HA's own pin, not at the manifest floor.
+        text = (
+            "# generated constraints\n"
+            "aiohttp==3.12.15\n"
+            "cryptography==45.0.3\n"
+            "somerange>=1.0\n"
+            "marked==1.2.3 ; python_version < '3.13'\n"
+            "\n"
+        )
+        assert audit_manifest.parse_ha_governed_pins(text) == {
+            "aiohttp": "3.12.15",
+            "cryptography": "45.0.3",
+            "marked": "1.2.3",
+        }
+        # The name set stays a derived view of the pin mapping.
+        assert audit_manifest.parse_ha_governed_names(text) == set(
+            audit_manifest.parse_ha_governed_pins(text)
+        )
+
+    def test_parse_ha_governed_pins_skips_empty_and_falls_back(self) -> None:
+        # An empty name or empty version on a ``==`` line is skipped; a line
+        # whose left-hand side is not a valid PEP 508 name falls back to the
+        # canonicalized bare name so a non-standard constraint still governs.
+        text = (
+            "==1.0\n"  # empty name -> skipped
+            "foo==\n"  # empty version -> skipped
+            "weird!name==2.0\n"  # not PEP 508 -> bare-name fallback
+        )
+        assert audit_manifest.parse_ha_governed_pins(text) == {"weird!name": "2.0"}
+
+    def test_ha_pin_requirements_pins_to_ha_version(self) -> None:
+        # A governed manifest entry is pinned to HA's == version, overriding its
+        # declared floor, so the audit reflects what the user actually runs.
+        specifiers = audit_manifest.ha_pin_requirements(
+            ["aiohttp>=3.11.8", "cryptography>=43.0.3"],
+            {"aiohttp": "3.12.15", "cryptography": "45.0.3"},
+        )
+        assert specifiers == ["aiohttp==3.12.15", "cryptography==45.0.3"]
 
 
 class TestFloorPin:
@@ -327,11 +402,36 @@ class TestMainDecision:
         rc = self._run(tmp_path, _audit("aiohttp", "3.13.3", "CVE-TEST-4", ["3.14.1"]))
         out = capsys.readouterr().out
         assert rc == 0
-        # The governed finding is surfaced live as a non-blocking INFO line;
-        # this is the transparency the audit-all model restores (was impossible
-        # when governed packages were never audited).
-        assert "Home Assistant-pinned dependency vulnerabilities" in out
+        # Fund 2: the governed finding is surfaced as an honest, non-blocking
+        # INFO, audited at HA's own pin. The finding is fixable, yet it does not
+        # block (the integration cannot lower HA's runtime pin), and the report
+        # names the real remediation (raise the hacs.json HA floor).
+        assert "Home Assistant's own minimum-version pin" in out
+        assert "hacs.json" in out
         assert "CVE-TEST-4" in out
+        # The old false assurance must be gone: HA's pinned version may itself
+        # be vulnerable, so "resolved by the user's HA version" was untrue.
+        assert "resolved by" not in out
+
+    def test_fixable_transitive_finding_blocks(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # Fund 1 at the CLI surface: a fixable transitive finding exits 1 and
+        # names the transitive remediation, not "bump the manifest floor".
+        rc = self._run(tmp_path, _audit("idna", "3.4", "CVE-TEST-5", ["3.7"]))
+        out = capsys.readouterr().out
+        assert rc == 1
+        assert "BLOCKING (1)" in out
+        assert "parent dependency" in out
+
+    def test_unfixable_transitive_does_not_block(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        rc = self._run(tmp_path, _audit("idna", "3.4", "CVE-TEST-6", []))
+        out = capsys.readouterr().out
+        assert rc == 0
+        assert "unfixable transitive" in out
+        assert "CVE-TEST-6" in out
 
     def test_unfixable_owned_does_not_block(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
@@ -389,6 +489,37 @@ class TestMainDecision:
         )
         assert rc == 2
 
+    def test_ha_governed_transitive_finding_does_not_block(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # Wiring proof for the P3 fix: main() must pass the FULL HA-governed name
+        # set to classify_audit, not only the HA-governed manifest entries. A
+        # fixable CVE in a package HA pins transitively (yarl, not a manifest
+        # entry) must surface as a non-blocking governed INFO, not a blocking
+        # transitive finding. If main() passed only the manifest-intersection
+        # set, yarl would exit 1 here.
+        constraints = tmp_path / "ha_constraints.txt"
+        constraints.write_text("aiohttp==3.13.3\nyarl==1.9.0\n", encoding="utf-8")
+        audit_path = _write_json(
+            tmp_path / "audit.json",
+            _audit("yarl", "1.9.0", "CVE-YARL-WIRE", ["1.10.0"]),
+        )
+        rc = audit_manifest.main(
+            [
+                "--manifest",
+                str(MANIFEST),
+                "--ha-constraints",
+                str(constraints),
+                "--audit-json",
+                str(audit_path),
+                "--verbose",
+            ]
+        )
+        out = capsys.readouterr().out
+        assert rc == 0
+        assert "BLOCKING (0)" in out
+        assert "CVE-YARL-WIRE" in out
+
     def test_unparseable_manifest_entry_does_not_crash(self, tmp_path: Path) -> None:
         # An unparseable manifest requirement is audited, not silently dropped,
         # and must not crash owned-name derivation (wiring, not just the
@@ -409,6 +540,42 @@ class TestMainDecision:
             ]
         )
         assert rc == 0
+
+
+def test_main_pins_governed_requirement_to_ha_version(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """main() audits a governed package at HA's pin, an owned one at its floor.
+
+    Wiring-level proof of Fund 2 (not the isolated helper): the requirement list
+    the production path hands to pip-audit must carry Home Assistant's ``==``
+    pin for the governed package (aiohttp) and the declared floor for an
+    integration-owned package (selenium), never the governed floor. No
+    ``--audit-json``, so main() takes the live branch and invokes the patched
+    runner.
+    """
+    constraints = tmp_path / "ha_constraints.txt"
+    constraints.write_text("aiohttp==3.12.15\n", encoding="utf-8")
+
+    captured: dict[str, list[str]] = {}
+
+    def fake_run(reqs: list[str], out_path: Path) -> int:
+        captured["reqs"] = list(reqs)
+        out_path.write_text('{"dependencies": []}', encoding="utf-8")
+        return 0
+
+    monkeypatch.setattr(audit_manifest, "run_pip_audit", fake_run)
+    rc = audit_manifest.main(
+        ["--manifest", str(MANIFEST), "--ha-constraints", str(constraints)]
+    )
+
+    assert rc == 0
+    reqs = captured["reqs"]
+    # Governed package pinned to HA's runtime version, not its manifest floor.
+    assert "aiohttp==3.12.15" in reqs
+    assert "aiohttp==3.11.8" not in reqs
+    # An integration-owned package is still pinned to its declared floor.
+    assert "selenium==4.25.0" in reqs
 
 
 def test_run_pip_audit_invokes_module(
