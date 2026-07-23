@@ -1343,3 +1343,270 @@ async def test_discovery_update_case_stages_the_delete_behind_the_gate(
     # of the gate removes exactly the file the import consumed.
     await _run_staged_cleanup(hass, unique_id=entry.unique_id, entry_id=entry.entry_id)
     assert not watched.exists()
+
+
+async def test_delete_swallows_file_not_found_race_at_unlink(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Losing the file between the guarded re-read and ``os.remove`` is a no-op.
+
+    ``_remove_if_digest_matches`` re-reads the bundle and unlinks it in the same
+    executor job, but POSIX has no atomic re-read+remove: a second deleter (the
+    container's own TTL cleanup, a parallel flow) can still win the final gap, so
+    ``os.remove`` raises ``FileNotFoundError``. The hook must swallow it *silently*
+    and let the config flow complete instead of propagating out of the durability
+    gate.
+    """
+
+    import logging
+
+    watched = tmp_path / "data" / "secrets.json"
+    _write_secrets(watched, "user@example.com", token="aas_et/GONE")
+
+    removed: list[str] = []
+
+    def _raise_missing(path: str) -> None:
+        removed.append(path)
+        raise FileNotFoundError(path)
+
+    monkeypatch.setattr(config_flow.os, "remove", _raise_missing)
+
+    hass = _FakeHass()
+    manager = SimpleNamespace(watch_paths=(watched,))
+    hass.data[DOMAIN] = {"discovery_manager": manager}
+
+    # Must not raise even though the unlink hits a vanished file.
+    with caplog.at_level(logging.WARNING):
+        await config_flow._async_delete_watched_secrets(
+            hass,
+            imported_stable_key=_stable_key_for("user@example.com"),
+            imported_digest=_digest_for("user@example.com", "aas_et/GONE"),
+        )
+
+    # The unlink branch was actually entered (the digest still matched) and the
+    # FileNotFoundError was swallowed rather than propagated.
+    assert removed == [str(watched)]
+    # Distinct from the OSError branch below: a file that vanished in the final
+    # gap is a benign race and is swallowed *without* a warning. Pinning the
+    # silence is what stops ``except FileNotFoundError`` from collapsing into the
+    # ``except OSError`` handler (FileNotFoundError is an OSError subclass).
+    assert not any(
+        "Failed to remove watched secrets file after import" in rec.getMessage()
+        for rec in caplog.records
+    )
+
+
+async def test_delete_warns_and_completes_on_unremovable_file(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A non-removable watched file logs a warning and never breaks the flow.
+
+    The hook promises it "never raises: a non-writable external path only logs a
+    warning so the flow completes". A same-account secrets copy on a read-only
+    mount is exactly that case: ``os.remove`` raises ``OSError`` and the flow has
+    to survive it.
+    """
+
+    import logging
+
+    watched = tmp_path / "data" / "secrets.json"
+    _write_secrets(watched, "user@example.com", token="aas_et/RO")
+
+    def _raise_oserror(path: str) -> None:
+        raise PermissionError(path)  # subclass of OSError
+
+    monkeypatch.setattr(config_flow.os, "remove", _raise_oserror)
+
+    hass = _FakeHass()
+    manager = SimpleNamespace(watch_paths=(watched,))
+    hass.data[DOMAIN] = {"discovery_manager": manager}
+
+    with caplog.at_level(logging.WARNING):
+        await config_flow._async_delete_watched_secrets(
+            hass,
+            imported_stable_key=_stable_key_for("user@example.com"),
+            imported_digest=_digest_for("user@example.com", "aas_et/RO"),
+        )
+
+    # The file is still on disk (the real remove never ran) and the flow logged a
+    # warning instead of raising.
+    assert watched.exists()
+    assert any(
+        "Failed to remove watched secrets file after import" in rec.getMessage()
+        for rec in caplog.records
+    )
+
+
+async def test_delete_with_no_hass_is_a_noop(tmp_path: Path) -> None:
+    """A ``None`` hass (teardown/edge invocation) is a silent no-op, not a crash.
+
+    The hook is armed from the durability gate; if it ever fires without a live
+    HomeAssistant it must return rather than dereference ``None.data``.
+
+    The standalone ``if hass is None`` early-return was folded into the mapping
+    guard (``if hass is None or not isinstance(domain_data, Mapping)``): runtime
+    the ``None`` check is redundant with ``getattr(None, "data", None)`` yielding
+    ``None``, but it still carries the type-narrowing that ``mypy --strict`` needs
+    for the later ``hass.async_add_executor_job`` calls, which it cannot infer
+    through ``getattr``. This test pins the no-crash contract for a ``None`` hass.
+    """
+
+    watched = tmp_path / "data" / "secrets.json"
+    _write_secrets(watched, "user@example.com", token="aas_et/NOHASS")
+
+    # No exception, and nothing to act on without a hass.
+    await config_flow._async_delete_watched_secrets(
+        None,
+        imported_stable_key=_stable_key_for("user@example.com"),
+        imported_digest=_digest_for("user@example.com", "aas_et/NOHASS"),
+    )
+
+    assert watched.exists()
+
+
+async def test_delete_with_non_mapping_hass_data_is_a_noop(tmp_path: Path) -> None:
+    """A hass whose ``.data`` is not the domain mapping yet is a no-op.
+
+    Early in startup ``hass.data`` may not be a mapping; the hook must bail out
+    instead of calling ``.get`` on the wrong type and raising into the flow.
+    """
+
+    watched = tmp_path / "data" / "secrets.json"
+    _write_secrets(watched, "user@example.com", token="aas_et/NODATA")
+
+    hass = SimpleNamespace(data=None)
+
+    await config_flow._async_delete_watched_secrets(
+        hass,
+        imported_stable_key=_stable_key_for("user@example.com"),
+        imported_digest=_digest_for("user@example.com", "aas_et/NODATA"),
+    )
+
+    assert watched.exists()
+
+
+async def test_undeletable_winner_does_not_shadow_a_second_account(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A read-only winner that cannot be deleted must not block other accounts.
+
+    Regression for the multi-account signature lock: ``_read_bundles`` returns
+    the newest bundle as the winner, and before the fix an armed winner that
+    stayed on disk (read-only mount, delete-after-import cannot remove it) made
+    every later scan short-circuit on the unchanged signature, so a second
+    account's older bundle was never armed. The watcher now skips already
+    dispatched signatures and steps to the next candidate.
+    """
+
+    hass = _FakeHass()
+    triggered: list[dict[str, Any]] = []
+    _patch_discovery(monkeypatch, triggered)
+
+    older = tmp_path / "auth" / "secrets.json"  # account two
+    newer = tmp_path / "data" / "secrets.json"  # account one (winner)
+    _write_secrets(older, "second@example.com", token="aas_et/TWO")
+    _write_secrets(newer, "first@example.com", token="aas_et/ONE")
+    os.utime(older, (1_000, 1_000))
+    os.utime(newer, (2_000, 2_000))
+
+    watcher = discovery.SecretsJSONWatcher(hass, paths=[older, newer])
+
+    # First scan arms the winner (newest); it is deliberately NOT deleted, as a
+    # read-only mount would leave it in place.
+    await watcher.async_force_scan()
+    await asyncio.sleep(0)
+    assert [t["email"] for t in triggered] == ["first@example.com"]
+
+    # Second scan: the winner is still the newest bundle on disk, but it has
+    # already been dispatched. Without the settled-set skip this returned early;
+    # now it steps to the older, second account.
+    await watcher.async_force_scan()
+    await asyncio.sleep(0)
+    assert [t["email"] for t in triggered] == [
+        "first@example.com",
+        "second@example.com",
+    ]
+
+    # Third scan: both bundles are settled -> nothing new is armed.
+    await watcher.async_force_scan()
+    await asyncio.sleep(0)
+    assert len(triggered) == 2
+
+    await watcher.async_stop()
+
+
+async def test_settled_winner_is_not_rearmed_until_it_fully_disappears(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A settled bundle is armed once; again only after the whole path set goes
+    empty (which drops the settled set) and it reappears.
+    """
+
+    hass = _FakeHass()
+    triggered: list[dict[str, Any]] = []
+    _patch_discovery(monkeypatch, triggered)
+
+    path = tmp_path / "data" / "secrets.json"
+    _write_secrets(path, "solo@example.com", token="aas_et/SOLO")
+    os.utime(path, (1_000, 1_000))
+
+    watcher = discovery.SecretsJSONWatcher(hass, paths=[path])
+
+    await watcher.async_force_scan()
+    await asyncio.sleep(0)
+    assert len(triggered) == 1
+
+    # Still present and unchanged -> settled -> not re-armed.
+    await watcher.async_force_scan()
+    await asyncio.sleep(0)
+    assert len(triggered) == 1
+
+    # The bundle vanishes entirely: the settled set is dropped by _forget_signature.
+    path.unlink()
+    await watcher.async_force_scan()
+    await asyncio.sleep(0)
+    assert len(triggered) == 1
+
+    # A byte-identical bundle reappears -> a fresh import, as documented.
+    _write_secrets(path, "solo@example.com", token="aas_et/SOLO")
+    os.utime(path, (3_000, 3_000))
+    await watcher.async_force_scan()
+    await asyncio.sleep(0)
+    assert len(triggered) == 2
+
+    await watcher.async_stop()
+
+
+async def test_stale_failure_of_a_concurrent_dispatch_is_not_lost(
+    tmp_path: Path,
+) -> None:
+    """A failure for a bundle that is no longer the last-armed one must drop it
+    from the settled set, so the next scan re-arms it instead of losing it.
+
+    The settled set permits several concurrent in-flight dispatches (that is the
+    multi-account fix). The single ``_last_signature`` retry budget only tracks
+    the most recently armed bundle, so a stale failure callback for an earlier,
+    still-in-flight bundle takes the ``_last_signature != signature`` branch. It
+    must discard that signature rather than leave it settled forever, which would
+    drop the account with no retry and no give-up warning. The multi-in-flight
+    occurrence itself was reproduced against the live watcher during review; this
+    pins the method contract that prevents the silent loss.
+    """
+
+    hass = _FakeHass()
+    watcher = discovery.SecretsJSONWatcher(hass, paths=[tmp_path / "secrets.json"])
+
+    # Two bundles were armed; the newest ("acct-B") is the last-armed one.
+    watcher._settled_signatures = {"acct-A", "acct-B"}
+    watcher._last_signature = "acct-B"
+
+    # A stale failure arrives for the earlier, still-in-flight bundle "acct-A".
+    watcher._invalidate_signature("acct-A")
+
+    # "acct-A" is released for a fresh re-arm; "acct-B" stays settled/in flight.
+    assert "acct-A" not in watcher._settled_signatures
+    assert "acct-B" in watcher._settled_signatures

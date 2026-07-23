@@ -1064,6 +1064,7 @@ class SecretsJSONWatcher:
         "_namespace",
         "_lock",
         "_last_signature",
+        "_settled_signatures",
         "_retry_signature",
         "_retry_attempts",
         "_unsubscribers",
@@ -1095,6 +1096,14 @@ class SecretsJSONWatcher:
         self._namespace = namespace
         self._lock = asyncio.Lock()
         self._last_signature: str | None = None
+        # Add-only within a generation: signatures already dispatched to a flow
+        # (in-flight or settled). Selection in ``_scan`` skips these, so an
+        # already-imported winner that cannot be deleted (read-only mount) no
+        # longer shadows *other* accounts' bundles. Reset wholesale only when
+        # every bundle vanishes or the watcher stops / re-pathes (see
+        # ``_forget_signature``); a failed dispatch removes its signature again
+        # via ``_invalidate_signature`` so the retry can re-arm it.
+        self._settled_signatures: set[str] = set()
         self._retry_signature: str | None = None
         self._retry_attempts = 0
         self._unsubscribers: list[CALLBACK_TYPE] = []
@@ -1177,10 +1186,13 @@ class SecretsJSONWatcher:
         stop/path-change/bundle-missing. Keeping both fields in one helper is
         what makes the budget reset rules complete -- a bundle that disappears
         and comes back byte-identical gets a fresh budget, not the exhausted
-        one from its previous life.
+        one from its previous life. The settled set is dropped here too: this is
+        the wholesale reset (stop/path-change/all-bundles-gone), after which a
+        byte-identical bundle is legitimately a fresh import again.
         """
 
         self._last_signature = None
+        self._settled_signatures.clear()
         self._retry_signature = None
         self._retry_attempts = 0
 
@@ -1217,6 +1229,14 @@ class SecretsJSONWatcher:
         """
 
         if self._last_signature != signature:
+            # A stale failure for a bundle that is no longer the last-armed one:
+            # a second bundle was armed while this one was still in flight (the
+            # settled set now permits several concurrent dispatches). The single
+            # ``_last_signature`` retry budget cannot be accounted against it, but
+            # it must NOT stay silently settled forever -- that would drop the
+            # account with no retry and no give-up warning. Discard it so the next
+            # scan re-arms it with a fresh budget instead of losing it.
+            self._settled_signatures.discard(signature)
             return
 
         if self._retry_signature != signature:
@@ -1237,11 +1257,16 @@ class SecretsJSONWatcher:
             return
 
         self._last_signature = None
+        # A failed dispatch is no longer settled: drop it so the next scan can
+        # re-arm the same bundle for the retry. The give-up branch above returns
+        # first and deliberately leaves the signature settled, so an exhausted
+        # bundle stops being re-armed yet still steps aside for other accounts.
+        self._settled_signatures.discard(signature)
 
     async def _scan(self, *, reason: str) -> None:
         async with self._lock:
-            result = await self._hass.async_add_executor_job(self._read_bundle)
-            if result is None:
+            candidates = await self._hass.async_add_executor_job(self._read_bundles)
+            if not candidates:
                 if self._last_signature is not None:
                     _LOGGER.debug(
                         "Secrets discovery reset; bundle missing",
@@ -1253,9 +1278,47 @@ class SecretsJSONWatcher:
                 self._forget_signature()
                 return
 
-            signature = f"{result.stable_key}:{result.digest}"
-            if signature == self._last_signature:
+            # Prune settled signatures whose bundle is no longer present. A
+            # bundle that left the candidate set (its file was overwritten or
+            # deleted) and later returns is a fresh import again with a full
+            # retry budget; only a signature that STAYS present (e.g. an
+            # undeletable read-only winner) keeps being skipped. Without this,
+            # a single watched path whose content changes and then reverts would
+            # never re-arm the returning bundle (regression against
+            # ``test_returning_bundle_gets_a_full_budget_after_a_successful_other``).
+            current_signatures = {
+                f"{candidate.stable_key}:{candidate.digest}" for candidate in candidates
+            }
+            self._settled_signatures &= current_signatures
+
+            # Select the newest bundle that has not already been dispatched.
+            # ``scan_secrets_bundles`` always returns the current winner as
+            # ``candidates[0]``; once that winner is imported but cannot be
+            # deleted (a read-only mount), the old single-signature short-circuit
+            # made every later scan return here, so a *second* account's older
+            # bundle was never looked at again. Skipping settled signatures steps
+            # past the stuck winner and lets the next account through. Membership
+            # in the settled set subsumes the former
+            # ``signature == self._last_signature`` guard: every armed signature
+            # is settled in the same critical section below, and a failed
+            # dispatch is removed from the set by ``_invalidate_signature``
+            # before its retry.
+            result = next(
+                (
+                    candidate
+                    for candidate in candidates
+                    if f"{candidate.stable_key}:{candidate.digest}"
+                    not in self._settled_signatures
+                ),
+                None,
+            )
+            if result is None:
+                # Every present bundle is already in flight or settled; the
+                # in-flight ones own their retry callbacks. Nothing new to arm,
+                # and not a reset -- the bundles still exist.
                 return
+
+            signature = f"{result.stable_key}:{result.digest}"
 
             # Arming a *different* bundle retires the budget of the previous
             # one. Without this, an exhausted signature keeps its spent counter
@@ -1270,6 +1333,11 @@ class SecretsJSONWatcher:
                 self._retry_attempts = 0
 
             self._last_signature = signature
+            # Arming and settling happen together in this locked section, so the
+            # next scan skips this bundle. Every early-return failure path below
+            # routes through ``_invalidate_signature``, which discards it again
+            # for the retry; only a genuinely dispatched bundle stays settled.
+            self._settled_signatures.add(signature)
 
             existing_entry = None
             try:
@@ -1388,18 +1456,22 @@ class SecretsJSONWatcher:
                 return template
         return None
 
-    def _read_bundle(self) -> _SecretsScanResult | None:
-        """Return the newest valid bundle across all observed paths.
+    def _read_bundles(self) -> list[_SecretsScanResult]:
+        """Return every valid bundle across all observed paths, newest first.
 
         Runs in the executor. Delegates to the shared
         :func:`scan_secrets_bundles` ordering so the watcher and the
-        delete-after-import hook agree on which bundle is the current winner;
-        missing paths are silently skipped, so empty/absent extra paths are a
-        no-op and a single-path watcher behaves exactly as before.
+        delete-after-import hook agree on which bundle is the current winner
+        (``[0]``); missing paths are silently skipped, so empty/absent extra
+        paths are a no-op and a single-path watcher behaves exactly as before.
+
+        The watcher needs the *full* ordered list, not only the winner: when the
+        winner has already been imported but cannot be deleted (a read-only
+        mount), :meth:`_scan` steps past it to the next, not-yet-dispatched
+        candidate so a second account is not shadowed forever.
         """
 
-        scan = scan_secrets_bundles(self._paths)
-        return scan[0][1] if scan else None
+        return [result for _path, result in scan_secrets_bundles(self._paths)]
 
 
 def _collect_extra_watch_paths(
@@ -1555,7 +1627,7 @@ class DiscoveryManager:
           freshly configured path is picked up without a Home Assistant restart.
 
         The comparison is by set, not by order: the winning bundle is chosen by
-        modification time (see :meth:`SecretsJSONWatcher._read_bundle`), so a
+        modification time (see :meth:`SecretsJSONWatcher._read_bundles`), so a
         pure reordering changes nothing observable.
         """
 

@@ -902,11 +902,8 @@ async def _async_delete_watched_secrets(
     file disappears, the watcher does not re-trigger on its own delete.
     """
 
-    if hass is None:
-        return
-
     domain_data = getattr(hass, "data", None)
-    if not isinstance(domain_data, Mapping):
+    if hass is None or not isinstance(domain_data, Mapping):
         return
     manager = domain_data.get(DOMAIN, {})
     manager = manager.get("discovery_manager") if isinstance(manager, Mapping) else None
