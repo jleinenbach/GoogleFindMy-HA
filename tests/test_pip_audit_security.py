@@ -251,6 +251,40 @@ class TestClassifyAudit:
         assert [r["id"] for r in findings["governed"]] == ["CVE-YARL"]
 
 
+class TestReachableGovernedTransitivePins:
+    """Which governed transitive packages need a second, HA-pinned audit pass."""
+
+    def test_selects_only_governed_transitive_at_wrong_version(self) -> None:
+        # yarl is HA-governed and reaches the manifest only transitively (via
+        # aiohttp); pass 1 resolved it to 1.24.5, above HA's 1.20.1 pin, so it
+        # must be re-audited at the pin. Every other dependency is excluded for a
+        # distinct reason: aiohttp is a *direct* governed manifest entry (already
+        # audited at HA's pin), selenium is integration-owned, multidict is
+        # governed but pass 1 already resolved it to HA's pin, and idna is not
+        # governed at all.
+        audit = {
+            "dependencies": [
+                {"name": "yarl", "version": "1.24.5", "vulns": []},
+                {"name": "aiohttp", "version": "3.13.3", "vulns": []},
+                {"name": "selenium", "version": "4.25.0", "vulns": []},
+                {"name": "multidict", "version": "6.0.0", "vulns": []},
+                {"name": "idna", "version": "3.4", "vulns": []},
+            ]
+        }
+        governed_pins = {
+            "yarl": "1.20.1",
+            "aiohttp": "3.13.3",
+            "multidict": "6.0.0",
+        }
+        result = audit_manifest.reachable_governed_transitive_pins(
+            audit,
+            governed_pins,
+            direct_governed_names={"aiohttp"},
+            owned_names={"selenium"},
+        )
+        assert result == {"yarl": "1.20.1"}
+
+
 class TestPartitionAndConstraints:
     """Requirement partitioning and HA-constraint parsing."""
 
@@ -478,7 +512,9 @@ class TestMainDecision:
         # A pip-audit exit code > 1 is a tooling/network failure and must map to
         # exit 2, never to a spurious block. No --audit-json, so main() takes
         # the live branch and invokes the (patched) runner.
-        monkeypatch.setattr(audit_manifest, "run_pip_audit", lambda _reqs, _out: 2)
+        monkeypatch.setattr(
+            audit_manifest, "run_pip_audit", lambda _reqs, _out, **_kw: 2
+        )
         rc = audit_manifest.main(
             [
                 "--manifest",
@@ -520,6 +556,78 @@ class TestMainDecision:
         assert "BLOCKING (0)" in out
         assert "CVE-YARL-WIRE" in out
 
+    def test_governed_transitive_reaudit_surfaces_ha_pinned_cve(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # Two-pass wiring proof: yarl is HA-governed but only *transitive* (via
+        # aiohttp), so ha_pin_requirements never pins it and pass 1 resolves it
+        # to 1.24.5 (above HA's 1.20.1 pin) with NO vuln -- a CVE that lives in
+        # HA's pinned 1.20.1 would silently vanish. The second, --no-deps pass
+        # re-audits yarl==1.20.1 (supplied here via --governed-audit-json) and
+        # finds the fixable CVE. It must surface in the governed INFO bucket at
+        # HA's own pin, and -- governed never blocks -- the gate stays green.
+        constraints = tmp_path / "ha_constraints.txt"
+        constraints.write_text("aiohttp==3.13.3\nyarl==1.20.1\n", encoding="utf-8")
+        pass1 = _write_json(
+            tmp_path / "pass1.json",
+            {"dependencies": [{"name": "yarl", "version": "1.24.5", "vulns": []}]},
+        )
+        pass2 = _write_json(
+            tmp_path / "pass2.json",
+            _audit("yarl", "1.20.1", "CVE-YARL-PIN", ["1.20.2"]),
+        )
+        rc = audit_manifest.main(
+            [
+                "--manifest",
+                str(MANIFEST),
+                "--ha-constraints",
+                str(constraints),
+                "--audit-json",
+                str(pass1),
+                "--governed-audit-json",
+                str(pass2),
+                "--verbose",
+            ]
+        )
+        out = capsys.readouterr().out
+        assert rc == 0
+        assert "BLOCKING (0)" in out
+        assert "CVE-YARL-PIN" in out
+        assert "Home Assistant's own minimum-version pin" in out
+
+    def test_no_governed_transitive_skips_second_pass(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # An empty reachable set must not trigger the second pass at all: no
+        # --governed-audit-json is supplied, and run_pip_audit is booby-trapped
+        # to fail if the live re-audit path is ever taken. yarl is already at
+        # HA's 1.20.1 pin here, so reachable is empty and the Bestandsverhalten
+        # is unchanged (exit 0). Dropping the version==pin guard in
+        # reachable_governed_transitive_pins would make yarl "reachable" and trip
+        # the booby trap.
+        constraints = tmp_path / "ha_constraints.txt"
+        constraints.write_text("aiohttp==3.13.3\nyarl==1.20.1\n", encoding="utf-8")
+        audit_path = _write_json(
+            tmp_path / "audit.json",
+            {"dependencies": [{"name": "yarl", "version": "1.20.1", "vulns": []}]},
+        )
+
+        def _boom(*_args: object, **_kwargs: object) -> int:
+            raise AssertionError("second pass must not invoke pip-audit")
+
+        monkeypatch.setattr(audit_manifest, "run_pip_audit", _boom)
+        rc = audit_manifest.main(
+            [
+                "--manifest",
+                str(MANIFEST),
+                "--ha-constraints",
+                str(constraints),
+                "--audit-json",
+                str(audit_path),
+            ]
+        )
+        assert rc == 0
+
     def test_unparseable_manifest_entry_does_not_crash(self, tmp_path: Path) -> None:
         # An unparseable manifest requirement is audited, not silently dropped,
         # and must not crash owned-name derivation (wiring, not just the
@@ -559,7 +667,7 @@ def test_main_pins_governed_requirement_to_ha_version(
 
     captured: dict[str, list[str]] = {}
 
-    def fake_run(reqs: list[str], out_path: Path) -> int:
+    def fake_run(reqs: list[str], out_path: Path, *, no_deps: bool = False) -> int:
         captured["reqs"] = list(reqs)
         out_path.write_text('{"dependencies": []}', encoding="utf-8")
         return 0
@@ -576,6 +684,69 @@ def test_main_pins_governed_requirement_to_ha_version(
     assert "aiohttp==3.11.8" not in reqs
     # An integration-owned package is still pinned to its declared floor.
     assert "selenium==4.25.0" in reqs
+
+
+def test_main_reaudits_governed_transitive_with_no_deps(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The live two-pass actually shells the second pass with ``no_deps=True``.
+
+    Wiring proof for Fund 2's live path (not the ``--governed-audit-json``
+    offline shortcut): when a governed transitive (yarl) resolves in pass 1 to a
+    version other than Home Assistant's pin, main() must run a *second*
+    pip-audit pass over ``yarl==<HA pin>`` with ``no_deps=True``. A regression
+    that drops the flag or skips the second pass fails this test.
+    """
+    constraints = tmp_path / "ha_constraints.txt"
+    constraints.write_text("yarl==1.20.1\n", encoding="utf-8")
+
+    calls: list[dict[str, object]] = []
+
+    def fake_run(reqs: list[str], out_path: Path, *, no_deps: bool = False) -> int:
+        calls.append({"reqs": list(reqs), "no_deps": no_deps})
+        if not no_deps:
+            # Pass 1: the resolver pulls yarl at a newer version than HA's pin.
+            out_path.write_text(
+                json.dumps(
+                    {
+                        "dependencies": [
+                            {"name": "yarl", "version": "1.24.5", "vulns": []}
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+        else:
+            # Pass 2 at HA's pin surfaces a fixable CVE -> non-blocking governed.
+            out_path.write_text(
+                json.dumps(
+                    {
+                        "dependencies": [
+                            {
+                                "name": "yarl",
+                                "version": "1.20.1",
+                                "vulns": [
+                                    {"id": "CVE-YARL-PIN", "fix_versions": ["1.24.5"]}
+                                ],
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+        return 0
+
+    monkeypatch.setattr(audit_manifest, "run_pip_audit", fake_run)
+    rc = audit_manifest.main(
+        ["--manifest", str(MANIFEST), "--ha-constraints", str(constraints)]
+    )
+
+    assert rc == 0
+    # Exactly two passes fired, the second with no_deps over HA's own pin.
+    assert len(calls) == 2
+    assert calls[0]["no_deps"] is False
+    assert calls[1]["no_deps"] is True
+    assert calls[1]["reqs"] == ["yarl==1.20.1"]
 
 
 def test_run_pip_audit_invokes_module(

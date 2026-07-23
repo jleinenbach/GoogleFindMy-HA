@@ -332,33 +332,79 @@ def blocking_records(findings: dict[str, list[Record]]) -> list[Record]:
     return findings["blocking"] + findings["transitive_blocking"]
 
 
-def run_pip_audit(requirements: list[str], output_path: Path) -> int:
+def reachable_governed_transitive_pins(
+    audit: dict[str, Any],
+    governed_pins: dict[str, str],
+    direct_governed_names: set[str],
+    owned_names: set[str],
+) -> dict[str, str]:
+    """Return governed transitive packages whose pass-1 version misses HA's pin.
+
+    A package Home Assistant governs but that reaches the manifest only
+    transitively (e.g. ``yarl`` pulled in by ``aiohttp``) is not pinned by
+    :func:`ha_pin_requirements`, which pins only direct manifest entries. The
+    resolver therefore audits it at the newest compatible release rather than at
+    Home Assistant's own ``==`` pin, so a CVE that lives in HA's pinned version
+    but is fixed in the newer one silently drops out of the report.
+
+    This function scans the pass-1 ``audit`` and returns the ``name -> pin`` map
+    of exactly those governed transitive packages that must be re-audited at
+    Home Assistant's pin. For each dependency in ``audit["dependencies"]`` the
+    canonical name is taken and skipped when it is integration-owned
+    (``owned_names``) or a direct governed manifest entry
+    (``direct_governed_names``); those are already audited at the right version.
+    A package is included only when Home Assistant pins it
+    (``governed_pins`` has an entry) and the pass-1 audit resolved it to a
+    *different* version than that pin; a package already at HA's pin needs no
+    re-audit. The returned mapping drives a second, ``--no-deps`` pip-audit pass
+    over ``name==pin`` specifiers.
+    """
+    result: dict[str, str] = {}
+    for dependency in audit.get("dependencies", []):
+        name = canonicalize_name(dependency.get("name", ""))
+        if name in owned_names or name in direct_governed_names:
+            continue
+        pin = governed_pins.get(name)
+        if pin is None or dependency.get("version", "") == pin:
+            continue
+        result[name] = pin
+    return result
+
+
+def run_pip_audit(
+    requirements: list[str], output_path: Path, *, no_deps: bool = False
+) -> int:
     """Run pip-audit on the given requirement specifiers, writing JSON output.
 
     Returns the pip-audit exit code: 0 (clean), 1 (vulnerabilities found) or
     >1 (tooling error). Callers decide what to block on from the JSON, not from
     the exit code, because a vulnerable-but-unfixable finding still yields 1.
+
+    When ``no_deps`` is true, ``--no-deps`` is appended so pip-audit audits
+    exactly the listed ``==`` pins without resolving transitive dependencies.
+    This is what lets the governed-transitive re-audit pin a package to Home
+    Assistant's own version instead of the resolver's newest compatible pick.
     """
     with tempfile.NamedTemporaryFile(
         "w", suffix=".txt", delete=False, encoding="utf-8"
     ) as handle:
         handle.write("\n".join(requirements) + "\n")
         requirements_path = handle.name
+    args = [
+        sys.executable,
+        "-m",
+        "pip_audit",
+        "-r",
+        requirements_path,
+        "-f",
+        "json",
+        "-o",
+        str(output_path),
+    ]
+    if no_deps:
+        args.append("--no-deps")
     try:
-        completed = subprocess.run(
-            [
-                sys.executable,
-                "-m",
-                "pip_audit",
-                "-r",
-                requirements_path,
-                "-f",
-                "json",
-                "-o",
-                str(output_path),
-            ],
-            check=False,
-        )
+        completed = subprocess.run(args, check=False)
     finally:
         Path(requirements_path).unlink(missing_ok=True)
     return completed.returncode
@@ -538,6 +584,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--governed-audit-json",
+        type=Path,
+        default=None,
+        help=(
+            "Use a pre-generated pip-audit JSON report for the governed "
+            "transitive re-audit instead of invoking pip-audit (no network; "
+            "used by the test suite)."
+        ),
+    )
+    parser.add_argument(
         "--verbose",
         action="store_true",
         help="Print the full report even when there are no blocking findings.",
@@ -546,7 +602,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 def obtain_audit(
-    audit_json: Path | None, audit_requirements: list[str]
+    audit_json: Path | None,
+    audit_requirements: list[str],
+    *,
+    no_deps: bool = False,
 ) -> tuple[dict[str, Any] | None, int]:
     """Return ``(audit, 0)`` or ``(None, exit_code)`` on a tooling error.
 
@@ -555,6 +614,10 @@ def obtain_audit(
     their floor, HA-governed entries pinned to Home Assistant's own version). A
     missing/malformed report or a pip-audit exit code > 1 yields ``(None, 2)``
     (tooling error), never a spurious block.
+
+    ``no_deps`` is forwarded to :func:`run_pip_audit` so the governed-transitive
+    re-audit pass evaluates exactly the listed pins without transitive
+    resolution.
     """
     if audit_json is not None:
         if not audit_json.is_file():
@@ -567,7 +630,7 @@ def obtain_audit(
     else:
         with tempfile.NamedTemporaryFile("r", suffix=".json", delete=False) as handle:
             audit_path = Path(handle.name)
-        exit_code = run_pip_audit(audit_requirements, audit_path)
+        exit_code = run_pip_audit(audit_requirements, audit_path, no_deps=no_deps)
         if exit_code > 1:
             audit_path.unlink(missing_ok=True)
             print(
@@ -585,6 +648,83 @@ def obtain_audit(
     finally:
         if audit_json is None:
             source.unlink(missing_ok=True)
+
+
+def _dedup_sorted_records(records: list[Record]) -> list[Record]:
+    """Return ``records`` deduplicated by ``(name, id)`` and sorted the same way.
+
+    Mirrors :func:`classify_audit`'s ``sort_key`` so a merged governed bucket
+    keeps identical ordering semantics, and drops a finding that appears in both
+    the pass-1 and the re-audit result.
+    """
+    seen: set[tuple[str, str]] = set()
+    deduped: list[Record] = []
+    for record in records:
+        key = (record["name"], record["id"])
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(record)
+    return sorted(deduped, key=lambda record: (record["name"], record["id"]))
+
+
+def _canonical_names(requirements: list[str]) -> set[str]:
+    """Return the canonical names of ``requirements``, skipping unparseable ones.
+
+    Mirrors the owned-name derivation in :func:`main`: an entry with no valid
+    PEP 508 name has no canonical form and is simply omitted rather than raising.
+    """
+    names: set[str] = set()
+    for requirement in requirements:
+        try:
+            names.add(requirement_project_name(requirement))
+        except InvalidRequirement:  # pragma: no cover - governed entries parse
+            continue
+    return names
+
+
+def apply_governed_transitive_reaudit(
+    findings: dict[str, list[Record]],
+    reachable: dict[str, str],
+    *,
+    governed_audit_json: Path | None,
+    governed: set[str],
+    owned_names: set[str],
+) -> int | None:
+    """Fold a governed-transitive re-audit into ``findings['governed']`` in place.
+
+    ``reachable`` is the ``name -> pin`` map from
+    :func:`reachable_governed_transitive_pins`: governed packages that reach the
+    manifest only transitively and whose pass-1 version differs from Home
+    Assistant's pin. Pass 1 audited them at the resolver's newest pick, so a CVE
+    living in HA's pinned version but fixed in the newer release would drop out
+    of the report. This runs a second, deterministic ``--no-deps`` pip-audit pass
+    over ``name==pin`` specifiers for exactly those packages and merges the
+    result authoritatively into the governed bucket (re-audited names replace
+    their pass-1 entries).
+
+    Returns ``None`` on success (``findings`` possibly updated in place), or a
+    tooling exit code when the second pass could not run, mirroring
+    :func:`obtain_audit` so a re-audit failure never becomes a spurious block.
+    An empty ``reachable`` is a no-op: the second pass is skipped entirely.
+    """
+    if not reachable:
+        return None
+    reaudit_reqs = sorted(f"{name}=={pin}" for name, pin in reachable.items())
+    reaudit, reaudit_exit = obtain_audit(
+        governed_audit_json, reaudit_reqs, no_deps=True
+    )
+    if reaudit is None:
+        return reaudit_exit
+    # Every re-audited name is HA-governed, so classify_audit routes each finding
+    # into the governed bucket at HA's own pin.
+    reaudit_findings = classify_audit(reaudit, owned_names, governed)
+    reaudited = set(reachable)
+    findings["governed"] = _dedup_sorted_records(
+        [record for record in findings["governed"] if record["name"] not in reaudited]
+        + reaudit_findings["governed"]
+    )
+    return None
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -642,6 +782,24 @@ def main(argv: list[str] | None = None) -> int:
     # treated as an actionable transitive finding, since the integration cannot
     # bump HA's runtime pin any more than it can for a direct governed entry.
     findings = classify_audit(audit, owned_names, governed)
+
+    # Re-audit governed packages that reach the manifest only transitively at
+    # Home Assistant's own pin: pass 1 resolved them to the newest compatible
+    # pick, not HA's pin, so a CVE living in HA's pinned version would otherwise
+    # drop out of the report. The result folds into the governed bucket.
+    reachable = reachable_governed_transitive_pins(
+        audit, governed_pins, _canonical_names(ha_governed), owned_names
+    )
+    reaudit_exit = apply_governed_transitive_reaudit(
+        findings,
+        reachable,
+        governed_audit_json=args.governed_audit_json,
+        governed=governed,
+        owned_names=owned_names,
+    )
+    if reaudit_exit is not None:
+        return reaudit_exit
+
     report = render_report(owned, ha_governed, unbounded, findings)
 
     blocking = blocking_records(findings)
@@ -654,12 +812,12 @@ def main(argv: list[str] | None = None) -> int:
             f"FAIL: {len(blocking)} fixable vulnerability/vulnerabilities in "
             "shipped integration-owned or transitive dependencies."
         )
-        return 1
-    print(
-        "OK: no fixable vulnerability in shipped integration-owned or transitive "
-        "dependencies."
-    )
-    return 0
+    else:
+        print(
+            "OK: no fixable vulnerability in shipped integration-owned or "
+            "transitive dependencies."
+        )
+    return 1 if blocking else 0
 
 
 if __name__ == "__main__":
