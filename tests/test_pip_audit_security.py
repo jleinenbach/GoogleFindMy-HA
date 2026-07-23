@@ -17,10 +17,14 @@ denylist with a principled policy:
   findings such as ``ecdsa`` are surfaced as warnings and never block. This
   subsumes the former ecdsa ignore.
 
-The live gate (``test_no_fixable_integration_owned_vulnerability``) resolves the
-manifest specifiers over the network exactly as Home Assistant would and blocks
-on the first shipped, integration-owned, fixable CVE. The offline unit tests
-pin the engine's classification behavior deterministically without a network.
+The live gate (``test_no_fixable_integration_owned_vulnerability``) audits each
+manifest requirement at its declared *floor* version (``pkg>=X`` -> ``pkg==X``)
+over the network and blocks on the first shipped, integration-owned, fixable
+CVE. Auditing the floor, not the resolver's newest pick, is what forces a floor
+bump when the minimum a user may install is vulnerable. A pip-audit tooling or
+network failure (exit 2) is fatal, not a skip, per the AGENTS.md pip-audit
+contract. The offline unit tests pin the engine's classification behavior
+deterministically without a network.
 
 Usage:
     pytest tests/test_pip_audit_security.py -v
@@ -97,15 +101,20 @@ class TestManifestOnlyPipAuditGate:
     def test_no_fixable_integration_owned_vulnerability(
         self, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        """Fail if a shipped, integration-owned package has a fixable CVE.
+        """Fail if a shipped, integration-owned package's floor has a fixable CVE.
 
         This is the real merge gate: it runs the ``audit_manifest`` engine over
-        the live manifest requirements (pip-audit resolves them over the network
-        in a subprocess, which the socket sandbox does not patch) under Home
-        Assistant's committed constraints for the declared-minimum version.
-        HA-governed and unfixable findings do not block; only actionable,
-        integration-owned findings do. A pip-audit tooling/network failure
-        (exit 2) skips rather than blocks.
+        the live manifest requirements, each pinned to its declared floor
+        (pip-audit resolves them over the network in a subprocess, which the
+        socket sandbox does not patch) under Home Assistant's committed
+        constraints for the declared-minimum version. HA-governed and unfixable
+        findings do not block; only actionable, integration-owned findings do.
+
+        A pip-audit tooling or network failure (engine exit 2) is fatal, never a
+        skip: the AGENTS.md pip-audit contract requires exit codes > 1 to stay
+        fatal so the workflow surfaces real issues instead of a silently green,
+        un-audited gate. Absence of pip-audit entirely is the only benign skip
+        and is handled by ``_require_pip_audit`` before the engine runs.
         """
         _require_pip_audit()
         version = _declared_minimum_ha_version()
@@ -123,8 +132,11 @@ class TestManifestOnlyPipAuditGate:
         report = capsys.readouterr().out
 
         if exit_code == 2:  # pragma: no cover - tooling/network guard
-            pytest.skip(
-                f"pip-audit could not run (tooling or network unavailable):\n{report}"
+            pytest.fail(
+                "The manifest-only pip-audit gate could not run (tooling or "
+                "network failure). Per the AGENTS.md pip-audit contract, exit "
+                "codes > 1 are fatal and must not silently skip the gate.\n\n"
+                f"{report}"
             )
         if exit_code == 1:
             pytest.fail(
@@ -178,14 +190,31 @@ class TestClassifyAudit:
         assert [r["id"] for r in findings["unfixable"]] == ["PYSEC-2026-1325"]
 
     def test_non_owned_is_transitive(self) -> None:
-        # aiohttp is HA-governed here (absent from owned_names) -> never blocks.
+        # A vulnerable package that is neither owned nor governed (e.g. a
+        # transitive dependency) is reported, never blocking.
         findings = audit_manifest.classify_audit(
-            _audit("aiohttp", "3.13.3", "CVE-TEST-2", ["3.14.1"]),
+            _audit("idna", "3.4", "CVE-TEST-2", ["3.7"]),
             {"selenium"},
         )
         assert findings["blocking"] == []
         assert findings["unfixable"] == []
+        assert findings["governed"] == []
         assert [r["id"] for r in findings["transitive"]] == ["CVE-TEST-2"]
+
+    def test_governed_finding_is_reported_not_blocking(self) -> None:
+        # A fixable CVE in an HA-governed direct manifest entry is surfaced for
+        # transparency but never blocks (the integration cannot raise its floor
+        # above HA's == pin). This is the finding the old design could not
+        # produce live, because governed packages were never audited.
+        findings = audit_manifest.classify_audit(
+            _audit("aiohttp", "3.11.8", "CVE-TEST-GOV", ["3.14.1"]),
+            {"selenium"},
+            {"aiohttp"},
+        )
+        assert findings["blocking"] == []
+        assert findings["unfixable"] == []
+        assert findings["transitive"] == []
+        assert [r["id"] for r in findings["governed"]] == ["CVE-TEST-GOV"]
 
 
 class TestPartitionAndConstraints:
@@ -217,6 +246,46 @@ class TestPartitionAndConstraints:
             "aiohttp",
             "cryptography",
         }
+
+
+class TestFloorPin:
+    """Floor pinning: audit the minimum allowed version, not the newest pick."""
+
+    def test_pins_lower_bound_to_exact_floor(self) -> None:
+        specifiers, unbounded = audit_manifest.floor_pin_requirements(
+            ["selenium>=4.25.0", "aiohttp>=3.11.8"]
+        )
+        assert specifiers == ["selenium==4.25.0", "aiohttp==3.11.8"]
+        assert unbounded == []
+
+    def test_highest_lower_bound_wins(self) -> None:
+        # A compound specifier is pinned to its most restrictive lower bound.
+        specifiers, unbounded = audit_manifest.floor_pin_requirements(
+            ["pkg>=1.0,<2.0", "other>1.0,>=1.5"]
+        )
+        assert specifiers == ["pkg==1.0", "other==1.5"]
+        assert unbounded == []
+
+    def test_compatible_release_pins_to_its_floor(self) -> None:
+        # ``~=1.4.5`` allows 1.4.5 itself, so the floor is 1.4.5.
+        specifiers, unbounded = audit_manifest.floor_pin_requirements(["pkg~=1.4.5"])
+        assert specifiers == ["pkg==1.4.5"]
+        assert unbounded == []
+
+    def test_requirement_without_floor_is_flagged(self) -> None:
+        # A bare name, an upper-bound-only requirement, or an *exclusive* ``>X``
+        # (which excludes X) has no determinable floor; it is passed through
+        # (audited at the newest pick) and its name is surfaced.
+        specifiers, unbounded = audit_manifest.floor_pin_requirements(
+            ["selenium", "capped<2.0", "exclusive>1.0"]
+        )
+        assert specifiers == ["selenium", "capped<2.0", "exclusive>1.0"]
+        assert unbounded == ["selenium", "capped", "exclusive"]
+
+    def test_unparseable_requirement_passes_through(self) -> None:
+        specifiers, unbounded = audit_manifest.floor_pin_requirements(["!!bogus!!"])
+        assert specifiers == ["!!bogus!!"]
+        assert unbounded == []
 
 
 class TestMainDecision:
@@ -252,9 +321,17 @@ class TestMainDecision:
         assert rc == 1
         assert "BLOCKING (1)" in capsys.readouterr().out
 
-    def test_ha_governed_finding_does_not_block(self, tmp_path: Path) -> None:
+    def test_ha_governed_finding_does_not_block(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
         rc = self._run(tmp_path, _audit("aiohttp", "3.13.3", "CVE-TEST-4", ["3.14.1"]))
+        out = capsys.readouterr().out
         assert rc == 0
+        # The governed finding is surfaced live as a non-blocking INFO line;
+        # this is the transparency the audit-all model restores (was impossible
+        # when governed packages were never audited).
+        assert "Home Assistant-pinned dependency vulnerabilities" in out
+        assert "CVE-TEST-4" in out
 
     def test_unfixable_owned_does_not_block(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]

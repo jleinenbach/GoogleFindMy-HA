@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# script/audit_manifest.py
 """Block PRs that ship an integration-owned dependency with a fixable CVE.
 
 Home Assistant installs the packages listed in ``manifest.json`` ``requirements``
@@ -9,22 +10,27 @@ never blocks a merge. This script closes that gap with a narrow, *actionable*
 gate.
 
 Scope and policy:
-- It audits only the ``manifest.json`` ``requirements`` (the end-user surface),
-  resolved exactly as Home Assistant would resolve the declared specifiers.
-- It excludes packages that Home Assistant itself pins in its
-  ``package_constraints.txt`` for the declared-minimum HA version (e.g. aiohttp,
-  cryptography). The integration cannot raise its floor above Home Assistant's
-  ``==`` pin without making installation impossible, so a finding there is not
-  actionable and must not block. These are reported for transparency only.
-- Among the remaining integration-owned packages it blocks (exit 1) only when a
-  package has at least one ``fix_versions`` entry, i.e. the CVE is fixable by
-  bumping the manifest floor. Unfixable (won't-fix) findings such as ``ecdsa``
-  are reported as warnings and never block.
+- It audits the ``manifest.json`` ``requirements`` (the end-user surface) at
+  their declared *floor* versions: each ``pkg>=X`` is pinned to ``pkg==X`` before
+  auditing. Auditing the floor rather than the resolver's newest pick is what
+  makes the gate demand a floor bump when the *minimum* a user may install is
+  vulnerable; a plain ``>=`` audit would resolve to a newer clean release and
+  silently hide a vulnerable floor.
+- Every manifest requirement is audited; Home Assistant governance decides only
+  whether a finding *blocks*, not whether it is audited. Packages Home Assistant
+  pins in its ``package_constraints.txt`` for the declared-minimum HA version
+  (e.g. aiohttp, cryptography) are reported for transparency but never block: the
+  integration cannot raise its floor above Home Assistant's ``==`` pin without
+  making installation impossible, so such a finding is not actionable.
+- Among the integration-owned packages it blocks (exit 1) only when a finding has
+  at least one ``fix_versions`` entry, i.e. the CVE is fixable by bumping the
+  manifest floor. Unfixable (won't-fix) findings such as the ``ecdsa`` Minerva
+  side-channel are reported as warnings and never block.
 
-The gate is intentionally green today: the only integration-owned vulnerability
-is ``ecdsa`` (unfixable), and every other shipped package resolves clean. It
-turns red the first time a shipped, integration-owned package gains a fixable
-CVE, which is exactly the case the report-only job waves through.
+The gate turns red the first time a shipped, integration-owned package's floor
+carries a fixable CVE, which is exactly the case the report-only job waves
+through. The remediation it prints is the required action: bump that package's
+manifest floor to the fix version.
 
 Usage:
     python script/audit_manifest.py --ha-constraints ha_constraints.txt
@@ -53,8 +59,15 @@ from typing import Any
 
 from packaging.requirements import InvalidRequirement, Requirement
 from packaging.utils import canonicalize_name
+from packaging.version import InvalidVersion, Version
 
 DEFAULT_MANIFEST = "custom_components/googlefindmy/manifest.json"
+
+# Specifier operators that establish an *inclusive* lower bound, i.e. the bound
+# version itself is installable and is therefore the floor we audit. ``>`` is
+# deliberately excluded: ``>X`` excludes X, and the exact next release is not
+# offline-computable, so such a requirement has no determinable floor.
+_LOWER_BOUND_OPERATORS = frozenset({">=", "==", "~="})
 
 # A single finding record: {"name", "version", "id", "fix_versions"}.
 Record = dict[str, Any]
@@ -72,6 +85,62 @@ def load_manifest_requirements(manifest_path: Path) -> list[str]:
 def requirement_project_name(requirement: str) -> str:
     """Return the canonical (PEP 503) project name of a requirement specifier."""
     return canonicalize_name(Requirement(requirement).name)
+
+
+def _requirement_floor(requirement: Requirement) -> str | None:
+    """Return the lowest version the requirement's specifiers allow, or None.
+
+    Considers inclusive lower-bound operators (``>=``, ``==``, ``~=``) and
+    returns the most restrictive (highest) such bound as a version string. A
+    requirement with no inclusive lower bound (a bare name, an upper-bound-only
+    specifier, or an exclusive ``>X``) has no determinable floor and returns
+    None; the caller then audits it at the resolver's newest pick and flags it,
+    rather than fabricating a wrong ``==X`` pin. Every real manifest entry uses
+    ``>=``.
+    """
+    best: Version | None = None
+    best_text: str | None = None
+    for spec in requirement.specifier:
+        if spec.operator not in _LOWER_BOUND_OPERATORS:
+            continue
+        try:
+            candidate = Version(spec.version)
+        except InvalidVersion:
+            continue
+        if best is None or candidate > best:
+            best = candidate
+            best_text = spec.version
+    return best_text
+
+
+def floor_pin_requirements(requirements: list[str]) -> tuple[list[str], list[str]]:
+    """Pin each manifest requirement to its declared floor for auditing.
+
+    Returns ``(audit_specifiers, unbounded_names)``:
+      - ``audit_specifiers``: one entry per requirement. A requirement with a
+        determinable floor becomes ``name==floor`` so pip-audit evaluates the
+        minimum a user may install rather than the resolver's newest pick. A
+        requirement without a floor, or one that cannot be parsed, is passed
+        through unchanged (audited as declared) rather than dropped.
+      - ``unbounded_names``: the canonical names whose floor could not be pinned;
+        their audit still reflects the resolver's newest pick, so the gap is
+        surfaced in the report instead of hidden.
+    """
+    audit_specifiers: list[str] = []
+    unbounded: list[str] = []
+    for raw in requirements:
+        try:
+            requirement = Requirement(raw)
+        except InvalidRequirement:
+            audit_specifiers.append(raw)
+            continue
+        floor = _requirement_floor(requirement)
+        if floor is None:
+            audit_specifiers.append(raw)
+            unbounded.append(canonicalize_name(requirement.name))
+            continue
+        audit_specifiers.append(f"{requirement.name}=={floor}")
+    return audit_specifiers, unbounded
 
 
 def parse_ha_governed_names(constraints_text: str) -> set[str]:
@@ -123,19 +192,30 @@ def partition_requirements(
 
 
 def classify_audit(
-    audit: dict[str, Any], owned_names: set[str]
+    audit: dict[str, Any],
+    owned_names: set[str],
+    governed_names: set[str] | None = None,
 ) -> dict[str, list[Record]]:
-    """Classify a pip-audit JSON report against the integration-owned names.
+    """Classify a pip-audit JSON report against the manifest name sets.
 
-    Returns a mapping with three deterministic, sorted lists of findings, each a
+    Returns a mapping with four deterministic, sorted lists of findings, each a
     ``{"name","version","id","fix_versions"}`` record:
       - ``blocking``: integration-owned package with a fixable vulnerability.
       - ``unfixable``: integration-owned package with no available fix.
+      - ``governed``: a direct manifest entry Home Assistant pins itself;
+        reported for transparency, never blocking (the integration cannot act
+        on it).
       - ``transitive``: a vulnerability in a package that is not a direct
         manifest entry (a transitive dependency); reported, never blocking.
+
+    ``owned_names`` alone decides whether a finding blocks; ``governed_names``
+    only labels the non-blocking transparency findings for HA-pinned manifest
+    entries, so those packages can be audited without ever blocking the gate.
     """
+    governed = governed_names or set()
     blocking: list[Record] = []
     unfixable: list[Record] = []
+    governed_findings: list[Record] = []
     transitive: list[Record] = []
     for dependency in audit.get("dependencies", []):
         name = canonicalize_name(dependency.get("name", ""))
@@ -147,12 +227,15 @@ def classify_audit(
                 "id": vuln.get("id", ""),
                 "fix_versions": list(vuln.get("fix_versions", [])),
             }
-            if name not in owned_names:
-                transitive.append(record)
-            elif record["fix_versions"]:
-                blocking.append(record)
+            if name in owned_names:
+                if record["fix_versions"]:
+                    blocking.append(record)
+                else:
+                    unfixable.append(record)
+            elif name in governed:
+                governed_findings.append(record)
             else:
-                unfixable.append(record)
+                transitive.append(record)
 
     def sort_key(record: Record) -> tuple[str, str]:
         return (record["name"], record["id"])
@@ -160,6 +243,7 @@ def classify_audit(
     return {
         "blocking": sorted(blocking, key=sort_key),
         "unfixable": sorted(unfixable, key=sort_key),
+        "governed": sorted(governed_findings, key=sort_key),
         "transitive": sorted(transitive, key=sort_key),
     }
 
@@ -196,28 +280,52 @@ def run_pip_audit(requirements: list[str], output_path: Path) -> int:
     return completed.returncode
 
 
+def _finding_line(record: Record, *, show_fix_state: bool) -> str:
+    """Render one finding as a report bullet."""
+    head = f"  - {record['name']} {record['version']}: {record['id']}"
+    if not show_fix_state:
+        return head
+    state = "fixable" if record["fix_versions"] else "no fix"
+    return f"{head} ({state})"
+
+
+def _info_section(title: str, records: list[Record]) -> list[str]:
+    """Render a non-blocking INFO section, or nothing when it is empty."""
+    if not records:
+        return []
+    lines = [title]
+    lines.extend(_finding_line(record, show_fix_state=True) for record in records)
+    lines.append("")
+    return lines
+
+
 def render_report(
     owned: list[str],
     ha_governed: list[str],
+    unbounded: list[str],
     findings: dict[str, list[Record]],
 ) -> str:
     """Return a human-facing summary of the audit result."""
-    lines: list[str] = []
-    lines.append("Manifest-only pip-audit (integration-owned requirements)")
+    lines: list[str] = ["Manifest pip-audit at declared floor versions", ""]
+
+    lines.append(f"Integration-owned packages (block on fixable): {len(owned)}")
+    lines.extend(f"  - {req}" for req in sorted(owned))
     lines.append("")
-    lines.append(f"Integration-owned packages audited: {len(owned)}")
-    for requirement in sorted(owned):
-        lines.append(f"  - {requirement}")
+    lines.append(f"Home Assistant-governed packages (report only): {len(ha_governed)}")
+    lines.extend(
+        f"  - {req}  (pinned by Home Assistant)" for req in sorted(ha_governed)
+    )
     lines.append("")
-    lines.append(f"Home Assistant-governed packages excluded: {len(ha_governed)}")
-    for requirement in sorted(ha_governed):
-        lines.append(f"  - {requirement}  (pinned by Home Assistant)")
-    lines.append("")
+
+    if unbounded:
+        lines.append(
+            f"NOTE ({len(unbounded)}) - requirement(s) without a floor, audited at "
+            "the resolver's newest pick:"
+        )
+        lines.extend(f"  - {name}" for name in sorted(unbounded))
+        lines.append("")
 
     blocking = findings["blocking"]
-    unfixable = findings["unfixable"]
-    transitive = findings["transitive"]
-
     if blocking:
         lines.append(f"BLOCKING ({len(blocking)}) - fixable, integration-owned:")
         for record in blocking:
@@ -230,23 +338,28 @@ def render_report(
         lines.append("BLOCKING (0) - no fixable integration-owned vulnerability.")
     lines.append("")
 
+    unfixable = findings["unfixable"]
     if unfixable:
         lines.append(f"WARN ({len(unfixable)}) - integration-owned, no fix available:")
-        for record in unfixable:
-            lines.append(f"  - {record['name']} {record['version']}: {record['id']}")
+        lines.extend(
+            _finding_line(record, show_fix_state=False) for record in unfixable
+        )
         lines.append("")
 
-    if transitive:
-        lines.append(
-            f"INFO ({len(transitive)}) - transitive dependency vulnerabilities "
-            "(not a direct manifest entry):"
+    lines.extend(
+        _info_section(
+            f"INFO ({len(findings.get('governed', []))}) - Home Assistant-pinned "
+            "dependency vulnerabilities (resolved by the user's HA version):",
+            findings.get("governed", []),
         )
-        for record in transitive:
-            state = "fixable" if record["fix_versions"] else "no fix"
-            lines.append(
-                f"  - {record['name']} {record['version']}: {record['id']} ({state})"
-            )
-        lines.append("")
+    )
+    lines.extend(
+        _info_section(
+            f"INFO ({len(findings['transitive'])}) - transitive dependency "
+            "vulnerabilities (not a direct manifest entry):",
+            findings["transitive"],
+        )
+    )
 
     return "\n".join(lines).rstrip() + "\n"
 
@@ -265,6 +378,17 @@ def emit_github_annotations(findings: dict[str, list[Record]]) -> None:
             f"::warning title=Unfixable vulnerability in shipped dependency::"
             f"{record['name']} {record['version']} is affected by "
             f"{record['id']} with no available fix."
+        )
+    governed = findings.get("governed", [])
+    if governed:
+        # Summarize rather than emit one annotation per finding: HA-pinned floors
+        # carry many CVEs that the user's Home Assistant version resolves, and
+        # GitHub caps notices at ten per step. The full list is in the report.
+        packages = ", ".join(sorted({record["name"] for record in governed}))
+        print(
+            f"::notice title=Vulnerabilities in Home Assistant-pinned dependencies::"
+            f"{len(governed)} finding(s) in {packages} at their manifest floor; "
+            f"resolved by the user's Home Assistant version, not by this integration."
         )
 
 
@@ -309,14 +433,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 def obtain_audit(
-    audit_json: Path | None, owned: list[str]
+    audit_json: Path | None, audit_requirements: list[str]
 ) -> tuple[dict[str, Any] | None, int]:
     """Return ``(audit, 0)`` or ``(None, exit_code)`` on a tooling error.
 
     Reads a pre-generated report when ``audit_json`` is given; otherwise runs
-    pip-audit over the integration-owned requirements. A missing/malformed
-    report or a pip-audit exit code > 1 yields ``(None, 2)`` (tooling error),
-    never a spurious block.
+    pip-audit over ``audit_requirements`` (the floor-pinned manifest). A
+    missing/malformed report or a pip-audit exit code > 1 yields ``(None, 2)``
+    (tooling error), never a spurious block.
     """
     if audit_json is not None:
         if not audit_json.is_file():
@@ -324,12 +448,12 @@ def obtain_audit(
             return None, 2
         source = audit_json
         label = f"audit JSON {audit_json}"
-    elif not owned:
+    elif not audit_requirements:
         return {"dependencies": []}, 0
     else:
         with tempfile.NamedTemporaryFile("r", suffix=".json", delete=False) as handle:
             audit_path = Path(handle.name)
-        exit_code = run_pip_audit(owned, audit_path)
+        exit_code = run_pip_audit(audit_requirements, audit_path)
         if exit_code > 1:
             audit_path.unlink(missing_ok=True)
             print(
@@ -377,16 +501,28 @@ def main(argv: list[str] | None = None) -> int:
             owned_names.add(requirement_project_name(requirement))
         except InvalidRequirement:
             # An unparseable manifest entry has no canonical name, so it can
-            # never match a pip-audit dependency name and is simply not
-            # classified as owned. partition_requirements still audits it.
+            # never match a pip-audit dependency name and is not classified as
+            # owned. It is still audited (below) and surfaces as a transitive
+            # INFO finding rather than a silent drop.
             continue
 
-    audit, exit_code = obtain_audit(args.audit_json, owned)
+    governed_names: set[str] = set()
+    for requirement in ha_governed:
+        try:
+            governed_names.add(requirement_project_name(requirement))
+        except InvalidRequirement:  # pragma: no cover - HA pins are well-formed
+            continue
+
+    # Audit every manifest requirement at its declared floor; governance decides
+    # only whether a finding blocks (owned) or is informational (HA-pinned).
+    audit_requirements, unbounded = floor_pin_requirements(requirements)
+
+    audit, exit_code = obtain_audit(args.audit_json, audit_requirements)
     if audit is None:
         return exit_code
 
-    findings = classify_audit(audit, owned_names)
-    report = render_report(owned, ha_governed, findings)
+    findings = classify_audit(audit, owned_names, governed_names)
+    report = render_report(owned, ha_governed, unbounded, findings)
 
     if args.verbose or findings["blocking"]:
         print(report)
