@@ -1452,7 +1452,7 @@ class SecretsJSONWatcher:
         return None
 
     def _read_bundles(self) -> list[_SecretsScanResult]:
-        """Return every valid bundle across all observed paths, newest first.
+        """Return the newest bundle per account across all paths, newest first.
 
         Runs in the executor. Delegates to the shared
         :func:`scan_secrets_bundles` ordering so the watcher and the
@@ -1460,13 +1460,38 @@ class SecretsJSONWatcher:
         (``[0]``); missing paths are silently skipped, so empty/absent extra
         paths are a no-op and a single-path watcher behaves exactly as before.
 
-        The watcher needs the *full* ordered list, not only the winner: when the
-        winner has already been imported but cannot be deleted (a read-only
-        mount), :meth:`_scan` steps past it to the next, not-yet-dispatched
-        candidate so a second account is not shadowed forever.
+        The watcher needs more than the winner: when the winner has already been
+        imported but cannot be deleted (a read-only mount), :meth:`_scan` steps
+        past it to the next, not-yet-dispatched candidate so a second account is
+        not shadowed forever. But only *one* candidate per account is exposed --
+        the newest, by the shared ordering. Two paths can hold different
+        snapshots of the *same* account (same ``stable_key``, different
+        ``digest``); without this collapse the older snapshot would become a
+        selectable candidate and, once the account already has an entry, be
+        dispatched as a discovery *update* that overwrites the freshly imported
+        credentials with the stale token. Collapsing to the newest bundle per
+        ``stable_key`` keeps multi-account discovery (different keys still
+        proceed) while, *as long as the newest bundle stays a candidate*, no
+        older snapshot of that account is armed. The guarantee is scoped to
+        candidacy on purpose: if the newest snapshot is later deleted and only
+        an older same-account snapshot on a read-only mount remains, that
+        snapshot becomes the sole candidate again -- there the delete-after-
+        import hook's stale-copy removal, not this collapse, is the guard. On
+        identical mtimes the per-account winner falls back to the digest
+        tiebreak of :func:`scan_secrets_bundles`, which is arbitrary with
+        respect to age; the collapse is therefore deterministic-winner, not
+        freshest-wins, trading a flip-flop between equally timestamped snapshots
+        for a stable choice.
         """
 
-        return [result for _path, result in scan_secrets_bundles(self._paths)]
+        seen_accounts: set[str] = set()
+        newest_per_account: list[_SecretsScanResult] = []
+        for _path, result in scan_secrets_bundles(self._paths):
+            if result.stable_key in seen_accounts:
+                continue
+            seen_accounts.add(result.stable_key)
+            newest_per_account.append(result)
+        return newest_per_account
 
 
 def _collect_extra_watch_paths(

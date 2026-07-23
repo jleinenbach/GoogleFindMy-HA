@@ -1539,6 +1539,55 @@ async def test_undeletable_winner_does_not_shadow_a_second_account(
     await watcher.async_stop()
 
 
+async def test_older_same_account_snapshot_is_never_dispatched(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A second path holding an older snapshot of the SAME account must never be
+    dispatched, so it cannot overwrite the fresh import with a stale token.
+
+    Two watched paths can hold different secrets.json snapshots for one account
+    (same email/stable_key, different digest). The newest wins and is imported;
+    when it cannot be deleted (a read-only mount) it stays settled. Before the
+    per-account collapse in ``_read_bundles`` the next scan armed the OLDER
+    same-account snapshot; once the account already has an entry that dispatch
+    is a discovery update that overwrites the fresh credentials with the stale
+    token. This test pins the strictly stronger invariant that closes the hole
+    at the root -- the older snapshot is never *dispatched at all*, whatever the
+    resulting flow source -- so it deliberately does not depend on an existing
+    entry being present. Only the newest bundle per account is a candidate now;
+    a genuine second account still proceeds (see
+    ``test_undeletable_winner_does_not_shadow_a_second_account``).
+    """
+
+    hass = _FakeHass()
+    triggered: list[dict[str, Any]] = []
+    _patch_discovery(monkeypatch, triggered)
+
+    newer = tmp_path / "data" / "secrets.json"
+    older = tmp_path / "auth" / "secrets.json"
+    _write_secrets(newer, "same@example.com", token="aas_et/NEW")
+    _write_secrets(older, "same@example.com", token="aas_et/OLD")
+    os.utime(newer, (2_000, 2_000))
+    os.utime(older, (1_000, 1_000))
+
+    watcher = discovery.SecretsJSONWatcher(hass, paths=[older, newer])
+
+    # First scan imports the newest snapshot; left undeletable, it stays settled.
+    await watcher.async_force_scan()
+    await asyncio.sleep(0)
+    assert [t["email"] for t in triggered] == ["same@example.com"]
+    assert [t["token"] for t in triggered] == ["aas_et/NEW"]
+
+    # Second scan: the older same-account snapshot must NOT be dispatched. Before
+    # the per-account collapse this armed the stale "aas_et/OLD" bundle.
+    await watcher.async_force_scan()
+    await asyncio.sleep(0)
+    assert len(triggered) == 1
+    assert [t["token"] for t in triggered] == ["aas_et/NEW"]
+
+    await watcher.async_stop()
+
+
 async def test_settled_winner_is_not_rearmed_until_it_fully_disappears(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
