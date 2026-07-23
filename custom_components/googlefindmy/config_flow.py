@@ -898,8 +898,8 @@ async def _async_delete_watched_secrets(
 
     The removal is idempotent (a missing file is a no-op) and never raises: a
     non-writable external path only logs a warning so the flow completes. Because
-    ``SecretsJSONWatcher._scan`` resets ``_last_signature`` to ``None`` when a
-    file disappears, the watcher does not re-trigger on its own delete.
+    ``SecretsJSONWatcher._scan`` forgets the settled signatures when a file
+    disappears, the watcher does not re-trigger on its own delete.
     """
 
     domain_data = getattr(hass, "data", None)

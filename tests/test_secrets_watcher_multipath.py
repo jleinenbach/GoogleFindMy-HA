@@ -1581,32 +1581,32 @@ async def test_settled_winner_is_not_rearmed_until_it_fully_disappears(
     await watcher.async_stop()
 
 
-async def test_stale_failure_of_a_concurrent_dispatch_is_not_lost(
+async def test_concurrent_dispatch_failure_charges_only_its_own_bundle(
     tmp_path: Path,
 ) -> None:
-    """A failure for a bundle that is no longer the last-armed one must drop it
-    from the settled set, so the next scan re-arms it instead of losing it.
+    """A failure for one concurrently in-flight bundle re-arms and charges only
+    itself, leaving the other in flight.
 
     The settled set permits several concurrent in-flight dispatches (that is the
-    multi-account fix). The single ``_last_signature`` retry budget only tracks
-    the most recently armed bundle, so a stale failure callback for an earlier,
-    still-in-flight bundle takes the ``_last_signature != signature`` branch. It
-    must discard that signature rather than leave it settled forever, which would
-    drop the account with no retry and no give-up warning. The multi-in-flight
-    occurrence itself was reproduced against the live watcher during review; this
-    pins the method contract that prevents the silent loss.
+    multi-account fix). With the per-signature retry budget a failure callback
+    for one bundle drops that signature from the settled set (so the next scan
+    re-arms it) and increments only its own counter; a second, still-in-flight
+    bundle is untouched. That is what prevents the silent loss the former
+    single-slot budget suffered, where a failure for a bundle that was no longer
+    the last-armed one could be neither charged nor bounded.
     """
 
     hass = _FakeHass()
     watcher = discovery.SecretsJSONWatcher(hass, paths=[tmp_path / "secrets.json"])
 
-    # Two bundles were armed; the newest ("acct-B") is the last-armed one.
+    # Two bundles are concurrently in flight.
     watcher._settled_signatures = {"acct-A", "acct-B"}
-    watcher._last_signature = "acct-B"
 
-    # A stale failure arrives for the earlier, still-in-flight bundle "acct-A".
+    # A failure arrives for "acct-A" while "acct-B" is still in flight.
     watcher._invalidate_signature("acct-A")
 
-    # "acct-A" is released for a fresh re-arm; "acct-B" stays settled/in flight.
+    # "acct-A" is released for a fresh re-arm and charged its own attempt;
+    # "acct-B" stays settled/in flight with no budget touched.
     assert "acct-A" not in watcher._settled_signatures
     assert "acct-B" in watcher._settled_signatures
+    assert watcher._retry_attempts == {"acct-A": 1}

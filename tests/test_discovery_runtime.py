@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
@@ -370,23 +371,38 @@ async def test_secrets_watcher_retries_unchanged_bundle_after_task_failure(
 
 
 @pytest.mark.asyncio
-async def test_stale_failure_does_not_clobber_a_newer_signature(
+async def test_a_failure_charges_only_its_own_signature(
     temp_secrets_path: Path,
 ) -> None:
-    """A late failure callback must not re-arm an already superseded bundle."""
+    """Each failure re-arms and charges only its own bundle, never another's.
+
+    With the per-signature retry budget a late failure callback for a bundle
+    that is no longer the most recently armed one is accounted against its own
+    counter and re-arms only itself; a concurrently in-flight second bundle is
+    left untouched. The former single-slot budget could not do this -- it either
+    mischarged the newer bundle or dropped the older one with no budget at all.
+    """
 
     watcher = discovery.SecretsJSONWatcher(
         _FakeHass(), path=temp_secrets_path, namespace="test.ns"
     )
-    watcher._last_signature = "newer-bundle"
+    # Two bundles are concurrently in flight (the settled set permits that).
+    watcher._settled_signatures = {"older-bundle", "newer-bundle"}
 
+    # A stale failure for the older bundle re-arms only the older bundle and
+    # charges only its own counter.
     watcher._invalidate_signature("older-bundle")
 
-    assert watcher._last_signature == "newer-bundle"
+    assert "older-bundle" not in watcher._settled_signatures
+    assert "newer-bundle" in watcher._settled_signatures
+    assert watcher._retry_attempts == {"older-bundle": 1}
 
+    # The newer bundle's own failure re-arms only itself and charges its own
+    # counter, independent of the older one.
     watcher._invalidate_signature("newer-bundle")
 
-    assert watcher._last_signature is None
+    assert "newer-bundle" not in watcher._settled_signatures
+    assert watcher._retry_attempts == {"older-bundle": 1, "newer-bundle": 1}
 
 
 @pytest.mark.asyncio
@@ -540,9 +556,9 @@ async def test_entry_unload_cancellation_keeps_bundle_retryable(
     discovery handles on *every* entry unload, and an unload happens on every
     reload (an options change, a reauth). The watcher is a Home Assistant
     instance singleton and survives that reload, so reading the cancel as
-    "shutdown, no failure" would leave ``_last_signature`` armed on a bundle
-    that was never imported -- every later scan returns early and the bundle is
-    lost until the file is rewritten or Home Assistant restarts.
+    "shutdown, no failure" would leave the bundle's signature settled on a
+    bundle that was never imported -- every later scan returns early and the
+    bundle is lost until the file is rewritten or Home Assistant restarts.
     """
 
     hass = _FakeHass()
@@ -565,20 +581,20 @@ async def test_entry_unload_cancellation_keeps_bundle_retryable(
     await _settle()
 
     assert len(attempts) == 1
-    assert watcher._last_signature is not None
+    assert watcher._settled_signatures
 
     # Home Assistant keeps running; only the config entry is unloaded.
     assert getattr(hass, "is_stopping", False) is False
     integration._cleanup_cloud_discovery_runtime(hass._entry.runtime_data)
     await _settle()
 
-    assert watcher._last_signature is None
+    assert not watcher._settled_signatures
 
     await watcher.async_force_scan()
     await _settle()
 
     assert len(attempts) == 2
-    assert watcher._last_signature is not None
+    assert watcher._settled_signatures
 
     # Same cancellation, but now Home Assistant really is shutting down: the
     # signature must stay armed instead of scheduling work on a dying core.
@@ -586,7 +602,7 @@ async def test_entry_unload_cancellation_keeps_bundle_retryable(
     integration._cleanup_cloud_discovery_runtime(hass._entry.runtime_data)
     await _settle()
 
-    assert watcher._last_signature is not None
+    assert watcher._settled_signatures
 
     await watcher.async_force_scan()
     await _settle()
@@ -786,6 +802,71 @@ async def test_returning_bundle_gets_a_full_budget_after_a_successful_other(
 
 
 @pytest.mark.asyncio
+async def test_two_concurrent_failing_bundles_each_give_up_bounded(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Two concurrently in-flight failing bundles must each stop bounded (N1).
+
+    The add-only settled set lets a second bundle arm while the first is still
+    in flight. The former single-slot retry budget could not charge a failure
+    for the bundle that was no longer the last-armed one, so under repeated
+    bursts the two bundles ping-ponged out of the settled set forever: unbounded
+    credential copies in memory and a permanent log flood, exactly the resource
+    exhaustion the budget exists to stop. With the per-signature budget each
+    bundle exhausts its own :data:`_MAX_SECRETS_RETRY_ATTEMPTS` and gives up
+    once. Drives the production trigger, classifier, done-callback and watcher;
+    only the trigger is replaced with a permanently failing one.
+    """
+
+    caplog.set_level(logging.WARNING)
+    hass = _FakeHass()
+    attempts: list[str] = []
+
+    async def _always_failing(_hass: Any, **kwargs: Any) -> bool:
+        attempts.append(str(kwargs.get("email") or ""))
+        raise RuntimeError("permanent flow creation failure")
+
+    _patch_watcher_environment(monkeypatch, _always_failing)
+
+    first = tmp_path / "auth" / "secrets.json"
+    second = tmp_path / "data" / "secrets.json"
+    first.parent.mkdir(parents=True, exist_ok=True)
+    second.parent.mkdir(parents=True, exist_ok=True)
+    _write_secrets(first, "first@example.com", token="aas_et/FIRST")
+    _write_secrets(second, "second@example.com", token="aas_et/SECOND")
+    os.utime(first, (1_000, 1_000))
+    os.utime(second, (2_000, 2_000))
+
+    watcher = discovery.SecretsJSONWatcher(hass, paths=[first, second])
+
+    # Burst: arm BOTH bundles before draining, so both are concurrently in
+    # flight when their failure callbacks fire. A single scan arms one
+    # non-settled candidate, so two scans without a settle in between put both
+    # in flight -- the exact interleaving the single-slot budget could not
+    # account for.
+    budget = discovery._MAX_SECRETS_RETRY_ATTEMPTS + 1
+    for _ in range(30):
+        await watcher.async_force_scan()
+        await watcher.async_force_scan()
+        await _settle()
+
+    # Bounded: each account is tried exactly its own budget, never more.
+    assert attempts.count("first@example.com") == budget
+    assert attempts.count("second@example.com") == budget
+
+    gave_up = [
+        record
+        for record in caplog.records
+        if "gave up on the current bundle" in record.getMessage()
+    ]
+    assert len(gave_up) == 2
+
+    await watcher.async_stop()
+
+
+@pytest.mark.asyncio
 async def test_queueing_error_keeps_bundle_retryable(
     monkeypatch: pytest.MonkeyPatch, temp_secrets_path: Path
 ) -> None:
@@ -900,7 +981,7 @@ def test_cleanup_cloud_discovery_runtime_cancels_handles() -> None:
 # exception: ``hass.config_entries.flow.async_init`` returns ``type=ABORT`` and
 # the coroutine ends normally. Reading the outcome off "the task did not raise"
 # therefore counts a transient abort as a successful import, the failure hook
-# never fires, ``_last_signature`` stays armed and the documented bounded
+# never fires, the signature stays settled and the documented bounded
 # retries never happen. The two tests below drive the *production* trigger,
 # classifier, done-callback and watcher, and only replace the config-flow layer
 # underneath them, so the FlowResult is the only thing that differs.
@@ -954,7 +1035,7 @@ async def test_transient_flow_abort_rearms_the_bundle(
 
     assert len(flow_calls) == 1
     # Re-armed: the signature is dropped, so the identical bundle is retried.
-    assert watcher._last_signature is None
+    assert not watcher._settled_signatures
 
     await watcher.async_force_scan()
     await _settle()
@@ -986,7 +1067,7 @@ async def test_terminal_flow_abort_consumes_the_bundle(
     )
 
     assert len(flow_calls) == 1
-    assert watcher._last_signature is not None
+    assert watcher._settled_signatures
 
     await watcher.async_force_scan()
     await _settle()
