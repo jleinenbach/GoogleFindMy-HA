@@ -788,7 +788,7 @@ class TestMainDecision:
         # An empty reachable set must not trigger the second pass at all: no
         # --governed-audit-json is supplied, and run_pip_audit is booby-trapped
         # to fail if the live re-audit path is ever taken. yarl is already at
-        # HA's 1.20.1 pin here, so reachable is empty and the Bestandsverhalten
+        # HA's 1.20.1 pin here, so reachable is empty and the existing behavior
         # is unchanged (exit 0). Dropping the version==pin guard in
         # reachable_governed_transitive_pins would make yarl "reachable" and trip
         # the booby trap.
