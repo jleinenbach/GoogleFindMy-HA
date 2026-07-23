@@ -710,6 +710,90 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+def _validate_audit_shape(data: object) -> str | None:
+    """Return an error string if ``data`` is not a usable pip-audit report.
+
+    Downstream code dereferences the report type-specifically, so every field
+    that reaches such a call must be validated or a malformed pre-generated
+    report would raise ``AttributeError``/``TypeError`` deep inside processing
+    instead of yielding the documented tooling-error exit code 2. The exhaustive
+    set of type-specific leaf uses is:
+      - a dependency ``name`` -> ``canonicalize_name`` (needs a string);
+      - a vuln ``id`` -> ``sort_key`` order comparison and the
+        :func:`_dedup_sorted_records` ``set`` key (needs a hashable, mutually
+        comparable string);
+      - a vuln ``fix_versions`` -> ``list(...)`` and ``", ".join(...)`` in the
+        report (needs a list of strings).
+    ``version`` is the only stored field never coerced (it is compared only with
+    ``==`` in :func:`reachable_governed_transitive_pins`, an order-/hash-free
+    operation), so it is deliberately not policed. Absent optional keys stay
+    tolerated, exactly as the consumers tolerate them through ``dict.get``
+    defaults; only a present-but-wrong-typed field is rejected. Validating at the
+    single JSON boundary both the pass-1 and the governed re-audit share keeps a
+    malformed report from silently degrading either pass.
+    """
+    if not isinstance(data, dict):
+        return f"root is {type(data).__name__}, expected a JSON object"
+    dependencies = data.get("dependencies", [])
+    if not isinstance(dependencies, list):
+        return f"'dependencies' is {type(dependencies).__name__}, expected a list"
+    for index, dependency in enumerate(dependencies):
+        error = _validate_dependency(index, dependency)
+        if error is not None:
+            return error
+    return None
+
+
+def _validate_dependency(index: int, dependency: object) -> str | None:
+    """Return an error string if one ``dependencies`` entry is unusable.
+
+    Split out of :func:`_validate_audit_shape` so each function keeps a single,
+    readable responsibility (and none trips the return-count lint); together they
+    enforce exactly the shape the consumers dereference.
+    """
+    if not isinstance(dependency, dict):
+        return (
+            f"dependencies[{index}] is {type(dependency).__name__}, "
+            "expected a JSON object"
+        )
+    name = dependency.get("name", "")
+    if not isinstance(name, str):
+        return f"dependencies[{index}].name is {type(name).__name__}, expected a string"
+    vulns = dependency.get("vulns", [])
+    if not isinstance(vulns, list):
+        return f"dependencies[{index}].vulns is {type(vulns).__name__}, expected a list"
+    for vuln_index, vuln in enumerate(vulns):
+        error = _validate_vuln(index, vuln_index, vuln)
+        if error is not None:
+            return error
+    return None
+
+
+def _validate_vuln(index: int, vuln_index: int, vuln: object) -> str | None:
+    """Return an error string if one ``vulns`` entry is unusable.
+
+    Guards the two vuln leaves the consumers dereference type-specifically: an
+    ``id`` used as an order/``set`` key (needs a string) and ``fix_versions``
+    joined into the report (needs a list of strings).
+    """
+    where = f"dependencies[{index}].vulns[{vuln_index}]"
+    if not isinstance(vuln, dict):
+        return f"{where} is {type(vuln).__name__}, expected a JSON object"
+    vuln_id = vuln.get("id", "")
+    if not isinstance(vuln_id, str):
+        return f"{where}.id is {type(vuln_id).__name__}, expected a string"
+    fix_versions = vuln.get("fix_versions", [])
+    if not isinstance(fix_versions, list):
+        return f"{where}.fix_versions is {type(fix_versions).__name__}, expected a list"
+    for fix_index, fix in enumerate(fix_versions):
+        if not isinstance(fix, str):
+            return (
+                f"{where}.fix_versions[{fix_index}] is "
+                f"{type(fix).__name__}, expected a string"
+            )
+    return None
+
+
 def obtain_audit(
     audit_json: Path | None,
     audit_requirements: list[str],
@@ -750,13 +834,19 @@ def obtain_audit(
         label = "pip-audit report"
 
     try:
-        return json.loads(source.read_text(encoding="utf-8")), 0
+        data = json.loads(source.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError) as exc:
         print(f"error: malformed {label}: {exc}", file=sys.stderr)
         return None, 2
     finally:
         if audit_json is None:
             source.unlink(missing_ok=True)
+
+    shape_error = _validate_audit_shape(data)
+    if shape_error is not None:
+        print(f"error: malformed {label}: {shape_error}", file=sys.stderr)
+        return None, 2
+    return data, 0
 
 
 def _dedup_sorted_records(records: list[Record]) -> list[Record]:

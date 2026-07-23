@@ -129,14 +129,19 @@ class TestManifestOnlyPipAuditGate:
                 "--verbose",
             ]
         )
-        report = capsys.readouterr().out
+        # Capture both streams: on a fatal exit 2 the engine writes its
+        # actionable explanation (resolver, network, or malformed-report cause)
+        # to stderr, and capsys drains both buffers here, so a stdout-only grab
+        # would strand that diagnostic where pytest can no longer surface it.
+        captured = capsys.readouterr()
+        report = captured.out
 
         if exit_code == 2:  # pragma: no cover - tooling/network guard
             pytest.fail(
                 "The manifest-only pip-audit gate could not run (tooling or "
                 "network failure). Per the AGENTS.md pip-audit contract, exit "
                 "codes > 1 are fatal and must not silently skip the gate.\n\n"
-                f"{report}"
+                f"stdout:\n{captured.out}\n\nstderr:\n{captured.err}"
             )
         if exit_code == 1:
             pytest.fail(
@@ -636,6 +641,83 @@ class TestMainDecision:
             ]
         )
         assert rc == 2
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            pytest.param([], id="root-list"),
+            pytest.param(None, id="root-null"),
+            pytest.param("nope", id="root-string"),
+            pytest.param({"dependencies": None}, id="dependencies-null"),
+            pytest.param({"dependencies": {}}, id="dependencies-object"),
+            pytest.param({"dependencies": [42]}, id="dependency-not-object"),
+            pytest.param(
+                {"dependencies": [{"name": "x", "vulns": 5}]},
+                id="vulns-not-list",
+            ),
+            pytest.param(
+                {"dependencies": [{"name": "x", "vulns": [7]}]},
+                id="vuln-not-object",
+            ),
+            pytest.param(
+                {"dependencies": [{"name": 42, "vulns": []}]},
+                id="name-not-string",
+            ),
+            pytest.param(
+                {"dependencies": [{"name": "x", "vulns": [{"fix_versions": None}]}]},
+                id="fix-versions-null",
+            ),
+            pytest.param(
+                {"dependencies": [{"name": "x", "vulns": [{"fix_versions": 5}]}]},
+                id="fix-versions-not-list",
+            ),
+            pytest.param(
+                {"dependencies": [{"name": "x", "vulns": [{"id": 1}]}]},
+                id="id-not-string",
+            ),
+            pytest.param(
+                {"dependencies": [{"name": "x", "vulns": [{"id": ["a"]}]}]},
+                id="id-unhashable",
+            ),
+            pytest.param(
+                {
+                    "dependencies": [
+                        {"name": "x", "vulns": [{"id": "V", "fix_versions": [42]}]}
+                    ]
+                },
+                id="fix-version-item-not-string",
+            ),
+        ],
+    )
+    def test_structurally_invalid_audit_json_is_tooling_error(
+        self, tmp_path: Path, payload: object
+    ) -> None:
+        # Syntactically valid JSON of the wrong shape must exit 2 (the documented
+        # tooling error), never crash a downstream consumer with an
+        # AttributeError or TypeError (in classify_audit, the reaudit dedup, or
+        # render_report). The root and every leaf that a consumer dereferences
+        # type-specifically is checked at the single obtain_audit JSON boundary,
+        # so both the pass-1 and the governed re-audit inherit the same guard.
+        bad = _write_json(tmp_path / "audit.json", payload)
+        rc = audit_manifest.main(
+            [
+                "--manifest",
+                str(MANIFEST),
+                "--ha-constraints",
+                str(self._constraints(tmp_path)),
+                "--audit-json",
+                str(bad),
+            ]
+        )
+        assert rc == 2
+
+    def test_well_formed_nested_audit_passes_shape_validation(
+        self, tmp_path: Path
+    ) -> None:
+        # Guard against an over-strict validator: a fully populated, well-formed
+        # report (nested dependency and vuln objects) must still classify and,
+        # with only an unfixable owned finding, exit 0 rather than be rejected.
+        assert self._run(tmp_path, _audit("ecdsa", "0.19.2", "CVE-OK-1", [])) == 0
 
     def test_pip_audit_exit_gt_1_is_tooling_error(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
