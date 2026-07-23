@@ -1,461 +1,359 @@
-"""tests/test_pip_audit_security.py: pip-audit dependency vulnerability scan as pytest.
+"""tests/test_pip_audit_security.py: manifest-only pip-audit gate.
 
-This test runs pip-audit to check for known vulnerabilities in project dependencies
-and provides detailed, actionable feedback for AI agents to fix security issues.
+This module is the pytest face of the manifest-only dependency audit. It is
+consolidated onto ``script/audit_manifest.py`` as the single classification
+engine, replacing the former hand-maintained ``IGNORED_VULNERABILITIES``
+denylist with a principled policy:
+
+- Only the ``manifest.json`` ``requirements`` are audited, because that list --
+  not ``poetry.lock`` -- is what Home Assistant installs for an end user.
+- Packages that Home Assistant pins in its ``package_constraints.txt`` for the
+  declared-minimum HA version (``hacs.json`` ``homeassistant``) are excluded
+  from the blocking decision: the integration cannot raise its floor above
+  Home Assistant's ``==`` pin without making installation impossible, so a
+  finding there is not actionable. This subsumes the former protobuf ignore.
+- Among the remaining integration-owned packages, only a *fixable* finding
+  (a CVE with an available fix version) blocks. Unfixable ("won't fix")
+  findings such as ``ecdsa`` are surfaced as warnings and never block. This
+  subsumes the former ecdsa ignore.
+
+The live gate (``test_no_fixable_integration_owned_vulnerability``) resolves the
+manifest specifiers over the network exactly as Home Assistant would and blocks
+on the first shipped, integration-owned, fixable CVE. The offline unit tests
+pin the engine's classification behavior deterministically without a network.
 
 Usage:
-    pytest tests/test_pip_audit_security.py -v --no-header -p no:conftest
-
-    Or standalone:
-    python tests/test_pip_audit_security.py
-
-The test will:
-1. Run pip-audit on requirements.txt
-2. FAIL on any known vulnerabilities with fix instructions
-3. Provide AI-friendly remediation guidance for each finding
+    pytest tests/test_pip_audit_security.py -v
 """
 
 from __future__ import annotations
 
 import json
-import subprocess
-import sys
-from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
 
 import pytest
 
-# ---------------------------------------------------------------------------
-# Configuration
-# ---------------------------------------------------------------------------
+from script import audit_manifest
 
-# Requirements files to audit (relative to repo root)
-REQUIREMENTS_FILES = [
-    "custom_components/googlefindmy/requirements.txt",
-]
-
-# Known vulnerabilities to ignore (with justification)
-# Format: {"CVE-ID": "Justification why this is acceptable"}
-IGNORED_VULNERABILITIES: dict[str, str] = {
-    # ecdsa is only used for curve definitions (CurveFp, Point, SECP160r1).
-    # The vulnerable sign_digest() function is NOT used in this project.
-    # ECDH operations use the 'cryptography' library instead.
-    "CVE-2024-23342": "ecdsa timing attack - sign_digest() not used; only curve definitions imported",
-    # Same finding as CVE-2024-23342 above, re-keyed by the advisory DB under a
-    # new primary PYSEC id (CVE-2024-23342 is now only an alias). The ignore
-    # match is by primary id, so the alias id must be listed explicitly.
-    "PYSEC-2026-1325": "ecdsa timing attack (alias of CVE-2024-23342) - sign_digest() not used; only curve definitions imported",
-    # protobuf DoS via ParseDict() recursion bypass - this project only uses
-    # MessageToDict/MessageToJson (protobuf→dict/json), never ParseDict (dict→protobuf).
-    # The vulnerable json_format.ParseDict() function is NOT used anywhere.
-    "CVE-2026-0994": "protobuf ParseDict() DoS - ParseDict() not used; only MessageToDict/MessageToJson",
-}
+REPO_ROOT = Path(__file__).resolve().parents[1]
+MANIFEST = REPO_ROOT / "custom_components" / "googlefindmy" / "manifest.json"
+HACS_JSON = REPO_ROOT / "hacs.json"
+FIXTURES = Path(__file__).resolve().parent / "fixtures" / "pip_audit"
+HA_CONSTRAINTS_URL = (
+    "https://raw.githubusercontent.com/home-assistant/core/{version}/"
+    "homeassistant/package_constraints.txt"
+)
 
 
 # ---------------------------------------------------------------------------
-# Data structures
+# Live gate helpers
 # ---------------------------------------------------------------------------
 
 
-@dataclass
-class Vulnerability:
-    """Represents a single vulnerability finding."""
-
-    vuln_id: str
-    aliases: list[str] = field(default_factory=list)
-    description: str = ""
-    fix_versions: list[str] = field(default_factory=list)
-
-    @property
-    def has_fix(self) -> bool:
-        """Return True if a fix version is available."""
-        return bool(self.fix_versions)
-
-    @property
-    def fix_version(self) -> str:
-        """Return the recommended fix version."""
-        return self.fix_versions[0] if self.fix_versions else "No fix available"
-
-
-@dataclass
-class DependencyIssue:
-    """Represents a dependency with vulnerabilities."""
-
-    name: str
-    version: str
-    vulns: list[Vulnerability] = field(default_factory=list)
-
-    @property
-    def vuln_ids(self) -> list[str]:
-        """Return all vulnerability IDs."""
-        return [v.vuln_id for v in self.vulns]
-
-
-# ---------------------------------------------------------------------------
-# pip-audit runner
-# ---------------------------------------------------------------------------
-
-
-def run_pip_audit(requirements_file: str) -> dict[str, Any]:
-    """Run pip-audit and return JSON results."""
-    cmd = [
-        sys.executable,
-        "-m",
-        "pip_audit",
-        "-r",
-        requirements_file,
-        "-f",
-        "json",
-        "--progress-spinner",
-        "off",
-    ]
-
-    result = subprocess.run(cmd, check=False, capture_output=True, text=True)  # noqa: S603
-
-    if "No module named pip_audit" in result.stderr:
+def _require_pip_audit() -> None:
+    """Skip when pip-audit is not importable (parity with the former test)."""
+    try:
+        import pip_audit  # noqa: F401
+    except ImportError:  # pragma: no cover - environment guard
         pytest.skip("pip-audit not installed. Run: pip install pip-audit")
 
-    # pip-audit returns exit code 1 when vulnerabilities are found
-    # Parse stdout for JSON regardless of exit code
-    stdout = result.stdout.strip()
-    if not stdout:
-        # Check stderr for error messages
-        if result.stderr and "error" in result.stderr.lower():
-            raise RuntimeError(f"pip-audit failed: {result.stderr}")
-        return {"dependencies": [], "fixes": []}
 
-    try:
-        return json.loads(stdout)
-    except json.JSONDecodeError as e:
-        # Try to find JSON in output
-        if "{" in stdout:
-            json_start = stdout.index("{")
-            return json.loads(stdout[json_start:])
-        raise RuntimeError(
-            f"Failed to parse pip-audit output: {e}\nOutput: {stdout[:500]}"
-        )
+def _declared_minimum_ha_version() -> str:
+    """Return the declared-minimum HA version from hacs.json."""
+    data = json.loads(HACS_JSON.read_text(encoding="utf-8"))
+    version = str(data.get("homeassistant", "")).strip()
+    if not version:  # pragma: no cover - configuration guard
+        pytest.skip("hacs.json declares no minimum homeassistant version")
+    return version
 
 
-def parse_issues(audit_output: dict[str, Any]) -> list[DependencyIssue]:
-    """Parse pip-audit JSON output into DependencyIssue objects."""
-    issues = []
-    for dep in audit_output.get("dependencies", []):
-        vulns = dep.get("vulns", [])
-        if vulns:
-            parsed_vulns = [
-                Vulnerability(
-                    vuln_id=v.get("id", "Unknown"),
-                    aliases=v.get("aliases", []),
-                    description=v.get("description", ""),
-                    fix_versions=v.get("fix_versions", []),
-                )
-                for v in vulns
-            ]
-            issues.append(
-                DependencyIssue(
-                    name=dep.get("name", "Unknown"),
-                    version=dep.get("version", "Unknown"),
-                    vulns=parsed_vulns,
-                )
-            )
-    return issues
+def _ha_constraints_fixture(version: str) -> Path:
+    """Return the committed HA package_constraints.txt snapshot for a version.
 
-
-# ---------------------------------------------------------------------------
-# Report generation
-# ---------------------------------------------------------------------------
-
-
-def generate_ai_report(issues: list[DependencyIssue], ignored: dict[str, str]) -> str:
-    """Generate a detailed AI-friendly report with remediation instructions."""
-    # Filter out ignored vulnerabilities
-    active_issues = []
-    ignored_issues = []
-
-    for issue in issues:
-        active_vulns = []
-        ignored_vulns = []
-        for vuln in issue.vulns:
-            if vuln.vuln_id in ignored:
-                ignored_vulns.append((vuln, ignored[vuln.vuln_id]))
-            else:
-                active_vulns.append(vuln)
-
-        if active_vulns:
-            active_issues.append(
-                DependencyIssue(
-                    name=issue.name, version=issue.version, vulns=active_vulns
-                )
-            )
-        if ignored_vulns:
-            ignored_issues.append((issue.name, issue.version, ignored_vulns))
-
-    lines = []
-    lines.append("=" * 80)
-    lines.append("🔐 PIP-AUDIT DEPENDENCY VULNERABILITY REPORT")
-    lines.append("=" * 80)
-    lines.append("")
-
-    total_vulns = sum(len(i.vulns) for i in active_issues)
-    fixable = sum(1 for i in active_issues for v in i.vulns if v.has_fix)
-    unfixable = total_vulns - fixable
-
-    lines.append(
-        f"📊 Summary: {total_vulns} vulnerabilities in {len(active_issues)} packages"
-    )
-    lines.append(f"   ✅ Fixable: {fixable} | ⚠️ No fix available: {unfixable}")
-    lines.append("")
-
-    if not active_issues:
-        lines.append("✅ No active vulnerabilities found!")
-        if ignored_issues:
-            lines.append("")
-            lines.append(
-                f"ℹ️  {len(ignored_issues)} vulnerabilities ignored (see IGNORED_VULNERABILITIES)"
-            )
-        return "\n".join(lines)
-
-    lines.append("⚠️  CRITICAL: The following vulnerabilities were found!")
-    lines.append("")
-
-    # Group by fixable vs unfixable
-    fixable_issues = [(i, v) for i in active_issues for v in i.vulns if v.has_fix]
-    unfixable_issues = [(i, v) for i in active_issues for v in i.vulns if not v.has_fix]
-
-    if fixable_issues:
-        lines.append("-" * 80)
-        lines.append(f"🔧 FIXABLE VULNERABILITIES ({len(fixable_issues)} found)")
-        lines.append("-" * 80)
-        lines.append("")
-
-        for issue, vuln in fixable_issues:
-            lines.append(f"### [{vuln.vuln_id}] {issue.name} {issue.version}")
-            lines.append(
-                f"🔗 Aliases: {', '.join(vuln.aliases) if vuln.aliases else 'None'}"
-            )
-            lines.append(f"✅ Fix available: Upgrade to {vuln.fix_version}")
-            lines.append("")
-            lines.append(f"📝 {vuln.description[:500]}...")
-            lines.append("")
-            lines.append("**AI ACTION REQUIRED:**")
-            lines.append("```bash")
-            lines.append("# Update requirements.txt:")
-            lines.append(f"# Change: {issue.name}>={issue.version}")
-            lines.append(f"# To:     {issue.name}>={vuln.fix_version}")
-            lines.append("```")
-            lines.append("")
-
-    if unfixable_issues:
-        lines.append("-" * 80)
-        lines.append(f"⚠️  UNFIXABLE VULNERABILITIES ({len(unfixable_issues)} found)")
-        lines.append("-" * 80)
-        lines.append("")
-        lines.append(
-            "These vulnerabilities have no fix available from the package maintainers."
-        )
-        lines.append("Consider the following options:")
-        lines.append("")
-
-        for issue, vuln in unfixable_issues:
-            lines.append(f"### [{vuln.vuln_id}] {issue.name} {issue.version}")
-            lines.append(
-                f"🔗 Aliases: {', '.join(vuln.aliases) if vuln.aliases else 'None'}"
-            )
-            lines.append("❌ No fix available")
-            lines.append("")
-            lines.append(f"📝 {vuln.description}")
-            lines.append("")
-            lines.append("**AI ACTION OPTIONS:**")
-            lines.append("")
-            lines.append(
-                "1. **Ignore if risk is acceptable** - Add to IGNORED_VULNERABILITIES:"
-            )
-            lines.append("   ```python")
-            lines.append("   IGNORED_VULNERABILITIES = {")
-            lines.append(
-                f'       "{vuln.vuln_id}": "Justification: [explain why this is acceptable]",'
-            )
-            lines.append("   }")
-            lines.append("   ```")
-            lines.append("")
-            lines.append("2. **Find alternative package** - Search for a replacement:")
-            lines.append(f"   - Search PyPI for alternatives to `{issue.name}`")
-            lines.append(
-                "   - Evaluate if the vulnerable functionality is actually used"
-            )
-            lines.append("")
-            lines.append(
-                "3. **Mitigate in code** - If the vulnerable function is used:"
-            )
-            lines.append(f"   - Review code that imports `{issue.name}`")
-            lines.append("   - Avoid using the affected functionality if possible")
-            lines.append("")
-
-    if ignored_issues:
-        lines.append("-" * 80)
-        lines.append(
-            f"ℹ️  IGNORED VULNERABILITIES ({sum(len(v) for _, _, v in ignored_issues)} found)"
-        )
-        lines.append("-" * 80)
-        lines.append("")
-        for name, version, vulns in ignored_issues:
-            for vuln, justification in vulns:
-                lines.append(f"- [{vuln.vuln_id}] {name} {version}")
-                lines.append(f"  Justification: {justification}")
-        lines.append("")
-
-    lines.append("=" * 80)
-    lines.append("🤖 AI AGENT INSTRUCTIONS")
-    lines.append("=" * 80)
-    lines.append("")
-    lines.append("1. For FIXABLE vulnerabilities:")
-    lines.append("   a. Update the version in requirements.txt")
-    lines.append("   b. Update the version in manifest.json (if present)")
-    lines.append("   c. Run pip-audit again to verify the fix")
-    lines.append("")
-    lines.append("2. For UNFIXABLE vulnerabilities:")
-    lines.append("   a. Assess if the vulnerable functionality is used in this project")
-    lines.append(
-        "   b. If not used or risk is acceptable, add to IGNORED_VULNERABILITIES"
-    )
-    lines.append("   c. If used, consider alternative packages or code mitigations")
-    lines.append("")
-    lines.append(
-        "3. Commit with message: 'security: fix pip-audit findings [package-name]'"
-    )
-    lines.append("")
-
-    return "\n".join(lines)
-
-
-# ---------------------------------------------------------------------------
-# Pytest tests
-# ---------------------------------------------------------------------------
-
-
-class TestPipAuditSecurity:
-    """Dependency vulnerability tests using pip-audit."""
-
-    def test_no_known_vulnerabilities(self) -> None:
-        """Ensure no known vulnerabilities exist in dependencies.
-
-        This test runs pip-audit on requirements.txt and fails if any
-        vulnerabilities are found (unless explicitly ignored).
-        It provides detailed, AI-friendly remediation instructions.
-        """
-        repo_root = Path(__file__).parent.parent
-
-        all_issues: list[DependencyIssue] = []
-
-        for req_file in REQUIREMENTS_FILES:
-            req_path = repo_root / req_file
-            if not req_path.exists():
-                print(f"⚠️  Skipping {req_file} (not found)")
-                continue
-
-            print(f"\n📦 Auditing {req_file}...")
-            audit_output = run_pip_audit(str(req_path))
-            issues = parse_issues(audit_output)
-            all_issues.extend(issues)
-
-        # Generate report
-        report = generate_ai_report(all_issues, IGNORED_VULNERABILITIES)
-
-        # Filter active (non-ignored) issues
-        active_issues = []
-        for issue in all_issues:
-            active_vulns = [
-                v for v in issue.vulns if v.vuln_id not in IGNORED_VULNERABILITIES
-            ]
-            if active_vulns:
-                active_issues.append(issue)
-
-        # Always print the report
-        print("\n" + report)
-
-        # Fail if active vulnerabilities found
-        if active_issues:
-            total_vulns = sum(len(i.vulns) for i in active_issues)
-            pytest.fail(
-                f"\n\n{report}\n\n"
-                f"❌ SECURITY CHECK FAILED: Found {total_vulns} vulnerabilities "
-                f"in {len(active_issues)} packages.\n"
-                f"See report above for AI-friendly remediation instructions."
-            )
-
-    def test_pip_audit_available(self) -> None:
-        """Verify pip-audit is installed and accessible."""
-        result = subprocess.run(
-            [sys.executable, "-m", "pip_audit", "--version"],
-            check=False,
-            capture_output=True,
-            text=True,
-        )
-        if result.returncode != 0:
-            pytest.skip(
-                "pip-audit is not installed. Install with: pip install pip-audit"
-            )
-        print(f"\n✅ pip-audit version: {result.stdout.strip()}")
-
-
-# ---------------------------------------------------------------------------
-# Standalone execution
-# ---------------------------------------------------------------------------
-
-
-def main() -> int:
-    """Run pip-audit analysis standalone (without pytest).
-
-    Returns:
-        0 if no vulnerabilities, 1 if vulnerabilities found.
+    The pytest suite is socket-sandboxed to localhost (tests/conftest.py), so
+    the Home Assistant governance set is read from a committed fixture rather
+    than fetched at runtime. A missing fixture means ``hacs.json`` was bumped
+    without refreshing the snapshot; that is a loud, actionable failure, not a
+    silent skip.
     """
-    print("🔐 Running pip-audit Dependency Vulnerability Scan (standalone mode)...")
-    print()
+    path = FIXTURES / f"ha_package_constraints_{version}.txt"
+    if not path.is_file():  # pragma: no cover - refresh guard
+        pytest.fail(
+            f"Missing HA constraints fixture for declared-minimum HA {version}: "
+            f"{path}\nhacs.json was bumped; add the snapshot from "
+            f"{HA_CONSTRAINTS_URL.format(version=version)}"
+        )
+    return path
 
-    repo_root = Path(__file__).parent.parent
 
-    all_issues: list[DependencyIssue] = []
+# ---------------------------------------------------------------------------
+# Live gate
+# ---------------------------------------------------------------------------
 
-    for req_file in REQUIREMENTS_FILES:
-        req_path = repo_root / req_file
-        if not req_path.exists():
-            print(f"⚠️  Skipping {req_file} (not found)")
-            continue
 
-        print(f"📦 Auditing {req_file}...")
-        try:
-            audit_output = run_pip_audit(str(req_path))
-        except RuntimeError as e:
-            print(f"❌ Error: {e}")
-            return 1
+class TestManifestOnlyPipAuditGate:
+    """The end-to-end manifest-only gate, resolved over the network."""
 
-        issues = parse_issues(audit_output)
-        all_issues.extend(issues)
+    def test_no_fixable_integration_owned_vulnerability(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Fail if a shipped, integration-owned package has a fixable CVE.
 
-    report = generate_ai_report(all_issues, IGNORED_VULNERABILITIES)
-    print(report)
+        This is the real merge gate: it runs the ``audit_manifest`` engine over
+        the live manifest requirements (pip-audit resolves them over the network
+        in a subprocess, which the socket sandbox does not patch) under Home
+        Assistant's committed constraints for the declared-minimum version.
+        HA-governed and unfixable findings do not block; only actionable,
+        integration-owned findings do. A pip-audit tooling/network failure
+        (exit 2) skips rather than blocks.
+        """
+        _require_pip_audit()
+        version = _declared_minimum_ha_version()
+        constraints_path = _ha_constraints_fixture(version)
 
-    # Filter active (non-ignored) issues
-    active_issues = []
-    for issue in all_issues:
-        active_vulns = [
-            v for v in issue.vulns if v.vuln_id not in IGNORED_VULNERABILITIES
+        exit_code = audit_manifest.main(
+            [
+                "--manifest",
+                str(MANIFEST),
+                "--ha-constraints",
+                str(constraints_path),
+                "--verbose",
+            ]
+        )
+        report = capsys.readouterr().out
+
+        if exit_code == 2:  # pragma: no cover - tooling/network guard
+            pytest.skip(
+                f"pip-audit could not run (tooling or network unavailable):\n{report}"
+            )
+        if exit_code == 1:
+            pytest.fail(
+                "Manifest-only pip-audit found a fixable, integration-owned "
+                "vulnerability. Bump the manifest floor for the affected "
+                f"package(s).\n\n{report}"
+            )
+        assert exit_code == 0
+
+
+# ---------------------------------------------------------------------------
+# Offline engine unit tests (deterministic, no network)
+# ---------------------------------------------------------------------------
+
+
+def _write_json(path: Path, obj: object) -> Path:
+    path.write_text(json.dumps(obj), encoding="utf-8")
+    return path
+
+
+def _audit(name: str, version: str, vuln_id: str, fixes: list[str]) -> dict:
+    return {
+        "dependencies": [
+            {
+                "name": name,
+                "version": version,
+                "vulns": [{"id": vuln_id, "fix_versions": fixes}],
+            }
         ]
-        if active_vulns:
-            active_issues.append(issue)
-
-    if active_issues:
-        total_vulns = sum(len(i.vulns) for i in active_issues)
-        print()
-        print(f"❌ SECURITY CHECK FAILED: Found {total_vulns} vulnerabilities.")
-        print("   Fix these issues and run again.")
-        return 1
-
-    print()
-    print("✅ SECURITY CHECK PASSED: No active vulnerabilities found.")
-    return 0
+    }
 
 
-if __name__ == "__main__":
-    sys.exit(main())
+class TestClassifyAudit:
+    """The classification core: block / warn / report partitioning."""
+
+    def test_fixable_owned_blocks(self) -> None:
+        findings = audit_manifest.classify_audit(
+            _audit("selenium", "4.25.0", "PYSEC-TEST-1", ["4.26.0"]),
+            {"selenium"},
+        )
+        assert [r["id"] for r in findings["blocking"]] == ["PYSEC-TEST-1"]
+        assert findings["unfixable"] == []
+        assert findings["transitive"] == []
+
+    def test_unfixable_owned_warns(self) -> None:
+        findings = audit_manifest.classify_audit(
+            _audit("ecdsa", "0.19.2", "PYSEC-2026-1325", []),
+            {"ecdsa"},
+        )
+        assert findings["blocking"] == []
+        assert [r["id"] for r in findings["unfixable"]] == ["PYSEC-2026-1325"]
+
+    def test_non_owned_is_transitive(self) -> None:
+        # aiohttp is HA-governed here (absent from owned_names) -> never blocks.
+        findings = audit_manifest.classify_audit(
+            _audit("aiohttp", "3.13.3", "CVE-TEST-2", ["3.14.1"]),
+            {"selenium"},
+        )
+        assert findings["blocking"] == []
+        assert findings["unfixable"] == []
+        assert [r["id"] for r in findings["transitive"]] == ["CVE-TEST-2"]
+
+
+class TestPartitionAndConstraints:
+    """Requirement partitioning and HA-constraint parsing."""
+
+    def test_ha_governed_is_excluded_from_owned(self) -> None:
+        owned, ha_governed = audit_manifest.partition_requirements(
+            ["aiohttp>=3.11.8", "selenium>=4.25.0"], {"aiohttp"}
+        )
+        assert owned == ["selenium>=4.25.0"]
+        assert ha_governed == ["aiohttp>=3.11.8"]
+
+    def test_unparseable_requirement_is_owned(self) -> None:
+        owned, ha_governed = audit_manifest.partition_requirements(
+            ["not a requirement!!!"], set()
+        )
+        assert owned == ["not a requirement!!!"]
+        assert ha_governed == []
+
+    def test_parse_ha_governed_names_reads_only_pins(self) -> None:
+        text = (
+            "# generated constraints\n"
+            "aiohttp==3.13.3\n"
+            "cryptography==46.0.5\n"
+            "somerange>=1.0\n"
+            "\n"
+        )
+        assert audit_manifest.parse_ha_governed_names(text) == {
+            "aiohttp",
+            "cryptography",
+        }
+
+
+class TestMainDecision:
+    """The CLI decision surface, driven by a pre-generated audit (no network)."""
+
+    def _constraints(self, tmp_path: Path) -> Path:
+        path = tmp_path / "ha_constraints.txt"
+        path.write_text("aiohttp==3.13.3\n", encoding="utf-8")
+        return path
+
+    def _run(self, tmp_path: Path, audit: dict) -> int:
+        # ``--verbose`` forces the full report to stdout even when there is no
+        # blocking finding, so the WARN/INFO assertions can read it.
+        audit_path = _write_json(tmp_path / "audit.json", audit)
+        return audit_manifest.main(
+            [
+                "--manifest",
+                str(MANIFEST),
+                "--ha-constraints",
+                str(self._constraints(tmp_path)),
+                "--audit-json",
+                str(audit_path),
+                "--verbose",
+            ]
+        )
+
+    def test_blocks_on_fixable_owned(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        rc = self._run(
+            tmp_path, _audit("selenium", "4.25.0", "PYSEC-TEST-3", ["4.26.0"])
+        )
+        assert rc == 1
+        assert "BLOCKING (1)" in capsys.readouterr().out
+
+    def test_ha_governed_finding_does_not_block(self, tmp_path: Path) -> None:
+        rc = self._run(tmp_path, _audit("aiohttp", "3.13.3", "CVE-TEST-4", ["3.14.1"]))
+        assert rc == 0
+
+    def test_unfixable_owned_does_not_block(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        rc = self._run(tmp_path, _audit("ecdsa", "0.19.2", "PYSEC-2026-1325", []))
+        assert rc == 0
+        assert "WARN (1)" in capsys.readouterr().out
+
+    def test_clean_audit_is_green(self, tmp_path: Path) -> None:
+        assert self._run(tmp_path, {"dependencies": []}) == 0
+
+    def test_missing_manifest_is_tooling_error(self, tmp_path: Path) -> None:
+        audit_path = _write_json(tmp_path / "audit.json", {"dependencies": []})
+        rc = audit_manifest.main(
+            [
+                "--manifest",
+                str(tmp_path / "does-not-exist.json"),
+                "--ha-constraints",
+                str(self._constraints(tmp_path)),
+                "--audit-json",
+                str(audit_path),
+            ]
+        )
+        assert rc == 2
+
+    def test_malformed_audit_json_is_tooling_error(self, tmp_path: Path) -> None:
+        bad = tmp_path / "audit.json"
+        bad.write_text("{ this is not valid json", encoding="utf-8")
+        rc = audit_manifest.main(
+            [
+                "--manifest",
+                str(MANIFEST),
+                "--ha-constraints",
+                str(self._constraints(tmp_path)),
+                "--audit-json",
+                str(bad),
+            ]
+        )
+        assert rc == 2
+
+    def test_pip_audit_exit_gt_1_is_tooling_error(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A pip-audit exit code > 1 is a tooling/network failure and must map to
+        # exit 2, never to a spurious block. No --audit-json, so main() takes
+        # the live branch and invokes the (patched) runner.
+        monkeypatch.setattr(audit_manifest, "run_pip_audit", lambda _reqs, _out: 2)
+        rc = audit_manifest.main(
+            [
+                "--manifest",
+                str(MANIFEST),
+                "--ha-constraints",
+                str(self._constraints(tmp_path)),
+            ]
+        )
+        assert rc == 2
+
+    def test_unparseable_manifest_entry_does_not_crash(self, tmp_path: Path) -> None:
+        # An unparseable manifest requirement is audited, not silently dropped,
+        # and must not crash owned-name derivation (wiring, not just the
+        # isolated partition helper).
+        manifest = _write_json(
+            tmp_path / "manifest.json",
+            {"requirements": ["selenium>=4.25.0", "!!bogus!!"]},
+        )
+        audit_path = _write_json(tmp_path / "audit.json", {"dependencies": []})
+        rc = audit_manifest.main(
+            [
+                "--manifest",
+                str(manifest),
+                "--ha-constraints",
+                str(self._constraints(tmp_path)),
+                "--audit-json",
+                str(audit_path),
+            ]
+        )
+        assert rc == 0
+
+
+def test_run_pip_audit_invokes_module(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """run_pip_audit shells out to ``python -m pip_audit`` and returns its code."""
+    seen: dict[str, list[str]] = {}
+
+    def fake_run(cmd: list[str], check: bool) -> object:
+        seen["cmd"] = cmd
+        out_path = Path(cmd[cmd.index("-o") + 1])
+        out_path.write_text('{"dependencies": []}', encoding="utf-8")
+
+        class _Completed:
+            returncode = 0
+
+        return _Completed()
+
+    monkeypatch.setattr(audit_manifest.subprocess, "run", fake_run)
+    output = tmp_path / "audit.json"
+    rc = audit_manifest.run_pip_audit(["selenium>=4.25.0"], output)
+
+    assert rc == 0
+    assert "pip_audit" in seen["cmd"]
+    assert json.loads(output.read_text(encoding="utf-8")) == {"dependencies": []}
