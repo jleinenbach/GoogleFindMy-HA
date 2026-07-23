@@ -185,35 +185,44 @@ def ha_pin_requirements(
 
 
 def parse_ha_governed_pins(constraints_text: str) -> dict[str, str]:
-    """Return the canonical ``name -> version`` pins from an HA constraints file.
+    """Return the canonical ``name -> audit-floor`` map from an HA constraints file.
 
-    Only ``name==version`` pins are treated as governed; comments, blank lines
-    and range/marker entries are ignored. Home Assistant's generated
-    ``package_constraints.txt`` uses exact ``==`` pins throughout. The *version*
-    is retained (unlike a bare name set) because the audit pins each governed
-    manifest entry to Home Assistant's own pin rather than to the manifest
-    floor: HA overrides the floor at install time, so the pin is the version a
-    user under the declared-minimum HA actually runs. On a duplicate pin the
-    last wins, mirroring how a constraints file is applied top to bottom.
+    Each governed package maps to the lowest version Home Assistant permits: an
+    exact ``name==X`` pin yields ``X`` (a zero-width floor), while a range such
+    as ``urllib3>=2.0`` yields its inclusive lower bound ``2.0``. That floor is
+    the worst-case version a user under the declared-minimum Home Assistant may
+    actually run, so auditing it -- exactly as :func:`floor_pin_requirements`
+    audits manifest floors -- surfaces a CVE that lives in an older, still-
+    permitted version instead of letting the resolver's newest pick hide it.
+    Comments, blank lines, and constraints with no inclusive lower bound (a bare
+    name, a pure ``!=`` exclusion, an upper-bound-only ``<`` cap, or a
+    non-concrete ``==1.*`` prefix / ``===`` arbitrary equality) are ignored: no
+    worst-case version can be derived from them. On a duplicate the last wins,
+    mirroring how a constraints file is applied top to bottom.
     """
     pins: dict[str, str] = {}
     for raw_line in constraints_text.splitlines():
         line = raw_line.strip()
         if not line or line.startswith("#"):
             continue
-        if "==" not in line:
-            continue
-        lhs, _, rhs = line.partition("==")
-        name = lhs.strip()
-        version = rhs.split(";", 1)[0].split(",", 1)[0].strip()
-        if not name or not version:
-            continue
         try:
-            canonical = canonicalize_name(Requirement(line).name)
+            requirement = Requirement(line)
         except InvalidRequirement:
-            # Fall back to the bare left-hand side for non-PEP 508 lines.
-            canonical = canonicalize_name(name)
-        pins[canonical] = version
+            # Non-PEP 508 line: salvage a bare ``name==version`` so a
+            # non-standard exact constraint still governs. A range floor cannot
+            # be recovered without a parseable specifier, so such a line is
+            # dropped rather than guessed.
+            name, separator, rhs = line.partition("==")
+            name = name.strip()
+            version = rhs.split(";", 1)[0].split(",", 1)[0].strip()
+            if not separator or not name or not version:
+                continue
+            pins[canonicalize_name(name)] = version
+            continue
+        floor = _requirement_floor(requirement)
+        if floor is None:
+            continue
+        pins[canonicalize_name(requirement.name)] = floor
     return pins
 
 

@@ -302,7 +302,10 @@ class TestPartitionAndConstraints:
         assert owned == ["not a requirement!!!"]
         assert ha_governed == []
 
-    def test_parse_ha_governed_names_reads_only_pins(self) -> None:
+    def test_parse_ha_governed_names_includes_range_floors(self) -> None:
+        # A range-constrained governed package (somerange) is governed too: its
+        # name is read alongside exact pins, because HA governs its version even
+        # without a zero-width pin.
         text = (
             "# generated constraints\n"
             "aiohttp==3.13.3\n"
@@ -313,11 +316,13 @@ class TestPartitionAndConstraints:
         assert audit_manifest.parse_ha_governed_names(text) == {
             "aiohttp",
             "cryptography",
+            "somerange",
         }
 
     def test_parse_ha_governed_pins_retains_versions(self) -> None:
         # Fund 2: the pin *version* is kept (not discarded), because governed
-        # packages are audited at HA's own pin, not at the manifest floor.
+        # packages are audited at HA's own pin, not at the manifest floor. A
+        # range constraint keeps its inclusive floor (somerange>=1.0 -> 1.0).
         text = (
             "# generated constraints\n"
             "aiohttp==3.12.15\n"
@@ -329,6 +334,7 @@ class TestPartitionAndConstraints:
         assert audit_manifest.parse_ha_governed_pins(text) == {
             "aiohttp": "3.12.15",
             "cryptography": "45.0.3",
+            "somerange": "1.0",
             "marked": "1.2.3",
         }
         # The name set stays a derived view of the pin mapping.
@@ -339,13 +345,71 @@ class TestPartitionAndConstraints:
     def test_parse_ha_governed_pins_skips_empty_and_falls_back(self) -> None:
         # An empty name or empty version on a ``==`` line is skipped; a line
         # whose left-hand side is not a valid PEP 508 name falls back to the
-        # canonicalized bare name so a non-standard constraint still governs.
+        # canonicalized bare name so a non-standard ``==`` constraint still
+        # governs. A non-PEP 508 *range* line has no recoverable floor (the
+        # fallback salvages only ``==``), so it is dropped, not guessed.
         text = (
             "==1.0\n"  # empty name -> skipped
             "foo==\n"  # empty version -> skipped
             "weird!name==2.0\n"  # not PEP 508 -> bare-name fallback
+            "bad!range>=2.0\n"  # not PEP 508 range -> no salvage, dropped
         )
         assert audit_manifest.parse_ha_governed_pins(text) == {"weird!name": "2.0"}
+
+    def test_parse_ha_governed_pins_reads_range_floors(self) -> None:
+        # The regression Codex flagged: HA governs many transitives with a range
+        # rather than an exact pin. Each contributes its inclusive lower bound so
+        # the audit runs at the worst-case permitted version; a constraint with
+        # no inclusive floor (a pure ``!=`` exclusion or an upper-bound-only cap)
+        # yields no worst-case version and is dropped.
+        text = (
+            "urllib3>=2.0\n"
+            "typing-extensions>=4.15.0,<5.0\n"
+            "certifi>=2021.5.30\n"
+            "compat~=1.4.5\n"
+            "pubnub!=6.4.0\n"  # no inclusive floor -> dropped
+            "gql<4.0.0\n"  # upper-bound only -> dropped
+        )
+        assert audit_manifest.parse_ha_governed_pins(text) == {
+            "urllib3": "2.0",
+            "typing-extensions": "4.15.0",
+            "certifi": "2021.5.30",
+            "compat": "1.4.5",
+        }
+
+    def test_no_manifest_dependency_is_ha_range_governed(self) -> None:
+        # Tripwire for the latent classification flip a range floor introduces:
+        # a DIRECT manifest entry HA governs is audited at HA's own pin
+        # (ha_pin_requirements), which is sound only when HA pins it EXACTLY.
+        # If HA ever range-constrains a manifest dependency (e.g. aiohttp>=3.0
+        # instead of ==), that entry would flip owned->governed, be audited at
+        # HA's floor -- possibly below the manifest floor -- and silently drop
+        # from blocking to non-blocking INFO. Today every manifest dependency HA
+        # governs is ==-pinned; this locks that invariant so a future HA snapshot
+        # that breaks it fails CI loudly instead of hiding an actionable finding.
+        manifest_names = {
+            audit_manifest.requirement_project_name(req)
+            for req in audit_manifest.load_manifest_requirements(MANIFEST)
+        }
+        text = (FIXTURES / "ha_package_constraints_2025.9.1.txt").read_text(
+            encoding="utf-8"
+        )
+        range_governed: set[str] = set()
+        for raw_line in text.splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            try:
+                requirement = audit_manifest.Requirement(line)
+            except audit_manifest.InvalidRequirement:
+                continue
+            operators = {spec.operator for spec in requirement.specifier}
+            # Governed (a determinable floor) but not via an exact == pin.
+            if audit_manifest._requirement_floor(
+                requirement
+            ) is not None and operators != {"=="}:
+                range_governed.add(audit_manifest.canonicalize_name(requirement.name))
+        assert manifest_names & range_governed == set()
 
     def test_ha_pin_requirements_pins_to_ha_version(self) -> None:
         # A governed manifest entry is pinned to HA's == version, overriding its
@@ -594,6 +658,44 @@ class TestMainDecision:
         assert "BLOCKING (0)" in out
         assert "CVE-YARL-PIN" in out
         assert "Home Assistant's own minimum-version pin" in out
+
+    def test_range_floored_governed_transitive_reaudited_at_floor(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # Codex fix: HA range-constrains urllib3 (>=2.0), a transitive reached
+        # via gpsoauth. Pass 1 resolves urllib3 to 2.5.0 (above the 2.0 floor)
+        # with no vuln, so a CVE living in the still-permitted 2.0 would vanish.
+        # The range floor now enters the governed pins, so reachable selection
+        # picks urllib3 up and the second --no-deps pass re-audits urllib3==2.0,
+        # surfacing the CVE as non-blocking governed. Reverting the range-floor
+        # parse drops urllib3 from governed, skips pass 2, and loses the CVE.
+        constraints = tmp_path / "ha_constraints.txt"
+        constraints.write_text("aiohttp==3.13.3\nurllib3>=2.0\n", encoding="utf-8")
+        pass1 = _write_json(
+            tmp_path / "pass1.json",
+            {"dependencies": [{"name": "urllib3", "version": "2.5.0", "vulns": []}]},
+        )
+        pass2 = _write_json(
+            tmp_path / "pass2.json",
+            _audit("urllib3", "2.0", "CVE-URLLIB3-FLOOR", ["2.0.7"]),
+        )
+        rc = audit_manifest.main(
+            [
+                "--manifest",
+                str(MANIFEST),
+                "--ha-constraints",
+                str(constraints),
+                "--audit-json",
+                str(pass1),
+                "--governed-audit-json",
+                str(pass2),
+                "--verbose",
+            ]
+        )
+        out = capsys.readouterr().out
+        assert rc == 0
+        assert "BLOCKING (0)" in out
+        assert "CVE-URLLIB3-FLOOR" in out
 
     def test_no_governed_transitive_skips_second_pass(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
