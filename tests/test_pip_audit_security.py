@@ -1066,6 +1066,39 @@ class TestMainDecision:
         )
         assert rc == 0
 
+    def test_offline_audit_json_requires_governed_report_for_reaudit(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Sibling of test_no_governed_transitive_skips_second_pass with the one
+        # difference that matters: yarl resolves in pass 1 to a version other
+        # than HA's pin, so reachable is non-empty and a second pass is
+        # required. --audit-json promises "no network", so main() must not go
+        # live; without --governed-audit-json it returns tooling exit 2 instead
+        # of silently invoking pip-audit or silently dropping the second pass.
+        # run_pip_audit is booby-trapped to prove no network call is made.
+        constraints = tmp_path / "ha_constraints.txt"
+        constraints.write_text("aiohttp==3.13.3\nyarl==1.20.1\n", encoding="utf-8")
+        audit_path = _write_json(
+            tmp_path / "audit.json",
+            {"dependencies": [{"name": "yarl", "version": "1.24.5", "vulns": []}]},
+        )
+
+        def _boom(*_args: object, **_kwargs: object) -> int:
+            raise AssertionError("offline --audit-json must not invoke pip-audit")
+
+        monkeypatch.setattr(audit_manifest, "run_pip_audit", _boom)
+        rc = audit_manifest.main(
+            [
+                "--manifest",
+                str(MANIFEST),
+                "--ha-constraints",
+                str(constraints),
+                "--audit-json",
+                str(audit_path),
+            ]
+        )
+        assert rc == 2
+
     def test_unparseable_manifest_entry_does_not_crash(self, tmp_path: Path) -> None:
         # An unparseable manifest requirement is audited, not silently dropped,
         # and must not crash owned-name derivation (wiring, not just the

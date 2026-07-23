@@ -803,7 +803,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help=(
             "Use a pre-generated pip-audit JSON report instead of invoking "
-            "pip-audit (no network; used by the test suite)."
+            "pip-audit (no network; used by the test suite). When governed "
+            "transitive packages resolve away from Home Assistant's pin, "
+            "--governed-audit-json must also be supplied to stay offline."
         ),
     )
     parser.add_argument(
@@ -813,7 +815,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help=(
             "Use a pre-generated pip-audit JSON report for the governed "
             "transitive re-audit instead of invoking pip-audit (no network; "
-            "used by the test suite)."
+            "used by the test suite). Required alongside --audit-json when pass "
+            "1 reaches governed transitives resolved away from HA's pin."
         ),
     )
     parser.add_argument(
@@ -996,11 +999,12 @@ def _canonical_names(requirements: list[str]) -> set[str]:
     return names
 
 
-def apply_governed_transitive_reaudit(  # noqa: PLR0913 - 6 irreducible inputs; see docstring
+def apply_governed_transitive_reaudit(  # noqa: PLR0913 - 7 irreducible inputs; see docstring
     findings: dict[str, list[Record]],
     reachable: dict[str, str],
     *,
     governed_audit_json: Path | None,
+    offline: bool = False,
     governed: set[str],
     exact_governed: set[str],
     owned_names: set[str],
@@ -1027,9 +1031,29 @@ def apply_governed_transitive_reaudit(  # noqa: PLR0913 - 6 irreducible inputs; 
     tooling exit code when the second pass could not run, mirroring
     :func:`obtain_audit` so a re-audit failure never becomes a spurious block.
     An empty ``reachable`` is a no-op: the second pass is skipped entirely.
+
+    ``offline`` is set when the caller ran pass 1 from a pre-generated report
+    (``--audit-json``), whose documented contract is "no network". In that mode a
+    live second pass would break the contract, and silently *skipping* it would
+    reopen the false negative this function exists to prevent (a CVE living in
+    HA's pin dropping out) behind an offline flag. So when a second pass is
+    required (non-empty ``reachable``) but no pre-generated governed report is
+    supplied (``governed_audit_json is None``), return tooling exit 2 with an
+    actionable message instead of going live. Exit 2 mirrors the tooling-error
+    contract above, never a spurious block (exit 1) or a silent pass (exit 0).
     """
     if not reachable:
         return None
+    if offline and governed_audit_json is None:
+        print(
+            "error: offline audit (--audit-json) reached governed transitive "
+            "packages that require a re-audit at Home Assistant's pins "
+            f"({', '.join(sorted(reachable))}), but --governed-audit-json was "
+            "not supplied. Provide a pre-generated governed re-audit report to "
+            "keep the preview offline.",
+            file=sys.stderr,
+        )
+        return 2
     reaudit_reqs = sorted(f"{name}=={pin}" for name, pin in reachable.items())
     reaudit, reaudit_exit = obtain_audit(
         governed_audit_json, reaudit_reqs, no_deps=True
@@ -1123,6 +1147,7 @@ def main(argv: list[str] | None = None) -> int:
         findings,
         reachable,
         governed_audit_json=args.governed_audit_json,
+        offline=args.audit_json is not None,
         governed=governed,
         exact_governed=exact_governed,
         owned_names=owned_names,
