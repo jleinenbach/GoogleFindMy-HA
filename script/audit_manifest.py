@@ -45,6 +45,19 @@ Scope and policy:
   defers these HA-ecosystem transitives to Home Assistant rather than making a
   silent "already resolved" claim.
 
+The floor and declared-minimum-HA pins are the lower edge of the installable
+span. Auditing only that edge can miss a CVE introduced above it, so the online
+gate widens coverage with two extra passes (both need the network and are
+skipped by the offline ``--audit-json`` preview, which stays floor-only and says
+so):
+- integration-owned packages are additionally audited *as declared* (``>=X``),
+  which the resolver resolves to the newest installable release, catching a CVE
+  that lives above the floor but within the permitted range;
+- governed packages are additionally audited at every *additional* supported HA
+  version's pins (pass one snapshot per ``--ha-constraints``): Home Assistant may
+  pin, say, ``cryptography`` or ``aiohttp`` at a newer version on a newer core,
+  and a CVE living solely in that newer pin would otherwise be invisible.
+
 The gate turns red the first time a shipped package a user actually installs
 carries a fixable CVE the integration can act on, which is exactly the case the
 report-only job waves through.
@@ -406,6 +419,49 @@ def parse_ha_exact_governed_names(constraints_text: str) -> set[str]:
     return exact
 
 
+def additional_governed_reaudit_pins(
+    additional_pins: dict[str, str],
+    primary_pins: dict[str, str],
+    audit: dict[str, Any],
+    relevant_names: set[str],
+) -> dict[str, str]:
+    """Return governed pins from an additional HA snapshot that need a re-audit.
+
+    The declared-minimum audit only covers Home Assistant's pins for the oldest
+    supported version. A newer supported release may pin a governed package (for
+    example ``cryptography``, ``aiohttp``, ``yarl``) at a different version whose
+    CVE would otherwise be invisible. This selects, from one additional
+    snapshot's ``name -> pin`` map, the governed packages that
+
+      - are actually part of this manifest's footprint (``relevant_names`` = the
+        direct governed manifest entries plus the governed transitives that
+        appeared in the pass-1 ``audit``); auditing every package HA pins would
+        drag in hundreds of unrelated dependencies, and
+      - are pinned at a version not already audited -- neither the declared-
+        minimum pin (``primary_pins``, at which pass 1 and the primary re-audit
+        already audited the package) nor the version pass 1 resolved for it.
+
+    The caller runs a deterministic ``--no-deps`` pip-audit over the resulting
+    ``name==pin`` set and folds the findings into the governed buckets (adding,
+    not replacing, so a finding present only at the newer pin is surfaced
+    alongside the declared-minimum result).
+    """
+    resolved: dict[str, str] = {
+        str(canonicalize_name(dependency.get("name", ""))): dependency.get(
+            "version", ""
+        )
+        for dependency in audit.get("dependencies", [])
+    }
+    result: dict[str, str] = {}
+    for name, pin in additional_pins.items():
+        if name not in relevant_names:
+            continue
+        if pin in {primary_pins.get(name), resolved.get(name)}:
+            continue
+        result[name] = pin
+    return result
+
+
 def partition_requirements(
     requirements: list[str], governed: set[str]
 ) -> tuple[list[str], list[str]]:
@@ -631,8 +687,18 @@ def render_report(
     ha_governed: list[str],
     unbounded: list[str],
     findings: dict[str, list[Record]],
+    *,
+    offline_preview_gap: bool = False,
 ) -> str:
-    """Return a human-facing summary of the audit result."""
+    """Return a human-facing summary of the audit result.
+
+    ``offline_preview_gap`` is set when the run used a pre-generated report
+    (``--audit-json``) and therefore skipped the online-only passes -- auditing
+    integration-owned packages as declared (beyond their floor) and governed
+    packages at additional supported HA versions' pins. A note then documents
+    that the offline preview covers only the declared-minimum floor/HA-pin
+    dimension, so a reader does not mistake a clean preview for the full gate.
+    """
     lines: list[str] = [
         "Manifest pip-audit (integration-owned at declared floor, "
         "HA-governed at Home Assistant's pin)",
@@ -654,6 +720,17 @@ def render_report(
             "the resolver's newest pick:"
         )
         lines.extend(f"  - {name}" for name in sorted(unbounded))
+        lines.append("")
+
+    if offline_preview_gap:
+        lines.append(
+            "NOTE - offline preview (--audit-json): coverage is limited to the "
+            "declared-minimum HA snapshot at each package's floor/HA-pin. The "
+            "online gate additionally audits integration-owned packages as "
+            "declared (catching a CVE above the floor but within the permitted "
+            "range) and governed packages at every supported HA version's pins; "
+            "those passes need the network and are skipped here."
+        )
         lines.append("")
 
     owned_blocking = findings["blocking"]
@@ -790,11 +867,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--ha-constraints",
         type=Path,
+        action="append",
         required=True,
+        metavar="PATH",
         help=(
-            "Path to Home Assistant's package_constraints.txt for the "
-            "declared-minimum HA version; packages pinned there are excluded "
-            "from the blocking decision."
+            "Path to a Home Assistant package_constraints.txt snapshot; repeat "
+            "to cover several supported HA versions. The first is the declared-"
+            "minimum and drives the floor/HA-pin audit; each additional snapshot "
+            "adds an online re-audit of governed packages at that version's pins "
+            "(a CVE living only in a newer HA pin would otherwise be invisible). "
+            "Packages pinned in any snapshot are excluded from the blocking "
+            "decision."
         ),
     )
     parser.add_argument(
@@ -1091,18 +1174,177 @@ def apply_governed_transitive_reaudit(  # noqa: PLR0913 - 7 irreducible inputs; 
     return None
 
 
+def apply_additional_ha_version_reaudit(  # noqa: PLR0913 - findings + audit context + classification sets; see docstring
+    findings: dict[str, list[Record]],
+    additional_texts: list[str],
+    primary_pins: dict[str, str],
+    audit: dict[str, Any],
+    *,
+    offline: bool,
+    owned_names: set[str],
+    ha_governed: list[str],
+    governed: set[str],
+    exact_governed: set[str],
+) -> int | None:
+    """Audit governed packages at each additional supported HA version's pins.
+
+    The declared-minimum audit only covers Home Assistant's pins for the oldest
+    supported version. A newer supported release may pin a governed package at a
+    different version whose CVE would otherwise be invisible. For every
+    additional snapshot in ``additional_texts`` this re-audits, with a
+    deterministic ``--no-deps`` pass, the governed packages this manifest
+    actually reaches (its direct governed entries plus the governed transitives
+    pass 1 resolved) at any pin not already audited, and folds the findings into
+    the governed buckets by *adding* -- a finding present only at a newer pin is
+    surfaced alongside the declared-minimum result rather than replacing it.
+
+    Needs the network, so it is a no-op when ``offline`` (the ``--audit-json``
+    preview documents the gap instead). Returns a tooling exit code when an
+    additional pass could not run (mirroring :func:`obtain_audit`), else ``None``.
+    """
+    resolved_governed = {
+        canonicalize_name(dependency.get("name", ""))
+        for dependency in audit.get("dependencies", [])
+    } & governed
+    relevant_governed = _canonical_names(ha_governed) | resolved_governed
+    for text in additional_texts:
+        to_reaudit = additional_governed_reaudit_pins(
+            parse_ha_governed_pins(text), primary_pins, audit, relevant_governed
+        )
+        if not to_reaudit or offline:
+            continue
+        extra_reqs = sorted(f"{name}=={pin}" for name, pin in to_reaudit.items())
+        extra_audit, extra_exit = obtain_audit(None, extra_reqs, no_deps=True)
+        if extra_audit is None:
+            return extra_exit
+        extra_findings = classify_audit(
+            extra_audit, owned_names, governed, exact_governed
+        )
+        for bucket in ("governed", "governed_range"):
+            findings[bucket] = _dedup_sorted_records(
+                findings.get(bucket, []) + extra_findings[bucket]
+            )
+    return None
+
+
+def apply_owned_as_declared_audit(  # noqa: PLR0913 - findings + owned + classification sets; see docstring
+    findings: dict[str, list[Record]],
+    owned: list[str],
+    *,
+    offline: bool,
+    owned_names: set[str],
+    governed: set[str],
+    exact_governed: set[str],
+) -> int | None:
+    """Audit the integration-owned requirements *as declared* and fold results in.
+
+    The floor pass audits the minimum a user may install (``pkg>=X`` ->
+    ``pkg==X``); this audits ``owned`` unchanged so the resolver picks the newest
+    installable release, catching a CVE introduced above the floor but still
+    within the permitted range (advisory ranges are not monotonic from a
+    package's first release). Only the actionable owned/transitive buckets are
+    merged: a governed package the resolver drags in at its newest pick is
+    audited authoritatively at Home Assistant's own pins elsewhere, not here.
+
+    Needs the network, so it is a no-op when ``offline`` or there are no owned
+    requirements. Returns a tooling exit code when the pass could not run
+    (mirroring :func:`obtain_audit`), else ``None``.
+    """
+    if not owned or offline:
+        return None
+    latest_audit, latest_exit = obtain_audit(None, owned)
+    if latest_audit is None:
+        return latest_exit
+    latest_findings = classify_audit(
+        latest_audit, owned_names, governed, exact_governed
+    )
+    for bucket in ("blocking", "unfixable", "transitive_blocking", "transitive"):
+        findings[bucket] = _dedup_sorted_records(
+            findings.get(bucket, []) + latest_findings[bucket]
+        )
+    return None
+
+
+def apply_audit_span_passes(  # noqa: PLR0913 - orchestration seam; see docstring
+    findings: dict[str, list[Record]],
+    audit: dict[str, Any],
+    constraint_texts: list[str],
+    primary_pins: dict[str, str],
+    owned: list[str],
+    ha_governed: list[str],
+    *,
+    owned_names: set[str],
+    governed: set[str],
+    exact_governed: set[str],
+    audit_json: Path | None,
+    governed_audit_json: Path | None,
+) -> int | None:
+    """Fold every re-audit and span-widening pass into ``findings`` in order.
+
+    Thin orchestration seam over the three pass helpers so :func:`main` carries a
+    single tooling-exit guard rather than one per pass. Runs, in sequence:
+      1. the declared-minimum governed-transitive re-audit at Home Assistant's
+         own pins (:func:`apply_governed_transitive_reaudit`);
+      2. governed re-audits at each additional supported HA version's pins
+         (:func:`apply_additional_ha_version_reaudit`);
+      3. an as-declared audit of the integration-owned requirements
+         (:func:`apply_owned_as_declared_audit`).
+    Each pass mutates ``findings`` in place. Returns the first tooling exit code
+    a pass reports (mirroring :func:`obtain_audit`), or ``None`` when all pass.
+    The offline-preview coverage gap is derived by the caller from its inputs and
+    is not returned here.
+    """
+    offline = audit_json is not None
+    reachable = reachable_governed_transitive_pins(
+        audit, primary_pins, _canonical_names(ha_governed), owned_names
+    )
+    reaudit_exit = apply_governed_transitive_reaudit(
+        findings,
+        reachable,
+        governed_audit_json=governed_audit_json,
+        offline=offline,
+        governed=governed,
+        exact_governed=exact_governed,
+        owned_names=owned_names,
+    )
+    if reaudit_exit is not None:
+        return reaudit_exit
+    additional_exit = apply_additional_ha_version_reaudit(
+        findings,
+        constraint_texts[1:],
+        primary_pins,
+        audit,
+        offline=offline,
+        owned_names=owned_names,
+        ha_governed=ha_governed,
+        governed=governed,
+        exact_governed=exact_governed,
+    )
+    if additional_exit is not None:
+        return additional_exit
+    return apply_owned_as_declared_audit(
+        findings,
+        owned,
+        offline=offline,
+        owned_names=owned_names,
+        governed=governed,
+        exact_governed=exact_governed,
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
 
     if not args.manifest.is_file():
         print(f"error: manifest not found: {args.manifest}", file=sys.stderr)
         return 2
-    if not args.ha_constraints.is_file():
-        print(
-            f"error: HA constraints not found: {args.ha_constraints}",
-            file=sys.stderr,
-        )
-        return 2
+    for constraints_path in args.ha_constraints:
+        if not constraints_path.is_file():
+            print(
+                f"error: HA constraints not found: {constraints_path}",
+                file=sys.stderr,
+            )
+            return 2
 
     try:
         requirements = load_manifest_requirements(args.manifest)
@@ -1110,13 +1352,22 @@ def main(argv: list[str] | None = None) -> int:
         print(f"error: cannot read manifest {args.manifest}: {exc}", file=sys.stderr)
         return 2
 
-    constraints_text = args.ha_constraints.read_text(encoding="utf-8")
-    governed_pins = parse_ha_governed_pins(constraints_text)
-    governed = set(governed_pins)
-    # The exact-``==`` subset is what the integration truly cannot tighten; a
-    # range-governed finding (HA sets only a floor) is actionable and routed to
-    # the visible ``governed_range`` bucket instead of the unfixable-INFO bucket.
-    exact_governed = parse_ha_exact_governed_names(constraints_text)
+    constraint_texts = [
+        path.read_text(encoding="utf-8") for path in args.ha_constraints
+    ]
+    # The blocking decision is the worst case for the integration's own floors:
+    # the declared-minimum Home Assistant a user may run. Governance is therefore
+    # derived from the PRIMARY (first) snapshot only. A package the minimum HA
+    # does not pin is integration-owned there -- the user installs the manifest
+    # floor, which no newer HA pin overrides -- so a fixable floor CVE must still
+    # block even if a *newer* supported HA governs that package. Unioning the
+    # governed names across snapshots would flip such a package to non-blocking
+    # and hide the finding (a false green). Additional snapshots therefore do NOT
+    # widen the non-blocking governed set; they only add re-audits of packages
+    # already governed at the minimum, at their newer pins (see below).
+    primary_pins = parse_ha_governed_pins(constraint_texts[0])
+    governed = parse_ha_governed_names(constraint_texts[0])
+    exact_governed = parse_ha_exact_governed_names(constraint_texts[0])
     owned, ha_governed = partition_requirements(requirements, governed)
 
     owned_names: set[str] = set()
@@ -1137,7 +1388,7 @@ def main(argv: list[str] | None = None) -> int:
     # version no user runs and let a blind "resolved by HA" label hide whether
     # HA's pinned version is itself vulnerable.
     owned_audit, unbounded = floor_pin_requirements(owned)
-    governed_audit = ha_pin_requirements(ha_governed, governed_pins)
+    governed_audit = ha_pin_requirements(ha_governed, primary_pins)
     audit_requirements = owned_audit + governed_audit
 
     audit, exit_code = obtain_audit(args.audit_json, audit_requirements)
@@ -1154,22 +1405,35 @@ def main(argv: list[str] | None = None) -> int:
     # Home Assistant's own pin: pass 1 resolved them to the newest compatible
     # pick, not HA's pin, so a CVE living in HA's pinned version would otherwise
     # drop out of the report. The result folds into the governed bucket.
-    reachable = reachable_governed_transitive_pins(
-        audit, governed_pins, _canonical_names(ha_governed), owned_names
-    )
-    reaudit_exit = apply_governed_transitive_reaudit(
+    span_exit = apply_audit_span_passes(
         findings,
-        reachable,
-        governed_audit_json=args.governed_audit_json,
-        offline=args.audit_json is not None,
+        audit,
+        constraint_texts,
+        primary_pins,
+        owned,
+        ha_governed,
+        owned_names=owned_names,
         governed=governed,
         exact_governed=exact_governed,
-        owned_names=owned_names,
+        audit_json=args.audit_json,
+        governed_audit_json=args.governed_audit_json,
     )
-    if reaudit_exit is not None:
-        return reaudit_exit
+    if span_exit is not None:
+        return span_exit
 
-    report = render_report(owned, ha_governed, unbounded, findings)
+    # The offline preview (--audit-json) runs neither the as-declared owned pass
+    # nor the additional-HA-version governed passes (both need the network), so
+    # flag the reduced coverage whenever either would have applied.
+    offline_preview_gap = args.audit_json is not None and (
+        bool(owned) or len(constraint_texts) > 1
+    )
+    report = render_report(
+        owned,
+        ha_governed,
+        unbounded,
+        findings,
+        offline_preview_gap=offline_preview_gap,
+    )
 
     blocking = blocking_records(findings)
     if args.verbose or blocking:

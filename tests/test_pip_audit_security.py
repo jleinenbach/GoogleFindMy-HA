@@ -91,6 +91,24 @@ def _ha_constraints_fixture(version: str) -> Path:
     return path
 
 
+def _all_ha_constraints_fixtures() -> list[Path]:
+    """Return the declared-minimum HA snapshot plus every additional supported one.
+
+    The declared-minimum (``hacs.json``) snapshot is the primary audit basis;
+    any other committed ``ha_package_constraints_*.txt`` fixture is an additional
+    supported HA version the live gate audits governed packages at (a CVE living
+    solely in a newer HA pin would otherwise be invisible). Ordered
+    minimum-first so ``main()`` treats the declared minimum as primary.
+    """
+    minimum = _ha_constraints_fixture(_declared_minimum_ha_version())
+    additional = sorted(
+        path
+        for path in FIXTURES.glob("ha_package_constraints_*.txt")
+        if path != minimum
+    )
+    return [minimum, *additional]
+
+
 # ---------------------------------------------------------------------------
 # Live gate
 # ---------------------------------------------------------------------------
@@ -108,8 +126,12 @@ class TestManifestOnlyPipAuditGate:
         the live manifest requirements, each pinned to its declared floor
         (pip-audit resolves them over the network in a subprocess, which the
         socket sandbox does not patch) under Home Assistant's committed
-        constraints for the declared-minimum version. HA-governed and unfixable
-        findings do not block; only actionable, integration-owned findings do.
+        constraints for every supported version (the declared-minimum snapshot
+        plus each additional committed snapshot, so governed packages are audited
+        at each version's pins). Integration-owned packages are additionally
+        audited as declared, catching a CVE above the floor. HA-governed and
+        unfixable findings do not block; only actionable, integration-owned
+        findings do.
 
         A pip-audit tooling or network failure (engine exit 2) is fatal, never a
         skip: the AGENTS.md pip-audit contract requires exit codes > 1 to stay
@@ -118,18 +140,12 @@ class TestManifestOnlyPipAuditGate:
         and is handled by ``_require_pip_audit`` before the engine runs.
         """
         _require_pip_audit()
-        version = _declared_minimum_ha_version()
-        constraints_path = _ha_constraints_fixture(version)
+        argv = ["--manifest", str(MANIFEST)]
+        for constraints_path in _all_ha_constraints_fixtures():
+            argv += ["--ha-constraints", str(constraints_path)]
+        argv.append("--verbose")
 
-        exit_code = audit_manifest.main(
-            [
-                "--manifest",
-                str(MANIFEST),
-                "--ha-constraints",
-                str(constraints_path),
-                "--verbose",
-            ]
-        )
+        exit_code = audit_manifest.main(argv)
         # Capture both streams: on a fatal exit 2 the engine writes its
         # actionable explanation (resolver, network, or malformed-report cause)
         # to stderr, and capsys drains both buffers here, so a stdout-only grab
@@ -1156,6 +1172,10 @@ def test_main_pins_governed_requirement_to_ha_version(
     integration-owned package (selenium), never the governed floor. No
     ``--audit-json``, so main() takes the live branch and invokes the patched
     runner.
+
+    Online, main() also fires the as-declared owned pass (Fund 1a) as a later
+    call, so the first (pass-1) requirement list is captured with ``setdefault``
+    rather than the last.
     """
     constraints = tmp_path / "ha_constraints.txt"
     constraints.write_text("aiohttp==3.12.15\n", encoding="utf-8")
@@ -1163,7 +1183,7 @@ def test_main_pins_governed_requirement_to_ha_version(
     captured: dict[str, list[str]] = {}
 
     def fake_run(reqs: list[str], out_path: Path, *, no_deps: bool = False) -> int:
-        captured["reqs"] = list(reqs)
+        captured.setdefault("reqs", list(reqs))
         out_path.write_text('{"dependencies": []}', encoding="utf-8")
         return 0
 
@@ -1191,6 +1211,9 @@ def test_main_reaudits_governed_transitive_with_no_deps(
     version other than Home Assistant's pin, main() must run a *second*
     pip-audit pass over ``yarl==<HA pin>`` with ``no_deps=True``. A regression
     that drops the flag or skips the second pass fails this test.
+
+    Online, a *third* pass fires too: the as-declared owned audit (Fund 1a,
+    ``no_deps=False``). It is asserted below so the call sequence stays pinned.
     """
     constraints = tmp_path / "ha_constraints.txt"
     constraints.write_text("yarl==1.20.1\n", encoding="utf-8")
@@ -1237,11 +1260,14 @@ def test_main_reaudits_governed_transitive_with_no_deps(
     )
 
     assert rc == 0
-    # Exactly two passes fired, the second with no_deps over HA's own pin.
-    assert len(calls) == 2
+    # Three passes fired online: pass 1 (resolved), the governed re-audit with
+    # no_deps over HA's own pin, then the as-declared owned pass (Fund 1a).
+    assert len(calls) == 3
     assert calls[0]["no_deps"] is False
     assert calls[1]["no_deps"] is True
     assert calls[1]["reqs"] == ["yarl==1.20.1"]
+    # The third pass audits the owned requirements as declared (not no_deps).
+    assert calls[2]["no_deps"] is False
 
 
 def test_run_pip_audit_invokes_module(
@@ -1267,3 +1293,229 @@ def test_run_pip_audit_invokes_module(
     assert rc == 0
     assert "pip_audit" in seen["cmd"]
     assert json.loads(output.read_text(encoding="utf-8")) == {"dependencies": []}
+
+
+# ---------------------------------------------------------------------------
+# Multi-version HA governance (Fund 2a) and as-declared owned audit (Fund 1a)
+# ---------------------------------------------------------------------------
+
+
+def test_package_owned_at_minimum_but_governed_at_latest_still_blocks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Governance is primary-snapshot-only, never the union across snapshots.
+
+    A manifest package the declared-minimum HA does not pin is integration-owned
+    there -- the user installs the manifest floor, which no newer HA pin
+    overrides -- so a fixable floor CVE must still block even when a *newer*
+    supported HA governs that package. Unioning the governed names would flip it
+    to non-blocking and hide the finding (a false green); this pins that it does
+    not.
+    """
+    primary = tmp_path / "min.txt"
+    primary.write_text("aiohttp==3.12.15\n", encoding="utf-8")  # does not pin selenium
+    latest = tmp_path / "latest.txt"
+    latest.write_text("aiohttp==3.14.1\nselenium==4.30.0\n", encoding="utf-8")
+
+    def fake_run(reqs: list[str], out_path: Path, *, no_deps: bool = False) -> int:
+        # The floor pass carries selenium==<floor>; surface a fixable CVE there.
+        if "selenium==4.25.0" in reqs:
+            out_path.write_text(
+                json.dumps(
+                    {
+                        "dependencies": [
+                            {
+                                "name": "selenium",
+                                "version": "4.25.0",
+                                "vulns": [
+                                    {"id": "CVE-SEL-FLOOR", "fix_versions": ["4.26.0"]}
+                                ],
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+        else:
+            out_path.write_text('{"dependencies": []}', encoding="utf-8")
+        return 0
+
+    monkeypatch.setattr(audit_manifest, "run_pip_audit", fake_run)
+    rc = audit_manifest.main(
+        [
+            "--manifest",
+            str(MANIFEST),
+            "--ha-constraints",
+            str(primary),
+            "--ha-constraints",
+            str(latest),
+        ]
+    )
+    report = capsys.readouterr().out
+
+    assert rc == 1
+    assert "CVE-SEL-FLOOR" in report
+
+
+class TestAdditionalGovernedReauditPins:
+    """Select governed pins from an additional snapshot that need a re-audit."""
+
+    AUDIT = {"dependencies": [{"name": "yarl", "version": "1.24.5", "vulns": []}]}
+
+    def test_new_pin_differing_from_primary_and_resolved_is_selected(self) -> None:
+        result = audit_manifest.additional_governed_reaudit_pins(
+            {"yarl": "1.24.2"}, {"yarl": "1.20.1"}, self.AUDIT, {"yarl"}
+        )
+        assert result == {"yarl": "1.24.2"}
+
+    def test_pin_equal_to_primary_is_skipped(self) -> None:
+        result = audit_manifest.additional_governed_reaudit_pins(
+            {"yarl": "1.20.1"}, {"yarl": "1.20.1"}, self.AUDIT, {"yarl"}
+        )
+        assert result == {}
+
+    def test_pin_equal_to_pass1_resolved_version_is_skipped(self) -> None:
+        result = audit_manifest.additional_governed_reaudit_pins(
+            {"yarl": "1.24.5"}, {"yarl": "1.20.1"}, self.AUDIT, {"yarl"}
+        )
+        assert result == {}
+
+    def test_name_outside_manifest_footprint_is_skipped(self) -> None:
+        result = audit_manifest.additional_governed_reaudit_pins(
+            {"unrelated": "9.9.9"}, {}, self.AUDIT, {"yarl"}
+        )
+        assert result == {}
+
+
+def test_main_audits_governed_at_additional_ha_version(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Fund 2a wiring: a governed package pinned higher on a newer HA version is
+    re-audited at that pin, and a CVE living only there surfaces (non-blocking)."""
+    primary = tmp_path / "min.txt"
+    primary.write_text("cryptography==45.0.3\n", encoding="utf-8")
+    latest = tmp_path / "latest.txt"
+    latest.write_text("cryptography==48.0.1\n", encoding="utf-8")
+
+    calls: list[dict[str, object]] = []
+
+    def fake_run(reqs: list[str], out_path: Path, *, no_deps: bool = False) -> int:
+        calls.append({"reqs": list(reqs), "no_deps": no_deps})
+        if any(req == "cryptography==48.0.1" for req in reqs):
+            out_path.write_text(
+                json.dumps(
+                    {
+                        "dependencies": [
+                            {
+                                "name": "cryptography",
+                                "version": "48.0.1",
+                                "vulns": [
+                                    {"id": "CVE-CR-NEW", "fix_versions": ["48.0.2"]}
+                                ],
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+        else:
+            out_path.write_text('{"dependencies": []}', encoding="utf-8")
+        return 0
+
+    monkeypatch.setattr(audit_manifest, "run_pip_audit", fake_run)
+    rc = audit_manifest.main(
+        [
+            "--manifest",
+            str(MANIFEST),
+            "--ha-constraints",
+            str(primary),
+            "--ha-constraints",
+            str(latest),
+            "--verbose",
+        ]
+    )
+    report = capsys.readouterr().out
+
+    # Governed -> non-blocking, but the newer-pin CVE is surfaced for visibility.
+    assert rc == 0
+    assert "CVE-CR-NEW" in report
+    # An additional --no-deps pass audited cryptography at the newer HA pin.
+    assert any(
+        call["no_deps"] and "cryptography==48.0.1" in call["reqs"] for call in calls
+    )
+
+
+def test_main_owned_as_declared_pass_catches_above_floor_cve(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Fund 1a wiring: an owned package clean at its floor but vulnerable at the
+    resolver's newest pick is caught by the as-declared pass and blocks."""
+    constraints = tmp_path / "ha.txt"
+    constraints.write_text("aiohttp==3.12.15\n", encoding="utf-8")
+
+    def fake_run(reqs: list[str], out_path: Path, *, no_deps: bool = False) -> int:
+        # The as-declared owned pass carries the bare specifier; the floor pass
+        # carries selenium==<floor>. Only the former surfaces the CVE.
+        if "selenium>=4.25.0" in reqs:
+            out_path.write_text(
+                json.dumps(
+                    {
+                        "dependencies": [
+                            {
+                                "name": "selenium",
+                                "version": "4.40.0",
+                                "vulns": [
+                                    {"id": "CVE-SEL-LATEST", "fix_versions": ["4.41.0"]}
+                                ],
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+        else:
+            out_path.write_text('{"dependencies": []}', encoding="utf-8")
+        return 0
+
+    monkeypatch.setattr(audit_manifest, "run_pip_audit", fake_run)
+    rc = audit_manifest.main(
+        ["--manifest", str(MANIFEST), "--ha-constraints", str(constraints)]
+    )
+    report = capsys.readouterr().out
+
+    assert rc == 1
+    assert "CVE-SEL-LATEST" in report
+
+
+def test_offline_preview_documents_reduced_coverage_and_stays_offline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Offline (--audit-json) skips the online-only 1a/2a passes and says so,
+    without ever invoking pip-audit."""
+    primary = tmp_path / "min.txt"
+    primary.write_text("aiohttp==3.12.15\n", encoding="utf-8")
+    latest = tmp_path / "latest.txt"
+    latest.write_text("aiohttp==3.14.1\n", encoding="utf-8")
+    audit_json = _write_json(tmp_path / "audit.json", {"dependencies": []})
+
+    def booby(*_args: object, **_kwargs: object) -> int:
+        raise AssertionError("offline preview must not invoke pip-audit")
+
+    monkeypatch.setattr(audit_manifest, "run_pip_audit", booby)
+    rc = audit_manifest.main(
+        [
+            "--manifest",
+            str(MANIFEST),
+            "--ha-constraints",
+            str(primary),
+            "--ha-constraints",
+            str(latest),
+            "--audit-json",
+            str(audit_json),
+            "--verbose",
+        ]
+    )
+    report = capsys.readouterr().out
+
+    assert rc == 0
+    assert "offline preview" in report
