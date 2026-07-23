@@ -438,8 +438,9 @@ class _CloudDiscoveryResults(list[dict[str, Any]]):
         (:attr:`CloudDiscoveryOutcome.RETRY`). A
         :attr:`CloudDiscoveryOutcome.SKIPPED` result from
         :func:`_trigger_cloud_discovery` deliberately does **not** run it. Every
-        ``SKIPPED`` path there is a *deduplication* path -- an identical flow is
-        already in flight (``runtime.active_keys``) or the runtime container was
+        ``SKIPPED`` path there is a *deduplication* path -- an identical payload
+        is already in flight (``runtime.active_keys``, keyed on the content
+        fingerprint, not merely the account) or the runtime container was
         torn down mid-unload -- so re-arming the producer would schedule a
         second attempt for work that is already running and recreate exactly the
         duplicate flows the dedup exists to suppress.
@@ -636,6 +637,45 @@ def _cloud_discovery_stable_key(
     return f"anonymous:{uuid.uuid4().hex[:12]}"
 
 
+def _cloud_discovery_dedup_key(
+    stable_key: str,
+    token: str | None,
+    secrets_bundle: Mapping[str, Any] | None,
+) -> str:
+    """Return a *content-aware* key for the in-flight ``active_keys`` guard.
+
+    ``active_keys`` closes the race between appending a payload and its config
+    flow registering in Home Assistant's in-progress index: two rapid dispatches
+    of the *same* payload must not both spawn a flow. The pitfall is granularity.
+    The account ``stable_key`` (``email:<addr>``) is too coarse for that guard:
+    when a second bundle for the same account but *different content* (a token
+    refresh, freshly written ``secrets.json``) arrives while the first flow is
+    still active, keying the guard on ``stable_key`` alone mis-classifies the new
+    payload as a duplicate and drops it as ``SKIPPED`` (which, by contract, never
+    re-arms the producer), so the refreshed credentials stall until the file
+    disappears, the watch paths change or Home Assistant restarts.
+
+    Home Assistant's own guard does not have this problem: ``ConfigEntries.
+    async_has_matching_discovery_flow`` matches on the full ``init_data == data``,
+    so a changed payload is a genuinely new flow *there*. This key mirrors that
+    granularity for the local pre-registration window by folding the credential
+    content (canonical :func:`secrets_bundle_digest`, else the raw token) into
+    the account key. Identical content still collapses (the race guard is
+    preserved); changed content passes through. The digest is one-way, and the
+    returned value is only ever a set member, never logged.
+    """
+
+    hasher = hashlib.sha256()
+    hasher.update(stable_key.encode("utf-8"))
+    hasher.update(b"\x00")
+    if isinstance(token, str) and token:
+        hasher.update(token.encode("utf-8"))
+    hasher.update(b"\x00")
+    if isinstance(secrets_bundle, Mapping) and secrets_bundle:
+        hasher.update(secrets_bundle_digest(secrets_bundle).encode("utf-8"))
+    return hasher.hexdigest()
+
+
 def _redact_account_for_log(email: str | None, stable_key: str) -> str:
     """Return a partially redacted account identifier safe for logging."""
 
@@ -751,6 +791,11 @@ async def _trigger_cloud_discovery(
         source=source,
     )
 
+    # The in-flight guard dedups identical *payloads*, not accounts: keying it on
+    # the account ``stable_key`` alone would suppress a same-account bundle whose
+    # content changed (see :func:`_cloud_discovery_dedup_key`).
+    dedup_key = _cloud_discovery_dedup_key(stable_key, token, secrets_copy)
+
     lock = runtime.lock
     async with lock:
         results_list = runtime.results
@@ -765,13 +810,14 @@ async def _trigger_cloud_discovery(
             return CloudDiscoveryOutcome.SKIPPED
 
         results_list.append(payload, trigger=False)
-        if stable_key in runtime.active_keys:
+        if dedup_key in runtime.active_keys:
             _LOGGER.debug(
-                "Cloud discovery request deduplicated for %s (flow already active)",
+                "Cloud discovery request deduplicated for %s "
+                "(identical payload already in flight)",
                 _redact_account_for_log(email, stable_key),
             )
             return CloudDiscoveryOutcome.SKIPPED
-        runtime.active_keys.add(stable_key)
+        runtime.active_keys.add(dedup_key)
 
     triggered = False
     outcome = CloudDiscoveryOutcome.ACCEPTED
@@ -844,7 +890,7 @@ async def _trigger_cloud_discovery(
         return outcome
     finally:
         async with lock:
-            runtime.active_keys.discard(stable_key)
+            runtime.active_keys.discard(dedup_key)
 
 
 @dataclass(slots=True)

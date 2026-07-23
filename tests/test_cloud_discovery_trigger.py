@@ -466,6 +466,69 @@ async def test_trigger_cloud_discovery_deduplicates(
     await _exercise()
 
 
+async def test_trigger_cloud_discovery_admits_changed_payload_for_same_account(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A same-account bundle with *changed content* must not dedup as SKIPPED.
+
+    Regression for the coarse, account-keyed in-flight guard (Codex P2,
+    discovery.py active_keys): the same account resolves to one
+    ``stable_key`` (``email:<addr>``), so keying the guard on it dropped a
+    refreshed bundle (new token/digest) that arrived while the first flow was
+    still active, leaving the fresh credentials stalled. The guard is
+    content-aware now, so the changed payload reaches a real flow. Identical
+    content still deduplicates -- proven by
+    ``test_trigger_cloud_discovery_deduplicates``.
+    """
+
+    hass = _make_hass()
+    caplog.set_level(logging.DEBUG, "custom_components.googlefindmy.discovery")
+
+    inflight = asyncio.Event()
+    calls: list[str | None] = []
+
+    async def _helper(*args, **kwargs):
+        data = kwargs.get("data") or args[3]
+        token = data.get("token")
+        calls.append(token)
+        if token == "aas_et/OLD":
+            # Keep the first account flow in flight while the second arrives.
+            await inflight.wait()
+
+    monkeypatch.setattr(config_flow, "async_create_discovery_flow", _helper)
+
+    async def _exercise() -> None:
+        first = asyncio.create_task(
+            integration._trigger_cloud_discovery(
+                hass,
+                email="same@example.com",
+                token="aas_et/OLD",
+            )
+        )
+        await asyncio.sleep(0)
+
+        # Same account (identical stable_key), different content, arriving while
+        # the first flow is still active. Account-coarse dedup returned SKIPPED
+        # here; the content-aware guard admits it.
+        second = await integration._trigger_cloud_discovery(
+            hass,
+            email="same@example.com",
+            token="aas_et/NEW",
+        )
+
+        assert second is not CloudDiscoveryOutcome.SKIPPED
+        # The strongest proof: the changed payload actually reached the flow
+        # helper. The buggy account-keyed guard would have stopped at one call.
+        assert calls == ["aas_et/OLD", "aas_et/NEW"]
+        # Neither raw token may leak into logs.
+        assert all("aas_et/" not in record.getMessage() for record in caplog.records)
+
+        inflight.set()
+        assert await first is CloudDiscoveryOutcome.ACCEPTED
+
+    await _exercise()
+
+
 async def test_results_append_triggers_flow(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
