@@ -33,6 +33,7 @@ Usage:
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
 import pytest
@@ -149,6 +150,16 @@ class TestManifestOnlyPipAuditGate:
                 "vulnerability. Bump the manifest floor for the affected "
                 f"package(s).\n\n{report}"
             )
+        # A clean exit 0 may still carry non-blocking findings (today the
+        # unfixable ecdsa advisory) as the verbose report on stdout plus
+        # ::warning/::notice annotations on stderr. capsys drained both buffers
+        # above, so re-emit them; otherwise the accepted vulnerabilities the
+        # surfacing policy promises to keep visible are swallowed in the CI
+        # pytest log. The exit 1/2 branches already fold the captured content
+        # into their pytest.fail messages and raise before reaching here, so
+        # this re-emit runs only on the success path and never double-prints.
+        sys.stdout.write(captured.out)
+        sys.stderr.write(captured.err)
         assert exit_code == 0
 
 
