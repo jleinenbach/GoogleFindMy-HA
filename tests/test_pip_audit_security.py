@@ -409,7 +409,7 @@ class TestPartitionAndConstraints:
         # other. The markers below are interpreter-independent (always
         # true/false on Python 3) so the assertion does not drift with the CI
         # Python version. All three governed views must agree, since they share
-        # ``_governed_constraint``.
+        # ``_merged_governed_constraints``.
         text = (
             "plain==4.0\n"  # no marker -> governed
             "kept==1.0 ; python_version >= '3.0'\n"  # true marker -> governed
@@ -485,6 +485,41 @@ class TestPartitionAndConstraints:
             "weird!name",
         }
 
+    def test_duplicate_governed_constraint_uses_combined_floor(self) -> None:
+        # Fund 2: pip applies every constraint line for a package together, so a
+        # package HA lists more than once (the committed snapshot pins multidict
+        # at both >=6.0.2 and >=6.4.2) is governed by the intersection of its
+        # lines. A looser bound ordered AFTER a tighter one must not mask the
+        # tighter floor -- last-wins would audit multidict==6.0.2, a version HA
+        # actually excludes. Both orderings must yield the higher floor.
+        looser_last = "multidict>=6.4.2\nmultidict>=6.0.2\n"
+        tighter_last = "multidict>=6.0.2\nmultidict>=6.4.2\n"
+        assert audit_manifest.parse_ha_governed_pins(looser_last) == {
+            "multidict": "6.4.2"
+        }
+        assert audit_manifest.parse_ha_governed_pins(tighter_last) == {
+            "multidict": "6.4.2"
+        }
+
+    def test_duplicate_exact_and_range_routes_to_actionable_bucket(self) -> None:
+        # Fund 2 exactness: a package HA constrains once as == and once with an
+        # extra bound is no longer a lone == in the combined set, so it routes to
+        # the actionable governed_range bucket (excluded from the exact names)
+        # rather than being silently suppressed as unfixable. Order-invariant.
+        for text in ("foo==1.5\nfoo>=1.0\n", "foo>=1.0\nfoo==1.5\n"):
+            assert audit_manifest.parse_ha_governed_pins(text) == {"foo": "1.5"}
+            assert audit_manifest.parse_ha_governed_names(text) == {"foo"}
+            assert audit_manifest.parse_ha_exact_governed_names(text) == set()
+
+    def test_contradictory_duplicate_has_no_derivable_floor(self) -> None:
+        # Fund 2 fail-safe: contradictory duplicates (>=2.0 combined with ==1.5)
+        # admit no version, so no exact floor is derivable and the package is
+        # dropped from the governed maps entirely -- it stays in the blocking
+        # bucket rather than being pinned to a version HA's own == excludes.
+        for text in ("foo>=2.0\nfoo==1.5\n", "foo==1.5\nfoo>=2.0\n"):
+            assert audit_manifest.parse_ha_governed_pins(text) == {}
+            assert audit_manifest.parse_ha_exact_governed_names(text) == set()
+
     def test_no_manifest_dependency_is_ha_range_governed(self) -> None:
         # Tripwire for the latent classification flip a range floor introduces:
         # a DIRECT manifest entry HA governs is audited at HA's own pin
@@ -499,9 +534,8 @@ class TestPartitionAndConstraints:
             audit_manifest.requirement_project_name(req)
             for req in audit_manifest.load_manifest_requirements(MANIFEST)
         }
-        text = (FIXTURES / "ha_package_constraints_2025.9.1.txt").read_text(
-            encoding="utf-8"
-        )
+        version = _declared_minimum_ha_version()
+        text = _ha_constraints_fixture(version).read_text(encoding="utf-8")
         range_governed: set[str] = set()
         for raw_line in text.splitlines():
             line = raw_line.strip()
@@ -518,6 +552,31 @@ class TestPartitionAndConstraints:
             ) is not None and operators != {"=="}:
                 range_governed.add(audit_manifest.canonicalize_name(requirement.name))
         assert manifest_names & range_governed == set()
+
+    def test_tripwire_follows_declared_ha_version_not_a_hardcoded_snapshot(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        # Fund 1: the range-governed tripwire must inspect the snapshot for the
+        # HA version hacs.json declares, resolved through the same helpers as the
+        # live gate, not a pinned filename. Were the fixture hard-coded, a
+        # hacs.json bump to a release whose snapshot range-governs a manifest
+        # dependency would keep reading the old clean file and pass, hiding
+        # exactly the blocking->INFO flip this tripwire exists to catch. Point
+        # the resolver at a synthetic newer snapshot that range-governs a real
+        # manifest dependency and assert the *real* tripwire fires.
+        manifest_name = audit_manifest.requirement_project_name(
+            next(iter(audit_manifest.load_manifest_requirements(MANIFEST)))
+        )
+        synthetic = tmp_path / "ha_package_constraints_9999.1.1.txt"
+        synthetic.write_text(f"{manifest_name}>=0.0.1\n", encoding="utf-8")
+        monkeypatch.setattr(
+            f"{__name__}._declared_minimum_ha_version", lambda: "9999.1.1"
+        )
+        monkeypatch.setattr(
+            f"{__name__}._ha_constraints_fixture", lambda _version: synthetic
+        )
+        with pytest.raises(AssertionError):
+            self.test_no_manifest_dependency_is_ha_range_governed()
 
     def test_ha_pin_requirements_pins_to_ha_version(self) -> None:
         # A governed manifest entry is pinned to HA's == version, overriding its

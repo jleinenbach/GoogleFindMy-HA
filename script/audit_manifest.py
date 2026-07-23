@@ -77,7 +77,7 @@ from typing import Any
 
 from packaging.markers import Marker
 from packaging.requirements import InvalidRequirement, Requirement
-from packaging.specifiers import SpecifierSet
+from packaging.specifiers import InvalidSpecifier, SpecifierSet
 from packaging.utils import canonicalize_name
 from packaging.version import InvalidVersion, Version
 
@@ -107,27 +107,29 @@ def requirement_project_name(requirement: str) -> str:
     return canonicalize_name(Requirement(requirement).name)
 
 
-def _requirement_floor(requirement: Requirement) -> str | None:
-    """Return the lowest version the requirement's specifiers allow, or None.
+def _specifier_floor(specifier: SpecifierSet) -> str | None:
+    """Return the lowest version a specifier set allows, or None.
 
     Considers inclusive lower-bound operators (``>=``, ``==``, ``~=``) and
     returns the most restrictive (highest) such bound as a version string. A
-    requirement with no inclusive lower bound (a bare name, an upper-bound-only
+    specifier set with no inclusive lower bound (empty, an upper-bound-only
     specifier, or an exclusive ``>X``) has no determinable floor and returns
-    None; the caller then audits it at the resolver's newest pick and flags it,
+    None; the caller then audits at the resolver's newest pick and flags it,
     rather than fabricating a wrong ``==X`` pin. Every real manifest entry uses
     ``>=``.
 
     The chosen bound must also satisfy the *complete* specifier set: a
-    requirement such as ``foo>=1.0,!=1.0`` names ``1.0`` as its lower bound yet
-    explicitly excludes it, so pinning ``foo==1.0`` would be a version the
-    requirement forbids and pip-audit would fail to resolve (tooling exit 2).
+    combined constraint such as ``foo>=1.0,!=1.0`` names ``1.0`` as its lower
+    bound yet explicitly excludes it, so pinning ``foo==1.0`` would be a version
+    the constraint forbids and pip-audit would fail to resolve (tooling exit 2).
     When the candidate floor is excluded by another specifier, no exact floor is
     derivable and None is returned so the caller audits it as declared instead.
+    This is why a package Home Assistant lists more than once (its combined
+    specifiers, not any single line) determines the floor.
     """
     best: Version | None = None
     best_text: str | None = None
-    for spec in requirement.specifier:
+    for spec in specifier:
         if spec.operator not in _LOWER_BOUND_OPERATORS:
             continue
         try:
@@ -137,14 +139,40 @@ def _requirement_floor(requirement: Requirement) -> str | None:
         if best is None or candidate > best:
             best = candidate
             best_text = spec.version
-    if best_text is not None and not requirement.specifier.contains(
-        best_text, prereleases=True
-    ):
+    if best_text is not None and not specifier.contains(best_text, prereleases=True):
         # Another specifier (e.g. ``!=floor``) excludes the lower bound; no exact
         # floor can be derived. prereleases=True so a legitimate prerelease floor
         # is not itself rejected -- only a genuine exclusion returns None.
         return None
     return best_text
+
+
+def _requirement_floor(requirement: Requirement) -> str | None:
+    """Return the lowest version the requirement's specifiers allow, or None.
+
+    Thin wrapper over :func:`_specifier_floor` for a single :class:`Requirement`
+    (the manifest floor-pinning path); the shared floor logic lives in
+    :func:`_specifier_floor` so the manifest and the combined-HA-constraint paths
+    can never diverge.
+    """
+    return _specifier_floor(requirement.specifier)
+
+
+def _specifier_is_exact(specifier: SpecifierSet) -> bool:
+    """Return whether a combined specifier set is a lone concrete ``==`` pin.
+
+    ``True`` only when every specifier in the set is ``==`` (a zero-width floor
+    the integration cannot tighten), which the floor gate in the callers pairs
+    with a derivable concrete version. A range floor (``>=``/``~=``), an ``==``
+    accompanied by any other operator (``==1.0,<2.0`` -- not a lone ``==``), or a
+    non-concrete ``==1.*`` prefix is therefore not exact and routes to the
+    actionable ``governed_range`` bucket. Deriving exactness from the *combined*
+    set is the conservative choice for a package Home Assistant constrains on
+    more than one line: an exact/range duplicate keeps the additional operator
+    and stays actionable rather than being silently suppressed as unfixable.
+    """
+    operators = {spec.operator for spec in specifier}
+    return operators == {"=="}
 
 
 def _pin_requirement(requirement: Requirement, version: str) -> str:
@@ -243,25 +271,27 @@ def _marker_applies(marker: Marker) -> bool:
     return bool(marker.evaluate())
 
 
-def _governed_constraint(raw_line: str) -> tuple[str, str, bool] | None:
-    """Parse one HA constraints line into ``(canonical_name, floor, is_exact)``.
+def _parse_governed_line(raw_line: str) -> tuple[str, SpecifierSet] | None:
+    """Parse one HA constraints line into ``(canonical_name, specifier_set)``.
 
     Shared single-line parser for the governed-constraint helpers so the pin
     map, the name set, and the exact-name subset can never diverge. Returns
-    ``None`` for a comment, a blank line, a valid PEP 508 constraint whose
+    ``None`` for a comment, a blank line, or a valid PEP 508 constraint whose
     environment marker is false on the auditing runtime (Home Assistant does not
-    impose it here, see :func:`_marker_applies`; the non-PEP 508 salvage path
-    below deliberately does not evaluate markers), or a constraint with no
-    inclusive lower bound (a bare name, a pure ``!=`` exclusion, an
-    upper-bound-only ``<`` cap, or a non-concrete ``==1.*`` prefix / ``===``
-    arbitrary equality): no worst-case version can be derived from them.
+    impose it here, see :func:`_marker_applies`). The floor and exactness are
+    deliberately NOT decided here: the caller combines every line for a package
+    first (pip applies all of a package's constraints together) and derives them
+    from the combined set, so a package listed more than once is governed by the
+    intersection of its lines rather than whichever line comes last.
 
-    ``is_exact`` is ``True`` only when Home Assistant pins the package to a
-    single concrete ``==`` version (a zero-width floor the integration cannot
-    tighten), including a non-PEP 508 line salvaged as a bare ``name==version``.
-    A range such as ``urllib3>=2.0`` yields its inclusive floor with
-    ``is_exact`` ``False``: HA sets only a lower bound the integration *could*
-    raise in its own manifest.
+    A non-PEP 508 line is salvaged as a bare ``name==version`` so a non-standard
+    exact constraint still governs; a range floor cannot be recovered without a
+    parseable specifier, so such a line is dropped rather than guessed. An
+    environment marker is deliberately NOT evaluated on the salvage path: the
+    marker filter applies only to valid PEP 508 lines, and a marker-gated
+    constraint whose *name* is not PEP 508 valid cannot occur in Home Assistant's
+    machine-generated constraints file (nor could such a package be a manifest
+    dependency).
     """
     line = raw_line.strip()
     if not line or line.startswith("#"):
@@ -269,20 +299,16 @@ def _governed_constraint(raw_line: str) -> tuple[str, str, bool] | None:
     try:
         requirement = Requirement(line)
     except InvalidRequirement:
-        # Non-PEP 508 line: salvage a bare ``name==version`` so a non-standard
-        # exact constraint still governs (an exact pin). A range floor cannot be
-        # recovered without a parseable specifier, so such a line is dropped
-        # rather than guessed. An environment marker is deliberately NOT
-        # evaluated on this path: the marker filter below applies only to valid
-        # PEP 508 lines, and a marker-gated constraint whose *name* is not PEP
-        # 508 valid cannot occur in Home Assistant's machine-generated
-        # constraints file (nor could such a package be a manifest dependency).
         name, separator, rhs = line.partition("==")
         name = name.strip()
         version = rhs.split(";", 1)[0].split(",", 1)[0].strip()
         if not separator or not name or not version:
             return None
-        return canonicalize_name(name), version, True
+        try:
+            salvaged = SpecifierSet(f"=={version}")
+        except InvalidSpecifier:  # pragma: no cover - HA versions are concrete
+            return None
+        return canonicalize_name(name), salvaged
     if requirement.marker is not None and not _marker_applies(requirement.marker):
         # Home Assistant only pins this package where the environment marker
         # holds. When it is false on the auditing runtime the pin is absent, so
@@ -291,11 +317,29 @@ def _governed_constraint(raw_line: str) -> tuple[str, str, bool] | None:
         # bucket and is audited at its own floor, instead of being suppressed at
         # a version Home Assistant never imposes here.
         return None
-    floor = _requirement_floor(requirement)
-    if floor is None:
-        return None
-    operators = {spec.operator for spec in requirement.specifier}
-    return canonicalize_name(requirement.name), floor, operators == {"=="}
+    return canonicalize_name(requirement.name), requirement.specifier
+
+
+def _merged_governed_constraints(constraints_text: str) -> dict[str, SpecifierSet]:
+    """Combine every HA constraint line per canonical package into one set.
+
+    Home Assistant may list the same package more than once (the committed
+    snapshot pins ``multidict`` at both ``>=6.0.2`` and ``>=6.4.2``); pip applies
+    those lines together, so the effective governance is their intersection, not
+    whichever line comes last. Accumulating each package's lines into a single
+    :class:`SpecifierSet` makes the derived floor (:func:`_specifier_floor`) and
+    exactness (:func:`_specifier_is_exact`) reflect what HA actually enforces
+    regardless of line order. Comments, blank lines, and marker-false lines are
+    excluded (see :func:`_parse_governed_line`).
+    """
+    merged: dict[str, SpecifierSet] = {}
+    for raw_line in constraints_text.splitlines():
+        parsed = _parse_governed_line(raw_line)
+        if parsed is None:
+            continue
+        name, specifier = parsed
+        merged[name] = merged.get(name, SpecifierSet()) & specifier
+    return merged
 
 
 def parse_ha_governed_pins(constraints_text: str) -> dict[str, str]:
@@ -311,8 +355,10 @@ def parse_ha_governed_pins(constraints_text: str) -> dict[str, str]:
     Comments, blank lines, and constraints with no inclusive lower bound (a bare
     name, a pure ``!=`` exclusion, an upper-bound-only ``<`` cap, or a
     non-concrete ``==1.*`` prefix / ``===`` arbitrary equality) are ignored: no
-    worst-case version can be derived from them. On a duplicate the last wins,
-    mirroring how a constraints file is applied top to bottom.
+    worst-case version can be derived from them. A package listed more than once
+    is governed by the *combination* of its lines (see
+    :func:`_merged_governed_constraints`), not whichever line comes last, so a
+    looser bound ordered after a tighter one cannot mask the tighter floor.
 
     The floor is retained for *every* governed package, exact or range, because
     the governed-transitive re-audit re-pins each reachable package to this
@@ -320,12 +366,10 @@ def parse_ha_governed_pins(constraints_text: str) -> dict[str, str]:
     is labelled is a separate concern handled in :func:`classify_audit`.
     """
     pins: dict[str, str] = {}
-    for raw_line in constraints_text.splitlines():
-        parsed = _governed_constraint(raw_line)
-        if parsed is None:
-            continue
-        name, floor, _is_exact = parsed
-        pins[name] = floor
+    for name, specifier in _merged_governed_constraints(constraints_text).items():
+        floor = _specifier_floor(specifier)
+        if floor is not None:
+            pins[name] = floor
     return pins
 
 
@@ -348,15 +392,16 @@ def parse_ha_exact_governed_names(constraints_text: str) -> set[str]:
     integration *could* raise (``urllib3>=<fixed>``); their findings are routed
     to the actionable ``governed_range`` bucket in :func:`classify_audit`
     instead of the unfixable-by-the-integration ``governed`` bucket. A non-PEP
-    508 line salvaged as a bare ``name==version`` counts as exact.
+    508 line salvaged as a bare ``name==version`` counts as exact. Exactness is
+    derived from the *combined* per-package specifier set (see
+    :func:`_merged_governed_constraints`): a package HA constrains on one line as
+    ``==`` and on another with an extra bound is no longer a lone ``==`` and
+    conservatively routes to the actionable range bucket rather than being
+    silently suppressed as unfixable.
     """
     exact: set[str] = set()
-    for raw_line in constraints_text.splitlines():
-        parsed = _governed_constraint(raw_line)
-        if parsed is None:
-            continue
-        name, _floor, is_exact = parsed
-        if is_exact:
+    for name, specifier in _merged_governed_constraints(constraints_text).items():
+        if _specifier_floor(specifier) is not None and _specifier_is_exact(specifier):
             exact.add(name)
     return exact
 
