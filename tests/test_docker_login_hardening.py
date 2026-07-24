@@ -2239,3 +2239,73 @@ def test_login_cmd_trims_trailing_blanks_from_every_inbound_switch() -> None:
     assert "goto :trim_trailing_blanks" in routine, (
         "the trim routine must recurse, otherwise it strips at most one blank"
     )
+
+
+def test_login_cmd_forwards_novnc_url_host_before_compose_run() -> None:
+    """Regression (Windows launcher, PR #1214 Codex follow-up).
+
+    ``login.cmd`` normalises the browsable host into ``NOVNC_URL_HOST`` (including
+    the ``--ip <ADDRESS>`` path) but must also re-export it as
+    ``GFMY_NOVNC_URL_HOST`` *before* invoking ``docker compose``. Otherwise the
+    compose interpolation ``${GFMY_NOVNC_URL_HOST:-localhost}`` falls back to
+    ``localhost`` and a remote user is told to open an unreachable URL even though
+    noVNC was published on the requested LAN address. ``login.sh`` exports it at
+    the same point (see its ``export GFMY_NOVNC_URL_HOST`` line); this locks the
+    Windows launcher to the same data path. Removing or moving the export after
+    the compose run would restore the localhost fallback without this failing.
+    """
+
+    lines = _read("login.cmd").splitlines()
+
+    export_idx = next(
+        (
+            index
+            for index, line in enumerate(lines)
+            if line.strip().lower().startswith('set "gfmy_novnc_url_host=')
+        ),
+        -1,
+    )
+    assert export_idx >= 0, (
+        "login.cmd must re-export the normalised host as GFMY_NOVNC_URL_HOST; "
+        "without it the in-container noVNC URL falls back to localhost for a "
+        "`login.cmd --ip <ADDRESS>` run."
+    )
+    assert "%NOVNC_URL_HOST%" in lines[export_idx], (
+        "GFMY_NOVNC_URL_HOST must carry the normalised %NOVNC_URL_HOST% value, "
+        "not a stale or empty literal."
+    )
+
+    run_idx = next(
+        (
+            index
+            for index, line in enumerate(lines)
+            if "docker compose" in line and "run --build" in line
+        ),
+        -1,
+    )
+    assert run_idx >= 0, "login.cmd must invoke `docker compose ... run --build`."
+    assert export_idx < run_idx, (
+        "GFMY_NOVNC_URL_HOST must be exported BEFORE `docker compose run`; moving "
+        "it afterwards restores the localhost fallback this fix removed."
+    )
+
+
+@pytest.mark.parametrize(
+    ("launcher", "assignment"),
+    [
+        ("login.sh", "export GFMY_NOVNC_URL_HOST="),
+        ("login.cmd", 'set "GFMY_NOVNC_URL_HOST='),
+    ],
+)
+def test_both_launchers_reexport_the_novnc_url_host(
+    launcher: str, assignment: str
+) -> None:
+    """Both launchers must ACTUALLY assign GFMY_NOVNC_URL_HOST (not merely mention
+    it in a comment) so the printed browsable URL matches across platforms; the
+    Windows path regressed once (PR #1214). Matching the real assignment form
+    keeps the check from passing on the ``rem``/``#`` explanations alone."""
+
+    assert assignment.lower() in _read(launcher).lower(), (
+        f"{launcher} must re-export GFMY_NOVNC_URL_HOST via `{assignment}...`; "
+        "otherwise the in-container noVNC URL falls back to localhost."
+    )
