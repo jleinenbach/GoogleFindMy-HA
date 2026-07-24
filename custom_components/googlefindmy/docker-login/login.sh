@@ -49,10 +49,10 @@
 #   ssh -L 7900:127.0.0.1:7900 <docker-host>
 # or, only on a trusted LAN, bind it to a CONCRETE address (preferred over the
 # 0.0.0.0 wildcard, which publishes on every interface):
-#   ./login.sh --ip 192.168.1.21
+#   bash login.sh --ip 192.168.1.21
 #
 # Optional one-click handoff:
-#   GFMY_ONECLICK=1 ./login.sh
+#   GFMY_ONECLICK=1 bash login.sh
 # only then does this script add docker-compose.oneclick.yml, which publishes the
 # token endpoint on host loopback (127.0.0.1, port 7901). Without it no 7901 port
 # is published at all, so the file handoff and GFMY_CLEARTEXT=1 still start on a
@@ -63,11 +63,11 @@ cd "$(dirname "$0")"
 
 usage() {
   cat <<'EOF'
-Usage: ./login.sh [--ip <ADDRESS>] [--help]
+Usage: bash login.sh [--ip <ADDRESS>] [--help]
 
   --ip <ADDRESS>  Bind the noVNC viewer (port 7900) to <ADDRESS> and print that
                   address as the URL to open. Use a concrete LAN address of this
-                  Docker host, for example: ./login.sh --ip 192.168.1.21
+                  Docker host, for example: bash login.sh --ip 192.168.1.21
   --help          Show this help and exit.
 
 Environment (see the comment block at the top of this file):
@@ -334,11 +334,11 @@ if is_loopback_addr "$novnc_bind"; then
   echo "[login] noVNC is bound to ${novnc_bind}, so only this Docker host reaches it."
   echo "[login] From another machine either tunnel it:"
   echo "[login]   ssh -L 7900:127.0.0.1:7900 <docker-host>"
-  echo "[login] or re-run bound to a LAN address of this host: ./login.sh --ip <ADDRESS>"
+  echo "[login] or re-run bound to a LAN address of this host: bash login.sh --ip <ADDRESS>"
   if [ -n "$lan_ips" ]; then
     echo "[login] Addresses detected on this host (pick the one your browser reaches):"
     printf '%s\n' "$lan_ips" | while IFS= read -r _ip; do
-      [ -n "$_ip" ] && echo "[login]   ./login.sh --ip ${_ip}"
+      [ -n "$_ip" ] && echo "[login]   bash login.sh --ip ${_ip}"
     done
   fi
 else
@@ -347,7 +347,7 @@ else
   echo "[login] \"secret\". Use it on a trusted LAN only, and only while logging in."
   if is_wildcard_addr "$novnc_bind"; then
     echo "[login] That bind is a wildcard, so the URL above names just one of the"
-    echo "[login] interfaces it listens on. Prefer ./login.sh --ip <ADDRESS>."
+    echo "[login] interfaces it listens on. Prefer bash login.sh --ip <ADDRESS>."
   fi
 fi
 
