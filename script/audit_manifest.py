@@ -948,15 +948,21 @@ def _validate_audit_shape(data: object) -> str | None:
     ``==`` in :func:`reachable_governed_transitive_pins`, an order-/hash-free
     operation), so it is deliberately not policed and stays tolerated when
     absent. The required identifiers ``name`` and ``id`` are rejected when
-    absent, empty, or wrong-typed; every other absent optional key stays
+    absent, empty, or wrong-typed; every other absent optional *leaf* key stays
     tolerated exactly as the consumers tolerate it through ``dict.get``
-    defaults. Validating at the
+    defaults. The top-level ``dependencies`` array is the sole *required* key:
+    pip-audit always emits it, so an absent one marks a truncated/malformed
+    report (which ``.get("dependencies", [])`` would otherwise launder into a
+    false-green empty audit at exit 0) and is rejected with the tooling-error
+    exit 2, unlike the tolerated optional leaf keys. Validating at the
     single JSON boundary both the pass-1 and the governed re-audit share keeps a
     malformed report from silently degrading either pass.
     """
     if not isinstance(data, dict):
         return f"root is {type(data).__name__}, expected a JSON object"
-    dependencies = data.get("dependencies", [])
+    if "dependencies" not in data:
+        return "'dependencies' is missing, expected a list"
+    dependencies = data["dependencies"]
     if not isinstance(dependencies, list):
         return f"'dependencies' is {type(dependencies).__name__}, expected a list"
     for index, dependency in enumerate(dependencies):

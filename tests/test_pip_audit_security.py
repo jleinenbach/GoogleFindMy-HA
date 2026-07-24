@@ -833,6 +833,8 @@ class TestMainDecision:
             pytest.param([], id="root-list"),
             pytest.param(None, id="root-null"),
             pytest.param("nope", id="root-string"),
+            pytest.param({}, id="dependencies-missing"),
+            pytest.param({"other": 1}, id="dependencies-absent-with-other-keys"),
             pytest.param({"dependencies": None}, id="dependencies-null"),
             pytest.param({"dependencies": {}}, id="dependencies-object"),
             pytest.param({"dependencies": [42]}, id="dependency-not-object"),
