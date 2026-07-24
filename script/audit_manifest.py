@@ -52,7 +52,11 @@ skipped by the offline ``--audit-json`` preview, which stays floor-only and says
 so):
 - integration-owned packages are additionally audited *as declared* (``>=X``),
   which the resolver resolves to the newest installable release, catching a CVE
-  that lives above the floor but within the permitted range;
+  in that newest pick. The floor and newest passes sample the two edges only; an
+  intermediate still-permitted release whose CVE is fixed before the newest one
+  stays a documented gap, because advisory ranges are not monotonic and two
+  endpoints cannot span the full range (closing it needs advisory-range
+  enumeration, deliberately out of scope for this owned/transitive gate);
 - governed packages are additionally audited at every *additional* supported HA
   version's pins (pass one snapshot per ``--ha-constraints``): Home Assistant may
   pin, say, ``cryptography`` or ``aiohttp`` at a newer version on a newer core,
@@ -739,9 +743,10 @@ def render_report(
             "NOTE - offline preview (--audit-json): coverage is limited to the "
             "declared-minimum HA snapshot at each package's floor/HA-pin. The "
             "online gate additionally audits integration-owned packages as "
-            "declared (catching a CVE above the floor but within the permitted "
-            "range) and governed packages at every supported HA version's pins; "
-            "those passes need the network and are skipped here."
+            "declared (the resolver's newest pick; intermediate still-permitted "
+            "versions between floor and newest are not spanned) and governed "
+            "packages at every supported HA version's pins; those passes need "
+            "the network and are skipped here."
         )
         lines.append("")
 
@@ -1298,11 +1303,15 @@ def apply_owned_as_declared_audit(  # noqa: PLR0913 - findings + owned + classif
 
     The floor pass audits the minimum a user may install (``pkg>=X`` ->
     ``pkg==X``); this audits ``owned`` unchanged so the resolver picks the newest
-    installable release, catching a CVE introduced above the floor but still
-    within the permitted range (advisory ranges are not monotonic from a
-    package's first release). Only the actionable owned/transitive buckets are
-    merged: a governed package the resolver drags in at its newest pick is
-    audited authoritatively at Home Assistant's own pins elsewhere, not here.
+    installable release, catching a CVE present in that newest pick. The two
+    passes therefore sample the floor and the newest edge only: because advisory
+    ranges are not monotonic from a package's first release, an intermediate
+    still-permitted release whose CVE is fixed before the newest one escapes both
+    and stays a documented gap (full coverage would need advisory-range
+    enumeration across the span, deliberately out of scope here). Only the
+    actionable owned/transitive buckets are merged: a governed package the
+    resolver drags in at its newest pick is audited authoritatively at Home
+    Assistant's own pins elsewhere, not here.
 
     Needs the network, so it is a no-op when ``offline`` or there are no owned
     requirements. Returns a tooling exit code when the pass could not run
