@@ -727,7 +727,11 @@ artifacts remain exempt when explicitly flagged by repo configuration).
 
 **Supply chain**
 
-* Pin dependencies and enable pip **hash checking** (`--require-hashes`).
+* Dependencies track upstream by design. This integration must stay compatible
+  with the current Chrome/ChromeDriver, so dependencies use lower-bound floors
+  (`>=`) rather than exact pins or `--require-hashes`. Supply-chain risk is
+  covered by the compensating controls below (SBOM scan, CI vulnerability gate)
+  and mandatory review, not by hard version pins.
 * Generate an **SBOM** (CycloneDX) and scan it (e.g., Dependency-Track).
 * Fail CI on known critical vulnerabilities.
 
@@ -795,7 +799,7 @@ artifacts remain exempt when explicitly flagged by repo configuration).
 * [ ] Archive extraction is traversal-safe; paths validated with `pathlib`.
 * [ ] `secrets` used for tokens; cryptography aligns with BSI TR-02102-1 guidance.
 * [ ] Logs/diagnostics redact tokens, PII, coordinates, device IDs, and derived identifiers.
-* [ ] Dependencies pinned; pip `--require-hashes`; CycloneDX SBOM generated and scanned.
+* [ ] Dependencies use `>=` floors by design (Chrome/ChromeDriver currency, not hard pins); CycloneDX SBOM generated and scanned; CI fails on critical CVEs.
 * [ ] Async: no loop blockers; `to_thread`/`TaskGroup`; proper cancel handling.
 * [ ] I/O optimized (batch/atomic); caches with clear TTL/invalidations.
 * [ ] HA-specific: Coordinator, injected session, `get_url`, config-flow test, Repairs/Diagnostics, HA Store.
