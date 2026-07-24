@@ -1393,9 +1393,9 @@ class TestAdditionalGovernedReauditPins:
 
         ``version`` is a tolerated, unpoliced leaf (see ``_validate_audit_shape``);
         it must be compared hash-free. Hashing it in a set literal would raise
-        ``TypeError`` instead of letting ``main`` return the documented
-        tooling-error exit. An unhashable resolved version matches no pin, so the
-        package is (conservatively) selected for re-audit rather than crashing.
+        ``TypeError`` and abort the run; ``==`` keeps the comparison hash-free, so
+        an unhashable resolved version matches no pin and the package is
+        (conservatively) selected for re-audit while processing continues.
         """
         audit = {"dependencies": [{"name": "yarl", "version": ["1.24.5"], "vulns": []}]}
         result = audit_manifest.additional_governed_reaudit_pins(

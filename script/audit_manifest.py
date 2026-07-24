@@ -468,10 +468,13 @@ def additional_governed_reaudit_pins(
             continue
         # Compare hash-free: ``resolved`` carries the report's tolerated,
         # unpoliced ``version`` leaf (see ``_validate_audit_shape``), which a
-        # malformed report may render as an unhashable list/dict. A set literal
-        # would hash it and raise ``TypeError`` instead of the documented
-        # tooling-error exit; ``==`` matches the sibling in
-        # :func:`reachable_governed_transitive_pins`.
+        # malformed report may render as an unhashable list/dict. That leaf is
+        # deliberately never policed and never hashed, so a set literal would
+        # hash it and abort with ``TypeError``. ``==`` keeps the comparison
+        # hash-free (matching the sibling in
+        # :func:`reachable_governed_transitive_pins`): an unhashable version
+        # simply compares unequal, so the package is conservatively re-audited
+        # and processing continues to ``main``'s normal integer exit.
         if pin == primary_pins.get(name) or pin == resolved.get(name):
             continue
         result[name] = pin
