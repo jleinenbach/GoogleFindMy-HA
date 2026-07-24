@@ -729,11 +729,14 @@ artifacts remain exempt when explicitly flagged by repo configuration).
 
 * Dependencies track upstream by design. This integration must stay compatible
   with the current Chrome/ChromeDriver, so dependencies use lower-bound floors
-  (`>=`) rather than exact pins or `--require-hashes`. Supply-chain risk is
-  covered by the compensating controls below (SBOM scan, CI vulnerability gate)
-  and mandatory review, not by hard version pins.
-* Generate an **SBOM** (CycloneDX) and scan it (e.g., Dependency-Track).
-* Fail CI on known critical vulnerabilities.
+  (`>=`) rather than exact pins or `--require-hashes`.
+* Actual coverage today: `pip-audit` runs on every PR in **report-only** mode
+  (findings surface as job-summary warnings, they do not fail the PR); a weekly
+  scheduled `pip-audit` job opens automated security-update PRs for fixable
+  advisories; Semgrep SAST runs on PRs and daily; every change is human-reviewed.
+  There is currently **no** SBOM scan and **no** hard CVE gate blocking a PR.
+* Hardening targets (not yet implemented): generate a CycloneDX **SBOM** and scan
+  it (e.g., Dependency-Track); fail CI on known critical vulnerabilities.
 
 ### 11.3 Async, concurrency & cancellation
 
@@ -787,7 +790,7 @@ artifacts remain exempt when explicitly flagged by repo configuration).
 
 ### 11.8 Release & operations
 
-* CI **security gate**: lint/type/tests/SBOM scan must pass.
+* CI **security gate**: lint/type/tests must pass; `pip-audit` runs report-only (no hard CVE gate) and an SBOM scan is a hardening target, not yet enforced.
 * Logs are **incident-ready** but privacy-preserving (use OWASP vocabulary).
 * All doc updates comply with **Rule §9.DOC**.
 
@@ -799,7 +802,7 @@ artifacts remain exempt when explicitly flagged by repo configuration).
 * [ ] Archive extraction is traversal-safe; paths validated with `pathlib`.
 * [ ] `secrets` used for tokens; cryptography aligns with BSI TR-02102-1 guidance.
 * [ ] Logs/diagnostics redact tokens, PII, coordinates, device IDs, and derived identifiers.
-* [ ] Dependencies use `>=` floors by design (Chrome/ChromeDriver currency, not hard pins); CycloneDX SBOM generated and scanned; CI fails on critical CVEs.
+* [ ] Dependencies use `>=` floors by design (Chrome/ChromeDriver currency, not hard pins); `pip-audit` runs report-only on PRs + weekly auto-update PRs; Semgrep SAST runs; SBOM scan and hard CVE gate remain hardening targets.
 * [ ] Async: no loop blockers; `to_thread`/`TaskGroup`; proper cancel handling.
 * [ ] I/O optimized (batch/atomic); caches with clear TTL/invalidations.
 * [ ] HA-specific: Coordinator, injected session, `get_url`, config-flow test, Repairs/Diagnostics, HA Store.
