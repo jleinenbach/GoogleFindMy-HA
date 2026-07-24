@@ -39,7 +39,14 @@ WORKDIR /app
 # it is COPYed at build time. The integration *code* is NOT copied (M2): it is
 # mounted at run time, which keeps the image independent of the code version.
 COPY requirements.txt /app/requirements.txt
-RUN pip3 install --no-cache-dir -r /app/requirements.txt
+# Install setuptools alongside the requirements: undetected-chromedriver 3.5.5
+# (the current PyPI top, so a version bump is not available) still imports
+# `distutils`, which was removed from the stdlib in Python 3.12 (PEP 632). The
+# base image selenium/standalone-chrome:latest has since moved to Python 3.14,
+# where the bare import fails (ModuleNotFoundError: distutils) and Chrome never
+# starts. setuptools re-provides distutils via its _distutils_hack, so this is a
+# dependency fix only, NOT a Chrome/ChromeDriver version pin.
+RUN pip3 install --no-cache-dir setuptools -r /app/requirements.txt
 
 # Writable volume mount point for the produced secrets.json (see
 # docker-compose.yml → ./data:/data and GOOGLEFINDMY_SECRETS_PATH). Created and
