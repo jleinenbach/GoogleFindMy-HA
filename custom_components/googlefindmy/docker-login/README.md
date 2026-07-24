@@ -53,13 +53,13 @@ itself.
 - **Trusted LAN opt-in.** Only on a network you trust, bind noVNC to a
   **concrete** address of the Docker host:
   ```bash
-  ./login.sh --ip 192.168.1.21
+  bash login.sh --ip 192.168.1.21
   ```
   The launcher then prints exactly that address as the URL to open. Prefer this
   over the `GFMY_NOVNC_BIND=0.0.0.0` wildcard, which publishes on every
   interface; prefer the SSH tunnel over both.
 
-  Run `./login.sh` without arguments first: when noVNC stays on loopback the
+  Run `bash login.sh` without arguments first: when noVNC stays on loopback the
   launcher lists the addresses it detected on this host, each with the
   ready-to-paste `--ip` command. Container and VPN interfaces (`docker0`,
   `br-*`, `veth*`, `tun*`, `wg*`) are left out, but the list is still a
@@ -113,8 +113,12 @@ duplicate containers, stale code after an update) for you.
 - **Linux / macOS / QNAP:**
   ```bash
   cd config/custom_components/googlefindmy/docker-login
-  ./login.sh
+  bash login.sh
   ```
+  Invoking it as `bash login.sh` (rather than `./login.sh`) is deliberate: HACS
+  installs the integration from a ZIP without restoring the execute bit, so
+  `./login.sh` can give `Permission denied`. Running it through bash needs no
+  execute bit and works after every update.
 - **Windows (Docker Desktop):** double-click `login.cmd`, or from a terminal:
   ```bat
   cd config\custom_components\googlefindmy\docker-login
@@ -175,7 +179,7 @@ read it as your host user. Docker Desktop (Windows/macOS) maps ownership for you
    container takes ownership of `./data` for the run, so no host `chmod` is needed.
 
 2. Start the container **in the foreground** (it prompts for input) —
-   `./login.sh` / `login.cmd`, or
+   `bash login.sh` / `login.cmd`, or
    `docker compose run --build --service-ports --rm googlefindmy-login`.
 
 3. Wait for this line in the terminal, then press **Enter**:
@@ -199,7 +203,7 @@ On a QNAP NAS running Home Assistant as a container, this wrapper is the
 intended login path (there is no Supervisor Add-on store for HA Container):
 
 - **SSH:** enable SSH on the NAS, `cd` into
-  `.../config/custom_components/googlefindmy/docker-login`, then run `./login.sh`
+  `.../config/custom_components/googlefindmy/docker-login`, then run `bash login.sh`
   (or `docker compose run --build --service-ports --rm googlefindmy-login`).
   noVNC is bound to loopback, so open it via an
   SSH tunnel from your workstation:
@@ -207,7 +211,7 @@ intended login path (there is no Supervisor Add-on store for HA Container):
   ssh -L 7900:127.0.0.1:7900 <nas-ip>
   ```
   then browse to `http://localhost:7900`. Only on a trusted LAN, start with
-  `GFMY_NOVNC_BIND=0.0.0.0 ./login.sh` to reach `http://<nas-ip>:7900` directly
+  `GFMY_NOVNC_BIND=0.0.0.0 bash login.sh` to reach `http://<nas-ip>:7900` directly
   (see [noVNC access & security](#novnc-access--security)).
 - **Container Station:** the interactive first login needs a terminal attached to
   its STDIN, which only the `docker compose run` path (the **SSH** option above)
@@ -225,7 +229,7 @@ Because HA and the login container run on the same box here, the produced
 ## Normal (already authenticated) runs
 
 ```bash
-./login.sh          # or: docker compose run --service-ports --rm googlefindmy-login
+bash login.sh       # or: docker compose run --service-ports --rm googlefindmy-login
 ```
 If `data/secrets.json` already holds valid tokens, the browser step is skipped
 and the CLI lists devices directly. You can ignore the noVNC link.
@@ -237,7 +241,7 @@ and the CLI lists devices directly. You can ignore the noVNC link.
 echo '{}' > data/secrets.json
 
 # Option B: keep the file but force re-authentication
-GFMY_ARGS="--reauth" ./login.sh
+GFMY_ARGS="--reauth" bash login.sh
 ```
 
 `GFMY_ARGS` is forwarded to `main.py`. Useful values: `--reauth` (force login),
@@ -293,7 +297,7 @@ is set as well, the clear-text output replaces the file handoff.
 > for the split-machine case.
 
 ```bash
-GFMY_ONECLICK=1 ./login.sh
+GFMY_ONECLICK=1 bash login.sh
 ```
 
 On Windows, run the two lines `set GFMY_ONECLICK=1` and `login.cmd`.
@@ -397,7 +401,7 @@ Assistant's *secrets.json* field. No port is opened.
 > output. Copy the block where the launcher runs.
 
 ```bash
-GFMY_CLEARTEXT=1 ./login.sh
+GFMY_CLEARTEXT=1 bash login.sh
 ```
 
 The block is framed by `BEGIN secrets.json` / `END secrets.json` markers so it is
@@ -453,9 +457,14 @@ there is no separate image to rebuild for code changes.
 ## Troubleshooting
 
 - **Stuck with no prompt / can't type:** you probably ran `docker compose up`
-  (which does not attach your terminal's stdin). Use `./login.sh` /
+  (which does not attach your terminal's stdin). Use `bash login.sh` /
   `docker compose run --service-ports --rm googlefindmy-login`, which runs in the
   foreground with stdin attached.
+- **`Permission denied` running `./login.sh`:** start it through bash instead —
+  `bash login.sh`. HACS installs the integration from a ZIP and does not restore
+  the execute bit, so `./login.sh` can fail even though the script is marked
+  executable in the repository. `bash login.sh` needs no execute bit and survives
+  every HACS update; that is why the commands above use this form.
 - **noVNC page won't load:** give the container a few seconds; check
   `docker compose logs` for `[entrypoint] Display ready.`
 - **`port is already allocated` on 7900 or 7901:** another process on the Docker
@@ -474,7 +483,7 @@ there is no separate image to rebuild for code changes.
   so a host `chmod` is not required.
 - **Can't read `secrets.json` as your user after a manual run:** you ran it by
   hand without exporting `GFMY_HOST_UID`/`GFMY_HOST_GID`, so the file stayed
-  container-owned. Re-run via `./login.sh`, or `sudo chown "$(id -u):$(id -g)"
+  container-owned. Re-run via `bash login.sh`, or `sudo chown "$(id -u):$(id -g)"
   data/secrets.json`.
 
 ## Known limitation

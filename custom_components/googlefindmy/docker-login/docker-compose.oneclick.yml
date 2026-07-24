@@ -5,7 +5,7 @@
 #
 # HOW TO USE IT
 #   The launchers do it for you when you ask for one-click:
-#     GFMY_ONECLICK=1 ./login.sh          (Linux/macOS/QNAP)
+#     GFMY_ONECLICK=1 bash login.sh       (Linux/macOS/QNAP)
 #     set GFMY_ONECLICK=1 && login.cmd    (Windows)
 #   By hand it is:
 #     docker compose -f docker-compose.yml -f docker-compose.oneclick.yml \
@@ -16,7 +16,7 @@
 #   it verbatim below, and the container's entrypoint gate (which compares
 #   against "1") silently stays off. login.cmd strips that blank from every
 #   GFMY_* switch before it calls Compose; a hand-typed compose call has
-#   nothing that would. (login.sh needs no such trim: `VAR=1 ./login.sh` is an
+#   nothing that would. (login.sh needs no such trim: `VAR=1 bash login.sh` is an
 #   assignment prefix, which cannot pick up a trailing blank.)
 #   Note: passing any `-f` disables Compose's implicit auto-load of a
 #   `docker-compose.override.yml`, so list that file explicitly too if you keep

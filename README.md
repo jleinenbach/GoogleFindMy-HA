@@ -151,27 +151,36 @@ The manifest classifies Google Find My Device as a **hub** integration. Home Ass
 >[!IMPORTANT]
 >**Authentication is a 2-part process.  One part requires use of a python script to obtain a secrets.json file, which will contain all necessary keys for authentication!  This is currently the *ONLY* way to authenticate to the FindMy network.**
 
-### <ins>Authentication Part 1 (External Steps)</ins>
-1. Navigate to [GoogleFindMyTools](https://github.com/leonboe1/GoogleFindMyTools?tab=readme-ov-file#how-to-use) repository and follow the directions on "How to use" the main.py script.
-   > [!IMPORTANT]
-   > Run the authentication script from the **same public IP address / network** that your Home Assistant instance uses, and sign in with the **same Google account** that owns the trackers. Google ties the end-to-end encryption keys in `secrets.json` to the account and may revoke them when requests arrive from a different IP or region. A mismatch produces a bundle that lists your devices and can ring them, but cannot decrypt any location reports — see [Devices appear but no location updates](#authentication-expires-repeatedly).
-2. **CRITICAL STEP!**  Complete the **ENTIRE** authentication process to generate `Auth/secrets.json`
-> [!WARNING]
->While going through the process in main.py to authenticate, you **MUST** go through **2 login processes!**  After the first login is successful, your available devices will be listed.  You must complete the next step to display location data for one of your devices.  You will then login again.  After you complete this step, you should see valid location data for your device, followed by several errors that are not important.  ONLY at this point are you ready to move on to the next step!
-3. Copy the entire contents of the secrets.json file.
-    - Specifically, open the file in a text editor, select all, and copy.
+### <ins>Authentication Part 1 (generate `secrets.json`)</ins>
+
+Generate the `secrets.json` bundle with **this repository's own login tooling**. It runs the integration's up-to-date fork code, so the bundle is exactly what Home Assistant consumes, and it retrieves **both** required keys (including the `shared_key`) automatically in a single run — no manual device selection, and none of the `keys_missing` pitfalls of the external script below.
+
 > [!IMPORTANT]
-> The encryption key (`shared_key`) is only retrieved during the **second** login, which happens when you actively **select a device to locate**. If you stop after the device list appears (skipping that step), the resulting `secrets.json` has no `shared_key` and Home Assistant will reject the import with a `keys_missing` error, because locations cannot be decrypted without it.
-> As an alternative to the external GoogleFindMyTools, this repository ships a bundled copy of the same CLI that fetches **both** keys automatically in a single run, without requiring you to select a device manually, so it is the more robust way to generate a complete `secrets.json`. **To use it for the initial login you must run it from a flat folder:** copy the *contents* of `custom_components/googlefindmy/` into a fresh, empty directory (so that `main.py`, `Auth/`, `NovaApi/`, etc. sit directly at its top level) and run `python main.py` from there. The flat layout is required because the script auto-detects its location: when it is run in place at `custom_components/googlefindmy/main.py` it operates in Home Assistant mode and only lists devices from an **existing** `secrets.json`, so it will not open the Chrome login that creates the bundle.
+> Whichever option you pick, run the login from the **same public IP address / network** that your Home Assistant instance uses, and sign in with the **same Google account** that owns the trackers. Google ties the end-to-end encryption keys in `secrets.json` to the account and may revoke them when requests arrive from a different IP or region. A mismatch produces a bundle that lists your devices and can ring them, but cannot decrypt any location reports — see [Devices appear but no location updates](#authentication-expires-repeatedly).
+
+**Option A — Docker login helper (recommended).** Run the bundled one-command wrapper on your Docker host and complete the Google login through a browser tab: [`custom_components/googlefindmy/docker-login/`](custom_components/googlefindmy/docker-login/README.md). It runs Chrome **inside the container** at a controlled version, so you are not at the mercy of whatever Chrome your desktop auto-updates to — the exact failure that currently breaks the external browser flow ([BSkando#207](https://github.com/BSkando/GoogleFindMy-HA/issues/207)). No local Python or Chrome is required, and it works on ARM Linux too.
+
+**Option B — Bundled CLI (`main.py`).** Copy the *contents* of `custom_components/googlefindmy/` into a fresh, empty directory (so that `main.py`, `Auth/`, `NovaApi/`, etc. sit directly at its top level) and run `python main.py` from there. The flat layout is required because the script auto-detects its location: run in place at `custom_components/googlefindmy/main.py` it operates in Home Assistant mode and only lists devices from an **existing** `secrets.json`, so it will not open the Chrome login that creates the bundle. If Chrome startup aborts with `only supports Chrome version …`, pin the version as described under [Chrome/ChromeDriver version mismatch](#chromechromedriver-version-mismatch-standalone-auth-scripts).
+
+When either option finishes, copy the entire contents of the generated `secrets.json` (open it in a text editor, select all, copy) for Part 2.
+
+<details>
+<summary><b>Fallback: the external GoogleFindMyTools script</b></summary>
+
+If you prefer the external tool, navigate to [GoogleFindMyTools](https://github.com/leonboe1/GoogleFindMyTools?tab=readme-ov-file#how-to-use) and follow the "How to use" directions for the `main.py` script. Two caveats make the options above the more robust choice:
+
+> [!WARNING]
+> You **MUST** go through **2 login processes**. After the first login your available devices are listed; you must then **select a device to locate**, which triggers a **second** login and retrieves the `shared_key`. If you stop after the device list appears, the resulting `secrets.json` has no `shared_key` and Home Assistant rejects the import with a `keys_missing` error, because locations cannot be decrypted without it.
+
+> [!NOTE]
+> The external browser login can abort with a Chrome/ChromeDriver version mismatch ([BSkando#207](https://github.com/BSkando/GoogleFindMy-HA/issues/207)). If you follow all of Leon's steps and still cannot get through the `main.py` sequence, try [BSkando/GoogleFindMyTools](https://github.com/BSkando/GoogleFindMyTools), or use Option A above, which sidesteps the desktop-Chrome dependency entirely.
+
+</details>
 
 ### <ins>Authentication Part 2 (Home Assistant Steps)</ins>
-4. Add the integration to your Home Assistant install.
-5. In Home Assistant, paste the copied text from secrets.json when prompted.
-6. After completing authentication and adding devices, RESTART Home Assistant!
-
-### Problems with Authentication?
->[!NOTE]
->Recently, some have had issues with the script from the repository above.  If you follow all the steps in Leon's repository and are unable to get through the main.py sequence due to errors, please try using my modification of the script [BACKUP:GoogleFindMyTools](https://github.com/BSkando/GoogleFindMyTools)
+1. Add the integration to your Home Assistant install.
+2. In Home Assistant, paste the copied text from secrets.json when prompted.
+3. After completing authentication and adding devices, RESTART Home Assistant!
 
 ### Automatic discovery & credential updates
 
@@ -183,7 +192,7 @@ The manifest classifies Google Find My Device as a **hub** integration. Home Ass
 
 - Home Assistant supports connecting multiple Google accounts, but **only one config entry per email address stays active**. When duplicate entries share the same Google account, the integration automatically disables and unloads the non-authoritative entries to prevent device duplication and token conflicts.
 - The disabled entries remain visible in **Settings → Devices & Services** with an integration-managed disabled state so you can review or remove them manually. Reactivating a disabled duplicate requires removing the authoritative entry first or supplying credentials for a different Google account.
-- The login container publishes two ports with **different** purposes, and they are configured separately: the one-click token endpoint (7901, read by Home Assistant, pinned to loopback in the compose overlay as a security boundary and deliberately not configurable) and the noVNC viewer (7900, opened by **your** browser, `GFMY_NOVNC_BIND` / `GFMY_NOVNC_URL_HOST`, or simply `./login.sh --ip <address>`). Home Assistant cannot guess which address your browser can reach, so the config flow only renders a clickable noVNC link for a non-loopback IP. Details, defaults and the network-mode requirement: [`custom_components/googlefindmy/docker-login/README.md`](custom_components/googlefindmy/docker-login/README.md#the-three-address-roles).
+- The login container publishes two ports with **different** purposes, and they are configured separately: the one-click token endpoint (7901, read by Home Assistant, pinned to loopback in the compose overlay as a security boundary and deliberately not configurable) and the noVNC viewer (7900, opened by **your** browser, `GFMY_NOVNC_BIND` / `GFMY_NOVNC_URL_HOST`, or simply `bash login.sh --ip <address>`). Home Assistant cannot guess which address your browser can reach, so the config flow only renders a clickable noVNC link for a non-loopback IP. Details, defaults and the network-mode requirement: [`custom_components/googlefindmy/docker-login/README.md`](custom_components/googlefindmy/docker-login/README.md#the-three-address-roles).
 - If two `secrets.json` files for **different** accounts are ever present in the watched paths at the same time, only the newer file is imported; the older account's file is **kept** (not deleted) and logged, so it is discovered and offered on the next scan rather than being silently discarded. Write one bundle at a time; the login container always writes a single complete bundle, so this only matters if you place files manually.
 
 ### Interoperability and third-party linking
@@ -356,7 +365,7 @@ by map-label changes and there is no hassfest schema risk.
 
 - **Historical data availability:** Map View history is generated locally and depends on the Recorder integration retaining statistics; pruning recorder data will remove historical traces.
 - **Offline devices:** Google only reports the last known location for powered-off or offline hardware.  Devices may appear as `unavailable` until they reconnect to the Find My network.
-- **Authentication tooling:** Generating `Auth/secrets.json` currently relies on the external GoogleFindMyTools scripts.  Future upstream changes to Google's login flow may require updated tooling before the integration can connect again.
+- **Authentication tooling:** Generating `Auth/secrets.json` requires a one-time browser login, produced either by this repository's own tooling (the Docker login helper or the bundled `main.py`, see [Authentication Part 1](#authentication-part-1-generate-secretsjson)) or by the external GoogleFindMyTools script.  Future changes to Google's login flow may require updated tooling before the integration can connect again.
 - **Multiple households:** Home Assistant imports all trackers from the authenticated Google account.  Fine-grained sharing to limit visibility per household member is not yet available and should be handled via entity permissions.
 
 ## Uninstallation / Removal

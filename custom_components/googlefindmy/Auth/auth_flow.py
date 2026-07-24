@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from typing import TYPE_CHECKING, Any, cast
 
@@ -55,9 +56,30 @@ def request_oauth_account_token_flow(
     """
     # In Home Assistant context, skip the interactive prompts
     is_home_assistant = "homeassistant" in sys.modules
+    # Inside the docker-login container Chrome runs *in the container* and is
+    # driven through the noVNC viewer, not on the user's own desktop. The
+    # entrypoint sets GOOGLEFINDMY_CONTAINER_LOGIN=1 there because the
+    # sys.modules HA heuristic above does not fire in that standalone process,
+    # so without this signal the user would be told to "install Chrome on your
+    # system" -- wrong for the container, where they must open the noVNC URL.
+    is_container = os.environ.get("GOOGLEFINDMY_CONTAINER_LOGIN") == "1"
 
     if not headless and not is_home_assistant:
-        print("""[AuthFlow] This script will now open Google Chrome on your device to login to your Google account.
+        if is_container:
+            novnc_url = (
+                os.environ.get("GOOGLEFINDMY_NOVNC_URL") or "http://localhost:7900"
+            )
+            print(
+                "[AuthFlow] ==================================================\n"
+                "[AuthFlow] Action required to sign in to Google:\n"
+                f"[AuthFlow]   1. Open {novnc_url} in your browser "
+                "(password: secret).\n"
+                "[AuthFlow]   2. Return to this terminal and press Enter (below).\n"
+                "[AuthFlow]   3. Sign in to Google in the browser view that opens.\n"
+                "[AuthFlow] =================================================="
+            )
+        else:
+            print("""[AuthFlow] This script will now open Google Chrome on your device to login to your Google account.
 > Please make sure that Chrome is installed on your system.
 > For macOS users only: Make that you allow Python (or PyCharm) to control Chrome if prompted.
         """)

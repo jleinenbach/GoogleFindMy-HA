@@ -113,6 +113,12 @@ call :bracket_ipv6 "%NOVNC_URL_HOST%"
 set "NOVNC_URL_HOST=%BRACKETED%"
 
 set "GFMY_NOVNC_BIND=%NOVNC_BIND%"
+rem Re-export the normalised, bracketed browsable host too, so docker-compose can
+rem build the noVNC URL (GOOGLEFINDMY_NOVNC_URL). Without this a `login.cmd --ip
+rem <ADDRESS>` run would leave GFMY_NOVNC_URL_HOST at its original (usually empty)
+rem value and the URL printed inside the container would fall back to localhost.
+rem login.sh exports both at the same point, for that reason.
+set "GFMY_NOVNC_URL_HOST=%NOVNC_URL_HOST%"
 
 if not exist data mkdir data
 

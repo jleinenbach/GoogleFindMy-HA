@@ -23,6 +23,17 @@ services:
       # inside the read-only code mount. main.py honours this override and keeps
       # the atomic write on a single writable filesystem.
       GOOGLEFINDMY_SECRETS_PATH: "/data/secrets.json"
+      # Mark this as the docker-login container so the interactive auth flow
+      # prints container-correct instructions (open the noVNC URL) instead of
+      # the desktop text ("install Chrome on your system"). The auth flow's own
+      # `homeassistant in sys.modules` heuristic does NOT fire in the standalone
+      # main.py process, so this explicit signal is required (not just cleaner).
+      # entrypoint.sh also defaults it on, so a manual `docker run` is covered.
+      GOOGLEFINDMY_CONTAINER_LOGIN: "1"
+      # The browsable noVNC URL printed at the login prompt. login.sh exports the
+      # normalised host (LAN address with --ip, else loopback); a manual
+      # `docker compose run` without the launcher falls back to localhost.
+      GOOGLEFINDMY_NOVNC_URL: "http://${GFMY_NOVNC_URL_HOST:-localhost}:7900"
       # Host UID/GID for the ownership handoff of the produced secrets.json. The
       # launcher (login.sh) passes these so the finished file ends up owned by
       # *you* with owner-only 0600 (readable/copyable by you, private from other

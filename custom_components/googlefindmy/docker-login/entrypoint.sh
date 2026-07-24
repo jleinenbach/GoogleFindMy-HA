@@ -136,7 +136,13 @@ for i in $(seq 1 30); do
   sleep 1
 done
 
-echo "[entrypoint] Open http://localhost:7900 (password: secret) in your browser to see/drive Chrome."
+# Neutral status line only: it must NOT read as the call to action. The single
+# actionable prompt (open the URL, press Enter, sign in) is printed by the login
+# flow (auth_flow.py) at the point it actually blocks, and ONLY on a real login
+# -- a second run with an existing secrets.json returns early and shows no such
+# prompt. Uses the real URL passed via compose (LAN address with --ip, else
+# loopback); a manual `docker run` falls back to localhost.
+echo "[entrypoint] noVNC available at ${GOOGLEFINDMY_NOVNC_URL:-http://localhost:7900} (password: secret)."
 
 # /data is a host bind mount whose owner/mode we do not control. Take ownership
 # for the container user for the duration of the run so main.py's atomic write of
@@ -150,6 +156,14 @@ sudo chown -R "$(id -u):$(id -g)" /data 2>/dev/null || true
 # the package __init__/config_flow, which require voluptuous + a real Home
 # Assistant install (neither is present in this image on purpose). secrets.json
 # goes to the writable /data volume via GOOGLEFINDMY_SECRETS_PATH.
+# Mark the standalone login flow as running inside the container so auth_flow.py
+# prints container-correct instructions. docker-compose.yml already sets this,
+# but default it on here too so a bare `docker run` of this image (no compose
+# env) is still recognised as a container login. `:=` never overrides an
+# explicit value; `export` makes the backgrounded python child inherit it.
+: "${GOOGLEFINDMY_CONTAINER_LOGIN:=1}"
+export GOOGLEFINDMY_CONTAINER_LOGIN
+
 cd /app/gfmy
 # Start the CLI in the BACKGROUND and wait on it, so a SIGTERM/SIGINT reaches bash
 # immediately and on_signal can relay it to the child (a foreground child defers the
@@ -223,7 +237,7 @@ if [ "${_rc}" -eq 0 ] && [ "${GFMY_ONECLICK:-}" = "1" ] && [ -f "${_secrets_path
   echo "[entrypoint] If Home Assistant cannot reach the port, the host publish is"
   echo "[entrypoint] missing: 7901 is an OPT-IN overlay so that a busy port never"
   echo "[entrypoint] blocks the file/cleartext tracks. The launcher adds it for you"
-  echo "[entrypoint] (GFMY_ONECLICK=1 ./login.sh); a manual run needs it spelled out:"
+  echo "[entrypoint] (GFMY_ONECLICK=1 bash login.sh); a manual run needs it spelled out:"
   echo "[entrypoint]   docker compose -f docker-compose.yml -f docker-compose.oneclick.yml \\"
   echo "[entrypoint]     run --build --service-ports --rm googlefindmy-login"
   echo "=================================================================="
