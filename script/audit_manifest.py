@@ -462,7 +462,13 @@ def additional_governed_reaudit_pins(
     for name, pin in additional_pins.items():
         if name not in relevant_names:
             continue
-        if pin in {primary_pins.get(name), resolved.get(name)}:
+        # Compare hash-free: ``resolved`` carries the report's tolerated,
+        # unpoliced ``version`` leaf (see ``_validate_audit_shape``), which a
+        # malformed report may render as an unhashable list/dict. A set literal
+        # would hash it and raise ``TypeError`` instead of the documented
+        # tooling-error exit; ``==`` matches the sibling in
+        # :func:`reachable_governed_transitive_pins`.
+        if pin == primary_pins.get(name) or pin == resolved.get(name):
             continue
         result[name] = pin
     return result

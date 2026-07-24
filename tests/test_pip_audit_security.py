@@ -1388,6 +1388,21 @@ class TestAdditionalGovernedReauditPins:
         )
         assert result == {}
 
+    def test_unhashable_report_version_is_compared_hash_free(self) -> None:
+        """A malformed report may carry an unhashable ``version`` (list/dict).
+
+        ``version`` is a tolerated, unpoliced leaf (see ``_validate_audit_shape``);
+        it must be compared hash-free. Hashing it in a set literal would raise
+        ``TypeError`` instead of letting ``main`` return the documented
+        tooling-error exit. An unhashable resolved version matches no pin, so the
+        package is (conservatively) selected for re-audit rather than crashing.
+        """
+        audit = {"dependencies": [{"name": "yarl", "version": ["1.24.5"], "vulns": []}]}
+        result = audit_manifest.additional_governed_reaudit_pins(
+            {"yarl": "1.24.2"}, {"yarl": "1.20.1"}, audit, {"yarl"}
+        )
+        assert result == {"yarl": "1.24.2"}
+
 
 def test_main_audits_governed_at_additional_ha_version(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
