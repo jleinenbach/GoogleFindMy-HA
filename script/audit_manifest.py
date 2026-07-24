@@ -793,6 +793,15 @@ def render_report(
             findings.get("governed_range", []),
         )
     )
+    if ha_governed:
+        lines.append(
+            "NOTE - HA-governed findings above cover Home Assistant's pinned "
+            "versions themselves, not the sub-dependency closure those pins pull "
+            "in. A vulnerability only in a sub-package that HA's older pin "
+            "requires (and a newer release no longer needs) is out of scope; "
+            "auditing HA's full pinned closure is Home Assistant's responsibility."
+        )
+        lines.append("")
     lines.extend(
         _info_section(
             f"INFO ({len(findings['transitive'])}) - unfixable transitive "
@@ -1144,6 +1153,20 @@ def apply_governed_transitive_reaudit(  # noqa: PLR0913 - 7 irreducible inputs; 
     supplied (``governed_audit_json is None``), return tooling exit 2 with an
     actionable message instead of going live. Exit 2 mirrors the tooling-error
     contract above, never a spurious block (exit 1) or a silent pass (exit 0).
+
+    Known HA-domain boundary (deliberately not patched): the ``--no-deps`` pass
+    audits HA's pinned version of each reachable governed package itself, but not
+    the dependency closure that pin pulls in. If HA's older pin of ``P`` requires
+    a vulnerable sub-package ``Q`` that ``P``'s newer (pass-1) release no longer
+    needs, that CVE in ``Q`` is invisible to both passes. The blind spot is
+    bounded: it stays strictly inside the non-blocking governed buckets (never
+    lets a fixable integration-owned vulnerability through), and ``Q`` is
+    HA-governed by construction (a manifest entry would be audited independently).
+    ``--no-deps`` is intentional -- resolving the graph would pull sub-
+    dependencies to *their* latest, not HA's pins, auditing a fictional
+    environment. A faithful fix would re-resolve ``P==pin`` under HA's full
+    constraints set, i.e. audit HA's entire pinned closure, which is Home
+    Assistant's responsibility rather than this integration-owned gate's.
     """
     if not reachable:
         return None
@@ -1216,6 +1239,11 @@ def apply_additional_ha_version_reaudit(  # noqa: PLR0913 - findings + audit con
     Needs the network, so it is a no-op when ``offline`` (the ``--audit-json``
     preview documents the gap instead). Returns a tooling exit code when an
     additional pass could not run (mirroring :func:`obtain_audit`), else ``None``.
+
+    Shares the ``--no-deps`` HA-domain boundary documented on
+    :func:`apply_governed_transitive_reaudit`: HA's pin is audited, the closure it
+    pulls in is not, and closing that gap would mean auditing HA's full pinned
+    dependency graph.
     """
     resolved_names = {
         canonicalize_name(dependency.get("name", ""))
