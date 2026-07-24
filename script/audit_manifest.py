@@ -56,7 +56,11 @@ so):
 - governed packages are additionally audited at every *additional* supported HA
   version's pins (pass one snapshot per ``--ha-constraints``): Home Assistant may
   pin, say, ``cryptography`` or ``aiohttp`` at a newer version on a newer core,
-  and a CVE living solely in that newer pin would otherwise be invisible.
+  and a CVE living solely in that newer pin would otherwise be invisible. Each
+  snapshot's relevance and classification use *its own* governance, so a
+  transitive a newer release governs for the first time (the fixtures pin
+  ``cffi`` only at 2026.7.3) is audited at that pin too; blocking stays
+  primary-snapshot-only, so this only ever adds non-blocking findings.
 
 The gate turns red the first time a shipped package a user actually installs
 carries a fixable CVE the integration can act on, which is exactly the case the
@@ -433,9 +437,11 @@ def additional_governed_reaudit_pins(
     CVE would otherwise be invisible. This selects, from one additional
     snapshot's ``name -> pin`` map, the governed packages that
 
-      - are actually part of this manifest's footprint (``relevant_names`` = the
-        direct governed manifest entries plus the governed transitives that
-        appeared in the pass-1 ``audit``); auditing every package HA pins would
+      - are actually part of this manifest's footprint under *this* snapshot's
+        governance (``relevant_names`` = the manifest's direct governed entries
+        plus every dependency the pass-1 ``audit`` resolved, intersected with the
+        names this snapshot governs -- so a transitive a newer release governs
+        for the first time is included); auditing every package HA pins would
         drag in hundreds of unrelated dependencies, and
       - are pinned at a version not already audited -- neither the declared-
         minimum pin (``primary_pins``, at which pass 1 and the primary re-audit
@@ -1174,7 +1180,7 @@ def apply_governed_transitive_reaudit(  # noqa: PLR0913 - 7 irreducible inputs; 
     return None
 
 
-def apply_additional_ha_version_reaudit(  # noqa: PLR0913 - findings + audit context + classification sets; see docstring
+def apply_additional_ha_version_reaudit(  # noqa: PLR0913 - findings + audit context + footprint inputs; per-snapshot governance is derived internally
     findings: dict[str, list[Record]],
     additional_texts: list[str],
     primary_pins: dict[str, str],
@@ -1183,8 +1189,6 @@ def apply_additional_ha_version_reaudit(  # noqa: PLR0913 - findings + audit con
     offline: bool,
     owned_names: set[str],
     ha_governed: list[str],
-    governed: set[str],
-    exact_governed: set[str],
 ) -> int | None:
     """Audit governed packages at each additional supported HA version's pins.
 
@@ -1193,23 +1197,37 @@ def apply_additional_ha_version_reaudit(  # noqa: PLR0913 - findings + audit con
     different version whose CVE would otherwise be invisible. For every
     additional snapshot in ``additional_texts`` this re-audits, with a
     deterministic ``--no-deps`` pass, the governed packages this manifest
-    actually reaches (its direct governed entries plus the governed transitives
-    pass 1 resolved) at any pin not already audited, and folds the findings into
-    the governed buckets by *adding* -- a finding present only at a newer pin is
+    actually reaches (its direct governed entries plus every dependency pass 1
+    resolved) at any pin not already audited, and folds the findings into the
+    governed buckets by *adding* -- a finding present only at a newer pin is
     surfaced alongside the declared-minimum result rather than replacing it.
+
+    Relevance and classification use **each snapshot's own governance**, not the
+    primary snapshot's: a transitive a newer release governs for the first time
+    (the committed fixtures pin ``cffi`` only at 2026.7.3, reachable through
+    ``cryptography``) is part of that snapshot's footprint and is classified as
+    governed there, so its shipped-pin CVE is surfaced instead of being dropped
+    as an unmergeable owned/transitive finding. Blocking stays primary-only: only
+    the non-blocking ``governed``/``governed_range`` buckets are merged, so a
+    package owned at the declared minimum keeps blocking regardless of newer
+    governance (see
+    :func:`test_package_owned_at_minimum_but_governed_at_latest_still_blocks`).
 
     Needs the network, so it is a no-op when ``offline`` (the ``--audit-json``
     preview documents the gap instead). Returns a tooling exit code when an
     additional pass could not run (mirroring :func:`obtain_audit`), else ``None``.
     """
-    resolved_governed = {
+    resolved_names = {
         canonicalize_name(dependency.get("name", ""))
         for dependency in audit.get("dependencies", [])
-    } & governed
-    relevant_governed = _canonical_names(ha_governed) | resolved_governed
+    }
+    footprint = _canonical_names(ha_governed) | resolved_names
     for text in additional_texts:
+        snapshot_governed = parse_ha_governed_names(text)
+        snapshot_exact = parse_ha_exact_governed_names(text)
+        relevant = footprint & snapshot_governed
         to_reaudit = additional_governed_reaudit_pins(
-            parse_ha_governed_pins(text), primary_pins, audit, relevant_governed
+            parse_ha_governed_pins(text), primary_pins, audit, relevant
         )
         if not to_reaudit or offline:
             continue
@@ -1218,7 +1236,7 @@ def apply_additional_ha_version_reaudit(  # noqa: PLR0913 - findings + audit con
         if extra_audit is None:
             return extra_exit
         extra_findings = classify_audit(
-            extra_audit, owned_names, governed, exact_governed
+            extra_audit, owned_names, snapshot_governed, snapshot_exact
         )
         for bucket in ("governed", "governed_range"):
             findings[bucket] = _dedup_sorted_records(
@@ -1317,8 +1335,6 @@ def apply_audit_span_passes(  # noqa: PLR0913 - orchestration seam; see docstrin
         offline=offline,
         owned_names=owned_names,
         ha_governed=ha_governed,
-        governed=governed,
-        exact_governed=exact_governed,
     )
     if additional_exit is not None:
         return additional_exit

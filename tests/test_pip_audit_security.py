@@ -1445,6 +1445,85 @@ def test_main_audits_governed_at_additional_ha_version(
     )
 
 
+def test_main_audits_transitive_governed_only_by_a_newer_ha_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Fund 3: a reachable transitive a *newer* HA snapshot governs for the first
+    time (here ``cffi`` at 2026.7.3, absent from the minimum snapshot) is audited
+    at that snapshot's pin and its CVE surfaces (non-blocking governed).
+
+    The bug this pins: relevance and classification once used only the primary
+    snapshot's governance, so ``cffi`` -- not governed at the minimum -- was
+    filtered out of the re-audit set and, had it slipped through, classified as a
+    non-governed transitive and dropped when only the governed buckets are merged.
+    """
+    primary = tmp_path / "min.txt"
+    primary.write_text("cryptography==45.0.3\n", encoding="utf-8")  # no cffi pin
+    latest = tmp_path / "latest.txt"
+    latest.write_text("cryptography==48.0.1\ncffi==2.0.0\n", encoding="utf-8")
+
+    calls: list[dict[str, object]] = []
+
+    def fake_run(reqs: list[str], out_path: Path, *, no_deps: bool = False) -> int:
+        calls.append({"reqs": list(reqs), "no_deps": no_deps})
+        if not no_deps and any("cryptography==45.0.3" == req for req in reqs):
+            # Pass 1 resolves cffi as a clean transitive of cryptography, so it
+            # enters the manifest footprint even though the minimum HA does not
+            # govern it.
+            out_path.write_text(
+                json.dumps(
+                    {
+                        "dependencies": [
+                            {"name": "cryptography", "version": "45.0.3", "vulns": []},
+                            {"name": "cffi", "version": "2.1.0", "vulns": []},
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+        elif "cffi==2.0.0" in reqs:
+            # The newer HA pin of cffi carries a CVE living only at that version.
+            out_path.write_text(
+                json.dumps(
+                    {
+                        "dependencies": [
+                            {
+                                "name": "cffi",
+                                "version": "2.0.0",
+                                "vulns": [
+                                    {"id": "CVE-CFFI-NEW", "fix_versions": ["2.0.1"]}
+                                ],
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+        else:
+            out_path.write_text('{"dependencies": []}', encoding="utf-8")
+        return 0
+
+    monkeypatch.setattr(audit_manifest, "run_pip_audit", fake_run)
+    rc = audit_manifest.main(
+        [
+            "--manifest",
+            str(MANIFEST),
+            "--ha-constraints",
+            str(primary),
+            "--ha-constraints",
+            str(latest),
+            "--verbose",
+        ]
+    )
+    report = capsys.readouterr().out
+
+    # cffi is governed by the newer snapshot -> non-blocking, but surfaced.
+    assert rc == 0
+    assert "CVE-CFFI-NEW" in report
+    # An additional --no-deps pass audited cffi at the snapshot pin that governs it.
+    assert any(call["no_deps"] and "cffi==2.0.0" in call["reqs"] for call in calls)
+
+
 def test_main_owned_as_declared_pass_catches_above_floor_cve(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
