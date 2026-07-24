@@ -314,6 +314,13 @@ novnc_url_host="$(bracket_if_ipv6 "$novnc_url_host")"
 novnc_bind="$(bracket_if_ipv6 "$novnc_bind")"
 
 export GFMY_NOVNC_BIND="$novnc_bind"
+# Also export the browsable host so docker-compose can build the noVNC URL that
+# the in-container login flow prints at its "Press Enter" prompt. This is the
+# fully normalised value (wildcards resolved to a concrete address, IPv6
+# bracketed), i.e. exactly what belongs in a URL. Re-exporting under the same
+# input name is safe: it is read once at startup (above) and only consumed by
+# child processes (docker compose) from here on.
+export GFMY_NOVNC_URL_HOST="$novnc_url_host"
 
 mkdir -p data
 

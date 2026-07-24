@@ -1735,3 +1735,100 @@ def test_create_driver_inner_all_file_lock_raises_permission_on_windows(
 
     with pytest.raises(PermissionError, match="file lock"):
         chrome_driver._create_driver_inner(headless=True)
+
+
+class _FakeCapsDriver:
+    """Minimal WebDriver stand-in exposing a ``capabilities`` mapping."""
+
+    def __init__(self, capabilities: object) -> None:
+        self.capabilities = capabilities
+
+    def quit(self) -> None:  # pragma: no cover - success path never quits
+        """No-op quit for API compatibility."""
+
+
+def test_version_guard_warns_on_driver_chrome_major_mismatch(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A live session whose ChromeDriver major differs from Chrome logs a warning."""
+
+    driver = _FakeCapsDriver(
+        {
+            "browserVersion": "150.0.7258.66",
+            "chrome": {"chromedriverVersion": "151.0.7300.0 (abcdef)"},
+        }
+    )
+    with caplog.at_level(logging.WARNING, logger=chrome_driver.LOGGER.name):
+        chrome_driver._warn_on_driver_version_mismatch(driver, detected_version=150)
+
+    assert any(
+        "does not match the running Chrome major" in record.getMessage()
+        for record in caplog.records
+    )
+
+
+def test_version_guard_silent_when_majors_match(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Chrome 150 with ChromeDriver 150 emits no warning (the good case)."""
+
+    driver = _FakeCapsDriver(
+        {
+            "browserVersion": "150.0.7258.66",
+            "chrome": {"chromedriverVersion": "150.0.7258.66 (abcdef)"},
+        }
+    )
+    with caplog.at_level(logging.WARNING, logger=chrome_driver.LOGGER.name):
+        chrome_driver._warn_on_driver_version_mismatch(driver, detected_version=150)
+
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+
+
+def test_version_guard_defensive_on_incomplete_capabilities(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Missing capability keys degrade to a debug log and never raise or warn."""
+
+    driver = _FakeCapsDriver({"browserVersion": "150.0.7258.66"})  # no chrome key
+    with caplog.at_level(logging.WARNING, logger=chrome_driver.LOGGER.name):
+        chrome_driver._warn_on_driver_version_mismatch(driver, detected_version=None)
+
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+
+
+def test_create_driver_warns_but_returns_on_version_mismatch(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A successful driver with a mismatched major is warned about, not rejected.
+
+    Regression for the post-construction version guard: Chrome 150 with a
+    ChromeDriver 151 must still return the working driver (the runtime guard is
+    non-fatal) while surfacing the actionable warning.
+    """
+
+    fake_driver = _FakeCapsDriver(
+        {
+            "browserVersion": "150.0.7258.66",
+            "chrome": {"chromedriverVersion": "151.0.7300.0 (abcdef)"},
+        }
+    )
+    monkeypatch.setattr(chrome_driver, "_kill_existing_chrome_processes", lambda: None)
+    monkeypatch.setattr(chrome_driver, "find_chrome", lambda: "/opt/chrome")
+    monkeypatch.setattr(chrome_driver, "get_chrome_version", lambda _p, **_k: 150)
+    monkeypatch.delenv("GOOGLEFINDMY_CHROME_PATH", raising=False)
+    monkeypatch.delenv("GOOGLEFINDMY_CHROME_VERSION", raising=False)
+
+    uc_module = chrome_driver._get_uc_module()
+    monkeypatch.setattr(uc_module, "ChromeOptions", FakeChromeOptions)
+    monkeypatch.setattr(
+        uc_module, "Chrome", lambda *, options, version_main=None, **k: fake_driver
+    )
+
+    with caplog.at_level(logging.WARNING, logger=chrome_driver.LOGGER.name):
+        result = chrome_driver.create_driver(headless=True)
+
+    assert result is fake_driver
+    assert any(
+        "does not match the running Chrome major" in record.getMessage()
+        for record in caplog.records
+    )

@@ -596,6 +596,80 @@ def _log_version_mismatch_hint(
     )
 
 
+def _major_from_version_string(value: object) -> int | None:
+    """Parse the leading integer major from a Chrome capability version string.
+
+    Chrome reports ``browserVersion`` as ``"150.0.7258.66"`` and
+    ``chromedriverVersion`` as ``"150.0.7258.66 (<hash>)"``; both start with the
+    major. Returns ``None`` for anything unparseable so the guard degrades to a
+    debug log instead of raising.
+    """
+    if not isinstance(value, str):
+        return None
+    head = value.strip().split(".", 1)[0]
+    try:
+        return int(head)
+    except ValueError:
+        return None
+
+
+def _warn_on_driver_version_mismatch(
+    driver: WebDriver, *, detected_version: int | None
+) -> None:
+    """Warn if the live ChromeDriver major differs from the running Chrome major.
+
+    Runs AFTER a driver was constructed successfully. It compares the majors of
+    the session that actually launched -- Chrome (``browserVersion``) against
+    ChromeDriver (``chrome.chromedriverVersion``) -- and, defensively,
+    cross-checks the detected Chrome major. Missing or unparseable capabilities
+    degrade to a debug log. This guard NEVER raises and NEVER aborts a working
+    session: a mismatch that still produced a driver is warned about, not
+    treated as a failure (the runtime path stays non-fatal; the hard check lives
+    at image build time).
+    """
+    try:
+        caps = getattr(driver, "capabilities", None)
+        if not isinstance(caps, dict):
+            LOGGER.debug(
+                "Driver exposes no capabilities mapping; skipping version guard."
+            )
+            return
+        browser_major = _major_from_version_string(caps.get("browserVersion"))
+        chrome_caps = caps.get("chrome")
+        driver_major = _major_from_version_string(
+            chrome_caps.get("chromedriverVersion")
+            if isinstance(chrome_caps, dict)
+            else None
+        )
+        if browser_major is None or driver_major is None:
+            LOGGER.debug(
+                "Version guard incomplete (chrome major: %s, driver major: %s); "
+                "capabilities missing expected keys.",
+                browser_major,
+                driver_major,
+            )
+            return
+        if browser_major != driver_major:
+            LOGGER.warning(
+                "ChromeDriver major %s does not match the running Chrome major "
+                "%s. The session started, but if location requests fail, pin the "
+                "major via the %s environment variable.",
+                driver_major,
+                browser_major,
+                _ENV_CHROME_VERSION,
+            )
+        elif detected_version is not None and detected_version != browser_major:
+            LOGGER.debug(
+                "Detected Chrome major %s differs from the live session's Chrome "
+                "major %s (the driver major %s matches the session).",
+                detected_version,
+                browser_major,
+                driver_major,
+            )
+    except Exception as err:  # noqa: BLE001 - a guard must never break driver creation
+        LOGGER.debug("Post-construction version guard skipped: %s", err)
+
+
 def _parse_env_version(env_raw: str | None) -> int | None:
     """Parse a ``GOOGLEFINDMY_CHROME_VERSION`` value into a major version int.
 
@@ -852,6 +926,7 @@ def _create_driver_inner(
     for attempt in attempts:
         driver, error = attempt()
         if driver is not None:
+            _warn_on_driver_version_mismatch(driver, detected_version=detected_version)
             return driver
         if error is not None:
             last_error = error
@@ -861,6 +936,9 @@ def _create_driver_inner(
     # Strategy 5: webdriver-manager fallback
     fallback_driver = _try_webdriver_manager_fallback()
     if fallback_driver is not None:
+        _warn_on_driver_version_mismatch(
+            fallback_driver, detected_version=detected_version
+        )
         return fallback_driver
 
     # If all failures were file-lock related, raise PermissionError so the

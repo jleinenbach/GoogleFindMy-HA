@@ -228,6 +228,66 @@ def test_request_oauth_flow_home_assistant_context_skips_prompts(
     assert token == "tok"
 
 
+def test_request_oauth_flow_container_shows_novnc_not_desktop_text(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """In the container the prompt names the noVNC URL and the 3 steps.
+
+    Regression for the docker-login UX fix: with
+    ``GOOGLEFINDMY_CONTAINER_LOGIN=1`` set (and the HA heuristic off) the flow
+    must print the container-correct instructions -- open the real noVNC URL,
+    press Enter, sign in -- and must NOT print the desktop 'install Chrome on
+    your system' text, which is wrong when Chrome runs inside the container.
+    """
+
+    driver = FakeDriver(cookie_after_wait={"value": "tok"})
+    monkeypatch.setattr(auth_flow, "create_driver", lambda **kwargs: driver)
+    monkeypatch.setattr(auth_flow, "WebDriverWait", ImmediateWaitFactory())
+    monkeypatch.setattr("builtins.input", lambda *a, **k: "")
+    monkeypatch.delitem(sys.modules, "homeassistant", raising=False)
+    monkeypatch.setenv("GOOGLEFINDMY_CONTAINER_LOGIN", "1")
+    monkeypatch.setenv("GOOGLEFINDMY_NOVNC_URL", "http://192.168.1.21:7900")
+    monkeypatch.setattr(auth_flow, "_extract_email_from_session", lambda _: None)
+
+    token, _email = request_oauth_account_token_flow(headless=False)
+    out = capsys.readouterr().out
+
+    assert token == "tok"
+    assert "http://192.168.1.21:7900" in out
+    assert "press Enter" in out
+    assert "Sign in to Google in the browser view" in out
+    assert "installed on your system" not in out
+
+
+def test_request_oauth_flow_desktop_branch_has_no_container_text(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Without the container signal the desktop text is unchanged.
+
+    Negative guard for the same fix: with ``GOOGLEFINDMY_CONTAINER_LOGIN``
+    unset, the interactive branch keeps the original desktop wording and shows
+    none of the container-only noVNC instructions.
+    """
+
+    driver = FakeDriver(cookie_after_wait={"value": "tok"})
+    monkeypatch.setattr(auth_flow, "create_driver", lambda **kwargs: driver)
+    monkeypatch.setattr(auth_flow, "WebDriverWait", ImmediateWaitFactory())
+    monkeypatch.setattr("builtins.input", lambda *a, **k: "")
+    monkeypatch.delitem(sys.modules, "homeassistant", raising=False)
+    monkeypatch.delenv("GOOGLEFINDMY_CONTAINER_LOGIN", raising=False)
+    monkeypatch.setattr(auth_flow, "_extract_email_from_session", lambda _: None)
+
+    token, _email = request_oauth_account_token_flow(headless=False)
+    out = capsys.readouterr().out
+
+    assert token == "tok"
+    assert "installed on your system" in out
+    assert "noVNC" not in out
+    assert "browser view that opens" not in out
+
+
 # ---------------------------------------------------------------------------
 # _parse_cli_args
 # ---------------------------------------------------------------------------
