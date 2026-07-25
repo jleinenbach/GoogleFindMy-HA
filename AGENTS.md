@@ -727,16 +727,39 @@ artifacts remain exempt when explicitly flagged by repo configuration).
 
 **Supply chain**
 
-* Dependencies track upstream by design. This integration must stay compatible
-  with the current Chrome/ChromeDriver, so dependencies use lower-bound floors
-  (`>=`) rather than exact pins or `--require-hashes`.
-* Actual coverage today: `pip-audit` runs on every PR in **report-only** mode
-  (findings surface as job-summary warnings, they do not fail the PR); a weekly
-  scheduled `pip-audit` job opens automated security-update PRs for fixable
-  advisories; Semgrep SAST runs on PRs only (the workflow declares scheduled and
-  push triggers, but its job is gated to `pull_request` events, so those runs are
-  skipped); every change is human-reviewed.
-  There is currently **no** SBOM scan and **no** hard CVE gate blocking a PR.
+* The `>=` floor policy is scoped to the **browser-facing runtime** dependencies
+  (undetected-chromedriver, Selenium and their transitive stack): this
+  integration must stay compatible with the current Chrome/ChromeDriver, so those
+  dependencies track upstream by design and use lower-bound floors (`>=`) rather
+  than exact pins or `--require-hashes`.
+* **Test and tooling** dependencies are pinned for reproducibility and are **not**
+  covered by the floor policy: `custom_components/googlefindmy/requirements-dev.txt`
+  pins `pytest-asyncio==1.3.0`, and
+  `custom_components/googlefindmy/constraints-test-stubs.txt` pins
+  `homeassistant==2025.12.1`, `pytest-homeassistant-custom-component==0.13.299`
+  and `pycares<5`. Do not relax those pins under the Chrome-currency rationale.
+* Actual coverage today (each claim cites the workflow proving its *effective*
+  behaviour):
+  * **`pip-audit` on PRs is report-only.** `.github/workflows/pip-audit.yml`
+    guards the PR job with `if: github.event_name == 'pull_request'` and runs it
+    as "Audit requirements (report-only; keep CI green)", failing only on a
+    pip-audit *tool* error (`exit "$status"`), never on a discovered advisory:
+    findings surface as job-summary warnings, they do not fail the PR.
+  * **A weekly `pip-audit` auto-fix job** (`schedule: cron '23 3 * * 2'`, job
+    guarded by `if: github.event_name != 'pull_request'`) opens automated
+    security-update PRs via `peter-evans/create-pull-request` for fixable
+    advisories.
+  * **Semgrep SAST runs on PRs only.** `.github/workflows/semgrep.yml` declares
+    `push`, `pull_request`, two daily `schedule` crons and `workflow_dispatch`,
+    but its sole job is guarded by `if: github.event_name == 'pull_request'`, so
+    scheduled, push and manual runs skip the scan.
+  * **Not every change is human-reviewed.** `.github/workflows/release-stamp.yml`
+    can push a version stamp directly to the owning branch (or auto-merge a
+    fallback PR after status checks, without a required review), and
+    `.github/workflows/hassfest-auto-fix.yml` commits manifest key-sorts via
+    `stefanzweifel/git-auto-commit-action`. Human review is the norm for feature
+    PRs, not a guarantee on every commit.
+  * There is currently **no** SBOM scan and **no** hard CVE gate blocking a PR.
 * Hardening targets (not yet implemented): generate a CycloneDX **SBOM** and scan
   it (e.g., Dependency-Track); fail CI on known critical vulnerabilities.
 * **Control claims must be grounded (no aspirational controls).** Any statement
@@ -814,7 +837,7 @@ artifacts remain exempt when explicitly flagged by repo configuration).
 * [ ] Archive extraction is traversal-safe; paths validated with `pathlib`.
 * [ ] `secrets` used for tokens; cryptography aligns with BSI TR-02102-1 guidance.
 * [ ] Logs/diagnostics redact tokens, PII, coordinates, device IDs, and derived identifiers.
-* [ ] Dependencies use `>=` floors by design (Chrome/ChromeDriver currency, not hard pins); `pip-audit` runs report-only on PRs + weekly auto-update PRs; Semgrep SAST runs on PRs only; SBOM scan and hard CVE gate remain hardening targets.
+* [ ] **Browser-runtime** deps use `>=` floors by design (Chrome/ChromeDriver currency, not hard pins); **test/tooling** deps stay pinned (e.g. `pytest-asyncio==1.3.0`, `constraints-test-stubs.txt`); `pip-audit` runs report-only on PRs + weekly auto-update PRs; Semgrep SAST runs on PRs only (job guarded to `pull_request`); not every change is human-reviewed (release-stamp/hassfest-auto-fix auto-commit); SBOM scan and hard CVE gate remain hardening targets.
 * [ ] Async: no loop blockers; `to_thread`/`TaskGroup`; proper cancel handling.
 * [ ] I/O optimized (batch/atomic); caches with clear TTL/invalidations.
 * [ ] HA-specific: Coordinator, injected session, `get_url`, config-flow test, Repairs/Diagnostics, HA Store.
