@@ -729,11 +729,16 @@ artifacts remain exempt when explicitly flagged by repo configuration).
 
 **Supply chain**
 
-* The `>=` floor policy is scoped to the **browser-facing runtime** dependencies
-  (undetected-chromedriver, Selenium and their transitive stack): this
-  integration must stay compatible with the current Chrome/ChromeDriver, so those
-  dependencies track upstream by design and use lower-bound floors (`>=`) rather
-  than exact pins or `--require-hashes`.
+* The **entire runtime stack** uses lower-bound (`>=`) floors rather than exact
+  pins or `--require-hashes`: every entry in
+  `custom_components/googlefindmy/requirements.txt` and every `manifest.json`
+  requirement uses a `>=` floor (aiohttp, cryptography, protobuf, gpsoauth and the
+  rest, alongside Selenium and undetected-chromedriver). What is **scoped to the
+  browser-facing** packages (undetected-chromedriver, Selenium and their
+  transitive stack) is the **Chrome-currency rationale**: those must track the
+  current Chrome/ChromeDriver upstream by design and therefore must not be
+  exact-pinned; the remaining runtime packages simply follow the same floor
+  convention (upgrade-friendly, not hash-locked).
 * **Most test and tooling** dependencies use the same lower-bound (`>=`) ranges as
   the runtime stack (for example `bandit>=1.7`, `mypy>=1.11`, `pytest>=8.3` and
   `ruff>=0.14.1` in `custom_components/googlefindmy/requirements-dev.txt`, and the
@@ -766,19 +771,37 @@ artifacts remain exempt when explicitly flagged by repo configuration).
     `.github/workflows/hassfest-auto-fix.yml` commits manifest key-sorts via
     `stefanzweifel/git-auto-commit-action`. Human review is the norm for feature
     PRs, not a guarantee on every commit.
-  * There is currently **no** SBOM scan and **no** hard CVE gate blocking a PR.
+  * **A narrow manifest CVE gate does block PRs.** The required `test` job
+    (`.github/workflows/ci.yml`, `poetry run pytest`) runs
+    `tests/test_pip_audit_security.py::TestManifestOnlyPipAuditGate::test_no_fixable_integration_owned_vulnerability`,
+    which fails the PR when `script/audit_manifest.py` finds an actionable,
+    fixable, integration-owned manifest or transitive-dependency vulnerability
+    (HA-governed and unfixable advisories do not block). What is **absent** is a
+    **broad, full-dependency-tree CVE scan** and any **SBOM scan** blocking a PR.
 * Hardening targets (not yet implemented): generate a CycloneDX **SBOM** and scan
   it (e.g., Dependency-Track); fail CI on known critical vulnerabilities.
-* **Control claims must be grounded (no aspirational controls).** Any statement
-  in this file or the docs that a CI control *exists* or *blocks* (SBOM scan,
-  CVE gate, "runs daily", "fails the PR", "must pass") must cite the workflow
-  file and the line proving its *effective* behaviour, not its declared intent.
-  Two recurring traps: (a) `report-only` / `continue-on-error` / "keep CI green"
-  is a report, not a blocking gate; (b) a declared `schedule:` / `push:` trigger
-  whose only job is guarded by `if: github.event_name == 'pull_request'` gives
-  no scheduled or push coverage. Describe what runs, not what is aspired to; if a
-  control is only planned, list it under "Hardening targets", never as current
-  coverage.
+* **Control claims must be grounded (no aspirational controls), in every
+  direction.** Grounding is symmetric across three claim polarities, because a
+  claim can drift from reality by asserting too much, too little, or the wrong
+  extent:
+  * **Positive** ("control X *exists* / *blocks* / *runs daily* / *fails the
+    PR*"): cite the workflow file and the line proving its *effective*
+    behaviour, not its declared intent.
+  * **Negative** ("there is **no** X", "not enforced", "does not block"): before
+    asserting an absence, search for the counterexample that would falsify it,
+    and treat a **gate embedded in the required `test` job** (a pytest test that
+    fails the PR) as a real gate even when no dedicated workflow exists. A false
+    "no gate" is the same drift as a false "gate exists".
+  * **Scope / quantifier** ("scoped to X", "**only** X", "**every** / **all**
+    X"): enumerate the full set (e.g. grep every entry in `requirements.txt`,
+    not just the named packages) and check the stated boundary against it. State
+    the mechanism's true extent separately from any narrower *rationale*.
+  Two recurring traps for positive claims: (a) `report-only` /
+  `continue-on-error` / "keep CI green" is a report, not a blocking gate; (b) a
+  declared `schedule:` / `push:` trigger whose only job is guarded by
+  `if: github.event_name == 'pull_request'` gives no scheduled or push coverage.
+  Describe what runs, not what is aspired to; if a control is only planned, list
+  it under "Hardening targets", never as current coverage.
 
 ### 11.3 Async, concurrency & cancellation
 
@@ -832,7 +855,7 @@ artifacts remain exempt when explicitly flagged by repo configuration).
 
 ### 11.8 Release & operations
 
-* CI **security gate**: lint/type/tests must pass; `pip-audit` runs report-only (no hard CVE gate) and an SBOM scan is a hardening target, not yet enforced.
+* CI **security gate**: lint/type/tests must pass; the required `test` job enforces a **narrow** manifest CVE gate (the `test_no_fixable_integration_owned_vulnerability` pytest gate over `audit_manifest`), while the separate `pip-audit` workflow runs report-only; a broad full-tree CVE scan and an SBOM scan remain hardening targets, not yet enforced.
 * Logs are **incident-ready** but privacy-preserving (use OWASP vocabulary).
 * All doc updates comply with **Rule §9.DOC**.
 
@@ -844,7 +867,7 @@ artifacts remain exempt when explicitly flagged by repo configuration).
 * [ ] Archive extraction is traversal-safe; paths validated with `pathlib`.
 * [ ] `secrets` used for tokens; cryptography aligns with BSI TR-02102-1 guidance.
 * [ ] Logs/diagnostics redact tokens, PII, coordinates, device IDs, and derived identifiers.
-* [ ] **Browser-runtime** deps use `>=` floors by design (Chrome/ChromeDriver currency, not hard pins); **most test/tooling** deps also use `>=` floors, only a constrained subset is exact-pinned (`pytest-asyncio==1.3.0`, `constraints-test-stubs.txt`); `pip-audit` runs report-only on PRs + weekly auto-update PRs; Semgrep SAST runs on PRs only (job guarded to `pull_request`); not every change is human-reviewed (release-stamp/hassfest-auto-fix auto-commit); SBOM scan and hard CVE gate remain hardening targets.
+* [ ] The **whole runtime stack** uses `>=` floors (the Chrome/ChromeDriver-currency rationale is what is scoped to the browser packages, not hard pins across the stack); **most test/tooling** deps also use `>=` floors, only a constrained subset is exact-pinned (`pytest-asyncio==1.3.0`, `constraints-test-stubs.txt`); the required `test` job enforces a **narrow** manifest CVE gate (`test_no_fixable_integration_owned_vulnerability`), the separate `pip-audit` workflow runs report-only on PRs + weekly auto-update PRs; Semgrep SAST runs on PRs only (job guarded to `pull_request`); not every change is human-reviewed (release-stamp/hassfest-auto-fix auto-commit); a broad full-tree CVE scan and an SBOM scan remain hardening targets.
 * [ ] Async: no loop blockers; `to_thread`/`TaskGroup`; proper cancel handling.
 * [ ] I/O optimized (batch/atomic); caches with clear TTL/invalidations.
 * [ ] HA-specific: Coordinator, injected session, `get_url`, config-flow test, Repairs/Diagnostics, HA Store.
