@@ -26,7 +26,9 @@ rem The split exists because the two ports serve different consumers: 7901 is
 rem machine-to-machine (Home Assistant on this host), 7900 is opened by a browser
 rem that usually runs on a DIFFERENT machine than the Docker host.
 rem
-rem noVNC uses the fixed password "secret". To reach it from another machine,
+rem On loopback (the default) noVNC uses the fixed password "secret". A LAN bind
+rem hardens it: the container mints a per-run password and serves self-signed
+rem HTTPS (Windows has no --no-tls opt-out). To reach it from another machine,
 rem tunnel it, or on a trusted LAN bind a CONCRETE address (preferred over the
 rem 0.0.0.0 wildcard):
 rem   login.cmd --ip 192.168.1.21

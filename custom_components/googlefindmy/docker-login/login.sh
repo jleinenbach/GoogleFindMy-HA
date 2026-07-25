@@ -44,8 +44,10 @@
 #                          the first detected address: "0.0.0.0" is a bind
 #                          pattern, not a browsable address.
 #
-# noVNC uses the base image's fixed password "secret". To reach it from another
-# machine, either tunnel
+# On loopback (the default) noVNC uses the base image's fixed password "secret".
+# A LAN bind hardens it: the container mints a per-run password and (unless
+# --no-tls) serves self-signed HTTPS. To reach it from another machine, either
+# tunnel
 #   ssh -L 7900:127.0.0.1:7900 <docker-host>
 # or, only on a trusted LAN, bind it to a CONCRETE address (preferred over the
 # 0.0.0.0 wildcard, which publishes on every interface):

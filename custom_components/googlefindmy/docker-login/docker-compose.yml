@@ -89,11 +89,14 @@ services:
       # the bundled Chrome (undetected-chromedriver SessionNotCreatedException).
       # GOOGLEFINDMY_CHROME_VERSION: "141"
     ports:
-      # noVNC web viewer (password: secret, a fixed default of the base image).
-      # Bound to LOOPBACK by default so the fixed-password session is NOT exposed
-      # to the LAN/Internet during the Google sign-in. To reach it from another
-      # machine, use an SSH tunnel (recommended) or set GFMY_NOVNC_BIND=0.0.0.0
-      # (README → Remote access) to opt into a LAN bind on a trusted network.
+      # noVNC web viewer. On the LOOPBACK default (below) it keeps the base
+      # image's fixed password "secret" over plain HTTP, safe only because
+      # loopback is not network-reachable during the Google sign-in. A LAN bind
+      # (GFMY_NOVNC_BIND, or the launcher's --ip/interactive chooser) makes the
+      # container mint a per-run password and serve self-signed HTTPS instead. To
+      # reach it from another machine prefer an SSH tunnel; on a trusted LAN
+      # prefer a concrete --ip over the GFMY_NOVNC_BIND=0.0.0.0 wildcard (see
+      # README → "noVNC access & security").
       - "${GFMY_NOVNC_BIND:-127.0.0.1}:7900:7900"
       # The one-click token endpoint (port 7901) is deliberately NOT published
       # here. Its publish lives in the opt-in overlay file

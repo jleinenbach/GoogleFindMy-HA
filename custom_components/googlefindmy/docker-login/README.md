@@ -39,34 +39,59 @@ Docker host and launch it there.
 
 ## noVNC access & security
 
-The noVNC viewer uses the base image's **fixed password `secret`**, and during
-the Google sign-in it exposes a fully authenticated Chrome session. To avoid
-handing that to anyone on the network, the port is bound to **loopback
-(`127.0.0.1:7900`) by default** — it is only reachable from the Docker host
-itself.
+The noVNC viewer exposes a fully authenticated Chrome session during the Google
+sign-in, so both its reachability and its password matter. What the viewer uses
+depends on **where you bind it**:
 
-- **Reach it from another machine (recommended): SSH tunnel.**
-  ```bash
-  ssh -L 7900:127.0.0.1:7900 <docker-host>
-  ```
-  Then open `http://localhost:7900` on your own machine.
-- **Trusted LAN opt-in.** Only on a network you trust, bind noVNC to a
-  **concrete** address of the Docker host:
+- **Loopback (default): fixed password `secret`, plain HTTP.** With no `--ip` and
+  no `GFMY_NOVNC_BIND`/`GFMY_NOVNC_URL_HOST`, the port is bound to
+  **`127.0.0.1:7900`** — reachable only from the Docker host. This is the
+  historical behaviour: the viewer keeps the base image's public password
+  `secret` over plain HTTP, which is safe **only** because nothing on the network
+  can reach it.
+- **LAN bind: per-run password + self-signed HTTPS, automatically.** The moment
+  you bind to a non-loopback address, the container hardens the viewer for you:
+  it mints a **fresh random password for that run** (so the public `secret` no
+  longer works) and, unless you pass `--no-tls`, serves the viewer over a
+  **self-signed TLS certificate** (`https://…`, SAN = the chosen address). The
+  password is minted *inside the container*, so the launcher cannot print it: it
+  appears in the container output below, shown as `(password: …)` in both the
+  `[entrypoint] noVNC available at …` line and the `[AuthFlow]` sign-in banner.
+  Because the certificate is self-signed, your browser shows a one-time warning
+  you accept once. (If `openssl` is somehow unavailable in the container it logs a
+  warning and falls back to plain HTTP for that run; the per-run password still
+  applies.)
+
+You reach a LAN-bound viewer in one of two ways:
+
+- **Interactive chooser (just run `bash login.sh`).** On an interactive terminal
+  with nothing pinned, the launcher lists the LAN addresses it detected on this
+  host and asks you to pick one; pressing **Enter** takes the highlighted default
+  (a detected `192.168.*`, else `10.*`, else the first address; loopback only
+  when none was found). Picking a LAN address turns on the hardening above;
+  picking loopback keeps `secret`/plain. Container and VPN interfaces (`docker0`,
+  `br-*`, `veth*`, `tun*`, `wg*`) are left out of the list. A **non-interactive**
+  run (no TTY) keeps the loopback default unchanged.
+- **Explicit `--ip` (scriptable, also Windows).** Skip the chooser by naming the
+  address directly:
   ```bash
   bash login.sh --ip 192.168.1.21
   ```
-  The launcher then prints exactly that address as the URL to open. Prefer this
-  over the `GFMY_NOVNC_BIND=0.0.0.0` wildcard, which publishes on every
-  interface; prefer the SSH tunnel over both.
+  `--no-tls` keeps the per-run password but serves plain HTTP instead of the
+  self-signed viewer — for people who prefer to tunnel the transport themselves.
+  `login.cmd` on Windows takes the same `--ip` flag (in both the `--ip X` and
+  `--ip=X` spellings) and gets the **same** per-run password and TLS; it has no
+  `--no-tls` (a LAN bind on Windows always encrypts) and does not auto-detect
+  addresses, because parsing `ipconfig` output in batch is locale-dependent.
 
-  Run `bash login.sh` without arguments first: when noVNC stays on loopback the
-  launcher lists the addresses it detected on this host, each with the
-  ready-to-paste `--ip` command. Container and VPN interfaces (`docker0`,
-  `br-*`, `veth*`, `tun*`, `wg*`) are left out, but the list is still a
-  suggestion: pick the one your browser can actually reach. (`login.cmd` on
-  Windows takes the same `--ip` flag, in both the `--ip X` and `--ip=X`
-  spellings, but does not auto-detect, because parsing `ipconfig` output in
-  batch is locale-dependent.)
+**Prefer an SSH tunnel over a LAN bind when you can** — it needs no LAN exposure
+at all:
+```bash
+ssh -L 7900:127.0.0.1:7900 <docker-host>
+```
+Then open `http://localhost:7900` on your own machine (loopback, so password
+`secret`). Prefer a concrete `--ip`/chooser address over the
+`GFMY_NOVNC_BIND=0.0.0.0` wildcard, which publishes on every interface.
 
 ### The three address roles
 
@@ -187,8 +212,12 @@ read it as your host user. Docker Desktop (Windows/macOS) maps ownership for you
    [AuthFlow] Press Enter to continue...
    ```
 
-4. Open **http://localhost:7900** in your normal browser. Password: `secret`.
-   You now see a live view of Chrome running inside the container.
+4. Open the noVNC URL the launcher printed and enter the password it names. On
+   the **loopback default** that is **http://localhost:7900** with password
+   `secret`. On a **LAN bind** it is the `https://<address>:7900` URL shown, with
+   the **per-run password** the container printed (`(password: …)`); accept the
+   one-time self-signed-certificate warning. You now see a live view of Chrome
+   running inside the container.
 
 5. In that noVNC window, log into your Google account as usual (2FA works the
    same as in any browser).
@@ -210,9 +239,11 @@ intended login path (there is no Supervisor Add-on store for HA Container):
   ```bash
   ssh -L 7900:127.0.0.1:7900 <nas-ip>
   ```
-  then browse to `http://localhost:7900`. Only on a trusted LAN, start with
-  `GFMY_NOVNC_BIND=0.0.0.0 bash login.sh` to reach `http://<nas-ip>:7900` directly
-  (see [noVNC access & security](#novnc-access--security)).
+  then browse to `http://localhost:7900`. Only on a trusted LAN, bind to a
+  concrete NAS address — `bash login.sh --ip <nas-ip>` (or the interactive
+  chooser) — and open the `https://<nas-ip>:7900` URL it prints with the per-run
+  password (see [noVNC access & security](#novnc-access--security)). Prefer this
+  concrete bind over the `GFMY_NOVNC_BIND=0.0.0.0` wildcard.
 - **Container Station:** the interactive first login needs a terminal attached to
   its STDIN, which only the `docker compose run` path (the **SSH** option above)
   provides. Importing `docker-compose.yml` as a Container Station *application*
@@ -473,7 +504,12 @@ there is no separate image to rebuild for code changes.
   are unaffected by a busy 7901; just start without `GFMY_ONECLICK=1`. For a
   busy 7900, stop the conflicting process (a leftover login container:
   `docker compose ps` / `docker compose down`).
-- **noVNC password:** it is `secret` — a fixed default of the base image.
+- **noVNC password:** on the **loopback default** it is `secret` (a fixed
+  default of the base image, safe only because loopback is not network-reachable).
+  On a **LAN bind** the container mints a **per-run random password** instead and
+  serves the viewer over self-signed **HTTPS**; read that password from the
+  container output (`(password: …)` in the noVNC-available line and the
+  `[AuthFlow]` banner), not from this guide.
 - **`SessionNotCreatedException` / chromedriver version mismatch:** set
   `GOOGLEFINDMY_CHROME_VERSION` to the container's Chrome major version
   (uncomment the line in `docker-compose.yml`). The integration's

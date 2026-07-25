@@ -2439,6 +2439,35 @@ def test_entrypoint_password_charset_excludes_shell_hostile_symbols() -> None:
     ), "the /dev/urandom fallback alphabet must match the keyboard-safe set"
 
 
+def test_entrypoint_password_generator_fails_closed_without_csprng() -> None:
+    """The password mint must FAIL CLOSED, never emit a weak credential.
+
+    If both python3's ``secrets`` and ``/dev/urandom`` are unavailable, the
+    hardened launch must abort rather than derive the LAN-exposed VNC password
+    from Bash's non-cryptographic ``$RANDOM`` -- a predictable credential on a
+    network-reachable viewer is worse than not starting. Codex flagged exactly
+    this fail-open path; this guard keeps ``$RANDOM`` out of the mint and pins the
+    abort branch so a later edit cannot silently reintroduce the weak fallback.
+    """
+
+    entrypoint = _read("entrypoint.sh")
+    start = entrypoint.find('if [ "${GFMY_NOVNC_HARDEN:-}" = "1" ]; then')
+    end = entrypoint.find("export SE_VNC_PASSWORD=", start)
+    assert start != -1 and end != -1, "could not locate the password-mint block"
+    mint = entrypoint[start:end]
+    # Strip comment lines: the code must not USE $RANDOM, but a comment may name it
+    # to document WHY it is excluded. Checking the raw text would flag that comment.
+    mint_code = "\n".join(
+        line for line in mint.splitlines() if not line.lstrip().startswith("#")
+    )
+    assert "RANDOM" not in mint_code, (
+        "the password mint must not fall back to Bash's non-crypto $RANDOM"
+    )
+    assert "exit 1" in mint_code, (
+        "the mint must fail closed (abort) when no CSPRNG byte is available"
+    )
+
+
 def test_compose_generates_password_in_container_not_from_host() -> None:
     """docker-compose.yml must NOT pass a VNC password from the host: the container
     mints it. Passing SE_VNC_PASSWORD from the host is exactly what re-introduces

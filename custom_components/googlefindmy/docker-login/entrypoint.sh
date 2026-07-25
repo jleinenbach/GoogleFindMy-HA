@@ -41,7 +41,9 @@ set -e
 # `x11vnc -storepasswd ${VNC_PASSWORD}`, and "$" is a shell metachar. Over 8
 # effective bytes they add negligible entropy, so dropping them costs nothing.
 # python3 (the venv CPython) is guaranteed in this image; the /dev/urandom
-# rejection-sampling fallback keeps the mint working even if it ever fails.
+# rejection-sampling fallback covers the (practically impossible) case it fails.
+# If BOTH CSPRNG sources are unavailable the mint FAILS CLOSED (aborts the launch)
+# rather than emit a weak, guessable credential onto a network-reachable viewer.
 if [ "${GFMY_NOVNC_HARDEN:-}" = "1" ]; then
   _gfmy_pw="$(python3 -c 'import secrets, string
 alphabet = string.ascii_letters + ".,=-_+@"
@@ -56,7 +58,18 @@ print("".join(secrets.choice(alphabet) for _ in range(8)))' 2>/dev/null || true)
     _gfmy_limit=$(( 256 - (256 % _gfmy_n) ))
     while [ "${#_gfmy_pw}" -lt 8 ]; do
       _gfmy_byte="$(od -An -N1 -tu1 /dev/urandom 2>/dev/null | tr -dc '0-9')"
-      [ -n "${_gfmy_byte}" ] || _gfmy_byte=$(( RANDOM % 256 ))
+      # Fail closed. If /dev/urandom yields no byte here, python3's secrets AND
+      # the kernel CSPRNG are both unavailable. Deriving the LAN-exposed VNC
+      # password from Bash's non-cryptographic $RANDOM would defeat the hardening
+      # precisely on the error path (owasp Fail-Closed): a predictable credential
+      # on a network-reachable viewer is worse than not starting. Abort BEFORE
+      # supervisord (traps are registered further down), so no viewer is served.
+      if [ -z "${_gfmy_byte}" ]; then
+        echo "[entrypoint] FATAL: no CSPRNG available (python3 'secrets' and" >&2
+        echo "[entrypoint] /dev/urandom both failed); refusing to serve a LAN-bound" >&2
+        echo "[entrypoint] noVNC viewer with a predictable password. Aborting." >&2
+        exit 1
+      fi
       [ "${_gfmy_byte}" -lt "${_gfmy_limit}" ] || continue
       _gfmy_pw="${_gfmy_pw}${_gfmy_chars:$(( _gfmy_byte % _gfmy_n )):1}"
     done
