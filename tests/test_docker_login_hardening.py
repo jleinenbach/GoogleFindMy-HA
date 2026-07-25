@@ -2322,20 +2322,22 @@ def test_both_launchers_reexport_the_novnc_url_host(
 def _pip_install_commands(dockerfile: str) -> list[str]:
     """Return every ``pip install`` invocation in the Dockerfile as one line.
 
-    Full-line comments are dropped and backslash line-continuations are joined,
-    so a multi-line ``RUN pip install ... \\`` still reads as a single logical
-    command.
+    Full-line comments are dropped, backslash line-continuations are joined, and
+    inline ``#`` comments are stripped, so neither a multi-line
+    ``RUN pip install ... \\`` nor a trailing ``# setuptools provided by base``
+    comment can hide or fake what the effective command actually installs.
     """
 
     code = "\n".join(
         line for line in dockerfile.splitlines() if not line.lstrip().startswith("#")
     )
     code = code.replace("\\\n", " ")
-    return [
-        line.strip()
-        for line in code.splitlines()
-        if re.search(r"\bpip[0-9]*\b", line) and "install" in line
-    ]
+    commands: list[str] = []
+    for raw in code.splitlines():
+        line = re.sub(r"\s+#.*$", "", raw)  # strip inline comments
+        if re.search(r"\bpip[0-9]*\b", line) and "install" in line:
+            commands.append(line.strip())
+    return commands
 
 
 def test_dockerfile_installs_setuptools_for_the_distutils_shim() -> None:
@@ -2366,3 +2368,23 @@ def test_dockerfile_installs_setuptools_for_the_distutils_shim() -> None:
         "_distutils_hack); do not drop it from the pip install step "
         "(Codex P1, PR #1215)."
     )
+
+
+def test_pip_install_parser_ignores_inline_comments() -> None:
+    """An inline ``# setuptools ...`` comment must not satisfy the setuptools
+    guard.
+
+    Without stripping inline comments, a Dockerfile such as
+    ``RUN pip3 install -r /app/requirements.txt  # setuptools provided by base``
+    would drop the real install yet still match the word ``setuptools`` in the
+    comment, letting the ``distutils`` regression back in unnoticed. The parser
+    strips inline comments so only the effective install arguments count
+    (Codex P2, PR #1215).
+    """
+
+    faked = "RUN pip3 install -r /app/requirements.txt  # setuptools provided by base\n"
+    commands = _pip_install_commands(faked)
+    assert commands == ["RUN pip3 install -r /app/requirements.txt"]
+    assert not any(
+        re.search(r"(?<![\w./-])setuptools(?![\w-])", cmd) for cmd in commands
+    ), "inline-comment setuptools must not count as an installed dependency"
