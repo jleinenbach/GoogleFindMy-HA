@@ -14,22 +14,25 @@
 #
 # Denylisting each secret path individually is whack-a-mole: a new location
 # reopens the hole (exactly what happened for Auth/secrets.json). Instead this is
-# an ALLOWLIST: ignore the whole context, then re-include ONLY the two paths the
+# an ALLOWLIST: ignore the whole context, then re-include ONLY the paths the
 # Dockerfile actually needs at build time:
-#   * requirements.txt           - COPYed, dependencies baked into the image
-#   * docker-login/entrypoint.sh - COPYed as the container entrypoint
+#   * requirements.txt            - COPYed, dependencies baked into the image
+#   * docker-login/entrypoint.sh  - COPYed as the container entrypoint
+#   * docker-login/start-novnc.sh - COPYed as the noVNC TLS override (AP-8)
 # The integration *code* is NOT built in; it is bind-mounted read-only at run
 # time (M2). This keeps every secret - current or future, anywhere in the tree -
 # out of the build context and shrinks the upload to just the required files.
 #
 # Docker cannot descend into an ignored directory, so docker-login/ is re-included
 # only for TRAVERSAL; its contents are then re-excluded (docker-login/*) and only
-# the one COPY input the Dockerfile needs (entrypoint.sh) is re-included. A bare
-# `!docker-login` would re-include the WHOLE directory, so any other file placed
-# under it -- an exported secrets.json, a diagnostic log, a future addition -- would
-# ship in the context; excluding only docker-login/data left exactly that hole.
+# the COPY inputs the Dockerfile needs (entrypoint.sh, start-novnc.sh) are
+# re-included. A bare `!docker-login` would re-include the WHOLE directory, so any
+# other file placed under it -- an exported secrets.json, a diagnostic log, a
+# future addition -- would ship in the context; excluding only docker-login/data
+# left exactly that hole.
 *
 !requirements.txt
 !docker-login
 docker-login/*
 !docker-login/entrypoint.sh
+!docker-login/start-novnc.sh

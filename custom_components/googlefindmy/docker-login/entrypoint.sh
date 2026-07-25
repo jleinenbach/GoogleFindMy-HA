@@ -13,6 +13,203 @@
 # bootstrap/FCM logging.
 set -e
 
+# --- Direct-Compose LAN-hardening fallback (AP-7/AP-8 verdict derivation) -----
+# The launchers (login.sh / login.cmd) raise GFMY_NOVNC_HARDEN/_TLS for a LAN bind
+# and pass them across the host->container boundary. The SUPPORTED direct path
+#   docker compose run --build --service-ports --rm googlefindmy-login
+# runs NO launcher: it binds ${GFMY_NOVNC_BIND}:7900 on the host (see `ports:` in
+# docker-compose.yml) but sets no verdict. Without this block a LAN bind on that
+# path would publish port 7900 with the base image's fixed "secret" over plain
+# http -- the exact fixed-credential hole the launchers close. So the CONTAINER
+# derives the same verdict the launchers do, keying on the bind (the single source
+# of truth for "is this reachable off-host"): a non-loopback bind is a LAN exposure
+# and MUST be hardened. This runs only when no explicit launcher verdict is present
+# (GFMY_NOVNC_HARDEN != 1), so it never overrides a launcher decision -- including
+# an intentional launcher --no-tls run, which already sets HARDEN=1 and thus skips
+# this block entirely. Fail-closed: any doubt about a non-loopback bind hardens.
+if [ "${GFMY_NOVNC_HARDEN:-}" != "1" ]; then
+  _gfmy_bind="${GFMY_NOVNC_BIND:-127.0.0.1}"
+  # Strip one enclosing IPv6 bracket pair ("[::1]" -> "::1") so the classifier,
+  # which mirrors login.sh's is_loopback_addr/is_wildcard_addr, sees the bare host.
+  _gfmy_bind_bare="${_gfmy_bind#[}"
+  _gfmy_bind_bare="${_gfmy_bind_bare%]}"
+  case "${_gfmy_bind_bare}" in
+    127.* | ::1 | localhost | "")
+      # Loopback (or unset): nothing off-host can reach it, keep the historical
+      # plain-http "secret" default. Also clear an inherited TLS verdict: login.sh
+      # clears both up front for the same reason, so a stray GFMY_NOVNC_TLS from the
+      # caller's environment cannot switch a loopback run to https-with-fixed-secret.
+      # HARDEN is already != 1 here by the outer guard.
+      export GFMY_NOVNC_TLS=""
+      ;;
+    *)
+      # Non-loopback (concrete LAN IP or 0.0.0.0/:: wildcard): network-reachable.
+      # ALWAYS mint the per-run password -- that is what closes the fixed-secret hole.
+      export GFMY_NOVNC_HARDEN=1
+      # Determine a certificate SAN. A concrete bind IP is a usable SAN; a wildcard
+      # (0.0.0.0/::/*) is not a single browsable host. When we adopt the bind as the
+      # SAN we must also rebuild the browse URL to name the SAME host: compose builds
+      # GOOGLEFINDMY_NOVNC_URL from URL_HOST ("localhost" when the host did not set
+      # it), so without this the banner would print https://localhost while the cert
+      # certifies the bind IP -- a broken, mismatched promise.
+      case "${_gfmy_bind_bare}" in
+        0.0.0.0 | :: | "*")
+          : ;;
+        *)
+          if [ -z "${GFMY_NOVNC_URL_HOST:-}" ]; then
+            export GFMY_NOVNC_URL_HOST="${_gfmy_bind}"
+            export GOOGLEFINDMY_NOVNC_URL="http://${_gfmy_bind}:7900"
+          fi
+          ;;
+      esac
+      # Enable TLS only when a SAN is available (so we never raise an https promise
+      # the TLS block cannot keep) AND the run did not opt out (GFMY_NOVNC_TLS=0, the
+      # direct-Compose analogue of the launcher --no-tls). A wildcard bind without an
+      # explicit URL_HOST therefore stays plain http + per-run password: the hole is
+      # closed, the transport is honestly plain (documented posture), no false https.
+      if [ -n "${GFMY_NOVNC_URL_HOST:-}" ] && [ "${GFMY_NOVNC_TLS:-}" != "0" ]; then
+        export GFMY_NOVNC_TLS=1
+      else
+        export GFMY_NOVNC_TLS=""
+      fi
+      ;;
+  esac
+  unset _gfmy_bind _gfmy_bind_bare
+fi
+
+# --- Per-run noVNC password for a LAN-bound viewer (AP-7) ---------------------
+# Only when the launcher raised the LAN-hardening verdict (GFMY_NOVNC_HARDEN=1,
+# set for a non-loopback/wildcard bind); the loopback/tunnel default never sets
+# it, so nothing here runs and the base image keeps its public "secret" password.
+# The password MUST be minted and exported HERE, before supervisord starts the VNC
+# program, so start-vnc.sh (a supervisor child that reads
+# VNC_PASSWORD=${VNC_PASSWORD:-$SE_VNC_PASSWORD}) inherits it in time. This is the
+# same timing class as the TLS-cert block below, and both run before the
+# `supervisord &` line further down.
+#
+# This entrypoint is now the crypto OWNER: neither launcher (login.sh on
+# Linux/macOS, login.cmd on Windows) does any host-side crypto, so BOTH get
+# identical hardening. The launcher only decides LAN-vs-loopback and passes the
+# verdict across the host->container boundary via docker-compose.yml.
+#
+# Classic VNC auth (x11vnc -storepasswd, which the base image feeds SE_VNC_PASSWORD
+# into) only uses the FIRST 8 BYTES of the password, so a long passphrase would be
+# silently truncated and its nominal length would misrepresent the real strength.
+# We therefore mint a DENSE 8-character password so the full entropy lives inside
+# those 8 effective bytes.
+#
+# Charset: letters + the keyboard-easy symbols ". , = - _ + @". The equally obvious
+# "! ? % $" are deliberately EXCLUDED, each has a SILENT-failure path in the code
+# this value flows through: "%" is the cmd.exe escape char (login.cmd), "!" is
+# cmd.exe delayed expansion, "?" glob-expands in the base image's UNQUOTED
+# `x11vnc -storepasswd ${VNC_PASSWORD}`, and "$" is a shell metachar. Over 8
+# effective bytes they add negligible entropy, so dropping them costs nothing.
+# python3 (the venv CPython) is guaranteed in this image; the /dev/urandom
+# rejection-sampling fallback covers the (practically impossible) case it fails.
+# If BOTH CSPRNG sources are unavailable the mint FAILS CLOSED (aborts the launch)
+# rather than emit a weak, guessable credential onto a network-reachable viewer.
+if [ "${GFMY_NOVNC_HARDEN:-}" = "1" ]; then
+  _gfmy_pw="$(python3 -c 'import secrets, string
+alphabet = string.ascii_letters + ".,=-_+@"
+print("".join(secrets.choice(alphabet) for _ in range(8)))' 2>/dev/null || true)"
+  if [ -z "${_gfmy_pw}" ]; then
+    # Fallback CSPRNG: a /dev/urandom byte stream with rejection sampling, so the
+    # naive modulo bias of `byte % n` never skews the character distribution. The
+    # 256-(256%n) limit rejects the top partial bucket that would otherwise bias it.
+    _gfmy_chars='ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz.,=-_+@'
+    _gfmy_n=${#_gfmy_chars}
+    _gfmy_pw=""
+    _gfmy_limit=$(( 256 - (256 % _gfmy_n) ))
+    while [ "${#_gfmy_pw}" -lt 8 ]; do
+      _gfmy_byte="$(od -An -N1 -tu1 /dev/urandom 2>/dev/null | tr -dc '0-9')"
+      # Fail closed. If /dev/urandom yields no byte here, python3's secrets AND
+      # the kernel CSPRNG are both unavailable. Deriving the LAN-exposed VNC
+      # password from Bash's non-cryptographic $RANDOM would defeat the hardening
+      # precisely on the error path (owasp Fail-Closed): a predictable credential
+      # on a network-reachable viewer is worse than not starting. Abort BEFORE
+      # supervisord (traps are registered further down), so no viewer is served.
+      if [ -z "${_gfmy_byte}" ]; then
+        echo "[entrypoint] FATAL: no CSPRNG available (python3 'secrets' and" >&2
+        echo "[entrypoint] /dev/urandom both failed); refusing to serve a LAN-bound" >&2
+        echo "[entrypoint] noVNC viewer with a predictable password. Aborting." >&2
+        exit 1
+      fi
+      [ "${_gfmy_byte}" -lt "${_gfmy_limit}" ] || continue
+      _gfmy_pw="${_gfmy_pw}${_gfmy_chars:$(( _gfmy_byte % _gfmy_n )):1}"
+    done
+  fi
+  # SE_VNC_PASSWORD is inherited by the base image's start-vnc.sh (x11vnc), so the
+  # viewer stops accepting the public "secret". GOOGLEFINDMY_NOVNC_PASSWORD carries
+  # the SAME value, so the banner below (noVNC-available line) and auth_flow.py's
+  # sign-in prompt both show the real per-run password instead of the "secret"
+  # default. On a loopback login neither is set, so both keep showing "secret".
+  export SE_VNC_PASSWORD="${_gfmy_pw}"
+  export GOOGLEFINDMY_NOVNC_PASSWORD="${_gfmy_pw}"
+  unset _gfmy_pw _gfmy_chars _gfmy_n _gfmy_limit _gfmy_byte
+fi
+
+# --- Self-signed TLS for a LAN-bound noVNC viewer (AP-8) ----------------------
+# Only when the launcher opted into TLS for a concrete LAN bind (GFMY_NOVNC_TLS=1);
+# the loopback/tunnel default never sets it, so no certificate is created and the
+# base image's plain start-novnc.sh runs completely unchanged. The cert MUST be
+# minted HERE, before supervisord starts the noVNC program, so start-novnc.sh
+# already sees it (a later write would race the proxy start). The IP is only known
+# at runtime (chosen interactively), so a cert carrying the chosen IP as a SAN --
+# which modern Chrome requires for an IP certificate -- cannot be baked into the
+# image. openssl failing (or absent) is non-fatal: we fall back to the plain
+# viewer so the login always proceeds.
+if [ "${GFMY_NOVNC_TLS:-}" = "1" ]; then
+  _tls_dir="${HOME:-/home/seluser}/gfmy-novnc"
+  _tls_pem="${_tls_dir}/combined.pem"
+  # The bind/URL host may be a bracketed IPv6 literal ("[::1]"); openssl wants the
+  # bare address in the SAN, so strip one enclosing bracket pair.
+  _san_host="${GFMY_NOVNC_URL_HOST:-}"
+  _san_host="${_san_host#[}"
+  _san_host="${_san_host%]}"
+  # A SAN entry must be TYPED: modern Chrome validates an IP cert against an IP:
+  # SAN and a hostname cert against a DNS: SAN, and openssl rejects a literal
+  # "IP:<hostname>" outright (nonzero exit). Hardcoding IP: would therefore drop a
+  # hostname URL_HOST to the plain fallback while the launcher already promised
+  # https -- a broken promise. Classify instead: a colon is an IPv6 literal, any
+  # character outside [0-9.] means a hostname, only digits and dots mean IPv4.
+  case "${_san_host}" in
+    *:*)        _san_alt="IP:${_san_host}" ;;
+    *[!0-9.]*)  _san_alt="DNS:${_san_host}" ;;
+    *)          _san_alt="IP:${_san_host}" ;;
+  esac
+  if command -v openssl >/dev/null 2>&1 && [ -n "${_san_host}" ]; then
+    mkdir -p "${_tls_dir}"
+    # -keyout and -out to SEPARATE files (same path would overwrite one with the
+    # other), then concatenate cert+key into combined.pem for websockify.
+    if openssl req -x509 -newkey rsa:2048 -nodes \
+        -keyout "${_tls_dir}/key.pem" -out "${_tls_dir}/cert.pem" \
+        -days 1 -subj "/CN=${_san_host}" \
+        -addext "subjectAltName=${_san_alt}" >/dev/null 2>&1; then
+      cat "${_tls_dir}/cert.pem" "${_tls_dir}/key.pem" > "${_tls_pem}"
+      chmod 0600 "${_tls_pem}"
+      # websockify reads only combined.pem (start-novnc.sh points both --cert and
+      # --key at it), so drop the standalone key.pem/cert.pem: leaving the bare
+      # private key on disk (created under the default umask, world-readable)
+      # serves no purpose and is one more copy of the key than necessary.
+      rm -f "${_tls_dir}/cert.pem" "${_tls_dir}/key.pem"
+      export GFMY_NOVNC_CERT="${_tls_pem}"
+      # --ssl-only serves https only, so the printed URL must be https too, or the
+      # user opens http:// and gets a blank page.
+      case "${GOOGLEFINDMY_NOVNC_URL:-}" in
+        http://*) GOOGLEFINDMY_NOVNC_URL="https://${GOOGLEFINDMY_NOVNC_URL#http://}" ;;
+      esac
+      export GOOGLEFINDMY_NOVNC_URL
+      echo "[entrypoint] Self-signed TLS enabled for noVNC (SAN ${_san_alt})."
+    else
+      echo "[entrypoint] WARNING: openssl could not create the noVNC certificate;" >&2
+      echo "[entrypoint] continuing WITHOUT TLS (plain http viewer)." >&2
+    fi
+  else
+    echo "[entrypoint] WARNING: TLS was requested but openssl or the target IP is" >&2
+    echo "[entrypoint] unavailable; continuing WITHOUT TLS (plain http viewer)." >&2
+  fi
+fi
+
 "${VENV_PATH}/bin/supervisord" --configuration /etc/supervisord.conf &
 SUPERVISOR_PID=$!
 
@@ -142,7 +339,7 @@ done
 # -- a second run with an existing secrets.json returns early and shows no such
 # prompt. Uses the real URL passed via compose (LAN address with --ip, else
 # loopback); a manual `docker run` falls back to localhost.
-echo "[entrypoint] noVNC available at ${GOOGLEFINDMY_NOVNC_URL:-http://localhost:7900} (password: secret)."
+echo "[entrypoint] noVNC available at ${GOOGLEFINDMY_NOVNC_URL:-http://localhost:7900} (password: ${GOOGLEFINDMY_NOVNC_PASSWORD:-secret})."
 
 # /data is a host bind mount whose owner/mode we do not control. Take ownership
 # for the container user for the duration of the run so main.py's atomic write of
@@ -163,6 +360,26 @@ sudo chown -R "$(id -u):$(id -g)" /data 2>/dev/null || true
 # explicit value; `export` makes the backgrounded python child inherit it.
 : "${GOOGLEFINDMY_CONTAINER_LOGIN:=1}"
 export GOOGLEFINDMY_CONTAINER_LOGIN
+
+# Grid-readiness wait (AP-2). The Selenium Standalone grid (port 4444) boots in
+# the background under supervisord and floods this console with a "Started
+# Selenium Standalone ... 4444" banner. That banner is irrelevant to the login
+# (the flow drives undetected-chromedriver directly, not the grid), but if it
+# prints AFTER the auth prompt the user mistakes the trailing 4444 line for a
+# hang. Wait for the grid to report ready first so the single actionable
+# "Press Enter" prompt from auth_flow.py is the LAST line on screen. Bounded and
+# best-effort: on timeout (or without curl) we simply continue, and this touches
+# none of the trap/wait/signal machinery above.
+if command -v curl >/dev/null 2>&1; then
+  echo "[entrypoint] Waiting for the Selenium grid to finish booting..."
+  for i in $(seq 1 30); do
+    if curl -sf http://127.0.0.1:4444/status >/dev/null 2>&1; then
+      echo "[entrypoint] Selenium grid ready."
+      break
+    fi
+    sleep 1
+  done
+fi
 
 cd /app/gfmy
 # Start the CLI in the BACKGROUND and wait on it, so a SIGTERM/SIGINT reaches bash

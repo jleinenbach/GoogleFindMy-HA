@@ -26,7 +26,9 @@ rem The split exists because the two ports serve different consumers: 7901 is
 rem machine-to-machine (Home Assistant on this host), 7900 is opened by a browser
 rem that usually runs on a DIFFERENT machine than the Docker host.
 rem
-rem noVNC uses the fixed password "secret". To reach it from another machine,
+rem On loopback (the default) noVNC uses the fixed password "secret". A LAN bind
+rem hardens it: the container mints a per-run password and serves self-signed
+rem HTTPS (Windows has no --no-tls opt-out). To reach it from another machine,
 rem tunnel it, or on a trusted LAN bind a CONCRETE address (preferred over the
 rem 0.0.0.0 wildcard):
 rem   login.cmd --ip 192.168.1.21
@@ -54,7 +56,7 @@ rem list below is not "what this script reads", it is "what a user can set and
 rem what survives into Compose or the container": the ${GFMY_*} names of
 rem docker-compose.yml plus GFMY_NOVNC_URL_HOST, which only this script uses.
 rem Without the trim the wrong mode starts silently, with exit code 0.
-for %%V in (GFMY_ONECLICK GFMY_CLEARTEXT GFMY_ARGS GFMY_HOST_UID GFMY_HOST_GID GFMY_NOVNC_BIND GFMY_NOVNC_URL_HOST) do call :trim_trailing_blanks %%V
+for %%V in (GFMY_ONECLICK GFMY_CLEARTEXT GFMY_ARGS GFMY_HOST_UID GFMY_HOST_GID GFMY_NOVNC_BIND GFMY_NOVNC_URL_HOST GFMY_NOVNC_HARDEN GFMY_NOVNC_TLS) do call :trim_trailing_blanks %%V
 
 set "NOVNC_BIND=%GFMY_NOVNC_BIND%"
 if "%NOVNC_BIND%"=="" set "NOVNC_BIND=127.0.0.1"
@@ -120,17 +122,46 @@ rem value and the URL printed inside the container would fall back to localhost.
 rem login.sh exports both at the same point, for that reason.
 set "GFMY_NOVNC_URL_HOST=%NOVNC_URL_HOST%"
 
+rem LAN-bind hardening (AP-7 + AP-8), mirroring login.sh. On a non-loopback bind
+rem raise a single verdict, GFMY_NOVNC_HARDEN=1, that the CONTAINER acts on:
+rem entrypoint.sh mints a per-run dense random password (SE_VNC_PASSWORD, fed to
+rem x11vnc) and, with GFMY_NOVNC_TLS=1, a self-signed TLS cert. Windows therefore
+rem gets the SAME hardening as login.sh WITHOUT any batch-side crypto: the password
+rem is generated in the container. Both vars reach it because docker-compose.yml
+rem interpolates ${GFMY_*} from this process environment. Classify on the BIND, not
+rem the printed address, exactly like the reachability hint below. Unlike login.sh
+rem there is no --no-tls opt-out here, so a LAN bind always encrypts the viewer.
+set "NOVNC_SCHEME=http"
+rem Clear both verdicts first, so a value inherited from the caller's environment
+rem cannot harden a loopback run (which must stay the base default). Re-raised
+rem below only for a real LAN bind.
+set "GFMY_NOVNC_HARDEN="
+set "GFMY_NOVNC_TLS="
+if not defined IS_LOOPBACK set "GFMY_NOVNC_HARDEN=1"
+if not defined IS_LOOPBACK set "GFMY_NOVNC_TLS=1"
+if not defined IS_LOOPBACK set "NOVNC_SCHEME=https"
+
 if not exist data mkdir data
 
 echo [login] Starting the GoogleFindMy-HA login container...
-echo [login] When it is up, open http://%NOVNC_URL_HOST%:7900 (password: secret)
+rem Loopback keeps the base image's known fixed password, so print it. On a LAN
+rem bind the per-run password is minted INSIDE the container, so the host cannot
+rem print it: point the user at the container output (both the noVNC-available
+rem line and the [AuthFlow] banner show it as "(password: ...)").
+if defined IS_LOOPBACK echo [login] When it is up, open %NOVNC_SCHEME%://%NOVNC_URL_HOST%:7900 (password: secret)
+if not defined IS_LOOPBACK echo [login] When it is up, open %NOVNC_SCHEME%://%NOVNC_URL_HOST%:7900
+if not defined IS_LOOPBACK echo [login] The per-run noVNC password is printed by the container below,
+if not defined IS_LOOPBACK echo [login] shown as "(password: ...)" in the noVNC-available line and the [AuthFlow] banner.
 echo [login] and log into Google in the browser view.
 
 rem Tell the truth about who can actually reach that address.
 if defined IS_LOOPBACK goto :loopback_hint
 echo [login] WARNING: noVNC is bound to %NOVNC_BIND% and is therefore reachable
-echo [login] beyond this host, protected only by the fixed password "secret".
-echo [login] Use it on a trusted LAN only, and only while logging in.
+echo [login] beyond this host. For this LAN bind the container replaces the base
+echo [login] image's public password with a per-run password, printed in the
+echo [login] container output below, and encrypts the viewer with a self-signed
+echo [login] certificate: open the https URL above and accept the one-time browser
+echo [login] warning. Use it on a trusted LAN only, and only while logging in.
 if "%NOVNC_BIND%"=="0.0.0.0" echo [login] That bind is a wildcard, so the URL above names just one interface it listens on. Prefer login.cmd --ip ^<ADDRESS^>.
 goto :hint_done
 :loopback_hint

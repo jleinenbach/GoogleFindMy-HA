@@ -69,11 +69,15 @@ def request_oauth_account_token_flow(
             novnc_url = (
                 os.environ.get("GOOGLEFINDMY_NOVNC_URL") or "http://localhost:7900"
             )
+            # The entrypoint mints a per-run password and exports it here for a
+            # LAN-hardened bind; on the loopback default it stays unset and the
+            # base image's fixed "secret" is what the viewer actually accepts.
+            novnc_password = os.environ.get("GOOGLEFINDMY_NOVNC_PASSWORD", "secret")
             print(
                 "[AuthFlow] ==================================================\n"
                 "[AuthFlow] Action required to sign in to Google:\n"
                 f"[AuthFlow]   1. Open {novnc_url} in your browser "
-                "(password: secret).\n"
+                f"(password: {novnc_password}).\n"
                 "[AuthFlow]   2. Return to this terminal and press Enter (below).\n"
                 "[AuthFlow]   3. Sign in to Google in the browser view that opens.\n"
                 "[AuthFlow] =================================================="

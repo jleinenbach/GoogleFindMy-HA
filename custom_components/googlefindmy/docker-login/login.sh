@@ -44,8 +44,10 @@
 #                          the first detected address: "0.0.0.0" is a bind
 #                          pattern, not a browsable address.
 #
-# noVNC uses the base image's fixed password "secret". To reach it from another
-# machine, either tunnel
+# On loopback (the default) noVNC uses the base image's fixed password "secret".
+# A LAN bind hardens it: the container mints a per-run password and (unless
+# --no-tls) serves self-signed HTTPS. To reach it from another machine, either
+# tunnel
 #   ssh -L 7900:127.0.0.1:7900 <docker-host>
 # or, only on a trusted LAN, bind it to a CONCRETE address (preferred over the
 # 0.0.0.0 wildcard, which publishes on every interface):
@@ -68,7 +70,15 @@ Usage: bash login.sh [--ip <ADDRESS>] [--help]
   --ip <ADDRESS>  Bind the noVNC viewer (port 7900) to <ADDRESS> and print that
                   address as the URL to open. Use a concrete LAN address of this
                   Docker host, for example: bash login.sh --ip 192.168.1.21
+  --no-tls        On a LAN bind, do NOT enable the self-signed TLS viewer; serve
+                  a plain http viewer instead (e.g. when you tunnel it yourself).
+                  Ignored for a loopback bind, which is plain either way.
   --help          Show this help and exit.
+
+Without --ip and without GFMY_NOVNC_BIND/GFMY_NOVNC_URL_HOST, and only on an
+interactive terminal, the launcher asks which address to open the noVNC viewer
+on (a numbered menu of detected LAN addresses, a loopback entry, or a free-text
+IP). A non-interactive run keeps the historical loopback default unchanged.
 
 Environment (see the comment block at the top of this file):
   GFMY_NOVNC_BIND       host bind for noVNC 7900         (default 127.0.0.1)
@@ -80,8 +90,23 @@ in docker-compose.oneclick.yml, on purpose.
 EOF
 }
 
+# Capture whether the operator pinned the bind / printed host through the
+# environment BEFORE the loopback default is applied, so the interactive menu
+# (AP-1) can tell "nothing was set" from "set to the default value". The `+set`
+# form is true only when the name is defined (empty or not) and is safe under
+# `set -u`.
+novnc_bind_env_set=0
+[ -n "${GFMY_NOVNC_BIND+set}" ] && novnc_bind_env_set=1
+novnc_url_host_env_set=0
+[ -n "${GFMY_NOVNC_URL_HOST+set}" ] && novnc_url_host_env_set=1
+
 novnc_bind="${GFMY_NOVNC_BIND:-127.0.0.1}"
 novnc_url_host="${GFMY_NOVNC_URL_HOST:-}"
+# Set to 1 by set_ip_option when --ip is passed: the interactive menu is then
+# skipped because the operator already chose. tls_enabled defaults on and is
+# turned off by --no-tls (LAN transport opt-out for people who tunnel/plain).
+ip_from_cli=0
+tls_enabled=1
 
 is_ip_literal() {
   # Accept a dotted quad with in-range octets, or an (optionally bracketed)
@@ -231,6 +256,7 @@ set_ip_option() {
   fi
   novnc_bind="$1"
   novnc_url_host="$1"
+  ip_from_cli=1
 }
 
 while [ "$#" -gt 0 ]; do
@@ -245,6 +271,13 @@ while [ "$#" -gt 0 ]; do
       ;;
     --ip=*)
       set_ip_option "${1#--ip=}"
+      shift
+      ;;
+    --no-tls)
+      # LAN transport opt-out: keep the plain-http viewer even on a LAN bind
+      # (for operators who tunnel themselves or accept plain on a trusted LAN).
+      # Has no effect on a loopback bind, which is plain in either case.
+      tls_enabled=0
       shift
       ;;
     -h|--help)
@@ -291,6 +324,94 @@ detect_lan_ips() {
     || true
 }
 
+# Interactive noVNC address chooser (AP-1). Reached only from a real TTY and only
+# when nothing was pinned (no --ip, no GFMY_NOVNC_* env). It offers the detected
+# LAN addresses as a numbered menu, plus a loopback entry and a free-text option,
+# and validates the result with the SAME is_ip_literal that --ip uses, re-asking
+# on a bad entry. Bare Enter takes the most likely LAN address (192.168.x is
+# preferred over 10.x over anything else, since a home browser almost always sits
+# on the 192.168 side). Sets novnc_bind / novnc_url_host on success.
+prompt_for_ip() {
+  local ips selected choice default cand _ip idx
+  local -a options=()
+  ips="$(detect_lan_ips)"
+  while IFS= read -r _ip; do
+    [ -n "$_ip" ] && options+=("$_ip")
+  done <<EOF
+$ips
+EOF
+
+  default=""
+  for cand in ${options[@]+"${options[@]}"}; do
+    case "$cand" in 192.168.*) default="$cand"; break ;; esac
+  done
+  if [ -z "$default" ]; then
+    for cand in ${options[@]+"${options[@]}"}; do
+      case "$cand" in 10.*) default="$cand"; break ;; esac
+    done
+  fi
+  if [ -z "$default" ] && [ "${#options[@]}" -gt 0 ]; then
+    default="${options[0]}"
+  fi
+  # When nothing was detected, loopback is the only safe default: the operator
+  # can still type a concrete address, or accept loopback and tunnel to it.
+  [ -n "$default" ] || default="127.0.0.1"
+
+  while true; do
+    # The whole menu goes to stderr so it never contaminates the stdout that the
+    # behavioural launcher test parses; the read still uses the terminal stdin.
+    {
+      echo ""
+      echo "[login] Where will you open the noVNC viewer? Pick the address your"
+      echo "[login] browser can reach on this Docker host:"
+      idx=1
+      for cand in ${options[@]+"${options[@]}"}; do
+        echo "[login]   ${idx}) ${cand}"
+        idx=$((idx + 1))
+      done
+      echo "[login]   L) 127.0.0.1  (loopback only; reach it via an SSH tunnel)"
+      echo "[login]   or type any other IP address of this host"
+      printf '[login] Choice [Enter = %s]: ' "$default"
+    } >&2
+    read -r choice || choice=""
+
+    if [ -z "$choice" ]; then
+      selected="$default"
+    elif [ "$choice" = "L" ] || [ "$choice" = "l" ]; then
+      selected="127.0.0.1"
+    elif printf '%s' "$choice" | grep -qE '^[0-9]+$'; then
+      if [ "$choice" -ge 1 ] && [ "$choice" -le "${#options[@]}" ]; then
+        selected="${options[$((choice - 1))]}"
+      else
+        echo "[login] No menu entry ${choice}. Try again." >&2
+        continue
+      fi
+    else
+      selected="$choice"
+    fi
+
+    if [ -z "$selected" ]; then
+      echo "[login] No address available; type one, e.g. 192.168.1.21." >&2
+      continue
+    fi
+    if is_ip_literal "$selected"; then
+      novnc_bind="$selected"
+      novnc_url_host="$selected"
+      return 0
+    fi
+    echo "[login] '${selected}' is not an IP address of this host. Try again." >&2
+  done
+}
+
+# Interactive address selection (AP-1): only on a real terminal AND only when the
+# operator pinned nothing explicitly (no --ip, no GFMY_NOVNC_BIND/URL_HOST). In
+# CI or any non-interactive pipe `[ -t 0 ]` is false, so this is skipped and the
+# historical loopback default below is reached completely UNCHANGED.
+if [ -t 0 ] && [ "${ip_from_cli}" -eq 0 ] \
+   && [ "${novnc_bind_env_set}" -eq 0 ] && [ "${novnc_url_host_env_set}" -eq 0 ]; then
+  prompt_for_ip
+fi
+
 # The printed address is derived AFTER all parsing, so --ip and both environment
 # variables run through the same normalisation. Deriving it inside the "nothing
 # was set" branch would leave the explicit paths unnormalised.
@@ -329,8 +450,47 @@ mkdir -p data
 export GFMY_HOST_UID="$(id -u)"
 export GFMY_HOST_GID="$(id -g)"
 
+# LAN-bind hardening (AP-7 + AP-8). A non-loopback bind exposes the noVNC viewer
+# on the network, where the base image's public default password "secret" and the
+# plain-HTTP transport are both inadequate. For that case ONLY, raise a single
+# verdict, GFMY_NOVNC_HARDEN=1, that the CONTAINER acts on: entrypoint.sh mints a
+# per-run dense random password (SE_VNC_PASSWORD, fed to x11vnc by the base image's
+# start-vnc.sh) IN THE CONTAINER, so this launcher does no crypto and login.cmd on
+# Windows gets the exact same hardening. Unless --no-tls was given, also raise
+# GFMY_NOVNC_TLS=1 so entrypoint.sh switches the viewer to a self-signed TLS
+# transport (realised in entrypoint.sh + start-novnc.sh, SAN = the chosen IP). A
+# loopback bind keeps the historical "secret"/plain behaviour: nothing on the
+# network can reach it, so the extra typing would be pure friction. The keying is
+# on the BIND, mirroring the reachability hint below, so a wildcard bind is treated
+# as LAN too.
+novnc_scheme="http"
+# Clear both verdicts first, so a value inherited from the caller's environment
+# cannot harden a loopback run (which must stay byte-for-byte the base default).
+# They are re-raised below only for a real LAN bind.
+export GFMY_NOVNC_HARDEN=""
+export GFMY_NOVNC_TLS=""
+if ! is_loopback_addr "$novnc_bind"; then
+  export GFMY_NOVNC_HARDEN=1
+  if [ "$tls_enabled" -eq 1 ]; then
+    export GFMY_NOVNC_TLS=1
+    novnc_scheme="https"
+  fi
+fi
+
 echo "[login] Starting the GoogleFindMy-HA login container..."
-echo "[login] When it is up, open http://${novnc_url_host}:7900 (password: secret)"
+if is_loopback_addr "$novnc_bind"; then
+  # Loopback keeps the base image's known fixed password, so it is safe -- and
+  # helpful -- to print it here.
+  echo "[login] When it is up, open ${novnc_scheme}://${novnc_url_host}:7900 (password: secret)"
+else
+  # LAN bind: the per-run password is minted INSIDE the container, so the host does
+  # not know it and cannot print it. It appears in the container output further
+  # down, both in the '[entrypoint] noVNC available at ...' line and in the
+  # '[AuthFlow]' sign-in banner, each as '(password: ...)'.
+  echo "[login] When it is up, open ${novnc_scheme}://${novnc_url_host}:7900"
+  echo "[login] (the per-run noVNC password is printed by the container below, as"
+  echo "[login] '(password: ...)' in the noVNC-available line and the [AuthFlow] banner)."
+fi
 echo "[login] and log into Google in the browser view."
 
 # Tell the truth about who can actually reach that address. This MUST key on the
@@ -350,8 +510,17 @@ if is_loopback_addr "$novnc_bind"; then
   fi
 else
   echo "[login] WARNING: noVNC is bound to ${novnc_bind} and is therefore reachable"
-  echo "[login] beyond this host, protected only by the base image's fixed password"
-  echo "[login] \"secret\". Use it on a trusted LAN only, and only while logging in."
+  echo "[login] beyond this host. For this LAN bind the container replaces the base"
+  echo "[login] image's public password with a per-run password (printed in the"
+  echo "[login] container output below, not here: the host never sees it),"
+  if [ "$tls_enabled" -eq 1 ]; then
+    echo "[login] and encrypts the viewer with a self-signed certificate: open the"
+    echo "[login] https URL above and accept the one-time browser warning. Use it on"
+    echo "[login] a trusted LAN only, and only while logging in."
+  else
+    echo "[login] but TLS is OFF (--no-tls), so the transport is plain http. Use it"
+    echo "[login] on a trusted LAN only, and only while logging in."
+  fi
   if is_wildcard_addr "$novnc_bind"; then
     echo "[login] That bind is a wildcard, so the URL above names just one of the"
     echo "[login] interfaces it listens on. Prefer bash login.sh --ip <ADDRESS>."

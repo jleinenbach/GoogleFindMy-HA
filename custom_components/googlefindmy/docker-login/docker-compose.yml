@@ -34,6 +34,44 @@ services:
       # normalised host (LAN address with --ip, else loopback); a manual
       # `docker compose run` without the launcher falls back to localhost.
       GOOGLEFINDMY_NOVNC_URL: "http://${GFMY_NOVNC_URL_HOST:-localhost}:7900"
+      # LAN-bind hardening. The launcher (login.sh / login.cmd) raises a single
+      # verdict, GFMY_NOVNC_HARDEN, ONLY when you bind noVNC to a concrete LAN
+      # (non-loopback) address; on the loopback default it stays empty and the
+      # container keeps the base image's plain-http + "secret" behaviour. These
+      # MUST be listed here to cross the host->container boundary: a bare
+      # `docker compose run` does NOT forward the launcher's shell environment,
+      # so exporting them in login.sh/login.cmd alone would leave the container
+      # blind and the LAN login would print an https/password promise it never keeps.
+      #   GFMY_NOVNC_HARDEN   -> entrypoint.sh mints a per-run dense random password
+      #                          IN THE CONTAINER, exports SE_VNC_PASSWORD (read by
+      #                          the base image's start-vnc.sh / x11vnc, replacing
+      #                          "secret") and GOOGLEFINDMY_NOVNC_PASSWORD (the same
+      #                          value, so the printed banners show the real per-run
+      #                          password). The password never crosses this boundary,
+      #                          so both launchers get identical hardening without any
+      #                          host-side crypto.
+      #   GFMY_NOVNC_TLS      -> entrypoint.sh mints a self-signed cert and
+      #                          start-novnc.sh serves https (--ssl-only).
+      #   GFMY_NOVNC_URL_HOST -> the concrete LAN IP, used as the cert SAN.
+      #   GFMY_NOVNC_BIND     -> the host bind address (same value used in `ports:`
+      #                          below). Forwarded so a DIRECT `docker compose run`
+      #                          (which never runs a launcher) can still derive the
+      #                          verdict IN the container: entrypoint.sh treats any
+      #                          non-loopback bind as a LAN exposure and hardens it,
+      #                          so this supported path cannot publish port 7900 with
+      #                          the fixed "secret" over plain http. A launcher run
+      #                          already sets HARDEN explicitly and the derivation
+      #                          then stays a no-op (it never overrides a launcher).
+      # There is deliberately NO SE_VNC_PASSWORD / GOOGLEFINDMY_NOVNC_PASSWORD
+      # passthrough here: the container generates the password, so an absent verdict
+      # (loopback) leaves the base image's own SE_VNC_PASSWORD=secret default intact.
+      # An empty passthrough used to OVERRIDE that default, leaving the loopback
+      # viewer with no VNC password while the prompt still printed "(password: secret)";
+      # dropping it removes that trap structurally.
+      GFMY_NOVNC_HARDEN: "${GFMY_NOVNC_HARDEN:-}"
+      GFMY_NOVNC_TLS: "${GFMY_NOVNC_TLS:-}"
+      GFMY_NOVNC_URL_HOST: "${GFMY_NOVNC_URL_HOST:-}"
+      GFMY_NOVNC_BIND: "${GFMY_NOVNC_BIND:-}"
       # Host UID/GID for the ownership handoff of the produced secrets.json. The
       # launcher (login.sh) passes these so the finished file ends up owned by
       # *you* with owner-only 0600 (readable/copyable by you, private from other
@@ -61,11 +99,14 @@ services:
       # the bundled Chrome (undetected-chromedriver SessionNotCreatedException).
       # GOOGLEFINDMY_CHROME_VERSION: "141"
     ports:
-      # noVNC web viewer (password: secret, a fixed default of the base image).
-      # Bound to LOOPBACK by default so the fixed-password session is NOT exposed
-      # to the LAN/Internet during the Google sign-in. To reach it from another
-      # machine, use an SSH tunnel (recommended) or set GFMY_NOVNC_BIND=0.0.0.0
-      # (README → Remote access) to opt into a LAN bind on a trusted network.
+      # noVNC web viewer. On the LOOPBACK default (below) it keeps the base
+      # image's fixed password "secret" over plain HTTP, safe only because
+      # loopback is not network-reachable during the Google sign-in. A LAN bind
+      # (GFMY_NOVNC_BIND, or the launcher's --ip/interactive chooser) makes the
+      # container mint a per-run password and serve self-signed HTTPS instead. To
+      # reach it from another machine prefer an SSH tunnel; on a trusted LAN
+      # prefer a concrete --ip over the GFMY_NOVNC_BIND=0.0.0.0 wildcard (see
+      # README → "noVNC access & security").
       - "${GFMY_NOVNC_BIND:-127.0.0.1}:7900:7900"
       # The one-click token endpoint (port 7901) is deliberately NOT published
       # here. Its publish lives in the opt-in overlay file
