@@ -432,34 +432,39 @@ def test_translation_values_contain_no_literal_urls() -> None:
 # the otherwise informal German file -- so it surfaces in the local suite instead
 # of in review.
 _GERMAN_FORMAL_ADDRESS_PATTERNS = (
-    # Formal imperative, e.g. "Wenden Sie", "finden Sie", "Starten Sie".
-    re.compile(r"\b[A-Za-zÄÖÜäöü][a-zäöüß]+en Sie\b"),
+    # Formal address pronoun "Sie" -- covers the imperative "Wenden Sie ..."
+    # as well as the standalone "Sie koennen ...". Case sensitive on purpose:
+    # the informal lowercase "sie" (she/they) is legitimate and must not trip.
+    re.compile(r"\bSie\b"),
     # Formal dative pronoun.
     re.compile(r"\bIhnen\b"),
-    # Formal possessive "Ihre/Ihren/Ihrem/Ihrer/Ihres".
-    re.compile(r"\bIhre[nmrs]?\b"),
+    # Formal possessive: bare "Ihr" plus "Ihre/Ihren/Ihrem/Ihrer/Ihres".
+    re.compile(r"\bIhr(?:e[nmrs]?)?\b"),
 )
 
 
 def test_german_translation_uses_informal_du() -> None:
     """German UI text must use the informal "du", never the formal "Sie"."""
     # Negative control first: a silently broken pattern set would let the real
-    # check pass on everything, so pin that it still recognises the formal
-    # address it guards against...
-    assert any(
-        p.search("Wenden Sie diese Optionen an.")
-        for p in _GERMAN_FORMAL_ADDRESS_PATTERNS
-    )
-    assert any(
-        p.search("Beispiele finden Sie hier.") for p in _GERMAN_FORMAL_ADDRESS_PATTERNS
-    )
-    assert any(
-        p.search("Erneuere Ihre secrets.json.") for p in _GERMAN_FORMAL_ADDRESS_PATTERNS
-    )
-    # ...and that the sanctioned informal address does NOT trip it.
+    # check pass on everything, so pin that it still recognises every formal
+    # address form it guards against -- imperative, standalone "Sie", the bare
+    # and inflected possessive "Ihr(e...)", and the dative "Ihnen".
+    for formal in (
+        "Wenden Sie diese Optionen an.",  # formal imperative
+        "Beispiele finden Sie hier.",  # formal imperative
+        "Sie können das später ändern.",  # standalone formal "Sie"
+        "Erneuere Ihre secrets.json.",  # inflected formal possessive
+        "Ihr Gerät bleibt erhalten.",  # bare formal possessive "Ihr"
+        "Das gehört Ihnen.",  # formal dative
+    ):
+        assert any(p.search(formal) for p in _GERMAN_FORMAL_ADDRESS_PATTERNS), formal
+    # ...and that the sanctioned informal address does NOT trip it, including
+    # the lowercase "sie" (she/they) and "ihr" (informal plural) that merely
+    # share a spelling with the formal forms but are legitimate German.
     informal = (
         "Wende diese Optionen an. Beispiele findest du hier. "
-        "Erneuere deine secrets.json."
+        "Erneuere deine secrets.json. Wenn Geräte fehlen, werden sie "
+        "ausgeblendet, und ihr könnt sie wieder einblenden."
     )
     assert not any(p.search(informal) for p in _GERMAN_FORMAL_ADDRESS_PATTERNS)
 
