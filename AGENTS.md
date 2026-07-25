@@ -638,11 +638,13 @@ Add to the PR description:
   > mode requires, eliminating interactive prompts during local or CI runs. When
   > invoking mypy against a subset of files, append
   > `--install-types --non-interactive` as well (for example,
-  > `mypy path/to/file.py --install-types --non-interactive`). CI logs are audited
-  > for this flag to prevent hung jobs waiting for stub-install confirmation.
+  > `mypy path/to/file.py --install-types --non-interactive`). The CI mypy job always
+  > passes these flags (`.github/workflows/ci.yml`) so strict runs never stall on an
+  > interactive stub-install prompt; no separate step scans the logs for the flag.
 
 > **Hassfest runs in CI.** The `.github/workflows/hassfest-auto-fix.yml` workflow
-> validates manifests on every push/PR and auto-commits any key ordering fixes.
+> validates manifests on every PR and on pushes to `main`, auto-committing any key
+> ordering fixes (the blocking manifest gate is the `hassfest` job in `ci.yml`).
 > Review the workflow output instead of attempting a local run; when you need a
 > fresh validation, use the **Run workflow** button in the Actions tab or re-run
 > the job from the PR UI.
@@ -732,12 +734,17 @@ artifacts remain exempt when explicitly flagged by repo configuration).
   integration must stay compatible with the current Chrome/ChromeDriver, so those
   dependencies track upstream by design and use lower-bound floors (`>=`) rather
   than exact pins or `--require-hashes`.
-* **Test and tooling** dependencies are pinned for reproducibility and are **not**
-  covered by the floor policy: `custom_components/googlefindmy/requirements-dev.txt`
-  pins `pytest-asyncio==1.3.0`, and
-  `custom_components/googlefindmy/constraints-test-stubs.txt` pins
-  `homeassistant==2025.12.1`, `pytest-homeassistant-custom-component==0.13.299`
-  and `pycares<5`. Do not relax those pins under the Chrome-currency rationale.
+* **Most test and tooling** dependencies use the same lower-bound (`>=`) ranges as
+  the runtime stack (for example `bandit>=1.7`, `mypy>=1.11`, `pytest>=8.3` and
+  `ruff>=0.14.1` in `custom_components/googlefindmy/requirements-dev.txt`, and the
+  Poetry `dev`/`test` groups in `pyproject.toml`), so they are **not** reproducibly
+  pinned either. Only a small **explicitly constrained** subset is exact-pinned and
+  must not be relaxed under the Chrome-currency rationale:
+  `custom_components/googlefindmy/requirements-dev.txt` pins `pytest-asyncio==1.3.0`,
+  and `custom_components/googlefindmy/constraints-test-stubs.txt` pins
+  `homeassistant==2025.12.1` and `pytest-homeassistant-custom-component==0.13.299`; it
+  also caps `pycares<5` (an upper bound, not an exact pin; the runtime floor
+  `pycares>=4.4.0` lives in `requirements-dev.txt`).
 * Actual coverage today (each claim cites the workflow proving its *effective*
   behaviour):
   * **`pip-audit` on PRs is report-only.** `.github/workflows/pip-audit.yml`
@@ -837,7 +844,7 @@ artifacts remain exempt when explicitly flagged by repo configuration).
 * [ ] Archive extraction is traversal-safe; paths validated with `pathlib`.
 * [ ] `secrets` used for tokens; cryptography aligns with BSI TR-02102-1 guidance.
 * [ ] Logs/diagnostics redact tokens, PII, coordinates, device IDs, and derived identifiers.
-* [ ] **Browser-runtime** deps use `>=` floors by design (Chrome/ChromeDriver currency, not hard pins); **test/tooling** deps stay pinned (e.g. `pytest-asyncio==1.3.0`, `constraints-test-stubs.txt`); `pip-audit` runs report-only on PRs + weekly auto-update PRs; Semgrep SAST runs on PRs only (job guarded to `pull_request`); not every change is human-reviewed (release-stamp/hassfest-auto-fix auto-commit); SBOM scan and hard CVE gate remain hardening targets.
+* [ ] **Browser-runtime** deps use `>=` floors by design (Chrome/ChromeDriver currency, not hard pins); **most test/tooling** deps also use `>=` floors, only a constrained subset is exact-pinned (`pytest-asyncio==1.3.0`, `constraints-test-stubs.txt`); `pip-audit` runs report-only on PRs + weekly auto-update PRs; Semgrep SAST runs on PRs only (job guarded to `pull_request`); not every change is human-reviewed (release-stamp/hassfest-auto-fix auto-commit); SBOM scan and hard CVE gate remain hardening targets.
 * [ ] Async: no loop blockers; `to_thread`/`TaskGroup`; proper cancel handling.
 * [ ] I/O optimized (batch/atomic); caches with clear TTL/invalidations.
 * [ ] HA-specific: Coordinator, injected session, `get_url`, config-flow test, Repairs/Diagnostics, HA Store.
