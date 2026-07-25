@@ -290,7 +290,7 @@
           "container_host": "Hostname oder IP-Adresse des Anmelde-Containers. Belasse den Standardwert, sofern der Container nicht anderswo läuft.",
           "container_port": "Port, über den der Anmelde-Container die Anmeldedaten bereitstellt. Belasse den Standardwert, sofern du ihn nicht geändert hast.",
           "pairing_code": "Gib einen Kopplungscode ein, um die Anmeldedaten über den Anmelde-Container zu aktualisieren, statt eine secrets.json einzufügen.",
-          "subentry": "Wenden Sie Aktualisierungen der Anmeldedaten auf die ausgewählte Funktionsgruppe an. Workflows finden Sie im Abschnitt [Subeinträge und Funktionsgruppen]({subentries_docs_url})."
+          "subentry": "Wende Aktualisierungen der Anmeldedaten auf die ausgewählte Funktionsgruppe an. Workflows findest du im Abschnitt [Subeinträge und Funktionsgruppen]({subentries_docs_url})."
         }
       },
       "settings": {
@@ -320,7 +320,7 @@
           "delete_caches_on_remove": "Löscht zwischengespeicherte Tokens und Gerätemetadaten, wenn dieser Eintrag entfernt wird.",
           "map_view_token_expiration": "Wenn aktiviert, laufen die Token für die Kartenansicht nach 1 Woche ab. Wenn deaktiviert (Standard), laufen die Token nicht ab.",
           "contributor_mode": "Lege fest, wie dein Gerät zum Google-Netzwerk beiträgt (standardmäßig Alle Bereiche für Crowdsourcing oder nur stark frequentierte Bereiche).",
-          "subentry": "Speichern Sie diese Optionen in der ausgewählten Funktionsgruppe. Beispiele finden Sie unter [Subeinträge und Funktionsgruppen]({subentries_docs_url}).",
+          "subentry": "Speichere diese Optionen in der ausgewählten Funktionsgruppe. Beispiele findest du unter [Subeinträge und Funktionsgruppen]({subentries_docs_url}).",
           "secrets_extra_watch_paths": "Optional. Zusätzliche absolute Pfade zu secrets.json-Dateien, die die Integration zur automatischen Übernahme überwachen soll, einer pro Zeile. Leer lassen, um nur die Standardorte zu überwachen."
         }
       },
@@ -332,7 +332,7 @@
           "subentry": "Funktionsgruppe"
         },
         "data_description": {
-          "subentry": "Wiederhergestellte Geräte werden der gewählten Funktionsgruppe zugeordnet. Hinweise finden Sie im Abschnitt [Subeinträge und Funktionsgruppen]({subentries_docs_url})."
+          "subentry": "Wiederhergestellte Geräte werden der gewählten Funktionsgruppe zugeordnet. Hinweise findest du im Abschnitt [Subeinträge und Funktionsgruppen]({subentries_docs_url})."
         }
       },
       "repairs": {
@@ -779,7 +779,7 @@
     },
     "fcm_connection_stuck": {
       "title": "FCM Push-Verbindung fehlgeschlagen",
-      "description": "Die Hintergrundverbindung zu Google ist blockiert.\n\n1. Ist der ausgehende **TCP Port 5228** in Ihrer Firewall freigegeben?\n2. Falls das Netzwerk okay ist: Erneuern Sie bitte Ihre `secrets.json` (Token könnte teilweise ungültig sein)."
+      "description": "Die Hintergrundverbindung zu Google ist blockiert.\n\n1. Ist der ausgehende **TCP Port 5228** in deiner Firewall freigegeben?\n2. Falls das Netzwerk okay ist: Erneuere bitte deine `secrets.json` (Token könnte teilweise ungültig sein)."
     },
     "fcm_reauth_required": {
       "title": "Google Find My Device push needs re-authentication",
@@ -813,11 +813,11 @@
     },
     "fcm_short_run_crash_loop": {
       "title": "FCM-Push-Abbruchschleife erkannt",
-      "description": "Der FCM-Push-Client trennt die Verbindung wiederholt innerhalb weniger Sekunden nach dem Verbindungsaufbau (Short-Run-Crash-Schleife). Üblicherweise wird das durch eine persistente, nicht dekodierbare Push-Nachricht in der eingehenden Warteschlange ausgelöst.\n\n1. Laden Sie die Integration neu, um den Laufzustand zurückzusetzen.\n2. Falls das Problem erneut auftritt: Erneuern Sie Ihre `secrets.json` (Google könnte Anmeldedaten rotiert haben)."
+      "description": "Der FCM-Push-Client trennt die Verbindung wiederholt innerhalb weniger Sekunden nach dem Verbindungsaufbau (Short-Run-Crash-Schleife). Üblicherweise wird das durch eine persistente, nicht dekodierbare Push-Nachricht in der eingehenden Warteschlange ausgelöst.\n\n1. Lade die Integration neu, um den Laufzustand zurückzusetzen.\n2. Falls das Problem erneut auftritt: Erneuere deine `secrets.json` (Google könnte Anmeldedaten rotiert haben)."
     },
     "restart_required": {
       "title": "Neustart von Home Assistant zum Abschluss des Updates erforderlich",
-      "description": "Google Find My Hub wurde auf der Festplatte auf Version {installed_version} aktualisiert, aber Home Assistant führt weiterhin Version {running_version} aus. Starten Sie Home Assistant neu, um die installierte Version zu aktivieren.\n\nEin Neuladen der Integration genügt nicht: Ein vollständiger Neustart von Home Assistant ist erforderlich."
+      "description": "Google Find My Hub wurde auf der Festplatte auf Version {installed_version} aktualisiert, aber Home Assistant führt weiterhin Version {running_version} aus. Starte Home Assistant neu, um die installierte Version zu aktivieren.\n\nEin Neuladen der Integration genügt nicht: Ein vollständiger Neustart von Home Assistant ist erforderlich."
     }
   },
   "exceptions": {

@@ -20,7 +20,7 @@
           "use_found_bundle": "Importar as credenciais encontradas"
         },
         "data_description": {
-          "use_found_bundle": "Mantenha esta opção ativada para importar o ficheiro mostrado acima. Desative-a para escolher você mesmo um método de autenticação."
+          "use_found_bundle": "Mantenha esta opção ativada para importar o ficheiro mostrado acima. Desative-a para escolher por si mesmo um método de autenticação."
         }
       },
       "secrets_json": {
@@ -196,7 +196,7 @@
     "step": {
       "init": {
         "title": "Configuração",
-        "description": "O que você gostaria de configurar?",
+        "description": "O que gostaria de configurar?",
         "menu_options": {
           "credentials": "Atualizar credenciais",
           "settings": "Modificar configurações",
@@ -332,7 +332,7 @@
           "subentry": "Grupo de recursos"
         },
         "data_description": {
-          "subentry": "Os dispositivos restaurados ingressam no grupo de recursos que você escolher. Consulte [Subentradas e grupos de recursos]({subentries_docs_url}) para orientações."
+          "subentry": "Os dispositivos restaurados ingressam no grupo de recursos que escolher. Consulte [Subentradas e grupos de recursos]({subentries_docs_url}) para orientações."
         }
       },
       "repairs": {
@@ -775,7 +775,7 @@
   "issues": {
     "auth_expired": {
       "title": "Reautenticação necessária",
-      "description": "A autenticação do Google Find My Device é inválida ou expirou para esta entrada.\n\n**Entrada:** {entry_title}\n**Conta:** {email}\n\nSelecione **Reconfigurar** no cartão da integração para entrar novamente. Se você alterou recentemente sua senha do Google ou revogou tokens, é necessário se autenticar novamente aqui para restaurar a funcionalidade.\n\n**Dica:** O Google pode revogar tokens quando as solicitações vêm de um endereço IP ou região diferente de onde o token foi criado (por ex. token gerado num portátil mas utilizado a partir de um servidor ou VPS noutro país). Gere o ficheiro `secrets.json` na mesma rede onde o Home Assistant está a funcionar ou utilize o mesmo endereço IP público."
+      "description": "A autenticação do Google Find My Device é inválida ou expirou para esta entrada.\n\n**Entrada:** {entry_title}\n**Conta:** {email}\n\nSelecione **Reconfigurar** no cartão da integração para entrar novamente. Se alterou recentemente sua senha do Google ou revogou tokens, é necessário se autenticar novamente aqui para restaurar a funcionalidade.\n\n**Dica:** O Google pode revogar tokens quando as solicitações vêm de um endereço IP ou região diferente de onde o token foi criado (por ex. token gerado num portátil mas utilizado a partir de um servidor ou VPS noutro país). Gere o ficheiro `secrets.json` na mesma rede onde o Home Assistant está a funcionar ou utilize o mesmo endereço IP público."
     },
     "fcm_connection_stuck": {
       "title": "Falha na conexão push do FCM",
@@ -797,7 +797,7 @@
     },
     "multiple_config_entries": {
       "title": "Várias entradas de configuração detectadas",
-      "description": "O Google Find My Device agora oferece suporte a várias entradas de configuração, uma por conta do Google. Se cada entrada tiver como alvo uma conta diferente, nenhuma ação é necessária. Quando a mesma conta é adicionada duas vezes, o Home Assistant cria um problema de reparação **Entradas de conta duplicadas** para a nova entrada, para que você possa remover ou reativar a correta."
+      "description": "O Google Find My Device agora oferece suporte a várias entradas de configuração, uma por conta do Google. Se cada entrada tiver como alvo uma conta diferente, nenhuma ação é necessária. Quando a mesma conta é adicionada duas vezes, o Home Assistant cria um problema de reparação **Entradas de conta duplicadas** para a nova entrada, para que possa remover ou reativar a correta."
     },
     "unique_id_collision": {
       "title": "Colisão de ID exclusivo da entidade detectada",

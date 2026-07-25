@@ -207,7 +207,7 @@
       },
       "semantic_locations_menu": {
         "title": "Localizações semânticas",
-        "description": "Gerenciar substituições de localização semântica. Mapeamentos existentes:\n{semantic_locations}",
+        "description": "Gerencie as substituições de localização semântica. Mapeamentos existentes:\n{semantic_locations}",
         "menu_options": {
           "semantic_locations_add": "Adicionar localização semântica",
           "semantic_location_edit": "Editar localização semântica",
@@ -216,7 +216,7 @@
       },
       "semantic_locations": {
         "title": "Localizações semânticas",
-        "description": "Gerenciar substituições de localização semântica. Mapeamentos existentes:\n{semantic_locations}",
+        "description": "Gerencie as substituições de localização semântica. Mapeamentos existentes:\n{semantic_locations}",
         "menu_options": {
           "semantic_locations_add": "Adicionar localização semântica",
           "semantic_locations_edit": "Editar localização semântica",
@@ -416,7 +416,7 @@
     },
     "stop_sound": {
       "name": "Parar som",
-      "description": "Parar o som em um dispositivo Google Find My.",
+      "description": "Pare o som em um dispositivo Google Find My.",
       "fields": {
         "device_id": {
           "name": "Dispositivo",

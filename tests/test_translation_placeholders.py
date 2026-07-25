@@ -422,3 +422,70 @@ def test_translation_values_contain_no_literal_urls() -> None:
         "Literal URLs in translation values (hassfest rejects these; use a "
         "description placeholder instead):\n" + "\n".join(offenders)
     )
+
+
+# German is the one locale where Home Assistant mandates a form of address: the
+# informal "du", never the formal "Sie" (Home Assistant translation guidelines,
+# German section: "Duze in den Uebersetzungen, und verwende nicht das formale
+# 'Sie'."). AGENTS.md pins this under "Consistent form of address". This guard
+# reproduces the reported regression -- formal "Sie"/"Ihre"/"Ihnen" leaking into
+# the otherwise informal German file -- so it surfaces in the local suite instead
+# of in review.
+_GERMAN_FORMAL_ADDRESS_PATTERNS = (
+    # Formal imperative, e.g. "Wenden Sie", "finden Sie", "Starten Sie".
+    re.compile(r"\b[A-Za-zÄÖÜäöü][a-zäöüß]+en Sie\b"),
+    # Formal dative pronoun.
+    re.compile(r"\bIhnen\b"),
+    # Formal possessive "Ihre/Ihren/Ihrem/Ihrer/Ihres".
+    re.compile(r"\bIhre[nmrs]?\b"),
+)
+
+
+def test_german_translation_uses_informal_du() -> None:
+    """German UI text must use the informal "du", never the formal "Sie"."""
+    # Negative control first: a silently broken pattern set would let the real
+    # check pass on everything, so pin that it still recognises the formal
+    # address it guards against...
+    assert any(
+        p.search("Wenden Sie diese Optionen an.")
+        for p in _GERMAN_FORMAL_ADDRESS_PATTERNS
+    )
+    assert any(
+        p.search("Beispiele finden Sie hier.") for p in _GERMAN_FORMAL_ADDRESS_PATTERNS
+    )
+    assert any(
+        p.search("Erneuere Ihre secrets.json.") for p in _GERMAN_FORMAL_ADDRESS_PATTERNS
+    )
+    # ...and that the sanctioned informal address does NOT trip it.
+    informal = (
+        "Wende diese Optionen an. Beispiele findest du hier. "
+        "Erneuere deine secrets.json."
+    )
+    assert not any(p.search(informal) for p in _GERMAN_FORMAL_ADDRESS_PATTERNS)
+
+    de_file = (
+        Path(__file__).resolve().parent.parent
+        / "custom_components"
+        / "googlefindmy"
+        / "translations"
+        / "de.json"
+    )
+    with de_file.open("r", encoding="utf-8") as handle:
+        data = json.load(handle)
+    paths: set[tuple[str, ...]] = set()
+    _collect_string_paths(data, tuple(), paths)
+
+    offenders: list[str] = []
+    for path in sorted(paths):
+        value = _resolve_path(data, path)
+        if not isinstance(value, str):
+            continue
+        for pattern in _GERMAN_FORMAL_ADDRESS_PATTERNS:
+            if match := pattern.search(value):
+                offenders.append(f"de.json:{'.'.join(path)} -> {match.group(0)}")
+
+    assert not offenders, (
+        "German translation must use the informal 'du', not the formal 'Sie' "
+        "(AGENTS.md 'Consistent form of address'; Home Assistant mandates the "
+        "informal address for German). Formal address found:\n" + "\n".join(offenders)
+    )
