@@ -136,9 +136,9 @@
   "config_subentries": {
     "hub": {
       "title": "Google Find My Device Hub",
-      "entry_type": "Hub feature group",
+      "entry_type": "Hub-Featuregruppe",
       "initiate_flow": {
-        "user": "Add hub feature group"
+        "user": "Hub-Featuregruppe hinzufügen"
       },
       "step": {
         "user": {
@@ -155,9 +155,9 @@
     },
     "service": {
       "title": "Google Find Hub Dienst",
-      "entry_type": "Service feature group",
+      "entry_type": "Dienst-Funktionsgruppe",
       "initiate_flow": {
-        "user": "Add service feature group"
+        "user": "Dienst-Funktionsgruppe hinzufügen"
       },
       "step": {
         "user": {
@@ -174,9 +174,9 @@
     },
     "core_tracking": {
       "title": "Google Find My Geräte",
-      "entry_type": "Device feature group",
+      "entry_type": "Geräte-Funktionsgruppe",
       "initiate_flow": {
-        "user": "Add device feature group"
+        "user": "Geräte-Funktionsgruppe hinzufügen"
       },
       "step": {
         "user": {
@@ -782,16 +782,16 @@
       "description": "Die Hintergrundverbindung zu Google ist blockiert.\n\n1. Ist der ausgehende **TCP Port 5228** in deiner Firewall freigegeben?\n2. Falls das Netzwerk okay ist: Erneuere bitte deine `secrets.json` (Token könnte teilweise ungültig sein)."
     },
     "fcm_reauth_required": {
-      "title": "Google Find My Device push needs re-authentication",
+      "title": "Google Find My Device Push muss neu authentifiziert werden",
       "fix_flow": {
         "step": {
           "confirm": {
-            "title": "Re-authenticate Google Find My Device",
-            "description": "The background push connection to Google failed for an extended period and could not recover on its own. This usually means the stored push credentials were revoked or rotated (for example after a Google password change, or when requests arrive from a new IP address or region). Less commonly, outgoing **TCP port 5228** is blocked by a firewall.\n\nSelect **Submit** to re-authenticate this account. Your device identity is preserved. If the problem persists afterwards, make sure port 5228 is allowed and regenerate your `secrets.json`."
+            "title": "Google Find My Device neu authentifizieren",
+            "description": "Die Hintergrund-Push-Verbindung zu Google ist über einen längeren Zeitraum fehlgeschlagen und konnte sich nicht von selbst erholen. Das bedeutet meist, dass die gespeicherten Push-Anmeldedaten widerrufen oder erneuert wurden (zum Beispiel nach einer Änderung deines Google-Passworts oder wenn Anfragen von einer neuen IP-Adresse oder Region kommen). Seltener wird der ausgehende **TCP-Port 5228** von einer Firewall blockiert.\n\nWähle **Absenden**, um dieses Konto neu zu authentifizieren. Deine Geräteidentität bleibt erhalten. Falls das Problem danach weiterhin besteht, stelle sicher, dass Port 5228 erlaubt ist, und erstelle deine `secrets.json` neu."
           }
         },
         "abort": {
-          "reauth_started": "Re-authentication has been started. Finish signing in to restore the background push connection. This repair stays open until the connection recovers, so the prompt is not lost if the sign-in is interrupted."
+          "reauth_started": "Die erneute Authentifizierung wurde gestartet. Schließe die Anmeldung ab, um die Hintergrund-Push-Verbindung wiederherzustellen. Diese Reparatur bleibt geöffnet, bis die Verbindung wiederhergestellt ist, damit der Hinweis nicht verloren geht, falls die Anmeldung unterbrochen wird."
         }
       }
     },
@@ -808,8 +808,8 @@
       "description": "Dieses Google-Konto (**{email}**) wird bereits von einem anderen Eintrag verwendet:\n\n{entries}\n\nDeaktiviere oder entferne doppelte Einträge, sodass pro Konto nur eine Instanz aktiv bleibt, und lade anschließend die Integration neu (oder starte Home Assistant neu)."
     },
     "cache_purged": {
-      "title": "Authentication cache cleared",
-      "description": "The stored authentication cache for **{entry_title}** was unreadable and has been cleared. Select **Reconfigure** on the integration card to sign in again and restore access."
+      "title": "Authentifizierungs-Cache geleert",
+      "description": "Der gespeicherte Authentifizierungs-Cache für **{entry_title}** war unlesbar und wurde geleert. Wähle auf der Integrationskarte **Neu konfigurieren**, um dich erneut anzumelden und den Zugriff wiederherzustellen."
     },
     "fcm_short_run_crash_loop": {
       "title": "FCM-Push-Abbruchschleife erkannt",
