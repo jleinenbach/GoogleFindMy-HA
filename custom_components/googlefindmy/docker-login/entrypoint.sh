@@ -13,6 +13,70 @@
 # bootstrap/FCM logging.
 set -e
 
+# --- Direct-Compose LAN-hardening fallback (AP-7/AP-8 verdict derivation) -----
+# The launchers (login.sh / login.cmd) raise GFMY_NOVNC_HARDEN/_TLS for a LAN bind
+# and pass them across the host->container boundary. The SUPPORTED direct path
+#   docker compose run --build --service-ports --rm googlefindmy-login
+# runs NO launcher: it binds ${GFMY_NOVNC_BIND}:7900 on the host (see `ports:` in
+# docker-compose.yml) but sets no verdict. Without this block a LAN bind on that
+# path would publish port 7900 with the base image's fixed "secret" over plain
+# http -- the exact fixed-credential hole the launchers close. So the CONTAINER
+# derives the same verdict the launchers do, keying on the bind (the single source
+# of truth for "is this reachable off-host"): a non-loopback bind is a LAN exposure
+# and MUST be hardened. This runs only when no explicit launcher verdict is present
+# (GFMY_NOVNC_HARDEN != 1), so it never overrides a launcher decision -- including
+# an intentional launcher --no-tls run, which already sets HARDEN=1 and thus skips
+# this block entirely. Fail-closed: any doubt about a non-loopback bind hardens.
+if [ "${GFMY_NOVNC_HARDEN:-}" != "1" ]; then
+  _gfmy_bind="${GFMY_NOVNC_BIND:-127.0.0.1}"
+  # Strip one enclosing IPv6 bracket pair ("[::1]" -> "::1") so the classifier,
+  # which mirrors login.sh's is_loopback_addr/is_wildcard_addr, sees the bare host.
+  _gfmy_bind_bare="${_gfmy_bind#[}"
+  _gfmy_bind_bare="${_gfmy_bind_bare%]}"
+  case "${_gfmy_bind_bare}" in
+    127.* | ::1 | localhost | "")
+      # Loopback (or unset): nothing off-host can reach it, keep the historical
+      # plain-http "secret" default. Also clear an inherited TLS verdict: login.sh
+      # clears both up front for the same reason, so a stray GFMY_NOVNC_TLS from the
+      # caller's environment cannot switch a loopback run to https-with-fixed-secret.
+      # HARDEN is already != 1 here by the outer guard.
+      export GFMY_NOVNC_TLS=""
+      ;;
+    *)
+      # Non-loopback (concrete LAN IP or 0.0.0.0/:: wildcard): network-reachable.
+      # ALWAYS mint the per-run password -- that is what closes the fixed-secret hole.
+      export GFMY_NOVNC_HARDEN=1
+      # Determine a certificate SAN. A concrete bind IP is a usable SAN; a wildcard
+      # (0.0.0.0/::/*) is not a single browsable host. When we adopt the bind as the
+      # SAN we must also rebuild the browse URL to name the SAME host: compose builds
+      # GOOGLEFINDMY_NOVNC_URL from URL_HOST ("localhost" when the host did not set
+      # it), so without this the banner would print https://localhost while the cert
+      # certifies the bind IP -- a broken, mismatched promise.
+      case "${_gfmy_bind_bare}" in
+        0.0.0.0 | :: | "*")
+          : ;;
+        *)
+          if [ -z "${GFMY_NOVNC_URL_HOST:-}" ]; then
+            export GFMY_NOVNC_URL_HOST="${_gfmy_bind}"
+            export GOOGLEFINDMY_NOVNC_URL="http://${_gfmy_bind}:7900"
+          fi
+          ;;
+      esac
+      # Enable TLS only when a SAN is available (so we never raise an https promise
+      # the TLS block cannot keep) AND the run did not opt out (GFMY_NOVNC_TLS=0, the
+      # direct-Compose analogue of the launcher --no-tls). A wildcard bind without an
+      # explicit URL_HOST therefore stays plain http + per-run password: the hole is
+      # closed, the transport is honestly plain (documented posture), no false https.
+      if [ -n "${GFMY_NOVNC_URL_HOST:-}" ] && [ "${GFMY_NOVNC_TLS:-}" != "0" ]; then
+        export GFMY_NOVNC_TLS=1
+      else
+        export GFMY_NOVNC_TLS=""
+      fi
+      ;;
+  esac
+  unset _gfmy_bind _gfmy_bind_bare
+fi
+
 # --- Per-run noVNC password for a LAN-bound viewer (AP-7) ---------------------
 # Only when the launcher raised the LAN-hardening verdict (GFMY_NOVNC_HARDEN=1,
 # set for a non-loopback/wildcard bind); the loopback/tunnel default never sets

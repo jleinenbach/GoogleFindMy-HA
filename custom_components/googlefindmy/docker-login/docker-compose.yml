@@ -53,6 +53,15 @@ services:
       #   GFMY_NOVNC_TLS      -> entrypoint.sh mints a self-signed cert and
       #                          start-novnc.sh serves https (--ssl-only).
       #   GFMY_NOVNC_URL_HOST -> the concrete LAN IP, used as the cert SAN.
+      #   GFMY_NOVNC_BIND     -> the host bind address (same value used in `ports:`
+      #                          below). Forwarded so a DIRECT `docker compose run`
+      #                          (which never runs a launcher) can still derive the
+      #                          verdict IN the container: entrypoint.sh treats any
+      #                          non-loopback bind as a LAN exposure and hardens it,
+      #                          so this supported path cannot publish port 7900 with
+      #                          the fixed "secret" over plain http. A launcher run
+      #                          already sets HARDEN explicitly and the derivation
+      #                          then stays a no-op (it never overrides a launcher).
       # There is deliberately NO SE_VNC_PASSWORD / GOOGLEFINDMY_NOVNC_PASSWORD
       # passthrough here: the container generates the password, so an absent verdict
       # (loopback) leaves the base image's own SE_VNC_PASSWORD=secret default intact.
@@ -62,6 +71,7 @@ services:
       GFMY_NOVNC_HARDEN: "${GFMY_NOVNC_HARDEN:-}"
       GFMY_NOVNC_TLS: "${GFMY_NOVNC_TLS:-}"
       GFMY_NOVNC_URL_HOST: "${GFMY_NOVNC_URL_HOST:-}"
+      GFMY_NOVNC_BIND: "${GFMY_NOVNC_BIND:-}"
       # Host UID/GID for the ownership handoff of the produced secrets.json. The
       # launcher (login.sh) passes these so the finished file ends up owned by
       # *you* with owner-only 0600 (readable/copyable by you, private from other

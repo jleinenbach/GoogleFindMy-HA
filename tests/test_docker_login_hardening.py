@@ -2519,3 +2519,194 @@ def test_login_sh_does_no_host_side_password_crypto() -> None:
     assert "export GFMY_NOVNC_HARDEN=1" in text, (
         "login.sh must raise the hardening verdict for a non-loopback bind"
     )
+
+
+def test_compose_forwards_the_bind_for_container_side_verdict() -> None:
+    """The container must SEE the bind so it can derive the LAN-hardening verdict on
+    the direct ``docker compose run`` path (which runs no launcher). Without
+    GFMY_NOVNC_BIND in the container environment, a direct LAN bind would publish
+    port 7900 with the fixed ``secret`` over plain HTTP -- the fixed-credential hole
+    the launchers close. Codex flagged exactly this gap.
+    """
+
+    compose = yaml.safe_load(_read("docker-compose.yml"))
+    env = compose["services"][LOGIN_SERVICE].get("environment", {})
+    keys = set(env) if isinstance(env, dict) else {e.split("=", 1)[0] for e in env}
+    assert "GFMY_NOVNC_BIND" in keys, (
+        "GFMY_NOVNC_BIND must cross into the container so entrypoint.sh can derive "
+        "the hardening verdict for a direct `docker compose run` LAN bind"
+    )
+
+
+def _run_derivation_block(env_overrides: dict[str, str]) -> dict[str, str]:
+    """Extract the ACTUAL direct-Compose derivation block from entrypoint.sh and run
+    it in isolation, then report the resulting verdict env.
+
+    This exercises the production code slice, not a reimplementation of the
+    classifier: a behavioural test that rebuilt the loopback/wildcard logic would
+    only prove the rebuild, never the shipped block (the construct-vs-wiring trap).
+    The block is self-contained (it runs before supervisord), so slicing it between
+    its banner comment and the password-mint banner and feeding it a minimal env is
+    faithful.
+    """
+
+    entrypoint = _read("entrypoint.sh")
+    start = entrypoint.find('if [ "${GFMY_NOVNC_HARDEN:-}" != "1" ]; then')
+    end = entrypoint.find("# --- Per-run noVNC password", start)
+    assert start != -1 and end != -1, "could not extract the derivation block"
+    block = entrypoint[start:end].rstrip()
+    harness = (
+        "set -e\n"
+        + block
+        + "\nprintf 'HARDEN=%s\\nTLS=%s\\nURL_HOST=%s\\nURL=%s\\n' "
+        + '"${GFMY_NOVNC_HARDEN:-}" "${GFMY_NOVNC_TLS:-}" '
+        + '"${GFMY_NOVNC_URL_HOST:-}" "${GOOGLEFINDMY_NOVNC_URL:-}"\n'
+    )
+    env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin")}
+    # Mirror docker-compose.yml: it builds GOOGLEFINDMY_NOVNC_URL from URL_HOST,
+    # defaulting the host to "localhost" when nothing set it on the host side.
+    url_host_in = env_overrides.get("GFMY_NOVNC_URL_HOST", "") or "localhost"
+    env["GOOGLEFINDMY_NOVNC_URL"] = f"http://{url_host_in}:7900"
+    env.update(env_overrides)
+    proc = subprocess.run(
+        ["bash", "-c", harness],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert proc.returncode == 0, f"derivation block failed: {proc.stderr}"
+    out: dict[str, str] = {}
+    for line in proc.stdout.splitlines():
+        key, _, value = line.partition("=")
+        out[key] = value
+    return out
+
+
+# (bind-env, extra-env), expected HARDEN, expected TLS, expected URL_HOST
+_DERIVATION_CASES = [
+    # Loopback (or the compose empty-string default): never harden, clear stray TLS.
+    ("compose-empty-bind", {"GFMY_NOVNC_BIND": ""}, "", "", ""),
+    ("loopback-127-1", {"GFMY_NOVNC_BIND": "127.0.0.1"}, "", "", ""),
+    ("loopback-127-x", {"GFMY_NOVNC_BIND": "127.0.0.5"}, "", "", ""),
+    ("loopback-localhost", {"GFMY_NOVNC_BIND": "localhost"}, "", "", ""),
+    ("loopback-v6", {"GFMY_NOVNC_BIND": "::1"}, "", "", ""),
+    ("loopback-v6-bracketed", {"GFMY_NOVNC_BIND": "[::1]"}, "", "", ""),
+    # A stray inherited TLS on a loopback run must be cleared, not honoured.
+    (
+        "loopback-clears-stray-tls",
+        {"GFMY_NOVNC_BIND": "127.0.0.1", "GFMY_NOVNC_TLS": "1"},
+        "",
+        "",
+        "",
+    ),
+    # Concrete LAN IP: harden + TLS, adopt the bind as SAN and browse host.
+    ("lan-ip-192", {"GFMY_NOVNC_BIND": "192.168.1.21"}, "1", "1", "192.168.1.21"),
+    ("lan-ip-10", {"GFMY_NOVNC_BIND": "10.0.0.5"}, "1", "1", "10.0.0.5"),
+    # Wildcard: harden (password) but no SAN, so TLS stays off and URL_HOST empty.
+    ("wildcard-v4", {"GFMY_NOVNC_BIND": "0.0.0.0"}, "1", "", ""),
+    ("wildcard-v6", {"GFMY_NOVNC_BIND": "::"}, "1", "", ""),
+    # Explicit TLS opt-out on a LAN bind: password stays, transport goes plain.
+    (
+        "lan-ip-opt-out",
+        {"GFMY_NOVNC_BIND": "192.168.1.21", "GFMY_NOVNC_TLS": "0"},
+        "1",
+        "",
+        "192.168.1.21",
+    ),
+    # Wildcard WITH an explicit URL_HOST: a SAN exists, so TLS is honoured.
+    (
+        "wildcard-explicit-host",
+        {"GFMY_NOVNC_BIND": "0.0.0.0", "GFMY_NOVNC_URL_HOST": "192.168.1.21"},
+        "1",
+        "1",
+        "192.168.1.21",
+    ),
+    # Concrete bracketed IPv6: the classifier strips the brackets, but URL_HOST and
+    # the browse URL must KEEP them (the URL-correct form). Regression guard for the
+    # bracket-strip-vs-keep split, the trickiest path.
+    (
+        "lan-ip-v6-bracketed",
+        {"GFMY_NOVNC_BIND": "[fd00::5]"},
+        "1",
+        "1",
+        "[fd00::5]",
+    ),
+    # Concrete bind IP WITH a preset URL_HOST: the -z guard must not overwrite the
+    # explicit host nor rebuild the URL (Browse-Host = the operator's chosen host).
+    (
+        "lan-ip-preset-host",
+        {"GFMY_NOVNC_BIND": "192.168.1.21", "GFMY_NOVNC_URL_HOST": "myhost.lan"},
+        "1",
+        "1",
+        "myhost.lan",
+    ),
+    # Bracketed wildcard: login.sh lists "[::]" explicitly; entrypoint strips to "::".
+    ("wildcard-v6-bracketed", {"GFMY_NOVNC_BIND": "[::]"}, "1", "", ""),
+    # Hostname bind (GFMY_NOVNC_BIND allows names, unlike --ip): non-loopback, adopt.
+    ("lan-hostname", {"GFMY_NOVNC_BIND": "myhost.lan"}, "1", "1", "myhost.lan"),
+    # Literal "*" wildcard: pins the quoted-literal case semantics (never a catch-all).
+    ("wildcard-star", {"GFMY_NOVNC_BIND": "*"}, "1", "", ""),
+]
+
+
+@pytest.mark.parametrize(
+    "label,env_overrides,exp_harden,exp_tls,exp_url_host",
+    _DERIVATION_CASES,
+    ids=[c[0] for c in _DERIVATION_CASES],
+)
+def test_entrypoint_derivation_hardens_every_network_reachable_bind(
+    label: str,
+    env_overrides: dict[str, str],
+    exp_harden: str,
+    exp_tls: str,
+    exp_url_host: str,
+) -> None:
+    """Behaviourally run the shipped derivation block over the bind type-space. The
+    security invariant: EVERY network-reachable bind (concrete LAN IP or wildcard)
+    ends with GFMY_NOVNC_HARDEN=1 (so the password is minted), and NO loopback bind
+    does (so the plain ``secret`` default is preserved byte-for-byte). Codex flagged
+    the direct-Compose path publishing 7900 with the fixed ``secret``; this pins the
+    fix across the whole input space, not just one grep-able line.
+    """
+
+    out = _run_derivation_block(env_overrides)
+    assert out["HARDEN"] == exp_harden, (
+        f"{label}: HARDEN {out['HARDEN']!r} != {exp_harden!r}"
+    )
+    assert out["TLS"] == exp_tls, f"{label}: TLS {out['TLS']!r} != {exp_tls!r}"
+    assert out["URL_HOST"] == exp_url_host, (
+        f"{label}: URL_HOST {out['URL_HOST']!r} != {exp_url_host!r}"
+    )
+    # WICHTIG-2 regression pin: when a concrete bind IP is adopted as the SAN, the
+    # printed browse URL must name that SAME host, never the compose "localhost"
+    # default -- otherwise the banner promises https://localhost while the cert
+    # certifies the LAN IP (a mismatched, broken promise).
+    if exp_url_host and exp_url_host not in ("0.0.0.0", "::"):
+        assert exp_url_host in out["URL"], (
+            f"{label}: browse URL {out['URL']!r} must name the SAN host {exp_url_host!r}"
+        )
+        if exp_tls == "1":
+            assert "localhost" not in out["URL"], (
+                f"{label}: browse URL {out['URL']!r} must not keep the localhost default"
+            )
+
+
+def test_entrypoint_derivation_never_overrides_a_launcher_verdict() -> None:
+    """When a launcher already raised GFMY_NOVNC_HARDEN=1, the container-side
+    derivation must NOT run at all -- so an intentional launcher --no-tls (HARDEN=1,
+    TLS="") survives, and a launcher LAN run is never downgraded. This pins the outer
+    guard behaviourally, not by grep.
+    """
+
+    # Launcher --no-tls on a LAN bind: HARDEN=1, TLS empty. Must stay untouched even
+    # though the bind itself is non-loopback (the derivation would otherwise raise TLS).
+    out = _run_derivation_block(
+        {
+            "GFMY_NOVNC_HARDEN": "1",
+            "GFMY_NOVNC_TLS": "",
+            "GFMY_NOVNC_BIND": "192.168.1.21",
+        }
+    )
+    assert out["HARDEN"] == "1", "launcher HARDEN verdict must be preserved"
+    assert out["TLS"] == "", "launcher --no-tls (TLS empty) must not be overridden to 1"

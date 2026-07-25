@@ -83,6 +83,16 @@ You reach a LAN-bound viewer in one of two ways:
   `--ip=X` spellings) and gets the **same** per-run password and TLS; it has no
   `--no-tls` (a LAN bind on Windows always encrypts) and does not auto-detect
   addresses, because parsing `ipconfig` output in batch is locale-dependent.
+- **Direct `docker compose run` (no launcher).** If you skip the launchers and run
+  `docker compose run --build --service-ports --rm googlefindmy-login` with
+  `GFMY_NOVNC_BIND` set to a LAN address (in your shell or a `.env`), the
+  **container itself** derives the hardening from that bind, so this path gets the
+  same per-run password and self-signed TLS — it cannot expose port 7900 with the
+  fixed `secret`. One nuance: with the `GFMY_NOVNC_BIND=0.0.0.0` **wildcard** and no
+  `GFMY_NOVNC_URL_HOST`, the container has no single address to certify, so it keeps
+  the per-run password but serves plain HTTP (set `GFMY_NOVNC_URL_HOST=<ip>` for
+  TLS, or `GFMY_NOVNC_TLS=0` to opt out of TLS deliberately). Prefer a concrete
+  `GFMY_NOVNC_BIND=<ip>` over the wildcard for that reason.
 
 **Prefer an SSH tunnel over a LAN bind when you can** — it needs no LAN exposure
 at all:
