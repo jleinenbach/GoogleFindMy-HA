@@ -2408,7 +2408,9 @@ def test_entrypoint_mints_password_before_supervisord_starts() -> None:
     )
     export_idx = entrypoint.find("export SE_VNC_PASSWORD")
     launch_idx = entrypoint.find('bin/supervisord" --configuration')
-    assert export_idx != -1, "entrypoint.sh must export SE_VNC_PASSWORD for the hardened path"
+    assert export_idx != -1, (
+        "entrypoint.sh must export SE_VNC_PASSWORD for the hardened path"
+    )
     assert launch_idx != -1, "entrypoint.sh must launch supervisord"
     assert export_idx < launch_idx, (
         "SE_VNC_PASSWORD must be exported BEFORE supervisord starts, or start-vnc.sh "
