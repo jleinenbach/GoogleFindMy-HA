@@ -471,12 +471,13 @@ def test_dockerignore_is_allowlist_excluding_every_secret_path() -> None:
         "requirements.txt",
         "docker-login",
         "docker-login/entrypoint.sh",
+        "docker-login/start-novnc.sh",
     }, (
         "the only `!`-re-includes may be the Dockerfile's COPY inputs "
-        "(requirements.txt, docker-login/entrypoint.sh) plus `docker-login` for "
-        f"traversal; found {sorted(reincludes)}. Re-including anything else -- or the "
-        "directory as a whole without re-excluding its contents -- risks shipping "
-        "integration source or secrets into the image."
+        "(requirements.txt, docker-login/entrypoint.sh, docker-login/start-novnc.sh) "
+        f"plus `docker-login` for traversal; found {sorted(reincludes)}. Re-including "
+        "anything else -- or the directory as a whole without re-excluding its "
+        "contents -- risks shipping integration source or secrets into the image."
     )
     assert not any(
         r.startswith("!") and ("auth" in r.lower() or "secret" in r.lower())
@@ -2388,3 +2389,102 @@ def test_pip_install_parser_ignores_inline_comments() -> None:
     assert not any(
         re.search(r"(?<![\w./-])setuptools(?![\w-])", cmd) for cmd in commands
     ), "inline-comment setuptools must not count as an installed dependency"
+
+
+def test_entrypoint_mints_password_before_supervisord_starts() -> None:
+    """The per-run noVNC password is minted IN THE CONTAINER and exported before
+    supervisord starts, so the base image's start-vnc.sh inherits it in time.
+
+    The launchers only raise the GFMY_NOVNC_HARDEN verdict; moving the crypto here
+    is what gives Windows (login.cmd) the same hardening without batch-side crypto.
+    If the SE_VNC_PASSWORD export ever slipped below the ``supervisord`` launch,
+    start-vnc.sh would have stored the public ``secret`` before the per-run
+    password landed, silently defeating the hardening.
+    """
+
+    entrypoint = _read("entrypoint.sh")
+    assert '"${GFMY_NOVNC_HARDEN:-}" = "1"' in entrypoint, (
+        "entrypoint.sh must gate the password mint on the GFMY_NOVNC_HARDEN verdict"
+    )
+    export_idx = entrypoint.find("export SE_VNC_PASSWORD")
+    launch_idx = entrypoint.find('bin/supervisord" --configuration')
+    assert export_idx != -1, "entrypoint.sh must export SE_VNC_PASSWORD for the hardened path"
+    assert launch_idx != -1, "entrypoint.sh must launch supervisord"
+    assert export_idx < launch_idx, (
+        "SE_VNC_PASSWORD must be exported BEFORE supervisord starts, or start-vnc.sh "
+        "stores the public 'secret' before the per-run password lands."
+    )
+
+
+def test_entrypoint_password_charset_excludes_shell_hostile_symbols() -> None:
+    """The in-container password alphabet stays letters + '. , = - _ + @' and never
+    admits ``! ? % $``.
+
+    Each excluded symbol has a SILENT-failure path in the code the value flows
+    through (``%`` cmd.exe escape, ``!`` cmd.exe delayed expansion, ``?`` glob in
+    the base image's unquoted ``x11vnc -storepasswd``, ``$`` shell metachar), so a
+    well-meant charset widening would break logins without an error. Locking both
+    the python3 alphabet and the /dev/urandom fallback here forces a conscious
+    change if anyone edits them.
+    """
+
+    entrypoint = _read("entrypoint.sh")
+    assert 'string.ascii_letters + ".,=-_+@"' in entrypoint, (
+        "the python3 CSPRNG alphabet must stay the keyboard-safe set"
+    )
+    assert (
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz.,=-_+@" in entrypoint
+    ), "the /dev/urandom fallback alphabet must match the keyboard-safe set"
+
+
+def test_compose_generates_password_in_container_not_from_host() -> None:
+    """docker-compose.yml must NOT pass a VNC password from the host: the container
+    mints it. Passing SE_VNC_PASSWORD from the host is exactly what re-introduces
+    the empty-string override that overwrites the base image's ``secret`` default.
+    Only the GFMY_NOVNC_HARDEN verdict (+ TLS + SAN host) crosses the boundary.
+    """
+
+    compose = yaml.safe_load(_read("docker-compose.yml"))
+    env = compose["services"][LOGIN_SERVICE].get("environment", {})
+    keys = set(env) if isinstance(env, dict) else {e.split("=", 1)[0] for e in env}
+    assert "SE_VNC_PASSWORD" not in keys, (
+        "SE_VNC_PASSWORD must not be a compose environment key; the container mints it"
+    )
+    assert "GOOGLEFINDMY_NOVNC_PASSWORD" not in keys, (
+        "GOOGLEFINDMY_NOVNC_PASSWORD must not be passed from the host either"
+    )
+    assert "GFMY_NOVNC_HARDEN" in keys, (
+        "the LAN-hardening verdict must cross into the container"
+    )
+
+
+def test_auth_flow_prompt_reads_password_from_env() -> None:
+    """The [AuthFlow] sign-in banner must show the real per-run password, read from
+    GOOGLEFINDMY_NOVNC_PASSWORD, not a hardcoded ``secret`` (which was always wrong
+    for a hardened LAN login).
+    """
+
+    text = Path("custom_components/googlefindmy/Auth/auth_flow.py").read_text(
+        encoding="utf-8"
+    )
+    assert "GOOGLEFINDMY_NOVNC_PASSWORD" in text, (
+        "auth_flow.py must read the noVNC password from the environment so the "
+        "sign-in banner shows the real per-run value"
+    )
+
+
+def test_login_sh_does_no_host_side_password_crypto() -> None:
+    """login.sh must not generate or export the VNC password any more (that moved
+    into entrypoint.sh); it only raises the GFMY_NOVNC_HARDEN verdict for a LAN bind.
+    """
+
+    text = _read("login.sh")
+    assert "gen_password" not in text, (
+        "password generation moved into the container; login.sh must not mint it"
+    )
+    assert "export SE_VNC_PASSWORD" not in text, (
+        "login.sh must not export SE_VNC_PASSWORD; the container mints it"
+    )
+    assert "export GFMY_NOVNC_HARDEN=1" in text, (
+        "login.sh must raise the hardening verdict for a non-loopback bind"
+    )

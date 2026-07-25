@@ -34,6 +34,34 @@ services:
       # normalised host (LAN address with --ip, else loopback); a manual
       # `docker compose run` without the launcher falls back to localhost.
       GOOGLEFINDMY_NOVNC_URL: "http://${GFMY_NOVNC_URL_HOST:-localhost}:7900"
+      # LAN-bind hardening. The launcher (login.sh / login.cmd) raises a single
+      # verdict, GFMY_NOVNC_HARDEN, ONLY when you bind noVNC to a concrete LAN
+      # (non-loopback) address; on the loopback default it stays empty and the
+      # container keeps the base image's plain-http + "secret" behaviour. These
+      # MUST be listed here to cross the host->container boundary: a bare
+      # `docker compose run` does NOT forward the launcher's shell environment,
+      # so exporting them in login.sh/login.cmd alone would leave the container
+      # blind and the LAN login would print an https/password promise it never keeps.
+      #   GFMY_NOVNC_HARDEN   -> entrypoint.sh mints a per-run dense random password
+      #                          IN THE CONTAINER, exports SE_VNC_PASSWORD (read by
+      #                          the base image's start-vnc.sh / x11vnc, replacing
+      #                          "secret") and GOOGLEFINDMY_NOVNC_PASSWORD (the same
+      #                          value, so the printed banners show the real per-run
+      #                          password). The password never crosses this boundary,
+      #                          so both launchers get identical hardening without any
+      #                          host-side crypto.
+      #   GFMY_NOVNC_TLS      -> entrypoint.sh mints a self-signed cert and
+      #                          start-novnc.sh serves https (--ssl-only).
+      #   GFMY_NOVNC_URL_HOST -> the concrete LAN IP, used as the cert SAN.
+      # There is deliberately NO SE_VNC_PASSWORD / GOOGLEFINDMY_NOVNC_PASSWORD
+      # passthrough here: the container generates the password, so an absent verdict
+      # (loopback) leaves the base image's own SE_VNC_PASSWORD=secret default intact.
+      # An empty passthrough used to OVERRIDE that default, leaving the loopback
+      # viewer with no VNC password while the prompt still printed "(password: secret)";
+      # dropping it removes that trap structurally.
+      GFMY_NOVNC_HARDEN: "${GFMY_NOVNC_HARDEN:-}"
+      GFMY_NOVNC_TLS: "${GFMY_NOVNC_TLS:-}"
+      GFMY_NOVNC_URL_HOST: "${GFMY_NOVNC_URL_HOST:-}"
       # Host UID/GID for the ownership handoff of the produced secrets.json. The
       # launcher (login.sh) passes these so the finished file ends up owned by
       # *you* with owner-only 0600 (readable/copyable by you, private from other

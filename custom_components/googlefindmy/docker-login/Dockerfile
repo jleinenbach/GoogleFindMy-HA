@@ -58,5 +58,22 @@ RUN mkdir -p /data \
 COPY docker-login/entrypoint.sh /opt/bin/gfm-entrypoint.sh
 RUN chmod +x /opt/bin/gfm-entrypoint.sh
 
+# openssl is needed at RUNTIME to mint the self-signed noVNC certificate for a
+# LAN bind (docker-login/entrypoint.sh, AP-8). It is normally already present in
+# the selenium base image; install it defensively so a LAN-bind login can always
+# encrypt the viewer. A loopback login never calls openssl, so this only matters
+# for the opt-in LAN path.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends openssl \
+ && rm -rf /var/lib/apt/lists/*
+
+# Self-signed TLS override for noVNC (AP-8). Preserve the base image's original
+# launcher as start-novnc.base.sh FIRST, so the override can hand off to it
+# verbatim on the loopback/tunnel default (no cert -> unchanged path), then
+# replace /opt/bin/start-novnc.sh (the path [program:novnc] already runs).
+RUN cp -a /opt/bin/start-novnc.sh /opt/bin/start-novnc.base.sh
+COPY docker-login/start-novnc.sh /opt/bin/start-novnc.sh
+RUN chmod +x /opt/bin/start-novnc.sh
+
 USER seluser
 ENTRYPOINT ["/opt/bin/gfm-entrypoint.sh"]
