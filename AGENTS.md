@@ -733,7 +733,9 @@ artifacts remain exempt when explicitly flagged by repo configuration).
 * Actual coverage today: `pip-audit` runs on every PR in **report-only** mode
   (findings surface as job-summary warnings, they do not fail the PR); a weekly
   scheduled `pip-audit` job opens automated security-update PRs for fixable
-  advisories; Semgrep SAST runs on PRs and daily; every change is human-reviewed.
+  advisories; Semgrep SAST runs on PRs only (the workflow declares scheduled and
+  push triggers, but its job is gated to `pull_request` events, so those runs are
+  skipped); every change is human-reviewed.
   There is currently **no** SBOM scan and **no** hard CVE gate blocking a PR.
 * Hardening targets (not yet implemented): generate a CycloneDX **SBOM** and scan
   it (e.g., Dependency-Track); fail CI on known critical vulnerabilities.
@@ -802,7 +804,7 @@ artifacts remain exempt when explicitly flagged by repo configuration).
 * [ ] Archive extraction is traversal-safe; paths validated with `pathlib`.
 * [ ] `secrets` used for tokens; cryptography aligns with BSI TR-02102-1 guidance.
 * [ ] Logs/diagnostics redact tokens, PII, coordinates, device IDs, and derived identifiers.
-* [ ] Dependencies use `>=` floors by design (Chrome/ChromeDriver currency, not hard pins); `pip-audit` runs report-only on PRs + weekly auto-update PRs; Semgrep SAST runs; SBOM scan and hard CVE gate remain hardening targets.
+* [ ] Dependencies use `>=` floors by design (Chrome/ChromeDriver currency, not hard pins); `pip-audit` runs report-only on PRs + weekly auto-update PRs; Semgrep SAST runs on PRs only; SBOM scan and hard CVE gate remain hardening targets.
 * [ ] Async: no loop blockers; `to_thread`/`TaskGroup`; proper cancel handling.
 * [ ] I/O optimized (batch/atomic); caches with clear TTL/invalidations.
 * [ ] HA-specific: Coordinator, injected session, `get_url`, config-flow test, Repairs/Diagnostics, HA Store.
