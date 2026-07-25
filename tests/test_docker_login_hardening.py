@@ -70,6 +70,14 @@ Codex review finding on PR #1208:
   child then dies on the relayed signal and its ``wait`` returns NORMALLY, so a
   shutdown check after the wait stops the run instead of falling through into the
   clear-text track and dumping the bundle into the container log.
+* The login image installs ``setuptools`` alongside ``requirements.txt`` in its
+  build step. undetected-chromedriver 3.5.5 (the current PyPI top) still imports
+  the stdlib ``distutils`` that Python 3.12+ removed (PEP 632); the
+  ``selenium/standalone-chrome:latest`` base image is on Python 3.14, so without
+  ``setuptools`` re-providing ``distutils`` via its ``_distutils_hack`` the bare
+  import fails (``ModuleNotFoundError: distutils``) and Chrome never starts.
+  Dropping ``setuptools`` from the install step would restore that failure while
+  every other guard here stays green (Codex P1 on PR #1215).
 """
 
 from __future__ import annotations
@@ -2308,4 +2316,53 @@ def test_both_launchers_reexport_the_novnc_url_host(
     assert assignment.lower() in _read(launcher).lower(), (
         f"{launcher} must re-export GFMY_NOVNC_URL_HOST via `{assignment}...`; "
         "otherwise the in-container noVNC URL falls back to localhost."
+    )
+
+
+def _pip_install_commands(dockerfile: str) -> list[str]:
+    """Return every ``pip install`` invocation in the Dockerfile as one line.
+
+    Full-line comments are dropped and backslash line-continuations are joined,
+    so a multi-line ``RUN pip install ... \\`` still reads as a single logical
+    command.
+    """
+
+    code = "\n".join(
+        line for line in dockerfile.splitlines() if not line.lstrip().startswith("#")
+    )
+    code = code.replace("\\\n", " ")
+    return [
+        line.strip()
+        for line in code.splitlines()
+        if re.search(r"\bpip[0-9]*\b", line) and "install" in line
+    ]
+
+
+def test_dockerfile_installs_setuptools_for_the_distutils_shim() -> None:
+    """The login image must install setuptools so undetected-chromedriver runs.
+
+    undetected-chromedriver 3.5.5 (the current PyPI top, so a version bump is not
+    available) still imports the stdlib ``distutils`` that Python 3.12+ removed
+    (PEP 632). The ``selenium/standalone-chrome:latest`` base image is on Python
+    3.14, so without ``setuptools`` re-providing ``distutils`` via its
+    ``_distutils_hack`` the bare import fails (``ModuleNotFoundError: distutils``)
+    and Chrome never starts. Dropping ``setuptools`` from the install step would
+    pass every other guard here yet restore that failure, so pin it explicitly
+    (Codex P1 on PR #1215).
+    """
+
+    dockerfile = _read("Dockerfile")
+    pip_installs = _pip_install_commands(dockerfile)
+    assert pip_installs, "Dockerfile must install Python dependencies via pip"
+    assert any("requirements.txt" in cmd for cmd in pip_installs), (
+        "Dockerfile must install the integration requirements via pip"
+    )
+    assert any(
+        re.search(r"(?<![\w./-])setuptools(?![\w-])", cmd) for cmd in pip_installs
+    ), (
+        "the login image must install setuptools so undetected-chromedriver's "
+        "distutils import keeps working on the Python 3.12+ base image "
+        "(PEP 632 removed the stdlib distutils; setuptools re-provides it via "
+        "_distutils_hack); do not drop it from the pip install step "
+        "(Codex P1, PR #1215)."
     )

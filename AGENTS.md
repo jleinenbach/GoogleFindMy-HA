@@ -739,6 +739,16 @@ artifacts remain exempt when explicitly flagged by repo configuration).
   There is currently **no** SBOM scan and **no** hard CVE gate blocking a PR.
 * Hardening targets (not yet implemented): generate a CycloneDX **SBOM** and scan
   it (e.g., Dependency-Track); fail CI on known critical vulnerabilities.
+* **Control claims must be grounded (no aspirational controls).** Any statement
+  in this file or the docs that a CI control *exists* or *blocks* (SBOM scan,
+  CVE gate, "runs daily", "fails the PR", "must pass") must cite the workflow
+  file and the line proving its *effective* behaviour, not its declared intent.
+  Two recurring traps: (a) `report-only` / `continue-on-error` / "keep CI green"
+  is a report, not a blocking gate; (b) a declared `schedule:` / `push:` trigger
+  whose only job is guarded by `if: github.event_name == 'pull_request'` gives
+  no scheduled or push coverage. Describe what runs, not what is aspired to; if a
+  control is only planned, list it under "Hardening targets", never as current
+  coverage.
 
 ### 11.3 Async, concurrency & cancellation
 
