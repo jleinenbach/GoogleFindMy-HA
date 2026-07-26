@@ -3858,7 +3858,6 @@ async def test_discovery_create_branch_marks_its_own_late_staged_ticket() -> Non
     flow._discovery_confirm_pending = True  # type: ignore[attr-defined]
     flow._pending_discovery_payload = payload  # type: ignore[attr-defined]
     flow._pending_discovery_updates = None  # type: ignore[attr-defined]
-    flow._pending_discovery_existing_entry = None  # type: ignore[attr-defined]
 
     async def _created() -> Any:
         # Mirrors what the create path does right before returning: mark, then

@@ -3840,7 +3840,6 @@ class ConfigFlow(
         self._subentry_key_service = SERVICE_SUBENTRY_KEY
         self._pending_discovery_payload: CloudDiscoveryData | None = None
         self._pending_discovery_updates: dict[str, Any] | None = None
-        self._pending_discovery_existing_entry: ConfigEntry | None = None
         self._discovery_confirm_pending = False
         # Survives _clear_discovery_confirmation_state on purpose: the overwrite
         # question is asked *after* the discovery card has been confirmed and
@@ -4373,7 +4372,6 @@ class ConfigFlow(
         self._discovery_confirm_pending = False
         self._pending_discovery_payload = None
         self._pending_discovery_updates = None
-        self._pending_discovery_existing_entry = None
         context = getattr(self, "context", None)
         if isinstance(context, dict):
             context.pop("confirm_only", None)
@@ -4553,7 +4551,6 @@ class ConfigFlow(
         self.context["title_placeholders"] = placeholders
         self._pending_discovery_payload = normalized
         self._pending_discovery_updates = updates
-        self._pending_discovery_existing_entry = existing_entry
         self._discovery_confirm_pending = True
         self._set_confirm_only()
         return self.async_show_form(
@@ -4574,7 +4571,8 @@ class ConfigFlow(
         nothing about their credentials.
 
         Declining writes nothing at all: the entry keeps the credentials it has,
-        and the bundle stays on disk, so the offer returns on the next scan.
+        and nothing is staged for cleanup, so the discovered bundle stays on
+        disk.
         """
 
         payload = self._pending_overwrite_payload
