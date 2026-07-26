@@ -1779,7 +1779,7 @@ def test_login_cmd_validates_the_ip_value_like_login_sh() -> None:
     )
 
 
-def test_login_sh_rejects_unbalanced_ipv6_brackets() -> None:
+def test_login_sh_rejects_unbalanced_ipv6_brackets(tmp_path: Path) -> None:
     """``is_ip_literal`` must not accept a spelling ``bracket_if_ipv6`` cannot fix.
 
     Accepting ``[::1`` would let the normaliser produce ``[[::1]``, so the
@@ -1801,6 +1801,24 @@ def test_login_sh_rejects_unbalanced_ipv6_brackets() -> None:
     # Absolute: the script cd's to its own directory, and the run below sets a
     # cwd, so a repo-relative path would not resolve there.
     script = (DOCKER_LOGIN / "login.sh").resolve()
+
+    # An ACCEPTED address does not end the script: it runs on to the final
+    # `docker compose ... run --build --service-ports --rm`. On a machine with a
+    # working Docker daemon (every GitHub runner) that really starts the login
+    # container, which then waits for a sign-in that never comes. `capture_output`
+    # plus a `timeout` does not save us there: the timeout kills only the direct
+    # `bash` child, while the surviving `docker`/`docker-compose` grandchildren keep
+    # the stdout pipe open, so the final `communicate()` blocks forever and the whole
+    # pytest run hangs. Hence the same stub-`docker`-on-`PATH` harness that
+    # `test_login_sh_behaviourally_selects_compose_files` already uses: the launcher
+    # runs to completion, but its last step is a no-op echo.
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    stub = bin_dir / "docker"
+    stub.write_text('#!/usr/bin/env bash\nprintf "DOCKER_ARGS: %s\\n" "$*"\n', "utf-8")
+    stub.chmod(0o755)
+    env = {"PATH": f"{bin_dir}:/usr/bin:/bin", "HOME": str(tmp_path)}
+
     for value, expected_reject in (
         ("::1", False),
         ("[::1]", False),
@@ -1872,6 +1890,8 @@ def test_login_sh_rejects_unbalanced_ipv6_brackets() -> None:
             text=True,
             check=False,
             cwd=str(DOCKER_LOGIN),
+            env=env,
+            timeout=60,
         )
         rejected = proc.returncode == 2 and "--ip needs an IP address" in proc.stderr
         assert rejected is expected_reject, (
