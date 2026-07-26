@@ -856,6 +856,58 @@ async def test_discovery_overwrite_does_not_write_twice_after_the_guard_wrote(
 
 
 @pytest.mark.asyncio
+async def test_discovery_overwrite_drops_credentials_the_guard_cannot_remove(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A superseded secrets bundle must not survive an accepted overwrite.
+
+    ``updates`` expresses a removal by leaving an optional credential key out,
+    but Home Assistant's guard merges flat (``{**entry.data, **updates}``) and
+    can only add or replace. Judging the write complete from the keys present in
+    ``updates`` therefore skipped the wholesale write while the old
+    ``secrets_data`` was still in the entry, and the reload that follows seeds
+    exactly that value into the entry-scoped token cache
+    (``__init__.async_setup_entry``): old and new credentials side by side.
+    """
+
+    entry, flow = await _prepare_configured_account_flow(monkeypatch)
+    # Credentials from an earlier secrets.json import. The discovered ones are
+    # an individual token, so they carry no bundle and the old one is obsolete.
+    entry.data[DATA_SECRET_BUNDLE] = {"owner_key": "STALE_OWNER_KEY"}
+    entry.data[DATA_AAS_TOKEN] = "aas_et/OLD_TOKEN_VALUE"
+
+    payload = _discovery_payload_for_configured_account()
+
+    form = await flow.async_step_discovery(payload)
+    if inspect.isawaitable(form):
+        form = await form
+    assert form["type"] == "form"
+
+    question = await flow.async_step_discovery({})
+    if inspect.isawaitable(question):
+        question = await question
+    assert question.get("step_id") == "discovery_overwrite"
+
+    result = await flow.async_step_discovery_overwrite(
+        {config_flow._FIELD_OVERWRITE_CREDENTIALS: True}
+    )
+    if inspect.isawaitable(result):
+        result = await result
+
+    assert result["type"] == "abort"
+    assert result["reason"] == "credentials_updated"
+    assert DATA_SECRET_BUNDLE not in entry.data, (
+        "the replaced bundle stays readable for the token cache unless the "
+        "step writes the payload wholesale"
+    )
+    assert entry.data[CONF_OAUTH_TOKEN] == "aas_et/NEW_TOKEN_VALUE"
+    assert entry.data[DATA_AAS_TOKEN] == "aas_et/NEW_TOKEN_VALUE"
+    assert flow.hass.config_entries.scheduled_reloads == [entry.entry_id], (
+        "the running integration keeps the old credentials until it reloads"
+    )
+
+
+@pytest.mark.asyncio
 async def test_discovery_overwrite_rebases_onto_data_written_while_asking(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
