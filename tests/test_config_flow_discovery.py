@@ -423,6 +423,7 @@ async def _prepare_configured_account_flow(
     class _ConfigEntries(ConfigEntriesDomainUniqueIdLookupMixin):
         def __init__(self) -> None:
             self.reloaded: list[str] = []
+            self.scheduled_reloads: list[str] = []
             self.setup_calls: list[str] = []
             attach_config_entries_flow_manager(self)
 
@@ -439,6 +440,11 @@ async def _prepare_configured_account_flow(
 
         def async_reload(self, entry_id: str) -> None:
             self.reloaded.append(entry_id)
+
+        def async_schedule_reload(self, entry_id: str) -> None:
+            # Home Assistant's own unique-id guard calls this after a changed
+            # entry, and so does the explicit write for a bound flow.
+            self.scheduled_reloads.append(entry_id)
 
         def async_get_entry(self, entry_id: str) -> Any | None:
             return entry if entry_id == entry.entry_id else None
@@ -621,6 +627,111 @@ async def test_discovery_from_tracker_rescan_does_not_ask_to_overwrite(
         "the rescan still applies its payload, exactly as it did before"
     )
     assert "data" not in entry.data
+
+
+@pytest.mark.asyncio
+async def test_discovery_overwrite_imports_when_the_entry_disappeared(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A vanished entry must not be reported as a completed overwrite.
+
+    The question stays on screen for as long as the user needs, and the entry
+    can be deleted (or have its account identity changed) in the meantime. The
+    unique-id guard then finds nothing, returns instead of aborting, and writes
+    nothing at all: reporting ``credentials_updated`` there would name an event
+    that did not happen. The credentials are still in hand, so the confirmed
+    import continues as a first import instead of being dropped.
+    """
+
+    entry, flow = await _prepare_configured_account_flow(monkeypatch)
+    payload = _discovery_payload_for_configured_account()
+
+    form = await flow.async_step_discovery(payload)
+    if inspect.isawaitable(form):
+        form = await form
+    assert form["type"] == "form"
+
+    question = await flow.async_step_discovery({})
+    if inspect.isawaitable(question):
+        question = await question
+    assert question.get("step_id") == "discovery_overwrite"
+
+    # The user removes the integration while the question is on screen.
+    monkeypatch.setattr(
+        flow.hass.config_entries, "async_entries", lambda domain: [], raising=False
+    )
+
+    device_selection_calls: list[str] = []
+
+    async def _fake_device_selection() -> dict[str, Any]:
+        device_selection_calls.append("called")
+        return {"type": "form", "step_id": "device_selection"}
+
+    monkeypatch.setattr(
+        flow, "async_step_device_selection", _fake_device_selection, raising=False
+    )
+
+    result = await flow.async_step_discovery_overwrite(
+        {config_flow._FIELD_OVERWRITE_CREDENTIALS: True}
+    )
+    if inspect.isawaitable(result):
+        result = await result
+
+    assert device_selection_calls == ["called"], (
+        "the confirmed credentials must be imported, not dropped"
+    )
+    assert result["type"] == "form", (
+        "an abort here would end the flow with nothing written"
+    )
+    assert result.get("step_id") == "device_selection"
+    assert entry.data[CONF_OAUTH_TOKEN] == "aas_et/OLD_TOKEN_VALUE", (
+        "the removed entry must not be written to behind the user's back"
+    )
+
+
+@pytest.mark.asyncio
+async def test_discovery_overwrite_writes_when_the_flow_is_bound_to_the_entry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A flow bound to the entry must still write what it reports.
+
+    ``_async_prepare_account_context`` returns the entry unchanged when the
+    flow already belongs to it (``context["entry_id"]``), because the
+    unique-id guard is what normally performs the write and it is skipped in
+    that case. Without an explicit write the step would report replaced
+    credentials over unchanged entry data.
+    """
+
+    entry, flow = await _prepare_configured_account_flow(monkeypatch)
+    flow.context = {"entry_id": entry.entry_id}
+    payload = _discovery_payload_for_configured_account()
+
+    form = await flow.async_step_discovery(payload)
+    if inspect.isawaitable(form):
+        form = await form
+    assert form["type"] == "form"
+
+    question = await flow.async_step_discovery({})
+    if inspect.isawaitable(question):
+        question = await question
+    assert question.get("step_id") == "discovery_overwrite"
+    assert entry.data[CONF_OAUTH_TOKEN] == "aas_et/OLD_TOKEN_VALUE"
+
+    result = await flow.async_step_discovery_overwrite(
+        {config_flow._FIELD_OVERWRITE_CREDENTIALS: True}
+    )
+    if inspect.isawaitable(result):
+        result = await result
+
+    assert result["type"] == "abort"
+    assert result["reason"] == "credentials_updated"
+    assert entry.data[CONF_OAUTH_TOKEN] == "aas_et/NEW_TOKEN_VALUE", (
+        "reporting the replacement requires having performed it"
+    )
+    assert "data" not in entry.data
+    assert flow.hass.config_entries.scheduled_reloads == [entry.entry_id], (
+        "the running integration keeps the old credentials until it reloads"
+    )
 
 
 @pytest.mark.asyncio

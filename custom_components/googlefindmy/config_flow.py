@@ -4524,45 +4524,7 @@ class ConfigFlow(
                         return self.async_abort(reason="already_configured")
                     return self.async_abort(reason="already_configured")
 
-                result = await self.async_step_device_selection()
-                # Delete-after-import: STAGED here, executed in
-                # async_setup_entry. A CREATE_ENTRY FlowResult is only a
-                # promise: Home Assistant adds the entry afterwards in
-                # ConfigEntriesFlowManager.async_finish_flow, so deleting the
-                # on-disk copies here would drop the credentials before they
-                # are persisted. Aborted device selection stages nothing and
-                # leaves the watched bundles in place so the flow can be
-                # retried. Only the copies the import actually consumed are
-                # removed (see the hook docstring): a co-located bundle of a
-                # different account and a same-account bundle that got fresher
-                # while the user was confirming both survive.
-                if (
-                    isinstance(result, Mapping)
-                    and result.get("type")
-                    == data_entry_flow.FlowResultType.CREATE_ENTRY
-                ):
-                    _async_stage_container_cleanup(
-                        getattr(self, "hass", None),
-                        flow_id=self._async_cleanup_ticket_id(),
-                        unique_id=self.unique_id,
-                        job=PendingContainerCleanup(
-                            imported_stable_key=_stable_key_for_discovery_payload(
-                                pending_payload
-                            ),
-                            imported_digest=_digest_for_discovery_payload(
-                                pending_payload
-                            ),
-                        ),
-                    )
-                    # This staging happens AFTER the CREATE_ENTRY result, so
-                    # the mark the create path set in async_step_device_selection
-                    # predates the ticket this call may just have created. Mark
-                    # again here, at the site that staged last: without it the
-                    # flow removal Home Assistant performs right after
-                    # async_finish_flow drops a ticket that belongs to an entry
-                    # which exists and whose setup may still be retrying.
-                    self._async_mark_own_cleanup_ticket_entry_promised()
-                return result
+                return await self._async_import_discovered_account(pending_payload)
 
         try:
             normalized = _normalize_and_validate_discovery_payload(discovery_info or {})
@@ -4612,6 +4574,100 @@ class ConfigFlow(
             description_placeholders=placeholders,
         )
 
+    async def _async_import_discovered_account(
+        self, payload: CloudDiscoveryData | None
+    ) -> FlowResult:
+        """Import ``payload`` as a new account and stage the bundle cleanup.
+
+        Split out of :meth:`async_step_discovery` because a second caller needs
+        exactly this behaviour: :meth:`async_step_discovery_overwrite` lands
+        here when the entry it was going to overwrite has disappeared while its
+        form was open, which turns the overwrite into a plain first import.
+
+        ``payload`` stays optional because the confirmation path reaches the
+        import with nothing staged as well; the cleanup helpers below resolve
+        that to "stage no key", which is what the absent payload means.
+        """
+
+        result = await self.async_step_device_selection()
+        # Delete-after-import: STAGED here, executed in
+        # async_setup_entry. A CREATE_ENTRY FlowResult is only a
+        # promise: Home Assistant adds the entry afterwards in
+        # ConfigEntriesFlowManager.async_finish_flow, so deleting the
+        # on-disk copies here would drop the credentials before they
+        # are persisted. Aborted device selection stages nothing and
+        # leaves the watched bundles in place so the flow can be
+        # retried. Only the copies the import actually consumed are
+        # removed (see the hook docstring): a co-located bundle of a
+        # different account and a same-account bundle that got fresher
+        # while the user was confirming both survive.
+        if (
+            isinstance(result, Mapping)
+            and result.get("type") == data_entry_flow.FlowResultType.CREATE_ENTRY
+        ):
+            _async_stage_container_cleanup(
+                getattr(self, "hass", None),
+                flow_id=self._async_cleanup_ticket_id(),
+                unique_id=self.unique_id,
+                job=PendingContainerCleanup(
+                    imported_stable_key=_stable_key_for_discovery_payload(payload),
+                    imported_digest=_digest_for_discovery_payload(payload),
+                ),
+            )
+            # This staging happens AFTER the CREATE_ENTRY result, so
+            # the mark the create path set in async_step_device_selection
+            # predates the ticket this call may just have created. Mark
+            # again here, at the site that staged last: without it the
+            # flow removal Home Assistant performs right after
+            # async_finish_flow drops a ticket that belongs to an entry
+            # which exists and whose setup may still be retrying.
+            self._async_mark_own_cleanup_ticket_entry_promised()
+        return result
+
+    def _async_write_entry_credentials(
+        self, entry: ConfigEntry, updates: Mapping[str, Any]
+    ) -> bool:
+        """Apply ``updates`` to ``entry`` and schedule its reload.
+
+        Only for the case where ``_async_prepare_account_context`` returned the
+        entry rather than aborting through Home Assistant's unique-id guard,
+        which is what normally performs this write. ``updates`` is the entry
+        data itself, flat and already merged (see
+        :func:`_ingest_discovery_credentials`), so it is written as-is: a
+        second merge would resurrect the keys the ingest deliberately dropped.
+
+        Returns whether the write happened, so the caller can report the
+        outcome it actually produced instead of assuming one.
+        """
+
+        hass_obj = getattr(self, "hass", None)
+        if hass_obj is None or not hasattr(hass_obj, "config_entries"):
+            return False
+        hass = cast(HomeAssistant, hass_obj)
+
+        try:
+            hass.config_entries.async_update_entry(entry, data=dict(updates))
+        except Exception:  # noqa: BLE001 - surface, but do not claim success
+            _LOGGER.exception(
+                "Failed to write discovered credentials to entry %s",
+                entry.entry_id,
+            )
+            return False
+
+        # ``async_update_entry`` only mutates the in-memory entry and schedules
+        # the debounced store save; the running integration keeps the old
+        # credentials until it is reloaded.
+        schedule_reload = getattr(hass.config_entries, "async_schedule_reload", None)
+        if callable(schedule_reload):
+            try:
+                schedule_reload(entry.entry_id)
+            except Exception:  # noqa: BLE001 - the write itself already landed
+                _LOGGER.exception(
+                    "Failed to schedule reload after writing credentials to entry %s",
+                    entry.entry_id,
+                )
+        return True
+
     async def async_step_discovery_overwrite(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
@@ -4627,6 +4683,11 @@ class ConfigFlow(
         Declining writes nothing at all: the entry keeps the credentials it has,
         and nothing is staged for cleanup, so the discovered bundle stays on
         disk.
+
+        Accepting reports ``credentials_updated`` only where credentials were
+        actually written. The entry can disappear while this form is open, and
+        then the guard returns instead of aborting and writes nothing; that
+        case continues as a first import of the same credentials.
         """
 
         payload = self._pending_overwrite_payload
@@ -4645,8 +4706,10 @@ class ConfigFlow(
                 )
                 return self.async_abort(reason="credentials_kept")
 
+            existing_entry: ConfigEntry | None = None
+            written = False
             try:
-                await self._async_prepare_account_context(
+                existing_entry = await self._async_prepare_account_context(
                     email=payload.email,
                     preferred_unique_id=payload.unique_id,
                     updates=updates,
@@ -4655,7 +4718,37 @@ class ConfigFlow(
                 # The expected exit: the core applied ``updates`` to the entry
                 # and then aborted the flow, which is how it signals "this
                 # account is already configured".
-                pass
+                written = True
+
+            if not written:
+                # Returning instead of aborting means the unique-id guard never
+                # ran and therefore never wrote ``updates``. Reporting success
+                # here would name an event that did not happen, so both
+                # remaining cases are resolved on their own terms.
+                if existing_entry is None:
+                    # The entry was removed, or its account identity changed,
+                    # while this form was open. There is nothing left to
+                    # overwrite, and the credentials are still in hand: import
+                    # them as a new account rather than dropping them.
+                    _LOGGER.info(
+                        "Discovery for %s confirmed, but the configured entry "
+                        "is gone; importing the credentials as a new account",
+                        _mask_email_for_logs(payload.email),
+                    )
+                    return await self._async_import_discovered_account(payload)
+
+                # The flow is bound to that very entry (``context["entry_id"]``
+                # or an attached ``config_entry``), which makes the guard return
+                # the entry instead of aborting through it. Write the update
+                # here so the reported outcome is the one that happened.
+                if not self._async_write_entry_credentials(existing_entry, updates):
+                    _LOGGER.warning(
+                        "Discovery for %s confirmed, but the credentials could "
+                        "not be written to the configured entry",
+                        _mask_email_for_logs(payload.email),
+                    )
+                    return self.async_abort(reason="already_configured")
+
             _LOGGER.info(
                 "Discovery for %s confirmed: stored credentials replaced",
                 _mask_email_for_logs(payload.email),
