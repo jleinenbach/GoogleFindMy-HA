@@ -13,8 +13,8 @@ Codex review finding on PR #1208:
 * Secrets file must stay owner-only ``0600`` and be handed to the host user via an
   ownership handoff, never relaxed to world-readable ``0644`` (findings A + C).
 * The launchers must start the container with ``docker compose run`` (interactive,
-  stdin attached) rather than ``docker compose up``, or the one-time
-  ``Press Enter`` prompt blocks forever (finding B).
+  stdin attached) rather than ``docker compose up``, or the account-e-mail prompt
+  blocks forever (finding B).
 * noVNC must stay bound to loopback by default (earlier finding), so the
   fixed-password session is not exposed on the LAN during sign-in.
 * A context-level ``.dockerignore`` must be an ALLOWLIST (ignore the whole
@@ -28,8 +28,8 @@ Codex review finding on PR #1208:
   ``docker-login/`` must NOT reach the context (Codex P2 on PR #1210).
 * The QNAP "Container Station" README guidance must NOT present importing the
   compose file as an *application* (``docker compose up`` semantics, no stdin) as
-  a first-login path: the interactive ``input("Press Enter")`` prompt can never
-  proceed without a terminal, so the login must go through the stdin-attaching
+  a first-login path: the ``input("Enter your Google account email:")`` prompt can
+  never be answered without a terminal, so the login must go through the stdin-attaching
   ``docker compose run`` (SSH) path (Codex P2 on PR #1210).
 * The ownership handoff must run from an ``EXIT`` trap, so a nonzero/interrupted
   ``main.py`` run still returns the produced secrets.json to the host user.
@@ -133,7 +133,7 @@ def test_entrypoint_hands_ownership_to_host_user() -> None:
 
 @pytest.mark.parametrize("launcher", ["login.sh", "login.cmd"])
 def test_launcher_uses_compose_run_not_up(launcher: str) -> None:
-    """Launchers must use interactive ``compose run`` so the Enter prompt reaches Python."""
+    """Launchers must use interactive ``compose run`` so stdin reaches Python."""
 
     text = _read(launcher)
     # `docker compose [-f ...] run`: the launchers now select their compose files
@@ -584,8 +584,8 @@ def test_entrypoint_preserves_stdin_and_sigint_for_background_child() -> None:
     defaults to an async (``&``) child, both proven empirically:
 
     * its stdin is pointed at ``/dev/null`` unless an explicit redirection overrides
-      it -- so ``main.py``'s interactive ``input("Press Enter")`` prompt would hit EOF
-      and abort the login (Codex: "Keep stdin attached when backgrounding the CLI");
+      it -- so ``main.py``'s ``input("Enter your Google account email:")`` prompt would
+      hit EOF and abort the login (Codex: "Keep stdin attached when backgrounding the CLI");
     * SIGINT/SIGQUIT are hard-ignored (SIG_IGN), which Python inherits and then keeps
       instead of installing its ``KeyboardInterrupt`` handler -- so a relayed SIGINT
       is dropped and the re-wait loop hangs (Codex: "Restore SIGINT handling in the
@@ -654,7 +654,7 @@ def test_backgrounded_login_child_behaviourally_keeps_stdin_and_default_sigint(
     runtime:
 
     * the child still reads the entrypoint's terminal stdin (``<&0`` works) -- the
-      first-run ``input("Press Enter")`` prompt does not hit EOF; and
+      first-run account-e-mail prompt does not hit EOF; and
     * the child ends up with Python's DEFAULT ``SIGINT`` handler installed rather
       than the inherited ``SIG_IGN`` -- so a relayed Ctrl-C is not dropped.
 
@@ -1229,7 +1229,7 @@ def test_readme_container_station_does_not_present_compose_up_first_login() -> N
 
     Codex: importing docker-compose.yml as a Container Station *application* starts it
     with ``docker compose up`` semantics, which does not forward terminal STDIN, so the
-    first-run ``input("Press Enter")`` prompt can never proceed. Telling users to "keep
+    first-run account-e-mail prompt can never be answered. Telling users to "keep
     it in the foreground for the first (login) run" is therefore wrong (foreground is
     not stdin attached). The README must route the interactive login through the
     stdin-attaching ``docker compose run`` (SSH) path and only offer Container Station

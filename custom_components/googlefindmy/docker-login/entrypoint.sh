@@ -334,10 +334,11 @@ for i in $(seq 1 30); do
 done
 
 # Neutral status line only: it must NOT read as the call to action. The single
-# actionable prompt (open the URL, press Enter, sign in) is printed by the login
-# flow (auth_flow.py) at the point it actually blocks, and ONLY on a real login
-# -- a second run with an existing secrets.json returns early and shows no such
-# prompt. Uses the real URL passed via compose (LAN address with --ip, else
+# actionable instruction block (open the URL, sign in to the Chrome window that
+# comes up there) is printed by the login flow (auth_flow.py) right before it
+# starts Chrome, and ONLY on a real login -- a second run with an existing
+# secrets.json returns early and shows no such block. Uses the real URL passed
+# via compose (LAN address with --ip, else
 # loopback); a manual `docker run` falls back to localhost.
 echo "[entrypoint] noVNC available at ${GOOGLEFINDMY_NOVNC_URL:-http://localhost:7900} (password: ${GOOGLEFINDMY_NOVNC_PASSWORD:-secret})."
 
@@ -365,9 +366,9 @@ export GOOGLEFINDMY_CONTAINER_LOGIN
 # the background under supervisord and floods this console with a "Started
 # Selenium Standalone ... 4444" banner. That banner is irrelevant to the login
 # (the flow drives undetected-chromedriver directly, not the grid), but if it
-# prints AFTER the auth prompt the user mistakes the trailing 4444 line for a
-# hang. Wait for the grid to report ready first so the single actionable
-# "Press Enter" prompt from auth_flow.py is the LAST line on screen. Bounded and
+# prints AFTER the auth instructions the user mistakes the trailing 4444 line for
+# a hang. Wait for the grid to report ready first so the single actionable
+# instruction block from auth_flow.py is the LAST thing on screen. Bounded and
 # best-effort: on timeout (or without curl) we simply continue, and this touches
 # none of the trap/wait/signal machinery above.
 if command -v curl >/dev/null 2>&1; then
@@ -389,8 +390,8 @@ cd /app/gfmy
 # Backgrounding in a non-interactive script (job control off) has two side effects we
 # must undo, or the first-run login breaks:
 #   1. stdin: bash points an async child's stdin at /dev/null unless an explicit
-#      redirection overrides it. main.py's interactive `input("Press Enter")` prompt
-#      would then hit EOF and abort the login. The `<&0` at the async boundary (NOT
+#      redirection overrides it. main.py's `input("Enter your Google account email:")`
+#      prompt would then hit EOF and abort the login. The `<&0` at the async boundary (NOT
 #      inside the subshell, where fd 0 is already /dev/null) restores the entrypoint's
 #      terminal stdin (which `docker compose run` attaches).
 #   2. SIGINT/SIGQUIT: bash hard-ignores (SIG_IGN) these in an async child; Python

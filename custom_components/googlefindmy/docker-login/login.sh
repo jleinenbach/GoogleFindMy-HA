@@ -18,7 +18,7 @@
 #      local account can).
 #   4. Build + run exactly ONE ephemeral container in the foreground
 #      (`docker compose run --rm`), which also attaches your terminal so the
-#      interactive "Press Enter" login prompt reaches Python.
+#      login CLI can ask you for the account e-mail if it needs to.
 #
 # THREE ADDRESS ROLES, deliberately separate (do not merge them again). They
 # exist because the two published ports serve different consumers: 7901 is
@@ -436,7 +436,7 @@ novnc_bind="$(bracket_if_ipv6 "$novnc_bind")"
 
 export GFMY_NOVNC_BIND="$novnc_bind"
 # Also export the browsable host so docker-compose can build the noVNC URL that
-# the in-container login flow prints at its "Press Enter" prompt. This is the
+# the in-container login flow prints in its instruction block. This is the
 # fully normalised value (wildcards resolved to a concrete address, IPv6
 # bracketed), i.e. exactly what belongs in a URL. Re-exporting under the same
 # input name is safe: it is read once at startup (above) and only consumed by
@@ -550,6 +550,6 @@ for _override in docker-compose.override.yml docker-compose.override.yaml; do
 done
 
 # `run --rm` (not `up`): fresh one-shot container, removed on exit, with your
-# terminal attached so the interactive "Press Enter" login prompt works.
+# terminal attached so the login CLI can prompt for the account e-mail.
 # `--service-ports` publishes the ports declared by the selected compose files.
 docker compose "${compose_files[@]}" run --build --service-ports --rm googlefindmy-login

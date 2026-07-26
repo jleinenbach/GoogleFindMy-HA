@@ -3,8 +3,9 @@ services:
     # One-shot login job, not a long-running service. The launcher starts it with
     # `docker compose run --rm` (see login.sh / login.cmd): that creates a fresh
     # ephemeral container per run and removes it on exit, so repeated logins never
-    # stack containers, and it attaches your terminal's STDIN so the interactive
-    # "Press Enter" prompt works (plain `docker compose up` does not forward it).
+    # stack containers, and it attaches your terminal's STDIN so the CLI can ask
+    # for the account e-mail when the Chrome session does not reveal it (plain
+    # `docker compose up` does not forward STDIN).
     build:
       # Build context is the integration package dir (this file lives in
       # <context>/docker-login/). It holds requirements.txt (baked in) and
@@ -12,7 +13,7 @@ services:
       # the read-only volume below (M2 runtime mount).
       context: ..
       dockerfile: docker-login/Dockerfile
-    stdin_open: true      # interactive login: main.py prompts "Press Enter"
+    stdin_open: true      # login: main.py may prompt for the account e-mail
     tty: true
     shm_size: "2g"        # headful Chrome needs shared memory
     environment:

@@ -7,8 +7,8 @@ rem config\custom_components\googlefindmy\docker-login\ so no git clone is neede
 rem
 rem It cd's to its own folder, creates ./data (where secrets.json is persisted),
 rem then builds + runs exactly ONE ephemeral container in the foreground
-rem (`docker compose run --rm`), which attaches your terminal so the interactive
-rem "Press Enter" login prompt works. Docker Desktop maps the bind-mount
+rem (`docker compose run --rm`), which attaches your terminal so the login CLI
+rem can ask you for the account e-mail if needed. Docker Desktop maps the bind-mount
 rem permissions, so no UID handoff or chmod is needed here.
 rem
 rem Three ADDRESS ROLES, deliberately separate (mirrors login.sh):
@@ -192,7 +192,7 @@ if exist docker-compose.override.yaml set "COMPOSE_FILES=%COMPOSE_FILES% -f dock
 :override_done
 
 rem `run --rm` (not `up`): fresh one-shot container with your terminal attached so
-rem the "Press Enter" prompt works; `--service-ports` publishes the ports declared
+rem the e-mail prompt works; `--service-ports` publishes the ports declared
 rem by the selected compose files.
 docker compose %COMPOSE_FILES% run --build --service-ports --rm googlefindmy-login
 
