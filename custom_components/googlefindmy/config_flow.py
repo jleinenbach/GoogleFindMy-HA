@@ -3284,14 +3284,31 @@ def _find_entry_by_email(hass: HomeAssistant, email: str) -> ConfigEntry | None:
     return None
 
 
+#: Credential keys an account may or may not carry. They are removed from the
+#: entry when the freshly discovered credentials do not carry them, which a flat
+#: merge cannot do on its own -- hence the full-data payload built by
+#: :func:`_merge_credential_updates`, and hence the absence check in
+#: :func:`_entry_carries_credentials`.
+_OPTIONAL_CREDENTIAL_KEYS: Final = (DATA_SECRET_BUNDLE, DATA_AAS_TOKEN)
+
+
 def _entry_carries_credentials(entry: ConfigEntry, updates: Mapping[str, Any]) -> bool:
-    """Whether ``entry`` already holds every value in ``updates``.
+    """Whether ``entry`` holds exactly the credentials ``updates`` describes.
 
     The evidence that Home Assistant's unique-id guard performed the write, read
     off the entry instead of inferred from the exception that followed. The
     guard writes ``{**entry.data, **updates}``, so a landed write means every
     pair in ``updates`` is present verbatim; a guard that returned early leaves
     the entry untouched and fails this test.
+
+    Presence alone is not enough, though. ``updates`` is the intended entry data
+    in full, and :func:`_merge_credential_updates` expresses a *removal* by
+    leaving an optional credential key out of it. A flat merge cannot act on
+    that: the guard leaves the superseded ``secrets_data`` or ``aas_token``
+    behind, where the reload would seed it into the entry-scoped token cache
+    next to the new credentials. So every optional key missing from ``updates``
+    must also be missing from the entry; where it is not, the caller's wholesale
+    write is still owed.
 
     Callers must not treat ``AbortFlow`` alone as proof: the guard returns
     silently when the flow has no unique id or when no entry claims it (a legacy
@@ -3303,7 +3320,11 @@ def _entry_carries_credentials(entry: ConfigEntry, updates: Mapping[str, Any]) -
     data = getattr(entry, "data", None)
     if not isinstance(data, Mapping):
         return False
-    return all(key in data and data[key] == value for key, value in updates.items())
+    if not all(key in data and data[key] == value for key, value in updates.items()):
+        return False
+    return all(
+        key not in data for key in _OPTIONAL_CREDENTIAL_KEYS if key not in updates
+    )
 
 
 async def _async_coalesce_account_entries(
@@ -3528,12 +3549,6 @@ def _normalize_and_validate_discovery_payload(
         title=str(title) if isinstance(title, str) else None,
         source=source if isinstance(source, str) and source else None,
     )
-
-
-#: Credential keys an account may or may not carry. They are removed from the
-#: entry when the freshly discovered credentials do not carry them, which a flat
-#: merge cannot do on its own -- hence the full-data payload below.
-_OPTIONAL_CREDENTIAL_KEYS: Final = (DATA_SECRET_BUNDLE, DATA_AAS_TOKEN)
 
 
 def _merge_credential_updates(
@@ -4728,14 +4743,16 @@ class ConfigFlow(
     ) -> bool:
         """Apply ``updates`` to ``entry`` and schedule its reload.
 
-        For the cases where Home Assistant's unique-id guard, which normally
-        performs this write, did not: ``_async_prepare_account_context``
-        returned the entry instead of aborting through the guard, or the guard
-        returned before its write because no entry claimed the flow's unique id
-        and the helper then aborted on its own. ``updates`` is the entry
-        data itself, flat and already merged (see
+        For the cases Home Assistant's unique-id guard, which normally performs
+        this write, does not cover: ``_async_prepare_account_context`` returned
+        the entry instead of aborting through the guard; the guard returned
+        before its write because no entry claimed the flow's unique id and the
+        helper then aborted on its own; or the guard did write, but flat, which
+        leaves behind the credential keys the payload means to drop.
+        ``updates`` is the entry data itself, flat and already merged (see
         :func:`_ingest_discovery_credentials`), so it is written as-is: a
-        second merge would resurrect the keys the ingest deliberately dropped.
+        second merge would resurrect the keys the ingest deliberately dropped,
+        which is precisely the third case above.
 
         Returns whether the write happened, so the caller can report the
         outcome it actually produced instead of assuming one.
@@ -4788,9 +4805,10 @@ class ConfigFlow(
         Accepting reports ``credentials_updated`` only where credentials were
         actually written, and that is read off the entry rather than inferred
         from the abort that ended the guard: the guard also aborts without
-        writing when no entry claims the flow's unique id. Whatever the reason,
-        an entry that does not hold the credentials afterwards is written here
-        explicitly. The entry can also disappear while this form is open; that
+        writing when no entry claims the flow's unique id, and where it does
+        write it merges flat, which cannot drop a superseded bundle or token.
+        Whatever the reason, an entry that does not hold exactly these
+        credentials afterwards is written here explicitly. The entry can also disappear while this form is open; that
         case continues as a first import of the same credentials.
 
         Accepting also stages the delete-after-import cleanup of the bundle,
@@ -4865,11 +4883,12 @@ class ConfigFlow(
                 )
 
             if not written:
-                # Nothing was written: either the guard returned the entry
-                # instead of aborting through it, or it aborted without ever
-                # reaching its write. Reporting success here would name an event
-                # that did not happen, so both remaining cases are resolved on
-                # their own terms.
+                # The entry does not hold these credentials: the guard returned
+                # the entry instead of aborting through it, or it aborted
+                # without ever reaching its write, or it wrote flat and left a
+                # superseded ``secrets_data``/``aas_token`` behind. Reporting
+                # success here would name an event that did not happen, so the
+                # remaining cases are resolved on their own terms.
                 if existing_entry is None:
                     # The entry the rebase above resolved is gone again, removed
                     # between that resolution and this write. Same answer as for
@@ -4883,13 +4902,14 @@ class ConfigFlow(
                     )
                     return await self._async_import_discovered_account(payload)
 
-                # The entry exists but does not hold the credentials, either
-                # because the flow is bound to that very entry
-                # (``context["entry_id"]`` or an attached ``config_entry``),
-                # which makes the guard return it instead of aborting through
-                # it, or because no entry claimed the flow's unique id and the
-                # guard returned before its write. Write the update here so the
-                # reported outcome is the one that happened.
+                # The entry exists but does not hold the credentials: the flow
+                # is bound to that very entry (``context["entry_id"]`` or an
+                # attached ``config_entry``), which makes the guard return it
+                # instead of aborting through it; or no entry claimed the
+                # flow's unique id and the guard returned before its write; or
+                # the guard's flat merge could not drop what the payload drops.
+                # Write the payload wholesale here, which covers all three, so
+                # the reported outcome is the one that happened.
                 if not self._async_write_entry_credentials(existing_entry, updates):
                     _LOGGER.warning(
                         "Discovery for %s confirmed, but the credentials could "
