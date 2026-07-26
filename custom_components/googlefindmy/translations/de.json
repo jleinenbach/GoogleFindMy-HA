@@ -23,6 +23,10 @@
           "use_found_bundle": "Lass die Option aktiviert, um die oben angezeigte Datei zu importieren. Schalte sie aus, um stattdessen selbst eine Anmeldemethode zu wählen."
         }
       },
+      "discovery_confirm": {
+        "title": "Zugangsdaten für Google Find My Device gefunden",
+        "description": "Für {email} wurden Zugangsdaten gefunden.\n\nFahre fort, um sie in Home Assistant zu verwenden. Ist das Konto bereits eingerichtet, wirst du vorher gefragt, bevor etwas ersetzt wird."
+      },
       "discovery_overwrite": {
         "title": "Gespeicherte Zugangsdaten ersetzen?",
         "description": "{email} ist in Home Assistant bereits eingerichtet, und soeben wurde eine neue Zugangsdaten-Datei gefunden.\n\nBeim Ersetzen werden die neuen Zugangsdaten in den vorhandenen Eintrag geschrieben und der Eintrag wird neu geladen. Lehnst du ab, bleibt der Eintrag unverändert.",

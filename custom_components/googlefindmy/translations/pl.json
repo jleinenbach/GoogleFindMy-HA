@@ -23,6 +23,10 @@
           "use_found_bundle": "Zostaw tę opcję włączoną, aby zaimportować pokazany wyżej plik. Wyłącz ją, aby samodzielnie wybrać metodę uwierzytelniania."
         }
       },
+      "discovery_confirm": {
+        "title": "Znaleziono poświadczenia Google Find My Device",
+        "description": "Znaleziono poświadczenia dla {email}.\n\nKontynuuj, aby użyć ich w Home Assistant. Jeśli konto jest już skonfigurowane, zostaniesz najpierw zapytany, zanim cokolwiek zostanie zastąpione."
+      },
       "discovery_overwrite": {
         "title": "Zastąpić zapisane poświadczenia?",
         "description": "{email} jest już skonfigurowane w Home Assistant, a właśnie znaleziono nowy plik poświadczeń.\n\nZastąpienie zapisuje nowe poświadczenia we wpisie i przeładowuje go. Jeśli odmówisz, wpis pozostanie bez zmian.",
