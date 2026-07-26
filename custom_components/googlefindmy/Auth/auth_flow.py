@@ -78,18 +78,28 @@ def request_oauth_account_token_flow(
                 "[AuthFlow] Action required to sign in to Google:\n"
                 f"[AuthFlow]   1. Open {novnc_url} in your browser "
                 f"(password: {novnc_password}).\n"
-                "[AuthFlow]   2. Return to this terminal and press Enter (below).\n"
-                "[AuthFlow]   3. Sign in to Google in the browser view that opens.\n"
+                "[AuthFlow]   2. Chrome opens by itself in that view within a "
+                "few seconds.\n"
+                "[AuthFlow]   3. Sign in to Google there, then come back to "
+                "this terminal.\n"
                 "[AuthFlow] =================================================="
             )
+            # No stdin gate in the container: Chrome runs *inside* the container
+            # and the user drives it through noVNC. Blocking on input() here
+            # would leave that viewer showing an empty desktop until someone
+            # pressed Enter in a terminal they may not even be looking at, and
+            # the pre-start prompt used to arrive before the display was ready.
+            # The terminal still has to stay attached, because main.py asks for
+            # the account e-mail on stdin when auto-detection fails.
         else:
             print("""[AuthFlow] This script will now open Google Chrome on your device to login to your Google account.
 > Please make sure that Chrome is installed on your system.
 > For macOS users only: Make that you allow Python (or PyCharm) to control Chrome if prompted.
         """)
 
-        # Press enter to continue
-        input("[AuthFlow] Press Enter to continue...")
+            # Press enter to continue: on the desktop path Chrome takes over the
+            # user's own screen, so they get to decide when that happens.
+            input("[AuthFlow] Press Enter to continue...")
 
     # Automatically install and set up the Chrome driver
     if not is_home_assistant:

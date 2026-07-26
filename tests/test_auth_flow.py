@@ -232,19 +232,28 @@ def test_request_oauth_flow_container_shows_novnc_not_desktop_text(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """In the container the prompt names the noVNC URL and the 3 steps.
+    """In the container the prompt names the noVNC URL and never blocks stdin.
 
     Regression for the docker-login UX fix: with
     ``GOOGLEFINDMY_CONTAINER_LOGIN=1`` set (and the HA heuristic off) the flow
-    must print the container-correct instructions -- open the real noVNC URL,
-    press Enter, sign in -- and must NOT print the desktop 'install Chrome on
-    your system' text, which is wrong when Chrome runs inside the container.
+    must print the container-correct instructions -- open the real noVNC URL and
+    sign in to the Chrome window that comes up by itself -- and must NOT print
+    the desktop 'install Chrome on your system' text, which is wrong when Chrome
+    runs inside the container.
+
+    It must also not wait on stdin first: the Enter gate used to run *before*
+    ``create_driver``, so the viewer showed an empty desktop until someone
+    answered a prompt in the terminal. ``builtins.input`` is therefore patched
+    to a fail sentinel -- any call fails this test.
     """
+
+    def _fail_on_input(*_args: object, **_kwargs: object) -> str:
+        pytest.fail("container branch must not block on stdin before Chrome starts")
 
     driver = FakeDriver(cookie_after_wait={"value": "tok"})
     monkeypatch.setattr(auth_flow, "create_driver", lambda **kwargs: driver)
     monkeypatch.setattr(auth_flow, "WebDriverWait", ImmediateWaitFactory())
-    monkeypatch.setattr("builtins.input", lambda *a, **k: "")
+    monkeypatch.setattr("builtins.input", _fail_on_input)
     monkeypatch.delitem(sys.modules, "homeassistant", raising=False)
     monkeypatch.setenv("GOOGLEFINDMY_CONTAINER_LOGIN", "1")
     monkeypatch.setenv("GOOGLEFINDMY_NOVNC_URL", "http://192.168.1.21:7900")
@@ -255,8 +264,8 @@ def test_request_oauth_flow_container_shows_novnc_not_desktop_text(
 
     assert token == "tok"
     assert "http://192.168.1.21:7900" in out
-    assert "press Enter" in out
-    assert "Sign in to Google in the browser view" in out
+    assert "Chrome opens by itself" in out
+    assert "press Enter" not in out
     assert "installed on your system" not in out
 
 
