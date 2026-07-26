@@ -3283,6 +3283,28 @@ def _find_entry_by_email(hass: HomeAssistant, email: str) -> ConfigEntry | None:
     return None
 
 
+def _entry_carries_credentials(entry: ConfigEntry, updates: Mapping[str, Any]) -> bool:
+    """Whether ``entry`` already holds every value in ``updates``.
+
+    The evidence that Home Assistant's unique-id guard performed the write, read
+    off the entry instead of inferred from the exception that followed. The
+    guard writes ``{**entry.data, **updates}``, so a landed write means every
+    pair in ``updates`` is present verbatim; a guard that returned early leaves
+    the entry untouched and fails this test.
+
+    Callers must not treat ``AbortFlow`` alone as proof: the guard returns
+    silently when the flow has no unique id or when no entry claims it (a legacy
+    entry without ``unique_id``, or one whose account identity has moved), and
+    :meth:`_async_prepare_account_context` then raises its own ``AbortFlow``
+    without anything having been written.
+    """
+
+    data = getattr(entry, "data", None)
+    if not isinstance(data, Mapping):
+        return False
+    return all(key in data and data[key] == value for key, value in updates.items())
+
+
 async def _async_coalesce_account_entries(
     hass: HomeAssistant,
     entry: ConfigEntry,
@@ -4619,9 +4641,11 @@ class ConfigFlow(
     ) -> bool:
         """Apply ``updates`` to ``entry`` and schedule its reload.
 
-        Only for the case where ``_async_prepare_account_context`` returned the
-        entry rather than aborting through Home Assistant's unique-id guard,
-        which is what normally performs this write. ``updates`` is the entry
+        For the cases where Home Assistant's unique-id guard, which normally
+        performs this write, did not: ``_async_prepare_account_context``
+        returned the entry instead of aborting through the guard, or the guard
+        returned before its write because no entry claimed the flow's unique id
+        and the helper then aborted on its own. ``updates`` is the entry
         data itself, flat and already merged (see
         :func:`_ingest_discovery_credentials`), so it is written as-is: a
         second merge would resurrect the keys the ingest deliberately dropped.
@@ -4675,8 +4699,11 @@ class ConfigFlow(
         disk.
 
         Accepting reports ``credentials_updated`` only where credentials were
-        actually written. The entry can disappear while this form is open, and
-        then the guard returns instead of aborting and writes nothing; that
+        actually written, and that is read off the entry rather than inferred
+        from the abort that ended the guard: the guard also aborts without
+        writing when no entry claims the flow's unique id. Whatever the reason,
+        an entry that does not hold the credentials afterwards is written here
+        explicitly. The entry can also disappear while this form is open; that
         case continues as a first import of the same credentials.
 
         Accepting also stages the delete-after-import cleanup of the bundle,
@@ -4709,25 +4736,32 @@ class ConfigFlow(
                     updates=updates,
                 )
             except data_entry_flow.AbortFlow:
-                # The expected exit: the core applied ``updates`` to the entry
-                # and then aborted the flow, which is how it signals "this
-                # account is already configured".
-                written = True
-                # The exception skipped the assignment above, so the entry has
-                # to be resolved again -- and deliberately *after* the write,
-                # because the cleanup ticket below needs the entry's fresh
-                # ``modified_at`` as its durability watermark.
+                # Two different aborts arrive here and only one of them wrote:
+                # the core's unique-id guard applies ``updates`` and then aborts
+                # to signal "this account is already configured", but it also
+                # returns silently when no entry claims this unique id (a legacy
+                # entry without one, or an account identity that moved), and
+                # ``_async_prepare_account_context`` then raises its own abort
+                # having written nothing. So the entry is resolved again -- the
+                # exception skipped the assignment above -- and asked what it
+                # actually holds. Resolving happens deliberately *after* the
+                # write, because the cleanup ticket below needs the entry's
+                # fresh ``modified_at`` as its durability watermark.
                 hass_obj = getattr(self, "hass", None)
                 if hass_obj is not None and hasattr(hass_obj, "config_entries"):
                     existing_entry = _find_entry_by_email(
                         cast(HomeAssistant, hass_obj), payload.email
                     )
+                written = existing_entry is not None and _entry_carries_credentials(
+                    existing_entry, updates
+                )
 
             if not written:
-                # Returning instead of aborting means the unique-id guard never
-                # ran and therefore never wrote ``updates``. Reporting success
-                # here would name an event that did not happen, so both
-                # remaining cases are resolved on their own terms.
+                # Nothing was written: either the guard returned the entry
+                # instead of aborting through it, or it aborted without ever
+                # reaching its write. Reporting success here would name an event
+                # that did not happen, so both remaining cases are resolved on
+                # their own terms.
                 if existing_entry is None:
                     # The entry was removed, or its account identity changed,
                     # while this form was open. There is nothing left to
@@ -4740,10 +4774,13 @@ class ConfigFlow(
                     )
                     return await self._async_import_discovered_account(payload)
 
-                # The flow is bound to that very entry (``context["entry_id"]``
-                # or an attached ``config_entry``), which makes the guard return
-                # the entry instead of aborting through it. Write the update
-                # here so the reported outcome is the one that happened.
+                # The entry exists but does not hold the credentials, either
+                # because the flow is bound to that very entry
+                # (``context["entry_id"]`` or an attached ``config_entry``),
+                # which makes the guard return it instead of aborting through
+                # it, or because no entry claimed the flow's unique id and the
+                # guard returned before its write. Write the update here so the
+                # reported outcome is the one that happened.
                 if not self._async_write_entry_credentials(existing_entry, updates):
                     _LOGGER.warning(
                         "Discovery for %s confirmed, but the credentials could "

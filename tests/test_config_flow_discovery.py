@@ -340,6 +340,13 @@ def test_async_step_discovery_existing_entry_updates(
 
         def _abort_helper(*, updates: dict[str, Any] | None = None, **_: Any) -> None:
             abort_calls.append(updates)
+            if updates:
+                # Mirror the core: the guard writes ``updates`` flat into the
+                # entry and only then ends the flow. A double that merely
+                # records models a guard that wrote nothing at all, which is a
+                # real but different outcome -- and one the step must no longer
+                # report as a completed overwrite.
+                entry.data = {**entry.data, **updates}
 
         flow._abort_if_unique_id_configured = _abort_helper  # type: ignore[attr-defined]
 
@@ -742,6 +749,110 @@ async def test_discovery_overwrite_writes_when_the_flow_is_bound_to_the_entry(
     assert "data" not in entry.data
     assert flow.hass.config_entries.scheduled_reloads == [entry.entry_id], (
         "the running integration keeps the old credentials until it reloads"
+    )
+
+
+@pytest.mark.asyncio
+async def test_discovery_overwrite_writes_when_the_guard_never_matched_the_entry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An abort is not a write: an unmatched unique id must not fake success.
+
+    ``_abort_if_unique_id_configured`` writes ``updates`` and *then* aborts, but
+    it also returns silently when no entry claims the flow's unique id, which is
+    what a legacy entry without one (or an account identity that has moved)
+    produces. ``_async_prepare_account_context`` then raises its own
+    ``AbortFlow`` at its closing line, having written nothing. Treating either
+    abort as proof of a write reported ``credentials_updated`` and staged the
+    discovered bundle for deletion over an entry that still held its old
+    credentials: file gone, credentials unchanged.
+    """
+
+    entry, flow = await _prepare_configured_account_flow(monkeypatch)
+    # A legacy entry: it matches by email, but claims no unique id, so the
+    # core's guard finds nothing to write to.
+    entry.unique_id = None
+    payload = _discovery_payload_for_configured_account()
+
+    form = await flow.async_step_discovery(payload)
+    if inspect.isawaitable(form):
+        form = await form
+    assert form["type"] == "form"
+
+    question = await flow.async_step_discovery({})
+    if inspect.isawaitable(question):
+        question = await question
+    assert question.get("step_id") == "discovery_overwrite", (
+        "the account is configured, so the question must still be asked"
+    )
+    assert entry.data[CONF_OAUTH_TOKEN] == "aas_et/OLD_TOKEN_VALUE"
+
+    result = await flow.async_step_discovery_overwrite(
+        {config_flow._FIELD_OVERWRITE_CREDENTIALS: True}
+    )
+    if inspect.isawaitable(result):
+        result = await result
+
+    assert result["type"] == "abort"
+    assert result["reason"] == "credentials_updated"
+    assert entry.data[CONF_OAUTH_TOKEN] == "aas_et/NEW_TOKEN_VALUE", (
+        "the guard wrote nothing here, so the step owes the write itself"
+    )
+    assert "data" not in entry.data
+    assert flow.hass.config_entries.scheduled_reloads == [entry.entry_id], (
+        "a write nobody reloads leaves the integration on the old credentials"
+    )
+
+
+@pytest.mark.asyncio
+async def test_discovery_overwrite_does_not_write_twice_after_the_guard_wrote(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The counter-direction: a landed guard write must not be repeated.
+
+    The step decides by reading the entry, so the check has to recognize the
+    ordinary case as written. One misread and every accepted overwrite would
+    write a second time and reload an entry that already holds exactly those
+    credentials.
+    """
+
+    entry, flow = await _prepare_configured_account_flow(monkeypatch)
+    writes: list[dict[str, Any]] = []
+    original_update = flow.hass.config_entries.async_update_entry
+
+    def _counting_update(target: Any, **updates: Any) -> bool:
+        writes.append(dict(updates))
+        return bool(original_update(target, **updates))
+
+    monkeypatch.setattr(
+        flow.hass.config_entries, "async_update_entry", _counting_update, raising=False
+    )
+
+    payload = _discovery_payload_for_configured_account()
+
+    form = await flow.async_step_discovery(payload)
+    if inspect.isawaitable(form):
+        form = await form
+    assert form["type"] == "form"
+
+    question = await flow.async_step_discovery({})
+    if inspect.isawaitable(question):
+        question = await question
+    assert question.get("step_id") == "discovery_overwrite"
+    assert not writes, "asking the question must not write anything yet"
+
+    result = await flow.async_step_discovery_overwrite(
+        {config_flow._FIELD_OVERWRITE_CREDENTIALS: True}
+    )
+    if inspect.isawaitable(result):
+        result = await result
+
+    assert result["type"] == "abort"
+    assert result["reason"] == "credentials_updated"
+    assert entry.data[CONF_OAUTH_TOKEN] == "aas_et/NEW_TOKEN_VALUE"
+    assert len(writes) == 1, (
+        "the guard already wrote these credentials; writing them again is "
+        "a redundant entry update and a redundant reload"
     )
 
 
