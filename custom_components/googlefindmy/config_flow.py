@@ -75,6 +75,7 @@ from typing import (
     TYPE_CHECKING,
     Any,
     ClassVar,
+    Final,
     Protocol,
     TypeAlias,
     TypeVar,
@@ -3529,6 +3530,40 @@ def _normalize_and_validate_discovery_payload(
     )
 
 
+#: Credential keys an account may or may not carry. They are removed from the
+#: entry when the freshly discovered credentials do not carry them, which a flat
+#: merge cannot do on its own -- hence the full-data payload below.
+_OPTIONAL_CREDENTIAL_KEYS: Final = (DATA_SECRET_BUNDLE, DATA_AAS_TOKEN)
+
+
+def _merge_credential_updates(
+    entry_data: Mapping[str, Any], auth_data: Mapping[str, Any]
+) -> dict[str, Any]:
+    """Merge the discovered credential delta onto ``entry_data``.
+
+    The result is the *entry data itself*, flat: that is what
+    ``_abort_if_unique_id_configured(updates=...)`` merges into the entry
+    (``data={**entry.data, **updates}``) and what
+    :meth:`_async_write_entry_credentials` writes verbatim. A full payload is
+    required rather than the bare delta because a flat merge can only add or
+    replace keys, never drop them, and credentials that no longer include a
+    secrets bundle or an ``aas_et/`` token must not leave the old ones behind.
+
+    Callers must apply this as late as possible -- against the entry data as it
+    is when the write happens, not as it was when a form was shown. A payload
+    built before a confirmation dialog is a snapshot, and writing a snapshot
+    rolls back whatever else touched the entry meanwhile (the options flow
+    refreshes credentials through ``_async_options_container_persist``, for
+    one).
+    """
+
+    merged = {**entry_data, **auth_data}
+    for key in _OPTIONAL_CREDENTIAL_KEYS:
+        if key not in auth_data:
+            merged.pop(key, None)
+    return merged
+
+
 async def _ingest_discovery_credentials(
     flow: ConfigFlow,
     discovery: CloudDiscoveryData,
@@ -3543,6 +3578,12 @@ async def _ingest_discovery_credentials(
     be the entry data itself, not ``{"data": ...}``: a nested payload would leave
     every credential on its old value and add a stray ``data`` key inside
     ``entry.data`` instead.
+
+    That second element is only good for an immediate write. It is merged from
+    ``existing_entry`` as it is *now*; a caller that shows a form before writing
+    must carry the first element (the delta) across it and merge again through
+    :func:`_merge_credential_updates`, or it will roll back whatever touched the
+    entry meanwhile.
     """
 
     candidates = list(discovery.candidates)
@@ -3605,14 +3646,9 @@ async def _ingest_discovery_credentials(
         auth_data.pop(DATA_AAS_TOKEN, None)
 
     if existing_entry is not None:
-        updated = {**existing_entry.data, **auth_data}
-        if not secrets_bundle:
-            updated.pop(DATA_SECRET_BUNDLE, None)
-        if not (isinstance(to_persist, str) and to_persist.startswith("aas_et/")):
-            updated.pop(DATA_AAS_TOKEN, None)
-        if fcm_credentials is not None:
-            updated["fcm_credentials"] = fcm_credentials
-        updates: dict[str, Any] | None = updated
+        updates: dict[str, Any] | None = _merge_credential_updates(
+            existing_entry.data, auth_data
+        )
     else:
         updates = None
 
@@ -3877,12 +3913,16 @@ class ConfigFlow(
         self._subentry_key_core_tracking = TRACKER_SUBENTRY_KEY
         self._subentry_key_service = SERVICE_SUBENTRY_KEY
         self._pending_discovery_payload: CloudDiscoveryData | None = None
-        self._pending_discovery_updates: dict[str, Any] | None = None
+        # The credential *delta*, not a merged entry payload: what a form
+        # carries across a user's think time must not be a snapshot of another
+        # object's state (see _merge_credential_updates).
+        self._pending_discovery_auth: dict[str, Any] | None = None
+        self._pending_discovery_entry_exists = False
         # Survives _clear_discovery_confirmation_state on purpose: the overwrite
         # question is asked *after* the discovery card has been confirmed and
         # that state torn down.
         self._pending_overwrite_payload: CloudDiscoveryData | None = None
-        self._pending_overwrite_updates: dict[str, Any] | None = None
+        self._pending_overwrite_auth: dict[str, Any] | None = None
         # Two-phase-delete (F4): a container-login fetch stages its result here so
         # the ack (which tells the container to delete its on-disk secret) is only
         # sent AFTER the config entry is actually created in device_selection. If
@@ -4407,7 +4447,8 @@ class ConfigFlow(
         """
 
         self._pending_discovery_payload = None
-        self._pending_discovery_updates = None
+        self._pending_discovery_auth = None
+        self._pending_discovery_entry_exists = False
         context = getattr(self, "context", None)
         if isinstance(context, dict):
             context.pop("confirm_only", None)
@@ -4524,7 +4565,8 @@ class ConfigFlow(
         placeholders.setdefault("email", normalized.email)
         self.context["title_placeholders"] = placeholders
         self._pending_discovery_payload = normalized
-        self._pending_discovery_updates = updates
+        self._pending_discovery_auth = dict(auth_data)
+        self._pending_discovery_entry_exists = updates is not None
         self._set_confirm_only()
         return self.async_show_form(
             step_id="discovery_confirm",
@@ -4546,7 +4588,8 @@ class ConfigFlow(
         """
 
         pending_payload = self._pending_discovery_payload
-        updates = self._pending_discovery_updates
+        pending_auth = self._pending_discovery_auth
+        entry_exists = self._pending_discovery_entry_exists
         if pending_payload is None:
             # No card is pending: the flow was resumed without one, or the
             # state was cleared by a newer payload. Nothing to confirm.
@@ -4554,7 +4597,7 @@ class ConfigFlow(
 
         self._clear_discovery_confirmation_state()
 
-        if updates is not None:
+        if entry_exists and pending_auth is not None:
             if _is_credential_import_discovery(pending_payload):
                 # The account is already configured and a human just supplied
                 # credentials. Do not write yet: ask first, because this
@@ -4562,7 +4605,7 @@ class ConfigFlow(
                 # unconditionally and reported "already_configured", which said
                 # nothing about what had happened to the credentials.
                 self._pending_overwrite_payload = pending_payload
-                self._pending_overwrite_updates = updates
+                self._pending_overwrite_auth = pending_auth
                 return await self.async_step_discovery_overwrite()
 
             # A tracker rescan re-submits the credentials the entry already
@@ -4574,11 +4617,20 @@ class ConfigFlow(
                 "applying updates without asking",
                 pending_payload.source,
             )
+            rebased = self._async_rebase_credential_updates(
+                pending_payload.email, pending_auth
+            )
+            if rebased is None:
+                # The entry went away while the card was open. There is nothing
+                # to update, and this path deliberately does not create
+                # anything: the payload is a rescan of an account the user
+                # configured, not an import they asked for.
+                return self.async_abort(reason="already_configured")
             try:
                 await self._async_prepare_account_context(
                     email=pending_payload.email,
                     preferred_unique_id=pending_payload.unique_id,
-                    updates=updates,
+                    updates=rebased[1],
                 )
             except data_entry_flow.AbortFlow:
                 return self.async_abort(reason="already_configured")
@@ -4635,6 +4687,41 @@ class ConfigFlow(
             # which exists and whose setup may still be retrying.
             self._async_mark_own_cleanup_ticket_entry_promised()
         return result
+
+    def _async_rebase_credential_updates(
+        self, email: str, auth_data: Mapping[str, Any]
+    ) -> tuple[ConfigEntry, dict[str, Any]] | None:
+        """Resolve the configured entry *now* and merge the delta onto it.
+
+        Both discovery forms (the card, then the overwrite question) sit between
+        the moment the credentials are validated and the moment they are
+        written. Anything merged before them is a snapshot: writing it back
+        would undo whatever else changed the entry meanwhile, and the options
+        flow does exactly that when it refreshes credentials through the login
+        container. So the merge happens here, against the entry as it is, and
+        only the delta travels across the forms.
+
+        Returns ``None`` when no entry can be resolved -- no ``hass``, or the
+        account is no longer configured -- which leaves the decision about that
+        case to the caller, where it differs (import versus abort).
+
+        This closes the window a form holds open, not the one between this call
+        and the write a few statements later; that one is bounded by the event
+        loop rather than by user think time.
+        """
+
+        hass_obj = getattr(self, "hass", None)
+        if hass_obj is None or not hasattr(hass_obj, "config_entries"):
+            return None
+
+        entry = _find_entry_by_email(cast(HomeAssistant, hass_obj), email)
+        if entry is None:
+            return None
+
+        entry_data = getattr(entry, "data", None)
+        if not isinstance(entry_data, Mapping):
+            entry_data = {}
+        return entry, _merge_credential_updates(entry_data, auth_data)
 
     def _async_write_entry_credentials(
         self, entry: ConfigEntry, updates: Mapping[str, Any]
@@ -4709,16 +4796,23 @@ class ConfigFlow(
         Accepting also stages the delete-after-import cleanup of the bundle,
         exactly as the non-interactive update path does, so an accepted file is
         eventually consumed instead of being rediscovered on every restart.
+
+        What crosses this form is the credential delta alone. The payload that
+        is written is merged from the entry's *current* data once the answer is
+        in (:meth:`_async_rebase_credential_updates`), because a payload merged
+        before the question would carry an entry state that may be minutes old
+        and would roll back, say, a credential refresh the options flow ran in
+        the meantime.
         """
 
         payload = self._pending_overwrite_payload
-        updates = self._pending_overwrite_updates
-        if payload is None or updates is None:  # pragma: no cover - defensive
+        auth_data = self._pending_overwrite_auth
+        if payload is None or auth_data is None:  # pragma: no cover - defensive
             return self.async_abort(reason="already_configured")
 
         if user_input is not None:
             self._pending_overwrite_payload = None
-            self._pending_overwrite_updates = None
+            self._pending_overwrite_auth = None
 
             if not user_input.get(_FIELD_OVERWRITE_CREDENTIALS, False):
                 _LOGGER.info(
@@ -4727,6 +4821,20 @@ class ConfigFlow(
                 )
                 return self.async_abort(reason="credentials_kept")
 
+            rebased = self._async_rebase_credential_updates(payload.email, auth_data)
+            if rebased is None:
+                # No entry to overwrite any more: it was removed, or its account
+                # identity changed, while this form was open. The credentials
+                # are still in hand, so import them as a new account rather than
+                # dropping them.
+                _LOGGER.info(
+                    "Discovery for %s confirmed, but the configured entry "
+                    "is gone; importing the credentials as a new account",
+                    _mask_email_for_logs(payload.email),
+                )
+                return await self._async_import_discovered_account(payload)
+
+            updates = rebased[1]
             existing_entry: ConfigEntry | None = None
             written = False
             try:
@@ -4763,10 +4871,11 @@ class ConfigFlow(
                 # that did not happen, so both remaining cases are resolved on
                 # their own terms.
                 if existing_entry is None:
-                    # The entry was removed, or its account identity changed,
-                    # while this form was open. There is nothing left to
-                    # overwrite, and the credentials are still in hand: import
-                    # them as a new account rather than dropping them.
+                    # The entry the rebase above resolved is gone again, removed
+                    # between that resolution and this write. Same answer as for
+                    # the wider window before the rebase: the credentials are
+                    # still in hand, so import them as a new account rather than
+                    # dropping them.
                     _LOGGER.info(
                         "Discovery for %s confirmed, but the configured entry "
                         "is gone; importing the credentials as a new account",

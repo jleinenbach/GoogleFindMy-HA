@@ -857,6 +857,130 @@ async def test_discovery_overwrite_does_not_write_twice_after_the_guard_wrote(
 
 
 @pytest.mark.asyncio
+async def test_discovery_overwrite_rebases_onto_data_written_while_asking(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A write that lands while the question is open must survive the answer.
+
+    The payload used to be merged from ``entry.data`` when the discovery card
+    was built, which is one or two user decisions before it is written. Anything
+    that changed the entry in between -- the options flow refreshes credentials
+    through the login container, for one -- was silently rolled back to the
+    value the snapshot had captured.
+    """
+
+    entry, flow = await _prepare_configured_account_flow(monkeypatch)
+    entry.data["polling_interval"] = 60
+
+    payload = _discovery_payload_for_configured_account()
+
+    form = await flow.async_step_discovery(payload)
+    if inspect.isawaitable(form):
+        form = await form
+    assert form["type"] == "form"
+
+    question = await flow.async_step_discovery_confirm({})
+    if inspect.isawaitable(question):
+        question = await question
+    assert question.get("step_id") == "discovery_overwrite"
+
+    # Somebody else updates the very entry this flow is about to overwrite,
+    # exactly as ``_async_options_container_persist`` does.
+    entry.data = {**entry.data, "polling_interval": 300}
+
+    result = await flow.async_step_discovery_overwrite(
+        {config_flow._FIELD_OVERWRITE_CREDENTIALS: True}
+    )
+    if inspect.isawaitable(result):
+        result = await result
+
+    assert result["type"] == "abort"
+    assert result["reason"] == "credentials_updated"
+    assert entry.data[CONF_OAUTH_TOKEN] == "aas_et/NEW_TOKEN_VALUE", (
+        "the answer was yes, so the discovered credentials must land"
+    )
+    assert entry.data["polling_interval"] == 300, (
+        "the overwrite must rebase onto the current entry data; writing the "
+        "snapshot taken before the question rolls the other write back"
+    )
+
+
+@pytest.mark.asyncio
+async def test_rebased_updates_drop_credentials_the_new_ones_replaced(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The counter-direction: the rebase is a full payload, not a bare delta.
+
+    Only a full payload can *remove* a key, and credentials that no longer come
+    with a secrets bundle must not leave the old bundle behind. A rebase reduced
+    to "merge the new values in" would keep it and the entry would carry two
+    generations of credentials at once.
+    """
+
+    entry, flow = await _prepare_configured_account_flow(monkeypatch)
+    entry.data[config_flow.DATA_SECRET_BUNDLE] = {"stale": "bundle"}
+
+    rebased = flow._async_rebase_credential_updates(
+        "existing@example.com",
+        {
+            CONF_GOOGLE_EMAIL: "existing@example.com",
+            CONF_OAUTH_TOKEN: "aas_et/NEW_TOKEN_VALUE",
+        },
+    )
+
+    assert rebased is not None
+    resolved_entry, updates = rebased
+    assert resolved_entry is entry
+    assert updates[CONF_OAUTH_TOKEN] == "aas_et/NEW_TOKEN_VALUE"
+    assert config_flow.DATA_SECRET_BUNDLE not in updates, (
+        "credentials without a bundle must clear the stored one"
+    )
+
+
+@pytest.mark.asyncio
+async def test_discovery_rescan_aborts_when_the_entry_vanished_while_confirming(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A rescan whose account disappeared must abort, not import.
+
+    The rescan path resolves the entry when the answer arrives rather than
+    trusting the one it saw earlier. With no entry left there is nothing to
+    update, and creating one is not what a rescan of a configured account
+    means -- that would turn a background scan into an unrequested import.
+    """
+
+    _entry, flow = await _prepare_configured_account_flow(monkeypatch)
+    payload = _discovery_payload_for_configured_account(
+        discovery_source="cloud_scanner"
+    )
+
+    form = await flow.async_step_discovery(payload)
+    if inspect.isawaitable(form):
+        form = await form
+    assert form["type"] == "form"
+
+    imported = False
+
+    async def _never_imports() -> Any:
+        nonlocal imported
+        imported = True
+        return {"type": config_flow.data_entry_flow.FlowResultType.CREATE_ENTRY}
+
+    flow.async_step_device_selection = _never_imports  # type: ignore[assignment]
+    monkeypatch.setattr(
+        flow.hass.config_entries, "async_entries", lambda domain: [], raising=False
+    )
+
+    result = await flow.async_step_discovery_confirm({})
+    if inspect.isawaitable(result):
+        result = await result
+
+    assert result["type"] == "abort"
+    assert result["reason"] == "already_configured"
+    assert not imported, "a rescan must never create an entry on its own"
+
+
+@pytest.mark.asyncio
 async def test_discovery_from_watched_file_update_still_asks_to_overwrite(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
