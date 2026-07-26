@@ -1085,7 +1085,6 @@ async def test_discovery_confirm_stages_delete_instead_of_running_it(
     flow = config_flow.ConfigFlow()
     flow.hass = hass  # type: ignore[assignment]
     flow.context = {}
-    flow._discovery_confirm_pending = True  # type: ignore[attr-defined]
     flow._pending_discovery_payload = payload  # type: ignore[attr-defined]
     flow._pending_discovery_entry_exists = False  # type: ignore[attr-defined]
 
@@ -1094,7 +1093,7 @@ async def test_discovery_confirm_stages_delete_instead_of_running_it(
 
     flow.async_step_device_selection = _fake_device_selection  # type: ignore[assignment]
 
-    result = await flow.async_step_discovery({})
+    result = await flow.async_step_discovery_confirm({})
     assert result["type"] == config_flow.data_entry_flow.FlowResultType.CREATE_ENTRY
 
     # NOT deleted yet: the entry does not exist at this point.
@@ -1132,7 +1131,6 @@ async def test_aborted_discovery_confirm_stages_nothing(tmp_path: Path) -> None:
     flow = config_flow.ConfigFlow()
     flow.hass = hass  # type: ignore[assignment]
     flow.context = {}
-    flow._discovery_confirm_pending = True  # type: ignore[attr-defined]
     flow._pending_discovery_payload = payload  # type: ignore[attr-defined]
     flow._pending_discovery_entry_exists = False  # type: ignore[attr-defined]
 
@@ -1141,7 +1139,7 @@ async def test_aborted_discovery_confirm_stages_nothing(tmp_path: Path) -> None:
 
     flow.async_step_device_selection = _fake_device_selection  # type: ignore[assignment]
 
-    result = await flow.async_step_discovery({})
+    result = await flow.async_step_discovery_confirm({})
     assert result["type"] == "form"
     assert watched.exists()
     assert _staged_cleanup(hass) == []

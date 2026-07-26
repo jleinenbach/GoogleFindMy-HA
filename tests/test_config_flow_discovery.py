@@ -196,12 +196,12 @@ def test_async_step_discovery_new_entry(
         if inspect.isawaitable(discovery_form):
             discovery_form = await discovery_form
         assert discovery_form["type"] == "form"
-        assert discovery_form.get("step_id") == "discovery"
+        assert discovery_form.get("step_id") == "discovery_confirm"
         assert flow.context.get("confirm_only") is True
         placeholders = flow.context.get("title_placeholders", {})
         assert placeholders.get("email") == "new.user@example.com"
 
-        device_form = await flow.async_step_discovery({})
+        device_form = await flow.async_step_discovery_confirm({})
         if inspect.isawaitable(device_form):
             device_form = await device_form
         assert flow._auth_data.get(CONF_GOOGLE_EMAIL) == "new.user@example.com"  # type: ignore[attr-defined]
@@ -233,7 +233,7 @@ def test_async_step_discovery_new_entry(
         "shared_key": "DDEEFF",
     }
     assert created_entry["data"].get(DATA_SUBENTRY_KEY) is None
-    assert recorded_forms == ["discovery", "device_selection"]
+    assert recorded_forms == ["discovery_confirm", "device_selection"]
 
 
 def test_async_step_discovery_existing_entry_updates(
@@ -354,10 +354,10 @@ def test_async_step_discovery_existing_entry_updates(
         if inspect.isawaitable(discovery_form):
             discovery_form = await discovery_form
         assert discovery_form["type"] == "form"
-        assert discovery_form.get("step_id") == "discovery"
+        assert discovery_form.get("step_id") == "discovery_confirm"
         assert not abort_calls, "abort helper should not run before confirmation"
 
-        overwrite_form = await flow.async_step_discovery({})
+        overwrite_form = await flow.async_step_discovery_confirm({})
         if inspect.isawaitable(overwrite_form):
             overwrite_form = await overwrite_form
         # Confirming the discovery card no longer writes: the account is already
@@ -378,12 +378,12 @@ def test_async_step_discovery_existing_entry_updates(
         assert isinstance(payload, dict)
         assert "data" not in payload
         assert payload.get(CONF_OAUTH_TOKEN) == "aas_et/NEW_TOKEN_VALUE"
-        assert recorded_forms == ["discovery", "discovery_overwrite"]
+        assert recorded_forms == ["discovery_confirm", "discovery_overwrite"]
         return discovery_form, abort_result, abort_calls, recorded_forms
 
     discovery_form, abort_result, abort_calls, recorded_forms = asyncio.run(_exercise())
     assert discovery_form["type"] == "form"
-    assert discovery_form.get("step_id") == "discovery"
+    assert discovery_form.get("step_id") == "discovery_confirm"
     assert len(abort_calls) == 1
     assert abort_result["type"] == "abort"
     assert abort_result["reason"] == "credentials_updated"
@@ -531,7 +531,7 @@ async def _drive_discovery_overwrite(
         "showing the confirmation form must not write anything yet"
     )
 
-    question = await flow.async_step_discovery({})
+    question = await flow.async_step_discovery_confirm({})
     if inspect.isawaitable(question):
         question = await question
     assert question["type"] == "form"
@@ -566,7 +566,7 @@ async def test_discovery_overwrite_confirmed_replaces_credentials_in_entry_data(
         monkeypatch, answer=True
     )
 
-    assert form.get("step_id") == "discovery"
+    assert form.get("step_id") == "discovery_confirm"
     assert question.get("step_id") == "discovery_overwrite"
     assert result["type"] == "abort"
     assert result["reason"] == "credentials_updated"
@@ -628,8 +628,9 @@ async def test_discovery_from_tracker_rescan_does_not_ask_to_overwrite(
     if inspect.isawaitable(form):
         form = await form
     assert form["type"] == "form"
+    assert form.get("step_id") == "discovery_confirm"
 
-    result = await flow.async_step_discovery({})
+    result = await flow.async_step_discovery_confirm({})
     if inspect.isawaitable(result):
         result = await result
 
@@ -668,7 +669,7 @@ async def test_discovery_overwrite_imports_when_the_entry_disappeared(
         form = await form
     assert form["type"] == "form"
 
-    question = await flow.async_step_discovery({})
+    question = await flow.async_step_discovery_confirm({})
     if inspect.isawaitable(question):
         question = await question
     assert question.get("step_id") == "discovery_overwrite"
@@ -728,7 +729,7 @@ async def test_discovery_overwrite_writes_when_the_flow_is_bound_to_the_entry(
         form = await form
     assert form["type"] == "form"
 
-    question = await flow.async_step_discovery({})
+    question = await flow.async_step_discovery_confirm({})
     if inspect.isawaitable(question):
         question = await question
     assert question.get("step_id") == "discovery_overwrite"
@@ -778,7 +779,7 @@ async def test_discovery_overwrite_writes_when_the_guard_never_matched_the_entry
         form = await form
     assert form["type"] == "form"
 
-    question = await flow.async_step_discovery({})
+    question = await flow.async_step_discovery_confirm({})
     if inspect.isawaitable(question):
         question = await question
     assert question.get("step_id") == "discovery_overwrite", (
@@ -834,7 +835,7 @@ async def test_discovery_overwrite_does_not_write_twice_after_the_guard_wrote(
         form = await form
     assert form["type"] == "form"
 
-    question = await flow.async_step_discovery({})
+    question = await flow.async_step_discovery_confirm({})
     if inspect.isawaitable(question):
         question = await question
     assert question.get("step_id") == "discovery_overwrite"
@@ -883,7 +884,7 @@ async def test_discovery_overwrite_drops_credentials_the_guard_cannot_remove(
         form = await form
     assert form["type"] == "form"
 
-    question = await flow.async_step_discovery({})
+    question = await flow.async_step_discovery_confirm({})
     if inspect.isawaitable(question):
         question = await question
     assert question.get("step_id") == "discovery_overwrite"
@@ -930,7 +931,7 @@ async def test_discovery_overwrite_rebases_onto_data_written_while_asking(
         form = await form
     assert form["type"] == "form"
 
-    question = await flow.async_step_discovery({})
+    question = await flow.async_step_discovery_confirm({})
     if inspect.isawaitable(question):
         question = await question
     assert question.get("step_id") == "discovery_overwrite"
@@ -1022,7 +1023,7 @@ async def test_discovery_rescan_aborts_when_the_entry_vanished_while_confirming(
         flow.hass.config_entries, "async_entries", lambda domain: [], raising=False
     )
 
-    result = await flow.async_step_discovery({})
+    result = await flow.async_step_discovery_confirm({})
     if inspect.isawaitable(result):
         result = await result
 
@@ -1051,7 +1052,7 @@ async def test_discovery_from_watched_file_update_still_asks_to_overwrite(
         discovery_source=config_flow.DISCOVERY_UPDATE_SOURCE,
     )
 
-    assert form.get("step_id") == "discovery"
+    assert form.get("step_id") == "discovery_confirm"
     assert question.get("step_id") == "discovery_overwrite"
     assert result["reason"] == "credentials_updated"
     assert entry.data[CONF_OAUTH_TOKEN] == "aas_et/NEW_TOKEN_VALUE"
@@ -1633,3 +1634,192 @@ def test_async_step_discovery_invalid_payload() -> None:
     result = asyncio.run(_exercise())
     assert result["type"] == "abort"
     assert result["reason"] == "invalid_discovery_info"
+
+
+def _build_flow_for_new_account(monkeypatch: pytest.MonkeyPatch) -> Any:
+    """Return a discovery-ready flow whose account is not configured yet."""
+
+    async def _fake_pick(
+        hass: Any,
+        email: str,
+        candidates: list[tuple[str, str]],
+        *,
+        secrets_bundle: dict[str, Any] | None = None,
+    ) -> str | None:
+        return candidates[0][1]
+
+    monkeypatch.setattr(config_flow, "async_pick_working_token", _fake_pick)
+
+    class _ConfigEntries(ConfigEntriesDomainUniqueIdLookupMixin):
+        def __init__(self) -> None:
+            self.setup_calls: list[str] = []
+            attach_config_entries_flow_manager(self)
+
+        def async_entries(self, domain: str) -> list[Any]:
+            return []
+
+        def async_get_subentries(self, _entry_id: str) -> list[Any]:
+            return []
+
+        async def async_setup(self, entry_id: str) -> bool:
+            self.setup_calls.append(entry_id)
+            return True
+
+    class _FlowHass:
+        def __init__(self) -> None:
+            prepare_flow_hass_config_entries(
+                self,
+                _ConfigEntries,
+                frame_module=frame,
+            )
+
+    flow = config_flow.ConfigFlow()
+    flow.hass = _FlowHass()  # type: ignore[assignment]
+    flow.context = {}
+    set_config_flow_unique_id(flow, None)
+
+    async def _set_unique_id(value: str, *, raise_on_progress: bool = False) -> None:
+        set_config_flow_unique_id(flow, value)
+
+    flow.async_set_unique_id = _set_unique_id  # type: ignore[assignment]
+    flow._abort_if_unique_id_configured = lambda **_: None  # type: ignore[attr-defined]
+    return flow
+
+
+def _discovery_payload(email: str, token: str, shared_key: str) -> dict[str, Any]:
+    """Return a minimal, valid secrets-first discovery payload."""
+
+    return {
+        CONF_GOOGLE_EMAIL: email,
+        "secrets_json": {
+            "aas_token": token,
+            # A shared_key is required to pass the single-key discovery gate.
+            "shared_key": shared_key,
+        },
+    }
+
+
+@pytest.mark.asyncio
+async def test_discovery_confirmation_is_a_step_of_its_own(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The confirmation must live under its own, translatable step id.
+
+    Regression guard for the rename. The card used to be shown under
+    ``step_id="discovery"``, the id Home Assistant reserves for the *entry point*
+    of a discovery flow: no core integration translates it (32 translate
+    ``discovery_confirm``, none ``discovery``), and the repo guard in
+    ``tests/test_manifest_translation_schema.py`` bans the key outright, so the
+    card could never carry a text of its own. Under ``discovery_confirm`` the
+    submit also routes to a handler of its own, which is why no state flag is
+    needed to tell a submit apart from an incoming payload.
+    """
+
+    flow = _build_flow_for_new_account(monkeypatch)
+
+    form = await flow.async_step_discovery(
+        _discovery_payload("rename@example.com", "aas_et/VALID_TOKEN_VALUE", "DDEEFF")
+    )
+    if inspect.isawaitable(form):
+        form = await form
+
+    assert form["type"] == "form"
+    assert form.get("step_id") == "discovery_confirm"
+
+    # The submit target Home Assistant derives from that step id has to exist,
+    # and it has to be a step of its own rather than the entry point re-entered.
+    confirm = getattr(flow, "async_step_discovery_confirm", None)
+    assert confirm is not None
+    assert confirm.__func__ is not flow.async_step_discovery.__func__  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_fresh_payload_supersedes_an_unanswered_confirmation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A newer payload must replace a card the user has not answered yet.
+
+    This path is why the old code carried an ``is_submission`` heuristic: with a
+    single handler serving both entry and submit, a second payload arriving
+    mid-flow was indistinguishable from a confirmation. The rename removes the
+    heuristic, so the behaviour it protected is pinned here instead.
+    """
+
+    flow = _build_flow_for_new_account(monkeypatch)
+
+    first = await flow.async_step_discovery(
+        _discovery_payload("first@example.com", "aas_et/FIRST_TOKEN_VALUE", "DDEEFF")
+    )
+    if inspect.isawaitable(first):
+        first = await first
+    assert first.get("step_id") == "discovery_confirm"
+    assert flow._pending_discovery_payload is not None  # type: ignore[attr-defined]
+    assert flow._pending_discovery_payload.email == "first@example.com"  # type: ignore[attr-defined]
+
+    second = await flow.async_step_discovery(
+        _discovery_payload("second@example.com", "aas_et/SECOND_TOKEN_VALUE", "AABBCC")
+    )
+    if inspect.isawaitable(second):
+        second = await second
+
+    assert second.get("step_id") == "discovery_confirm"
+    assert flow.context.get("confirm_only") is True, (
+        "the new card must be armed, not left over from the superseded one"
+    )
+    assert flow._pending_discovery_payload is not None  # type: ignore[attr-defined]
+    assert flow._pending_discovery_payload.email == "second@example.com", (  # type: ignore[attr-defined]
+        "the newer payload is the more recent truth and has to win"
+    )
+
+
+@pytest.mark.asyncio
+async def test_discovery_confirm_without_a_pending_card_aborts() -> None:
+    """Confirming when nothing is pending must abort, not raise."""
+
+    flow = config_flow.ConfigFlow()
+    flow.context = {}
+
+    result = await flow.async_step_discovery_confirm({})
+    if inspect.isawaitable(result):
+        result = await result
+
+    assert result["type"] == "abort"
+    assert result["reason"] == "invalid_discovery_info"
+
+
+@pytest.mark.asyncio
+async def test_rejected_payload_does_not_leave_the_old_card_confirmable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A payload that fails validation must not leave the previous card armed.
+
+    The dangerous shape is silent: the user sees the second discovery fail, and
+    a confirmation arriving afterwards would apply the *first* payload, which no
+    card is on screen for any more. Clearing the pending state at the top of the
+    entry point is what prevents it.
+    """
+
+    flow = _build_flow_for_new_account(monkeypatch)
+
+    first = await flow.async_step_discovery(
+        _discovery_payload("first@example.com", "aas_et/FIRST_TOKEN_VALUE", "DDEEFF")
+    )
+    if inspect.isawaitable(first):
+        first = await first
+    assert first.get("step_id") == "discovery_confirm"
+
+    rejected = await flow.async_step_discovery({"not": "a valid payload"})
+    if inspect.isawaitable(rejected):
+        rejected = await rejected
+    assert rejected["type"] == "abort"
+
+    assert flow._pending_discovery_payload is None, (  # type: ignore[attr-defined]
+        "the superseded payload must not survive a rejected discovery"
+    )
+
+    confirmed = await flow.async_step_discovery_confirm({})
+    if inspect.isawaitable(confirmed):
+        confirmed = await confirmed
+    assert confirmed["type"] == "abort", (
+        "confirming after a rejected payload must abort, not apply the old one"
+    )

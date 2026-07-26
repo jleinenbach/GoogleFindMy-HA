@@ -279,3 +279,74 @@ def test_overwrite_abort_reasons_are_the_ones_the_flow_emits() -> None:
         "the translated reasons are no longer the ones the step aborts with; "
         f"the step emits {sorted(emitted)}"
     )
+
+
+# The discovery confirmation card. It was shown under ``step_id="discovery"``
+# until the rename, and that id can never carry a text: Home Assistant reserves
+# it for the *entry point* of a discovery flow, and
+# ``tests/test_manifest_translation_schema.py`` bans the key from every
+# translation file. Under ``discovery_confirm`` (the id 32 core integrations use
+# and none use ``discovery`` for) the card is translatable, so it has to actually
+# be translated everywhere.
+_CONFIRM_STEP = "discovery_confirm"
+
+
+@pytest.mark.parametrize("translation_path", _TRANSLATION_FILES)
+def test_confirm_step_is_translated_everywhere(translation_path: Path) -> None:
+    """Every locale must carry a title and description for the discovery card."""
+
+    payload = json.loads(translation_path.read_text(encoding="utf-8"))
+    step = payload["config"]["step"].get(_CONFIRM_STEP)
+    assert step, f"{translation_path} has no config.step.{_CONFIRM_STEP}"
+    for field in ("title", "description"):
+        assert step.get(field), f"{translation_path}: {_CONFIRM_STEP}.{field} is empty"
+
+
+def test_confirm_step_id_matches_the_translated_key() -> None:
+    """Bind the translated key to the ``step_id`` the flow actually shows.
+
+    Existence of a text proves nothing on its own: if the form went back to
+    showing ``step_id="discovery"``, every locale would still have its entry and
+    the user would still see Home Assistant's generic default.
+    """
+
+    tree = ast.parse(CONFIG_FLOW_PATH.read_text(encoding="utf-8"))
+    entry_step = next(
+        (
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.AsyncFunctionDef)
+            and node.name == "async_step_discovery"
+        ),
+        None,
+    )
+    assert entry_step is not None, "async_step_discovery vanished"
+
+    shown = {
+        keyword.value.value
+        for node in ast.walk(entry_step)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "async_show_form"
+        for keyword in node.keywords
+        if keyword.arg == "step_id" and isinstance(keyword.value, ast.Constant)
+    }
+
+    assert shown == {_CONFIRM_STEP}, (
+        "the discovery entry point must show its form under the translatable "
+        f"step id; it shows {sorted(shown)}"
+    )
+
+    handler = next(
+        (
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.AsyncFunctionDef)
+            and node.name == f"async_step_{_CONFIRM_STEP}"
+        ),
+        None,
+    )
+    assert handler is not None, (
+        f"async_step_{_CONFIRM_STEP} is missing: Home Assistant routes the submit "
+        "of that form there, so without it the card cannot be confirmed"
+    )

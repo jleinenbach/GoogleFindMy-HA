@@ -3838,7 +3838,7 @@ async def test_discovery_create_branch_marks_its_own_late_staged_ticket() -> Non
     ticket and drops it -- so an entry whose first ``async_setup_entry`` retries
     loses the delete-after-import job it was promised.
 
-    Drives the real ``async_step_discovery`` confirm branch and replaces only
+    Drives the real ``async_step_discovery_confirm`` branch and replaces only
     ``async_step_device_selection`` with its CREATE_ENTRY FlowResult, because
     that is the input the branch reacts to.
     """
@@ -3855,19 +3855,18 @@ async def test_discovery_create_branch_marks_its_own_late_staged_ticket() -> Non
         candidates=((_EMAIL, _TOKEN),),
         secrets_bundle=_valid_bundle(),
     )
-    flow._discovery_confirm_pending = True  # type: ignore[attr-defined]
     flow._pending_discovery_payload = payload  # type: ignore[attr-defined]
     flow._pending_discovery_entry_exists = False  # type: ignore[attr-defined]
 
     async def _created() -> Any:
         # Mirrors what the create path does right before returning: mark, then
-        # hand the CREATE_ENTRY result back to async_step_discovery.
+        # hand the CREATE_ENTRY result back to async_step_discovery_confirm.
         flow._async_mark_own_cleanup_ticket_entry_promised()
         return {"type": config_flow.data_entry_flow.FlowResultType.CREATE_ENTRY}
 
     flow.async_step_device_selection = _created  # type: ignore[assignment,method-assign]
 
-    result = await _maybe_await(flow.async_step_discovery(None))
+    result = await _maybe_await(flow.async_step_discovery_confirm(None))
     assert result["type"] == config_flow.data_entry_flow.FlowResultType.CREATE_ENTRY
 
     staged = _staged_cleanup(hass)
