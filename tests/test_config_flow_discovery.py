@@ -779,7 +779,7 @@ async def test_discovery_overwrite_writes_when_the_guard_never_matched_the_entry
         form = await form
     assert form["type"] == "form"
 
-    question = await flow.async_step_discovery({})
+    question = await flow.async_step_discovery_confirm({})
     if inspect.isawaitable(question):
         question = await question
     assert question.get("step_id") == "discovery_overwrite", (
@@ -835,7 +835,7 @@ async def test_discovery_overwrite_does_not_write_twice_after_the_guard_wrote(
         form = await form
     assert form["type"] == "form"
 
-    question = await flow.async_step_discovery({})
+    question = await flow.async_step_discovery_confirm({})
     if inspect.isawaitable(question):
         question = await question
     assert question.get("step_id") == "discovery_overwrite"
