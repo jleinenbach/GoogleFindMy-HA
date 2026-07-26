@@ -884,7 +884,7 @@ async def test_discovery_overwrite_drops_credentials_the_guard_cannot_remove(
         form = await form
     assert form["type"] == "form"
 
-    question = await flow.async_step_discovery({})
+    question = await flow.async_step_discovery_confirm({})
     if inspect.isawaitable(question):
         question = await question
     assert question.get("step_id") == "discovery_overwrite"
