@@ -32,14 +32,25 @@
 #   ./data, and the GFMY_CLEARTEXT=1 clear-text terminal output. Keeping the
 #   publish here means those tracks start with no 7901 publish whatsoever.
 #
-# WHY THE PUBLISH IS HARD-PINNED TO 127.0.0.1
+# WHY THE PUBLISH DEFAULTS TO 127.0.0.1
 #   This endpoint serves the freshly minted tokens IN THE CLEAR, guarded only by
-#   a runtime pairing code. The host-side loopback publish IS the security
-#   boundary, so there is deliberately NO LAN opt-in for this port (unlike
-#   GFMY_NOVNC_BIND for the noVNC viewer on 7900). Never change the host part to
-#   0.0.0.0 or drop it, and never add `network_mode: host` (that removes the
-#   bridge and the publish indirection, exposing the container's 0.0.0.0 bind to
-#   the LAN). To drive it from another machine, tunnel to host loopback:
+#   a runtime pairing code, a 300-second expiry, a single successful fetch and a
+#   lockout after five wrong codes. The host-side publish is therefore the
+#   security boundary, and it stays on loopback unless you say otherwise:
+#     GFMY_ONECLICK_BIND=192.168.1.21 GFMY_ONECLICK=1 bash login.sh
+#   The widening exists because a loopback-only endpoint is reachable exactly
+#   where the file handoff already works (same host, shared network namespace);
+#   a Home Assistant in its own bridge container, or on another machine, cannot
+#   use it at all. Rules that stay in force:
+#     * the DEFAULT is loopback -- an unset variable must never widen anything,
+#     * a wildcard host part (0.0.0.0, ::, *) is refused by the launchers: a
+#       concrete address can always replace it, and this port hands out
+#       credentials rather than guarding them behind a password like noVNC,
+#     * a widened bind is plain http on the wire, so it is for a trusted LAN or
+#       the host itself, for the seconds the handoff takes -- never the internet,
+#     * never add `network_mode: host` (that removes the bridge and the publish
+#       indirection, exposing the container's 0.0.0.0 bind on every interface).
+#   Staying on loopback from another machine is still possible with a tunnel:
 #     ssh -L 7901:127.0.0.1:7901 <docker-host>
 services:
   googlefindmy-login:
@@ -51,13 +62,14 @@ services:
       # Merged onto (not replacing) the base file's noVNC publish. Three-part
       # mapping HOST_IP:HOST_PORT:CONTAINER_PORT; the leading host address is the
       # security boundary, the two equal port numbers are just host and container
-      # side of the same service. The host side is FIXED to loopback, not merely
-      # defaulted, see the header above. Deliberately NOT variable-driven, unlike
-      # noVNC's GFMY_NOVNC_BIND: this endpoint serves credentials in clear text,
-      # so it gets no environment override surface at all. A `${VAR:-127.0.0.1}`
-      # form would still default to loopback, but it would let one stray variable
-      # in any shell, .env file or compose wrapper widen the bind silently. Home
-      # Assistant in a bridge network does not need one either, because the
-      # supported route puts both containers on a shared network and publishes no
-      # host port at all.
-      - "127.0.0.1:7901:7901"
+      # side of the same service. The host side DEFAULTS to loopback and is only
+      # widened by an explicit GFMY_ONECLICK_BIND, exactly like noVNC's
+      # GFMY_NOVNC_BIND on 7900 -- with two differences that matter, both enforced
+      # in login.sh/login.cmd rather than here (Compose cannot validate a value):
+      # a wildcard is REFUSED for this port instead of merely warned about, and a
+      # non-loopback value triggers a clear-text warning before the container
+      # starts. Keep the `:-127.0.0.1` default: without it a stray empty variable
+      # in a shell, .env file or compose wrapper would publish on every interface.
+      # Where both containers already share a network, no host publish is needed
+      # at all -- see the shared-network route in README.md.
+      - "${GFMY_ONECLICK_BIND:-127.0.0.1}:7901:7901"

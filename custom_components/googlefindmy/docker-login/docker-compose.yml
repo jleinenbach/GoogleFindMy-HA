@@ -125,11 +125,15 @@ services:
       # GFMY_CLEARTEXT=1 terminal output. Compose cannot drop a `ports:` entry
       # conditionally, so the conditional part moves into a second file.
       #
-      # WHY IT STAYS ON LOOPBACK when it IS published: the overlay pins it to
-      # 127.0.0.1 and nothing else, because that endpoint hands out the freshly
-      # minted tokens in the clear. That host publish IS the security boundary,
-      # and there is deliberately NO LAN opt-in for this port (unlike
-      # GFMY_NOVNC_BIND for noVNC above). From another machine, tunnel instead:
+      # WHY IT DEFAULTS TO LOOPBACK when it IS published: the overlay publishes
+      # it on `${GFMY_ONECLICK_BIND:-127.0.0.1}`, because that endpoint hands out
+      # the freshly minted tokens in the clear, so the host publish IS the
+      # security boundary. Unset means loopback; widening is an explicit act and
+      # is meant for a Home Assistant that cannot see ./data and cannot share
+      # this host's network namespace. Unlike GFMY_NOVNC_BIND above, a wildcard
+      # is refused for this port by both launchers, and a non-loopback value
+      # makes them warn that the transport is plain http. From another machine
+      # you can also stay on loopback and tunnel instead:
       #   ssh -L 7901:127.0.0.1:7901 <docker-host>
       # NOTE on the in-container bind: token_server.py binds 0.0.0.0 *inside* the
       # container ON PURPOSE. Under the default bridge network Docker DNATs the

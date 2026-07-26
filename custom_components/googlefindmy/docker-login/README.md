@@ -110,7 +110,7 @@ have separate settings. Never collapse them into one value.
 
 | Setting | Port | Consumer | Default | Why |
 |---|---|---|---|---|
-| *(none, pinned)* | 7901 | Home Assistant, machine-to-machine | `127.0.0.1`, **not configurable** | **Security boundary.** The endpoint serves Google credentials in cleartext, so it gets no environment override surface at all: the bind is written literally into `docker-compose.oneclick.yml`, so one stray variable in a shell, `.env` file or compose wrapper cannot widen it. |
+| `GFMY_ONECLICK_BIND` | 7901 | Home Assistant, machine-to-machine | `127.0.0.1` | **Security boundary.** The endpoint serves Google credentials in cleartext, so the host publish is what limits who can fetch them. Unset means loopback; widen it only for a Home Assistant that can neither see `./data` nor share this host's network namespace. A wildcard (`0.0.0.0`, `::`, `*`) is **refused** by both launchers, and a non-loopback value makes them warn that the transport is plain http: trusted LAN or this host, for the seconds the handoff takes. |
 | `GFMY_NOVNC_BIND` | 7900 | the browser, via the host's network stack | `127.0.0.1` | Where the viewer actually listens. Everything the launchers print about reachability is derived from **this** value, never from the printed one. |
 | `GFMY_NOVNC_URL_HOST` | 7900 | printed text only | the noVNC bind | The address you are told to open. A wildcard bind is never printed as a URL: `login.sh` substitutes the first detected address, `login.cmd` (which does not auto-detect) falls back to `127.0.0.1` and asks you to pass `--ip`. |
 
@@ -175,11 +175,20 @@ On Linux/QNAP the launcher also exports your `GFMY_HOST_UID`/`GFMY_HOST_GID` so
 the finished `secrets.json` is handed back to you (see
 [Using `secrets.json`](#using-secretsjson-in-home-assistant)).
 
-Only if you ask for the one-click handoff (`GFMY_ONECLICK=1`) does the launcher
-add a second compose file, `docker-compose.oneclick.yml`, which publishes the
-token endpoint on `127.0.0.1:7901`. Without that opt-in **no 7901 port is
-published at all**, so a host that already uses port 7901 cannot stop the login
-container from starting (see
+On an interactive terminal the launcher **asks which handoff you want** before it
+starts anything: `A` (the file in `./data`, the default a bare Enter picks), `B`
+(also publish the token endpoint on 7901) or `C` (also print the bundle in this
+terminal). Pass `--track a|b|c`, or set `GFMY_ONECLICK`/`GFMY_CLEARTEXT` yourself,
+and the question is skipped; a non-interactive run (CI, a pipe, `< /dev/null`)
+behaves exactly as it always did. Track A runs in every case — B and C are
+additions on top of it, never replacements.
+
+Only if you ask for the one-click handoff (track B, or `GFMY_ONECLICK=1`) does
+the launcher add a second compose file, `docker-compose.oneclick.yml`, which
+publishes the token endpoint on port 7901 — on `127.0.0.1` unless you name
+another address of this host. Without that opt-in **no 7901 port is published at
+all**, so a host that already uses port 7901 cannot stop the login container from
+starting (see
 [One-click handoff](#one-click-handoff-optional-no-manual-copy)).
 
 ### Manual alternative (`docker compose`)
@@ -333,19 +342,26 @@ Those two fallbacks are alternatives, not cumulative: Track C is ephemeral by
 contract and deletes the file right after printing it, so if `GFMY_CLEARTEXT=1`
 is set as well, the clear-text output replaces the file handoff.
 
-> **How the loopback guarantee is enforced.** Under Docker's default *bridge*
-> network the published port is DNAT'd onto the container's `eth0`, not onto the
+> **Where the boundary actually sits.** Under Docker's default *bridge* network
+> the published port is DNAT'd onto the container's `eth0`, not onto the
 > container's loopback, so the server inside the container binds `0.0.0.0` (all
 > container interfaces) on purpose — otherwise the published port would be
-> unreachable. The "no LAN exposure" boundary is the **host-side publish**
-> `127.0.0.1:7901:7901` in `docker-compose.oneclick.yml`, which is pinned to
-> loopback and has, deliberately, no LAN opt-in switch.
+> unreachable. Who can reach it is decided entirely by the **host-side publish**
+> `${GFMY_ONECLICK_BIND:-127.0.0.1}:7901:7901` in `docker-compose.oneclick.yml`:
+> loopback unless you name another address of this host.
+>
+> **A widened bind is clear text.** There is no TLS on 7901 (Home Assistant's
+> client speaks plain http here), so a non-loopback publish puts the bundle on
+> the wire readable by anyone on that segment, protected only by the one-time
+> pairing code, the 300-second expiry, the single successful fetch and the
+> lockout after five wrong codes. Use it inside your own LAN or on this host, for
+> the seconds the handoff takes, never across an untrusted network. A wildcard is
+> refused outright.
 >
 > **`network_mode: host` is NOT supported for this service.** In host networking
-> there is no bridge and no publish indirection: the `0.0.0.0` bind would then be
-> LAN-visible and expose the clear-text token endpoint to the whole network. Keep
-> the default bridge network with the loopback publish; use the SSH tunnel below
-> for the split-machine case.
+> there is no bridge and no publish indirection, so the `0.0.0.0` bind would be
+> LAN-visible on every interface with no address left to choose. Keep the default
+> bridge network; widen the publish deliberately, or use the SSH tunnel below.
 
 ```bash
 GFMY_ONECLICK=1 bash login.sh
@@ -369,29 +385,38 @@ The overlay switches `GFMY_ONECLICK` on by default, so that command needs no
 extra environment variable. Note that passing any `-f` disables Compose's
 implicit auto-load of a `docker-compose.override.yml`; if you keep such a file,
 list it explicitly as a further `-f` (the launchers do this for you). The
-overlay pins the publish to `127.0.0.1:7901:7901`; there is no supported way to
-put this port on the LAN.
+overlay publishes on `${GFMY_ONECLICK_BIND:-127.0.0.1}:7901:7901`, so a by-hand
+run without that variable is loopback-only, exactly like the launchers.
 
 The container prints a **pairing code** (generated at runtime — there is no
 default) **in the terminal you started the launcher from**, right after the
 Google sign-in completes; it is not shown in the noVNC viewer, which only ever
 displays Chrome's own window. In Home Assistant, choose the *Container login*
-auth method and enter host `127.0.0.1`, port `7901`, and that pairing code. The endpoint is
-loopback-only by design (it carries the tokens in the clear); to drive it from
-another machine, tunnel it:
+auth method and enter port `7901`, that pairing code, and **the address the
+launcher printed** in its `token endpoint published on … port 7901` line: that is
+`127.0.0.1` by default, or whatever you chose. To reach it from another machine
+you have two ways. Either keep the loopback default and tunnel:
 
 ```bash
 ssh -L 7901:127.0.0.1:7901 <docker-host>
 ```
 
-There is deliberately **no LAN opt-in** for this port — the split-machine path
-is the SSH tunnel above.
+or publish it on a LAN address of this host, which the launcher offers when you
+pick track B and which you can also state up front:
+
+```bash
+GFMY_ONECLICK_BIND=192.168.1.21 GFMY_ONECLICK=1 bash login.sh
+```
+
+The second way carries the tokens **unencrypted** over that LAN for the few
+seconds of the handoff, so use it on a network you trust, and never on an
+untrusted one. A wildcard bind is refused.
 
 > **If Home Assistant itself runs in a bridged Docker container** (the *HA
 > Container* install method), `127.0.0.1` inside Home Assistant points at the
 > **HA container**, not at the Docker host — so the host-published
 > `127.0.0.1:7901` is unreachable and the SSH tunnel only helps if its local end
-> is opened inside HA's own network namespace. Two supported routes:
+> is opened inside HA's own network namespace. Three supported routes:
 >
 > 1. **Same Docker network (no LAN exposure).** This needs two deliberate steps,
 >    because the shipped launchers (`login.sh` / `login.cmd`) start a throwaway
@@ -434,9 +459,16 @@ is the SSH tunnel above.
 > 2. **File handoff instead (Track A, no network at all).** Point the integration
 >    at `docker-login/data/secrets.json` via the options and let the secrets
 >    watcher pick it up — this needs no reachable port.
+> 3. **Publish 7901 on a LAN address of this host.** Pick track B in the launcher
+>    menu and accept or type the address, or state it up front with
+>    `GFMY_ONECLICK_BIND=192.168.1.21 GFMY_ONECLICK=1 bash login.sh`, then enter
+>    that same address in Home Assistant. This is the route for a Home Assistant
+>    on **another machine**, and the only one of the three that puts the bundle on
+>    the wire: it is **unencrypted**, so keep it inside a LAN you trust and only
+>    for the seconds the handoff takes. A wildcard bind is refused.
 >
 > For **HA OS, HA Core, or host-networked HA on the same machine**, the plain
-> `127.0.0.1:7901` above is correct.
+> `127.0.0.1:7901` above is correct and needs none of this.
 
 ### Terminal clear-text copy fallback (`GFMY_CLEARTEXT=1`)
 

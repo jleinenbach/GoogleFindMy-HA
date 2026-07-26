@@ -37,14 +37,15 @@ exercising the security contract documented in the module docstring:
   against ``const.py``, the source of truth, not against literals.
 * Host-publish loopback boundary: the container-internal bind is ``0.0.0.0`` on
   purpose (Docker bridge DNATs the published port onto eth0, not container
-  loopback), and the *no-LAN* guarantee is asserted against the HOST publish,
-  NOT against the container bind. Since the token port became an opt-in overlay
-  (Track A/C must start even when 7901 is taken on the host), that publish lives
-  in ``docker-compose.oneclick.yml``; the base ``docker-compose.yml`` must not
-  publish 7901 at all. Both files are asserted, on parsed YAML rather than raw
-  text, because both carry ``127.0.0.1:7901:7901`` and ``network_mode: host`` in
-  explanatory comments that a text match would happily mistake for the real
-  thing.
+  loopback), and reachability is asserted against the HOST publish, NOT against
+  the container bind. Since the token port became an opt-in overlay (Track A/C
+  must start even when 7901 is taken on the host), that publish lives in
+  ``docker-compose.oneclick.yml``; the base ``docker-compose.yml`` must not
+  publish 7901 at all. The host part of that publish DEFAULTS to loopback and is
+  widened only by an explicit ``GFMY_ONECLICK_BIND``. Both files are asserted, on
+  parsed YAML rather than raw text, because both carry a ``…:7901:7901`` publish
+  and ``network_mode: host`` in explanatory comments that a text match would
+  happily mistake for the real thing.
 
 Collection hardening (Audit HOCH-3): ``docker-login/`` is NOT a Python package
 and its basename is not importable via ``import``. The module is loaded with
@@ -267,20 +268,27 @@ def test_base_compose_does_not_publish_the_token_port() -> None:
     assert any("7900" in port for port in ports)
 
 
-def test_host_publish_is_loopback_only_no_lan_exposure() -> None:
-    """The security boundary: the overlay publishes 7901 on host loopback only.
+def test_host_publish_defaults_to_loopback_with_one_opt_in() -> None:
+    """The security boundary: the overlay publishes 7901 on loopback by default.
 
-    The no-LAN guarantee lives in the host-side publish, not in the container
-    bind. The overlay must publish the token port exactly as
-    ``127.0.0.1:7901:7901``: no wildcard publish (``0.0.0.0:7901``), no bare
-    ``7901:7901`` (which binds all interfaces), and no variable-driven host bind
-    (there is deliberately no LAN opt-in for this port, unlike noVNC 7900).
+    Reachability lives in the host-side publish, not in the container bind. The
+    overlay must publish the token port exactly as
+    ``${GFMY_ONECLICK_BIND:-127.0.0.1}:7901:7901``: no wildcard publish
+    (``0.0.0.0:7901``), no bare ``7901:7901`` (which binds all interfaces), and
+    no second spelling of the opt-in.
+
+    The earlier rule was a hard loopback pin with no opt-in at all. It was given
+    up on purpose, because it left this handoff usable only from the machine
+    where the file handoff already works; what it protected against -- a publish
+    that widens without anyone asking -- is still pinned here by the loopback
+    default, and the launchers add the checks Compose cannot express (a wildcard
+    is refused, a LAN value is warned about as clear text).
     """
 
     token_ports = [
         port for port in _published_ports(_ONECLICK_COMPOSE_PATH) if "7901" in port
     ]
-    assert token_ports == ["127.0.0.1:7901:7901"]
+    assert token_ports == ["${GFMY_ONECLICK_BIND:-127.0.0.1}:7901:7901"]
 
 
 @pytest.mark.parametrize("compose_path", [_COMPOSE_PATH, _ONECLICK_COMPOSE_PATH])

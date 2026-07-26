@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 # custom_components/googlefindmy/docker-login/token_server.py
-"""One-shot loopback token endpoint for the container login (Track B).
+"""One-shot token endpoint for the container login (Track B).
 
 This runs *inside the login container*, after ``main.py`` produced a fresh
 ``secrets.json``. It hands that bundle to the Home Assistant integration over a
-short-lived, nonce-authenticated, loopback-only HTTP endpoint, then deletes the
-on-disk secret and shuts itself down. The delete happens once the handoff is
+short-lived, nonce-authenticated HTTP endpoint -- published on host loopback
+unless the launcher was told otherwise -- then deletes the on-disk secret and
+shuts itself down. The delete happens once the handoff is
 over (ack or TTL); a lockout only shuts the endpoint down and keeps the file
 (see "Security model" below).
 
@@ -17,22 +18,27 @@ the handful of constants it needs are mirrored locally (kept in sync with
 
 Security model:
 
-* **Container-internal wildcard bind, host-loopback publish.** The server binds
-  to ``0.0.0.0`` *inside the login container*. This is deliberate and is NOT the
-  security boundary: under Docker's default bridge network, a published port
-  (the opt-in overlay ``docker-compose.oneclick.yml`` publishes
-  ``127.0.0.1:7901:7901``; the base ``docker-compose.yml`` deliberately
-  publishes nothing for this port, so a host that already uses 7901 can still
-  run the file and clear-text handoffs) is DNAT'd onto the
-  container's ``eth0`` interface, not onto the container's loopback. A bind to
-  the container's ``127.0.0.1`` would therefore make the published port
-  unreachable and break the whole handoff. The "no LAN exposure" guarantee is
-  enforced by the *host-side publish* being pinned to ``127.0.0.1`` (loopback
-  only), not by the in-container bind. The split-machine case is served by an
-  SSH tunnel to host loopback, never by exposing a cleartext token endpoint to
-  the network (OWASP A02). See ``docker-login/README.md``: ``network_mode: host``
-  is unsupported precisely because it would collapse this two-layer boundary and
-  make ``0.0.0.0`` LAN-visible.
+* **Container-internal wildcard bind, host-side publish as the boundary.** The
+  server binds to ``0.0.0.0`` *inside the login container*. This is deliberate
+  and is NOT the security boundary: under Docker's default bridge network, a
+  published port (the opt-in overlay ``docker-compose.oneclick.yml`` publishes
+  ``${GFMY_ONECLICK_BIND:-127.0.0.1}:7901:7901``; the base
+  ``docker-compose.yml`` deliberately publishes nothing for this port, so a host
+  that already uses 7901 can still run the file and clear-text handoffs) is
+  DNAT'd onto the container's ``eth0`` interface, not onto the container's
+  loopback. A bind to the container's ``127.0.0.1`` would therefore make the
+  published port unreachable and break the whole handoff. Reachability is
+  governed entirely by that *host-side publish*, which defaults to ``127.0.0.1``
+  and is widened only by an explicit ``GFMY_ONECLICK_BIND`` -- for the case this
+  handoff exists for, a Home Assistant that can neither see ``./data`` nor share
+  this host's network namespace. A widened publish carries the bundle in clear
+  text (OWASP A02), so the launchers refuse a wildcard outright and warn that it
+  belongs on a trusted LAN, for the seconds of the handoff, never on an
+  untrusted network; an SSH tunnel to host loopback remains the alternative that
+  needs no widening at all. See ``docker-login/README.md``: ``network_mode:
+  host`` stays unsupported because it removes the publish indirection
+  altogether and makes the container's ``0.0.0.0`` bind LAN-visible on every
+  interface, with no address to choose.
 * **Strong single-use nonce.** The pairing nonce is generated at runtime with
   ``secrets.token_urlsafe(16)`` (>=128 bit) and compared with
   ``hmac.compare_digest`` (constant time) over the *encoded bytes*

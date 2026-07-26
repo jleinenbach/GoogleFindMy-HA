@@ -49,10 +49,11 @@ Codex review finding on PR #1208:
   handoff (``./data``) and the ``GFMY_CLEARTEXT=1`` output, neither of which uses
   the port. The publish therefore lives in the opt-in overlay
   ``docker-compose.oneclick.yml`` that the launchers add only for
-  ``GFMY_ONECLICK=1`` (Codex P2 on PR #1211). When it IS published it stays pinned
-  to ``127.0.0.1:7901:7901``: that host publish is the security boundary for an
-  endpoint serving clear-text tokens, and there is deliberately no LAN opt-in for
-  it (unlike ``GFMY_NOVNC_BIND`` for noVNC 7900).
+  ``GFMY_ONECLICK=1`` (Codex P2 on PR #1211). When it IS published, the host part
+  defaults to loopback and is widened only by an explicit ``GFMY_ONECLICK_BIND``
+  (the counterpart of ``GFMY_NOVNC_BIND`` for noVNC 7900, with two extra rules
+  the launchers enforce: a wildcard is refused, and a LAN value is warned about
+  because this endpoint serves clear-text tokens).
 * ``GFMY_ONECLICK`` and ``GFMY_CLEARTEXT`` are documented (compose + README) as
   INDEPENDENT switches, but the clear-text track hung off the one-click branch as
   an ``elif``, so with both set it was never evaluated -- in the documented lockout
@@ -83,7 +84,9 @@ Codex review finding on PR #1208:
 from __future__ import annotations
 
 import os
+import pty
 import re
+import selectors
 import shutil
 import subprocess
 import sys
@@ -225,14 +228,23 @@ def test_base_compose_does_not_publish_the_oneclick_token_port() -> None:
     )
 
 
-def test_oneclick_overlay_publishes_token_port_on_host_loopback_only() -> None:
-    """The overlay must publish 7901 exclusively as ``127.0.0.1:7901:7901``.
+def test_oneclick_overlay_publishes_token_port_with_a_loopback_default() -> None:
+    """The overlay must publish 7901 as ``${GFMY_ONECLICK_BIND:-127.0.0.1}:7901:7901``.
 
     The endpoint serves the freshly minted tokens in the clear, so the host-side
-    loopback publish IS the security boundary (the in-container bind is ``0.0.0.0``
-    on purpose, because Docker's bridge DNATs the published port onto eth0 rather
-    than onto container loopback). A wildcard publish (``0.0.0.0:7901:7901``) or a
-    bare ``7901:7901`` would put clear-text credentials on the LAN.
+    publish IS the security boundary (the in-container bind is ``0.0.0.0`` on
+    purpose, because Docker's bridge DNATs the published port onto eth0 rather
+    than onto container loopback).
+
+    Until the bind became configurable this was a literal ``127.0.0.1``. That pin
+    made the one-click track usable only where the file handoff already works --
+    a Home Assistant in its own bridge container, or on another machine, cannot
+    reach the Docker host's loopback -- so the host part is now variable-driven,
+    exactly like noVNC's ``GFMY_NOVNC_BIND``. What must NOT change: the DEFAULT is
+    loopback, so an unset variable can never widen anything, and neither a
+    wildcard publish (``0.0.0.0:7901:7901``) nor a bare ``7901:7901`` may appear.
+    The launchers add the checks Compose cannot express (wildcard refused,
+    clear-text warning); see the behavioural tests further down.
     """
 
     overlay = DOCKER_LOGIN / ONECLICK_COMPOSE
@@ -243,10 +255,11 @@ def test_oneclick_overlay_publishes_token_port_on_host_loopback_only() -> None:
 
     ports = _compose_service_ports(ONECLICK_COMPOSE)
     token_ports = [p for p in ports if "7901" in p]
-    assert token_ports == ["127.0.0.1:7901:7901"], (
+    assert token_ports == ["${GFMY_ONECLICK_BIND:-127.0.0.1}:7901:7901"], (
         f"{ONECLICK_COMPOSE} must publish the token port exactly as "
-        f"'127.0.0.1:7901:7901' (found {ports!r}). Anything else exposes clear-text "
-        "tokens beyond host loopback."
+        f"'${{GFMY_ONECLICK_BIND:-127.0.0.1}}:7901:7901' (found {ports!r}): one "
+        "variable, one loopback default. A second spelling, a missing default or "
+        "a non-loopback default would widen the publish without anyone asking."
     )
     # The overlay must not silently take over other ports (noVNC is merged in from
     # the base file, including its GFMY_NOVNC_BIND behaviour).
@@ -264,23 +277,30 @@ def test_oneclick_overlay_publishes_token_port_on_host_loopback_only() -> None:
 
 
 @pytest.mark.parametrize("compose_file", ["docker-compose.yml", ONECLICK_COMPOSE])
-def test_no_lan_opt_in_exists_for_the_token_port(compose_file: str) -> None:
-    """No compose file may offer a LAN bind for 7901, not even via a variable.
+def test_token_port_has_exactly_one_bind_knob_defaulting_to_loopback(
+    compose_file: str,
+) -> None:
+    """A LAN bind for 7901 must stay opt-in, single-spelled and loopback by default.
 
-    noVNC deliberately has one (``GFMY_NOVNC_BIND``); the token port deliberately
-    has none, because it hands out credentials in the clear. This guard travels
-    with the publish: it now covers the overlay as strictly as it covered the base
-    file before the split.
+    The token port hands out credentials in the clear, so widening it is allowed
+    but must always be somebody's explicit decision: exactly ONE variable, always
+    with a loopback default, and never a wildcard or a bare mapping (both of which
+    publish on every interface without naming an address).
+
+    This is the successor of the older "no LAN opt-in at all" rule. That rule was
+    dropped deliberately -- it left the one-click handoff reachable only from the
+    machine where the file handoff already works -- but everything it protected
+    against (a silent widening) is still asserted here.
     """
 
+    allowed = "${GFMY_ONECLICK_BIND:-127.0.0.1}:7901:7901"
     for entry in _compose_service_ports(compose_file):
         if "7901" not in entry:
             continue
-        assert entry == "127.0.0.1:7901:7901", (
-            f"{compose_file} publishes the token port as {entry!r}. It must be the "
-            "hard-coded loopback publish '127.0.0.1:7901:7901' -- no wildcard, no "
-            "bare mapping, and no variable-driven host bind (there is no LAN opt-in "
-            "for this port by design; use an SSH tunnel instead)."
+        assert entry == allowed, (
+            f"{compose_file} publishes the token port as {entry!r}. It must be "
+            f"exactly {allowed!r}: no wildcard, no bare mapping, no second variable "
+            "name, and never a default other than loopback."
         )
 
     text = _read(compose_file)
@@ -349,10 +369,15 @@ def test_launcher_adds_oneclick_overlay_only_behind_the_oneclick_gate(
 
     # bash: the add must live inside the `if [ "${GFMY_ONECLICK:-}" = "1" ]` block.
     lines = text.splitlines()
-    gate = next(
-        i for i, line in enumerate(lines) if '"${GFMY_ONECLICK:-}" = "1"' in line
-    )
     add = next(i for i, line in enumerate(lines) if line in adding_lines)
+    # The ENCLOSING gate is the last one before the add, not the first one in the
+    # file: the same `= "1"` idiom is now also used earlier, where the token-port
+    # bind is derived for track B. Anchoring on the first occurrence would measure
+    # that unrelated block instead. The guard keeps its teeth, because an add
+    # moved out of its gate still lands after the matching `fi`.
+    gate = max(
+        i for i, line in enumerate(lines[:add]) if '"${GFMY_ONECLICK:-}" = "1"' in line
+    )
     closing = next(
         i for i, line in enumerate(lines[gate:], gate) if line.strip() == "fi"
     )
@@ -427,6 +452,311 @@ def test_login_sh_behaviourally_selects_compose_files(
             f"GFMY_ONECLICK={oneclick!r} must NOT publish the token port: the "
             f"overlay may not be selected. got {argline!r}"
         )
+    assert "How should the finished credentials reach" not in proc.stderr.decode(), (
+        "a non-interactive run must never print the handoff menu: CI, a pipe and "
+        "`login.sh < /dev/null` have to behave exactly as they did before it existed."
+    )
+
+
+def _launcher_sandbox(tmp_path: Path) -> tuple[Path, dict[str, str]]:
+    """Copy the launcher next to its compose files and stub out ``docker``.
+
+    The stub echoes the compose invocation AND the token-endpoint bind that
+    ``login.sh`` exported for it. That second line is what makes the bind testable
+    without a Docker daemon: the overlay publishes
+    ``${GFMY_ONECLICK_BIND:-127.0.0.1}:7901:7901``, so the value Compose would
+    interpolate is exactly the value this child process sees.
+    """
+
+    work = tmp_path / "docker-login"
+    work.mkdir()
+    for name in ("login.sh", "docker-compose.yml", ONECLICK_COMPOSE):
+        shutil.copy(DOCKER_LOGIN / name, work / name)
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    stub = bin_dir / "docker"
+    stub.write_text(
+        "#!/usr/bin/env bash\n"
+        'printf "DOCKER_ARGS: %s\\n" "$*"\n'
+        'printf "ONECLICK_BIND: %s\\n" "${GFMY_ONECLICK_BIND:-<unset>}"\n',
+        "utf-8",
+    )
+    stub.chmod(0o755)
+    return work, {"PATH": f"{bin_dir}:/usr/bin:/bin", "HOME": str(tmp_path)}
+
+
+def _run_launcher_on_tty(
+    work: Path, env: dict[str, str], answers: str, timeout: float = 60.0
+) -> tuple[int, str]:
+    """Run ``login.sh`` with a real terminal on stdin and feed it ``answers``.
+
+    A pty is the only way to exercise the interactive branches at all: both menus
+    are gated on ``[ -t 0 ]``, so a pipe silently takes the non-interactive path
+    and would make an "the menu did the right thing" assertion vacuously true.
+    All answers are written up front (the shell buffers them) and stdout/stderr
+    share the pty, so the returned text is what the operator would have seen.
+    """
+
+    bash = shutil.which("bash")
+    assert bash is not None, "bash is required to run the launcher"
+
+    master, slave = pty.openpty()
+    try:
+        proc = subprocess.Popen(  # noqa: S603 - fixed argv, test-local stub PATH
+            [bash, str(work / "login.sh")],
+            stdin=slave,
+            stdout=slave,
+            stderr=slave,
+            env=env,
+            close_fds=True,
+        )
+        os.close(slave)
+        slave = -1
+        os.write(master, answers.encode())
+
+        chunks: list[bytes] = []
+        selector = selectors.DefaultSelector()
+        selector.register(master, selectors.EVENT_READ)
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if not selector.select(0.5):
+                if proc.poll() is not None:
+                    break
+                continue
+            try:
+                data = os.read(master, 65536)
+            except OSError:  # the child closed the pty: normal end of run
+                break
+            if not data:
+                break
+            chunks.append(data)
+        selector.close()
+        try:
+            returncode = proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:  # pragma: no cover - defensive
+            proc.kill()
+            raise
+    finally:
+        if slave != -1:
+            os.close(slave)
+        os.close(master)
+    return returncode, b"".join(chunks).decode("utf-8", "replace")
+
+
+def test_track_menu_defaults_to_the_file_handoff_on_a_bare_enter(
+    tmp_path: Path,
+) -> None:
+    """Enter, Enter must keep the historical behaviour: no overlay, no 7901.
+
+    Track A is the only handoff that needs no port, no network and no shared
+    secret, and it runs on every launch anyway. Making it the default answer is
+    what keeps the new question from changing anything for the people who just
+    press Enter -- and it is the property that silently breaks if the menu ever
+    grows a "no default" or reorders its options.
+    """
+
+    work, env = _launcher_sandbox(tmp_path)
+    # Two answers: the noVNC address menu, then the handoff menu.
+    returncode, out = _run_launcher_on_tty(work, env, "\n\n")
+
+    assert returncode == 0, out
+    assert "How should the finished credentials reach" in out, (
+        "an interactive run must ASK; that is the whole point of the change."
+    )
+    argline = next(line for line in out.splitlines() if "DOCKER_ARGS: " in line)
+    assert ONECLICK_COMPOSE not in argline, (
+        f"a bare Enter must select track A, so no 7901 publish; got {argline!r}"
+    )
+    assert "GFMY_CLEARTEXT" not in out or "cleartext" not in argline.lower()
+
+
+def test_track_menu_answer_b_publishes_7901_on_the_novnc_address(
+    tmp_path: Path,
+) -> None:
+    """Answering B must add the overlay AND bind 7901 to a reachable address.
+
+    Both halves matter and neither is enough alone: without the overlay there is
+    no port, and without a non-loopback bind the port exists but a Home Assistant
+    outside this host's network namespace still cannot reach it -- which was the
+    original defect. The address menu answer (192.0.2.10) is offered as the
+    default for the token endpoint, so a bare Enter accepts it.
+    """
+
+    work, env = _launcher_sandbox(tmp_path)
+    # noVNC address, then track B, then accept the offered token-endpoint address.
+    returncode, out = _run_launcher_on_tty(work, env, "192.0.2.10\nb\n\n")
+
+    assert returncode == 0, out
+    argline = next(line for line in out.splitlines() if "DOCKER_ARGS: " in line)
+    assert f"-f {ONECLICK_COMPOSE}" in argline, (
+        f"answer B must pull in the one-click overlay; got {argline!r}"
+    )
+    bindline = next(line for line in out.splitlines() if "ONECLICK_BIND: " in line)
+    assert "192.0.2.10" in bindline, (
+        "answer B must carry the address the operator just confirmed into "
+        f"GFMY_ONECLICK_BIND, so the overlay publishes there; got {bindline!r}"
+    )
+    assert "UNENCRYPTED" in out, (
+        "a non-loopback token endpoint must say out loud that it ships the "
+        "credentials in clear text; that warning is the whole mitigation."
+    )
+
+
+def test_preset_oneclick_env_skips_the_menu_and_keeps_loopback(
+    tmp_path: Path,
+) -> None:
+    """``GFMY_ONECLICK=1`` must behave exactly as it did before the menu existed.
+
+    This is the precedence rule: anything the operator already decided is not
+    asked again. It is also the compatibility promise for every script and every
+    README line that predates the menu -- including the loopback bind, which must
+    not start drifting to a LAN address just because a menu could now offer one.
+    """
+
+    work, env = _launcher_sandbox(tmp_path)
+    env["GFMY_ONECLICK"] = "1"
+    returncode, out = _run_launcher_on_tty(work, env, "\n")
+
+    assert returncode == 0, out
+    assert "How should the finished credentials reach" not in out, (
+        "a preset GFMY_ONECLICK must suppress the handoff menu entirely."
+    )
+    argline = next(line for line in out.splitlines() if "DOCKER_ARGS: " in line)
+    assert f"-f {ONECLICK_COMPOSE}" in argline
+    bindline = next(line for line in out.splitlines() if "ONECLICK_BIND: " in line)
+    assert "127.0.0.1" in bindline, (
+        f"the preset path must keep the loopback default; got {bindline!r}"
+    )
+
+
+@pytest.mark.parametrize("track", ["a", "b", "c"])
+def test_track_flag_suppresses_the_menu(tmp_path: Path, track: str) -> None:
+    """``--track`` is the scriptable spelling of the menu and must skip it."""
+
+    work, env = _launcher_sandbox(tmp_path)
+    bash = shutil.which("bash")
+    assert bash is not None
+    proc = subprocess.run(
+        [bash, str(work / "login.sh"), "--track", track],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+        env=env,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert "How should the finished credentials reach" not in proc.stderr
+    argline = next(
+        line for line in proc.stdout.splitlines() if line.startswith("DOCKER_ARGS: ")
+    )
+    if track == "b":
+        assert f"-f {ONECLICK_COMPOSE}" in argline
+    else:
+        assert ONECLICK_COMPOSE not in argline
+
+
+def test_explicit_oneclick_bind_reaches_the_publish(tmp_path: Path) -> None:
+    """An explicit ``GFMY_ONECLICK_BIND`` must win and reach Compose.
+
+    This is the only route in a script or CI, where there is no menu to answer,
+    so it has to work without a terminal.
+    """
+
+    work, env = _launcher_sandbox(tmp_path)
+    env["GFMY_ONECLICK"] = "1"
+    env["GFMY_ONECLICK_BIND"] = "192.0.2.10"
+    bash = shutil.which("bash")
+    assert bash is not None
+    proc = subprocess.run(
+        [bash, str(work / "login.sh")],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+        env=env,
+    )
+    assert proc.returncode == 0, proc.stderr
+    bindline = next(
+        line for line in proc.stdout.splitlines() if line.startswith("ONECLICK_BIND: ")
+    )
+    assert "192.0.2.10" in bindline, (
+        f"GFMY_ONECLICK_BIND must reach the compose child; got {bindline!r}"
+    )
+    assert "UNENCRYPTED" in proc.stdout, (
+        "a LAN bind of the token endpoint must warn about the clear-text transport"
+    )
+
+
+@pytest.mark.parametrize("wildcard", ["0.0.0.0", "::", "*"])
+def test_wildcard_oneclick_bind_is_refused(tmp_path: Path, wildcard: str) -> None:
+    """A wildcard bind for 7901 must abort, not merely warn.
+
+    For the noVNC viewer a wildcard only widens a password-gated viewer, and the
+    launcher settles for a warning. This port hands out the credentials
+    themselves, and a concrete address can always replace the wildcard, so there
+    is no case in which continuing is the better answer.
+    """
+
+    work, env = _launcher_sandbox(tmp_path)
+    env["GFMY_ONECLICK"] = "1"
+    env["GFMY_ONECLICK_BIND"] = wildcard
+    bash = shutil.which("bash")
+    assert bash is not None
+    proc = subprocess.run(
+        [bash, str(work / "login.sh")],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+        env=env,
+    )
+    assert proc.returncode == 2, (
+        f"a wildcard token-endpoint bind must exit 2; got {proc.returncode} "
+        f"(stdout={proc.stdout!r})"
+    )
+    assert "wildcard" in proc.stderr, proc.stderr
+    assert "DOCKER_ARGS: " not in proc.stdout, (
+        "the launcher must refuse BEFORE starting the container"
+    )
+
+
+def test_login_cmd_mirrors_the_track_menu_and_the_bind_guard() -> None:
+    """``login.cmd`` cannot be executed here (no Windows), so pin it by text.
+
+    Every property the bash tests above prove behaviourally has a counterpart
+    here, because a Windows user gets the same three tracks and the same refusal
+    of a wildcard bind -- a launcher that silently offered less would be the
+    quietest way for this hardening to go missing.
+    """
+
+    cmd = _read("login.cmd")
+    assert "How should the finished credentials reach Home Assistant?" in cmd, (
+        "login.cmd must offer the same handoff menu as login.sh."
+    )
+    assert 'set /p "TRACK_CHOICE=[login] Choice [Enter = A]: "' in cmd, (
+        "the menu must default to track A on a bare Enter, like login.sh."
+    )
+    for guard in ("ONECLICK_ENV_SET", "CLEARTEXT_ENV_SET", "TRACK_FROM_CLI"):
+        assert f"if defined {guard} goto :track_done" in cmd, (
+            f"a preset {guard} must skip the menu, mirroring the bash precedence."
+        )
+    assert "GFMY_ONECLICK_BIND" in cmd.split("call :trim_trailing_blanks")[0], (
+        "GFMY_ONECLICK_BIND must be in the trailing-blank trim list: `set VAR=1 && "
+        "login.cmd` stores the blank, and an address with a trailing space becomes "
+        "an invalid docker port bind."
+    )
+    assert re.search(r"^:reject_wildcard$", cmd, re.MULTILINE), (
+        "login.cmd must define the wildcard refusal for the token endpoint."
+    )
+    wildcard_block = cmd.split("\n:oneclick_bind_wildcard\n", 1)[1].split("\n:", 1)[0]
+    for token in ("popd", "endlocal", "exit /b 2"):
+        assert token in wildcard_block, (
+            f":oneclick_bind_wildcard must {token} like the other early exits."
+        )
+    assert "UNENCRYPTED" in cmd, (
+        "login.cmd must warn about the clear-text transport on a LAN bind."
+    )
 
 
 def _dockerignore_rules() -> list[str]:
@@ -1580,10 +1910,11 @@ def test_login_sh_handles_the_ip_flag_in_its_argument_parser() -> None:
     itself, not merely mentioned in the usage text (which is the failure mode a
     plain substring check would miss).
 
-    The token endpoint (7901) has no such opt-in on purpose: its loopback
-    publish is pinned statically in ``docker-compose.oneclick.yml`` and guarded
-    by ``test_no_lan_opt_in_exists_for_the_token_port`` above. There is no
-    runtime check in either launcher, and this test must not imply one.
+    The token endpoint (7901) has its own, deliberately narrower opt-in:
+    ``GFMY_ONECLICK_BIND``, defaulting to loopback, guarded by
+    ``test_token_port_has_exactly_one_bind_knob_defaulting_to_loopback`` above and
+    by the launcher checks (wildcard refused, clear-text warning) further down. It
+    has no ``--ip``-style flag, so this test is about ``--ip`` only.
     """
 
     text = _read("login.sh")
@@ -1709,8 +2040,20 @@ def test_launchers_bracket_ipv6_before_printing_or_binding() -> None:
     # The bracketing must run on BOTH roles and AFTER the classification, so the
     # GFMY_NOVNC_BIND environment path is normalised too and the loopback /
     # wildcard comparisons still see the spelling the operator typed.
-    assert cmd.count("call :bracket_ipv6 ") == 2, (
-        "login.cmd must bracket the bind AND the printed address (found "
+    # Pinned by ROLE, not by a bare call count: since the token endpoint got its
+    # own bind (GFMY_ONECLICK_BIND) there are more call sites, and a count would
+    # have to be edited again for every further address role -- which is the kind
+    # of edit that quietly drops a role instead of adding one. Each variable that
+    # ends up in a docker port bind or in a printed URL must be assigned FROM the
+    # bracketing subroutine's output.
+    for role in ("NOVNC_BIND", "NOVNC_URL_HOST", "ONECLICK_BIND"):
+        assert f'set "{role}=%BRACKETED%"' in cmd, (
+            f"login.cmd must normalise {role} through :bracket_ipv6; an unbracketed "
+            "IPv6 literal is printed as a broken URL and rejected by docker as a "
+            "port bind."
+        )
+    assert cmd.count("call :bracket_ipv6 ") >= 2, (
+        "login.cmd must bracket at least the bind AND the printed address (found "
         f"{cmd.count('call :bracket_ipv6 ')} call sites)."
     )
     classify_at = cmd.index('set "IS_LOOPBACK="')
@@ -1753,13 +2096,18 @@ def test_login_cmd_validates_the_ip_value_like_login_sh() -> None:
     """
 
     cmd = _read("login.cmd")
-    assert cmd.count("call :validate_ip ") == 2, (
-        "both --ip spellings must call :validate_ip (found "
-        f"{cmd.count('call :validate_ip ')} call sites)."
-    )
-    assert cmd.count("goto :ip_invalid") == 2, (
-        "each validation call must route a rejected value to :ip_invalid."
-    )
+    # Pinned per --ip PARSING BRANCH rather than by a global call count: the token
+    # endpoint bind (GFMY_ONECLICK_BIND) runs through the same validator, so a
+    # count would grow with every new address input and stop testing "both --ip
+    # spellings" specifically. Each branch is read up to the next label.
+    for branch in (":parse_ip\n", ":parse_ip_inline\n"):
+        block = cmd.split("\n" + branch, 1)[1].split("\n:", 1)[0]
+        assert "call :validate_ip " in block, (
+            f"the {branch.strip()} branch must validate its value before using it."
+        )
+        assert "goto :ip_invalid" in block, (
+            f"the {branch.strip()} branch must route a rejected value to :ip_invalid."
+        )
     assert re.search(r"^:ip_invalid$", cmd, re.MULTILINE), (
         "login.cmd must define the :ip_invalid exit path."
     )
