@@ -93,6 +93,22 @@ def service_device_identifier(entry_id: str) -> tuple[str, str]:
 
 
 # --------------------------------------------------------------------------------------
+# Cloud discovery producers
+# --------------------------------------------------------------------------------------
+# Marker carried in the discovery payload (``discovery_source``) by the tracker
+# rescan in device_tracker.py. That producer re-submits the credentials the entry
+# already stores; it is not a credential import, so the config flow must not ask
+# whether to replace the stored credentials with themselves.
+#
+# The flow context cannot tell the producers apart: discovery.py downgrades every
+# source that is not a Home Assistant ``SOURCE_*`` constant to plain ``discovery``,
+# which is exactly what the file watcher's payloads arrive as too. The payload
+# marker is the only reliable discriminator, so it lives here as the single source
+# shared by producer (device_tracker.py) and consumer (config_flow.py); const.py
+# is the shared home because discovery.py already imports config_flow.
+CLOUD_SCANNER_DISCOVERY_SOURCE: Final[Literal["cloud_scanner"]] = "cloud_scanner"
+
+# --------------------------------------------------------------------------------------
 # Configuration keys (data vs. options separation)
 # NOTE: Keep keys stable to avoid migration churn across releases.
 # --------------------------------------------------------------------------------------

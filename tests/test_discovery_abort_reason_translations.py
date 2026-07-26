@@ -204,3 +204,78 @@ async def test_discovery_without_shared_key_aborts_with_keys_missing() -> None:
 
     assert result["type"] == "abort"
     assert result["reason"] == "keys_missing"
+
+
+# The overwrite question introduced with the discovery credential fix ends in one
+# of two aborts, and neither is a Home Assistant Core common reason. They are
+# emitted by ``async_abort`` directly rather than through the
+# ``DiscoveryFlowError`` chokepoint above, so the structural guard there does not
+# see them: without this test a rename in the code would silently leave the user
+# with an untranslated abort.
+_OVERWRITE_ABORT_REASONS = ("credentials_updated", "credentials_kept")
+_OVERWRITE_STEP = "discovery_overwrite"
+
+_TRANSLATION_FILES = (
+    STRINGS_PATH,
+    *sorted(Path("custom_components/googlefindmy/translations").glob("*.json")),
+)
+
+
+@pytest.mark.parametrize("translation_path", _TRANSLATION_FILES)
+def test_overwrite_step_is_translated_everywhere(translation_path: Path) -> None:
+    """Every locale must carry the overwrite question and both of its outcomes."""
+
+    payload = json.loads(translation_path.read_text(encoding="utf-8"))
+    config = payload["config"]
+
+    step = config["step"].get(_OVERWRITE_STEP)
+    assert step, f"{translation_path} has no config.step.{_OVERWRITE_STEP}"
+    for field in ("title", "description"):
+        assert step.get(field), (
+            f"{translation_path}: {_OVERWRITE_STEP}.{field} is empty"
+        )
+    for section in ("data", "data_description"):
+        assert step.get(section, {}).get(config_flow._FIELD_OVERWRITE_CREDENTIALS), (
+            f"{translation_path}: {_OVERWRITE_STEP}.{section} lacks the toggle text"
+        )
+
+    for reason in _OVERWRITE_ABORT_REASONS:
+        assert config["abort"].get(reason), (
+            f"{translation_path} has no config.abort.{reason}"
+        )
+
+
+def test_overwrite_abort_reasons_are_the_ones_the_flow_emits() -> None:
+    """Bind the translated reasons to the literals in the step implementation.
+
+    Reading the source keeps the guard honest without driving the whole flow a
+    second time: the behavioural coverage lives in
+    ``tests/test_config_flow_discovery.py``.
+    """
+
+    tree = ast.parse(CONFIG_FLOW_PATH.read_text(encoding="utf-8"))
+    step = next(
+        (
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.AsyncFunctionDef)
+            and node.name == f"async_step_{_OVERWRITE_STEP}"
+        ),
+        None,
+    )
+    assert step is not None, f"async_step_{_OVERWRITE_STEP} vanished"
+
+    emitted = {
+        keyword.value.value
+        for node in ast.walk(step)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "async_abort"
+        for keyword in node.keywords
+        if keyword.arg == "reason" and isinstance(keyword.value, ast.Constant)
+    }
+
+    assert set(_OVERWRITE_ABORT_REASONS) <= emitted, (
+        "the translated reasons are no longer the ones the step aborts with; "
+        f"the step emits {sorted(emitted)}"
+    )

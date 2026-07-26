@@ -23,6 +23,16 @@
           "use_found_bundle": "Laat dit aan staan om het bestand hierboven te importeren. Zet het uit om zelf een aanmeldmethode te kiezen."
         }
       },
+      "discovery_overwrite": {
+        "title": "Opgeslagen inloggegevens vervangen?",
+        "description": "{email} is al ingesteld in Home Assistant en er is zojuist een nieuw bestand met inloggegevens gevonden.\n\nBij vervangen worden de nieuwe inloggegevens naar het bestaande item geschreven en wordt het opnieuw geladen. Als je weigert, blijft het item precies zoals het is.",
+        "data": {
+          "overwrite_credentials": "Opgeslagen inloggegevens vervangen"
+        },
+        "data_description": {
+          "overwrite_credentials": "Laat dit aan staan als je je zojuist opnieuw hebt aangemeld. Zet het uit om de inloggegevens te behouden die Home Assistant nu gebruikt."
+        }
+      },
       "secrets_json": {
         "title": "GoogleFindMyTools secrets.json",
         "description": "Voer GoogleFindMyTools (Chrome) uit om authenticatietokens te genereren en plak vervolgens de volledige inhoud van het Auth/secrets.json-bestand hieronder.",
@@ -118,6 +128,8 @@
     },
     "abort": {
       "already_configured": "Google Find My Device is al geconfigureerd.",
+      "credentials_updated": "De opgeslagen inloggegevens voor dit account zijn vervangen door de gevonden gegevens.",
+      "credentials_kept": "De opgeslagen inloggegevens zijn behouden. Er is niets gewijzigd.",
       "cannot_connect": "Kan geen verbinding maken met Google Find My Device.",
       "dependency_not_ready": "Google Find My Device-afhankelijkheden zijn niet geïnstalleerd. Installeer de vereisten en probeer het opnieuw.",
       "invalid_discovery_info": "De discovery-payload was ongeldig. Controleer de inloggegevens en probeer het opnieuw.",

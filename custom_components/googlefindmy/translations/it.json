@@ -23,6 +23,16 @@
           "use_found_bundle": "Lascia l'opzione attiva per importare il file mostrato sopra. Disattivala per scegliere tu stesso un metodo di autenticazione."
         }
       },
+      "discovery_overwrite": {
+        "title": "Sostituire le credenziali salvate?",
+        "description": "{email} è già configurato in Home Assistant ed è appena stato trovato un nuovo file di credenziali.\n\nCon la sostituzione le nuove credenziali vengono scritte nella voce esistente, che viene ricaricata. Se rifiuti, la voce resta com'è.",
+        "data": {
+          "overwrite_credentials": "Sostituisci le credenziali salvate"
+        },
+        "data_description": {
+          "overwrite_credentials": "Lascia l'opzione attiva se hai appena effettuato di nuovo l'accesso. Disattivala per mantenere le credenziali che Home Assistant sta usando adesso."
+        }
+      },
       "secrets_json": {
         "title": "GoogleFindMyTools secrets.json",
         "description": "Esegui GoogleFindMyTools (Chrome) per generare i token di autenticazione, quindi incolla qui sotto il contenuto completo del file Auth/secrets.json.",
@@ -118,6 +128,8 @@
     },
     "abort": {
       "already_configured": "Google Find My Device è già configurato.",
+      "credentials_updated": "Le credenziali salvate per questo account sono state sostituite con quelle trovate.",
+      "credentials_kept": "Le credenziali salvate sono state mantenute. Non è stato modificato nulla.",
       "cannot_connect": "Impossibile connettersi a Google Find My Device.",
       "dependency_not_ready": "Le dipendenze di Google Find My Device non sono installate. Installa i requisiti e riprova.",
       "invalid_discovery_info": "Il payload di rilevamento non è valido. Controlla le credenziali e riprova.",

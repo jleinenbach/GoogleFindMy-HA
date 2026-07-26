@@ -1678,11 +1678,13 @@ class DiscoveryManager:
         for why the exclusion is explicit.
 
         Only *added* paths justify re-arming and rescanning. A force scan
-        re-imports whatever bundle it finds, and the discovery update flow
-        applies such an import to the matching entry without any user
-        interaction, so an unconditional rescan on an unchanged or shrunken
-        path set would overwrite credentials and delete bundles that nobody
-        touched. Therefore, per watcher:
+        re-imports whatever bundle it finds, and for an account that already
+        has an entry the discovery flow now raises a confirmation prompt for
+        that import (``config_flow.ConfigFlow.async_step_discovery_overwrite``,
+        pre-answered with "replace"), so an unconditional rescan on an
+        unchanged or shrunken path set would put an unasked-for question in
+        front of the user, and answering it would overwrite credentials and
+        delete bundles that nobody touched. Therefore, per watcher:
 
         * identical path set: skip entirely (no update, no scan),
         * paths only removed: update without forgetting the signature and

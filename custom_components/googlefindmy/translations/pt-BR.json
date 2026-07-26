@@ -23,6 +23,16 @@
           "use_found_bundle": "Mantenha esta opção ativada para importar o arquivo mostrado acima. Desative-a para escolher você mesmo um método de autenticação."
         }
       },
+      "discovery_overwrite": {
+        "title": "Substituir as credenciais salvas?",
+        "description": "{email} já está configurado no Home Assistant e um novo arquivo de credenciais acabou de ser encontrado.\n\nA substituição grava as novas credenciais na entrada existente e a recarrega. Se você recusar, a entrada fica exatamente como está.",
+        "data": {
+          "overwrite_credentials": "Substituir as credenciais salvas"
+        },
+        "data_description": {
+          "overwrite_credentials": "Mantenha esta opção ativada se você acabou de fazer login novamente. Desative-a para manter as credenciais que o Home Assistant está usando agora."
+        }
+      },
       "secrets_json": {
         "title": "GoogleFindMyTools secrets.json",
         "description": "Execute o GoogleFindMyTools (Chrome) para gerar os tokens de autenticação, depois cole abaixo o conteúdo completo do arquivo Auth/secrets.json.",
@@ -118,6 +128,8 @@
     },
     "abort": {
       "already_configured": "O Google Encontrar Meu Dispositivo já está configurado.",
+      "credentials_updated": "As credenciais salvas desta conta foram substituídas pelas que foram encontradas.",
+      "credentials_kept": "As credenciais salvas foram mantidas. Nada foi alterado.",
       "cannot_connect": "Falha ao conectar-se ao Encontre Meu Dispositivo do Google.",
       "dependency_not_ready": "As dependências do Encontre Meu Dispositivo do Google não estão instaladas. ",
       "invalid_discovery_info": "A carga de descoberta era inválida. ",

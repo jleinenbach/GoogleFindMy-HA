@@ -507,8 +507,8 @@ async def test_refresh_watch_paths_is_a_noop_when_the_path_set_is_unchanged(
 
     The removal hook refreshes on every entry removal, and in the normal case
     the removed entry owned no extra path. Re-arming and rescanning there would
-    re-import a bundle that is already known, and the discovery update flow
-    applies such an import without asking the user.
+    re-import a bundle that is already known, which for a configured account
+    now puts an unasked-for overwrite prompt in front of the user.
     """
 
     default_path = tmp_path / "auth" / "secrets.json"
@@ -1087,7 +1087,7 @@ async def test_discovery_confirm_stages_delete_instead_of_running_it(
     flow.context = {}
     flow._discovery_confirm_pending = True  # type: ignore[attr-defined]
     flow._pending_discovery_payload = payload  # type: ignore[attr-defined]
-    flow._pending_discovery_updates = None  # type: ignore[attr-defined]
+    flow._pending_discovery_entry_exists = False  # type: ignore[attr-defined]
 
     async def _fake_device_selection() -> dict[str, Any]:
         return {"type": config_flow.data_entry_flow.FlowResultType.CREATE_ENTRY}
@@ -1134,7 +1134,7 @@ async def test_aborted_discovery_confirm_stages_nothing(tmp_path: Path) -> None:
     flow.context = {}
     flow._discovery_confirm_pending = True  # type: ignore[attr-defined]
     flow._pending_discovery_payload = payload  # type: ignore[attr-defined]
-    flow._pending_discovery_updates = None  # type: ignore[attr-defined]
+    flow._pending_discovery_entry_exists = False  # type: ignore[attr-defined]
 
     async def _fake_device_selection() -> dict[str, Any]:
         return {"type": "form", "step_id": "device_selection"}
