@@ -507,8 +507,8 @@ async def test_refresh_watch_paths_is_a_noop_when_the_path_set_is_unchanged(
 
     The removal hook refreshes on every entry removal, and in the normal case
     the removed entry owned no extra path. Re-arming and rescanning there would
-    re-import a bundle that is already known, and the discovery update flow
-    applies such an import without asking the user.
+    re-import a bundle that is already known, which for a configured account
+    now puts an unasked-for overwrite prompt in front of the user.
     """
 
     default_path = tmp_path / "auth" / "secrets.json"
