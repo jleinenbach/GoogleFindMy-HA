@@ -1087,7 +1087,7 @@ async def test_discovery_confirm_stages_delete_instead_of_running_it(
     flow.context = {}
     flow._discovery_confirm_pending = True  # type: ignore[attr-defined]
     flow._pending_discovery_payload = payload  # type: ignore[attr-defined]
-    flow._pending_discovery_updates = None  # type: ignore[attr-defined]
+    flow._pending_discovery_entry_exists = False  # type: ignore[attr-defined]
 
     async def _fake_device_selection() -> dict[str, Any]:
         return {"type": config_flow.data_entry_flow.FlowResultType.CREATE_ENTRY}
@@ -1134,7 +1134,7 @@ async def test_aborted_discovery_confirm_stages_nothing(tmp_path: Path) -> None:
     flow.context = {}
     flow._discovery_confirm_pending = True  # type: ignore[attr-defined]
     flow._pending_discovery_payload = payload  # type: ignore[attr-defined]
-    flow._pending_discovery_updates = None  # type: ignore[attr-defined]
+    flow._pending_discovery_entry_exists = False  # type: ignore[attr-defined]
 
     async def _fake_device_selection() -> dict[str, Any]:
         return {"type": "form", "step_id": "device_selection"}
