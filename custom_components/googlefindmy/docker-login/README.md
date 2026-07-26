@@ -166,8 +166,9 @@ step 3.
 The launcher runs a single command:
 `docker compose -f docker-compose.yml run --build --service-ports --rm googlefindmy-login`.
 `run` builds (if needed) **and** starts a fresh one-shot container in the
-foreground with your terminal attached (so the "Press Enter" prompt reaches
-Python); `--rm` removes it on exit, so repeated logins never stack containers;
+foreground with your terminal attached (so the CLI can ask you for the account
+e-mail when it cannot read it out of the Chrome session); `--rm` removes it on
+exit, so repeated logins never stack containers;
 and `--service-ports` publishes the ports declared by the selected compose
 files, which in this default case is only **noVNC on 7900**.
 On Linux/QNAP the launcher also exports your `GFMY_HOST_UID`/`GFMY_HOST_GID` so
@@ -213,21 +214,27 @@ read it as your host user. Docker Desktop (Windows/macOS) maps ownership for you
    `docker-compose.yml`, so the integration code mount stays read-only. The
    container takes ownership of `./data` for the run, so no host `chmod` is needed.
 
-2. Start the container **in the foreground** (it prompts for input) —
+2. Start the container **in the foreground**, with your terminal attached —
    `bash login.sh` / `login.cmd`, or
    `docker compose run --build --service-ports --rm googlefindmy-login`.
+   Keep that terminal open for the whole run: it is where the instructions and
+   the tracker list appear, and the CLI asks there for your account e-mail if it
+   cannot read it out of the Chrome session.
 
-3. Wait for this line in the terminal, then press **Enter**:
+3. Wait for the instruction block in the terminal. It names the noVNC URL and
+   the password to use:
    ```
-   [AuthFlow] Press Enter to continue...
+   [AuthFlow] Action required to sign in to Google:
+   [AuthFlow]   1. Open http://localhost:7900 in your browser (password: secret).
    ```
-
-4. Open the noVNC URL the launcher printed and enter the password it names. On
-   the **loopback default** that is **http://localhost:7900** with password
+   On the **loopback default** that is **http://localhost:7900** with password
    `secret`. On a **LAN bind** it is the `https://<address>:7900` URL shown, with
    the **per-run password** the container printed (`(password: …)`); accept the
-   one-time self-signed-certificate warning. You now see a live view of Chrome
-   running inside the container.
+   one-time self-signed-certificate warning.
+
+4. Open that URL. You now see a live view of the desktop inside the container.
+   **Chrome opens by itself** there within a few seconds, on the Google sign-in
+   page — there is nothing to confirm in the terminal first.
 
 5. In that noVNC window, log into your Google account as usual (2FA works the
    same as in any browser).
@@ -235,6 +242,9 @@ read it as your host user. Docker Desktop (Windows/macOS) maps ownership for you
 6. When the terminal prints `[AuthFlow] Retrieved Account Token successfully.`
    the CLI continues and lists your Find My Device / Find Hub trackers. Your
    tokens are now cached to `data/secrets.json` on the host.
+
+   Chrome may close and reopen once or twice along the way. That is expected:
+   the sign-in and the encryption-key retrieval are separate browser sessions.
 
 ## Running on QNAP / Container Station
 
@@ -258,11 +268,11 @@ intended login path (there is no Supervisor Add-on store for HA Container):
   its STDIN, which only the `docker compose run` path (the **SSH** option above)
   provides. Importing `docker-compose.yml` as a Container Station *application*
   starts it with `docker compose up` semantics, which does **not** forward a
-  terminal — so the `[AuthFlow] Press Enter to continue...` prompt can never
-  proceed and the login stalls (see the compose file's own note and
+  terminal — so the `Enter your Google account email:` prompt can never be
+  answered and the login stalls there (see the compose file's own note and
   [Troubleshooting](#troubleshooting)). Run the **login** via SSH; you may use
   Container Station afterwards for the normal, already-authenticated runs, which
-  skip the Enter prompt.
+  never ask for input.
 
 Because HA and the login container run on the same box here, the produced
 `data/secrets.json` is on the same host you import it from.
@@ -497,10 +507,14 @@ there is no separate image to rebuild for code changes.
 
 ## Troubleshooting
 
-- **Stuck with no prompt / can't type:** you probably ran `docker compose up`
-  (which does not attach your terminal's stdin). Use `bash login.sh` /
-  `docker compose run --service-ports --rm googlefindmy-login`, which runs in the
-  foreground with stdin attached.
+- **Asked for your e-mail but you can't type:** you probably ran
+  `docker compose up` (which does not attach your terminal's stdin). Use
+  `bash login.sh` / `docker compose run --service-ports --rm googlefindmy-login`,
+  which runs in the foreground with stdin attached.
+- **noVNC shows an empty desktop:** give it a few seconds — Chrome is started
+  right after the display comes up, and the terminal prints
+  `[AuthFlow] Installing ChromeDriver...` just before it appears. You are not
+  expected to confirm anything in the terminal to make it start.
 - **`Permission denied` running `./login.sh`:** start it through bash instead —
   `bash login.sh`. HACS installs the integration from a ZIP and does not restore
   the execute bit, so `./login.sh` can fail even though the script is marked
