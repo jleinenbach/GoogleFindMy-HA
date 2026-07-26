@@ -349,7 +349,18 @@ def test_async_step_discovery_existing_entry_updates(
         assert discovery_form.get("step_id") == "discovery"
         assert not abort_calls, "abort helper should not run before confirmation"
 
-        abort_result = await flow.async_step_discovery({})
+        overwrite_form = await flow.async_step_discovery({})
+        if inspect.isawaitable(overwrite_form):
+            overwrite_form = await overwrite_form
+        # Confirming the discovery card no longer writes: the account is already
+        # configured, so the flow asks before replacing anything.
+        assert overwrite_form["type"] == "form"
+        assert overwrite_form.get("step_id") == "discovery_overwrite"
+        assert not abort_calls, "the question must be asked before the write"
+
+        abort_result = await flow.async_step_discovery_overwrite(
+            {config_flow._FIELD_OVERWRITE_CREDENTIALS: True}
+        )
         if inspect.isawaitable(abort_result):
             abort_result = await abort_result
         assert flow._auth_data.get(CONF_OAUTH_TOKEN) == "aas_et/NEW_TOKEN_VALUE"  # type: ignore[attr-defined]
@@ -359,7 +370,7 @@ def test_async_step_discovery_existing_entry_updates(
         assert isinstance(payload, dict)
         assert "data" not in payload
         assert payload.get(CONF_OAUTH_TOKEN) == "aas_et/NEW_TOKEN_VALUE"
-        assert recorded_forms == ["discovery"]
+        assert recorded_forms == ["discovery", "discovery_overwrite"]
         return discovery_form, abort_result, abort_calls, recorded_forms
 
     discovery_form, abort_result, abort_calls, recorded_forms = asyncio.run(_exercise())
@@ -367,22 +378,18 @@ def test_async_step_discovery_existing_entry_updates(
     assert discovery_form.get("step_id") == "discovery"
     assert len(abort_calls) == 1
     assert abort_result["type"] == "abort"
-    assert abort_result["reason"] == "already_configured"
+    assert abort_result["reason"] == "credentials_updated"
 
 
-def test_discovery_confirmation_replaces_credentials_in_entry_data(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Confirming a discovery for a configured account must replace the token.
+def _drive_discovery_overwrite(
+    monkeypatch: pytest.MonkeyPatch, *, answer: bool
+) -> tuple[Any, dict[str, Any], dict[str, Any], dict[str, Any]]:
+    """Drive a discovery for an already configured account to ``answer``.
 
-    Regression guard for the nested-payload defect. ``updates`` used to be
-    ``{"data": {...}}``, but Home Assistant merges the payload *flat*
-    (``data={**entry.data, **updates}``): the stored ``oauth_token`` kept its old
-    value while a stray ``data`` key appeared beside it, and the resulting
-    ``changed=True`` reloaded the entry, so it looked like it had worked.
-
-    The assertions deliberately inspect ``entry.data`` rather than the payload
-    handed to the abort helper. Checking the argument is exactly what let the
+    Returns ``(entry, discovery_card, overwrite_question, result)``. The entry is
+    a live object: the manager stub applies ``async_update_entry`` to it, so the
+    callers can assert on ``entry.data`` instead of on the payload handed to the
+    abort helper. Checking the argument is exactly what let the nested-payload
     defect through.
     """
 
@@ -452,7 +459,7 @@ def test_discovery_confirmation_replaces_credentials_in_entry_data(
                 frame_module=frame,
             )
 
-    async def _exercise() -> tuple[dict[str, Any], dict[str, Any]]:
+    async def _exercise() -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
         hass = _FlowHass()
         flow = config_flow.ConfigFlow()
         flow.hass = hass  # type: ignore[assignment]
@@ -479,15 +486,44 @@ def test_discovery_confirmation_replaces_credentials_in_entry_data(
             "showing the confirmation form must not write anything yet"
         )
 
-        confirmed = await flow.async_step_discovery({})
-        if inspect.isawaitable(confirmed):
-            confirmed = await confirmed
-        return form, confirmed
+        question = await flow.async_step_discovery({})
+        if inspect.isawaitable(question):
+            question = await question
+        assert question["type"] == "form"
+        assert question.get("step_id") == "discovery_overwrite"
+        assert entry.data[CONF_OAUTH_TOKEN] == "aas_et/OLD_TOKEN_VALUE", (
+            "asking the question must not write anything yet"
+        )
 
-    form, confirmed = asyncio.run(_exercise())
+        result = await flow.async_step_discovery_overwrite(
+            {config_flow._FIELD_OVERWRITE_CREDENTIALS: answer}
+        )
+        if inspect.isawaitable(result):
+            result = await result
+        return form, question, result
+
+    form, question, result = asyncio.run(_exercise())
+    return entry, form, question, result
+
+
+def test_discovery_overwrite_confirmed_replaces_credentials_in_entry_data(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Answering yes must replace the stored credentials, flat, in ``entry.data``.
+
+    Regression guard for the nested-payload defect. ``updates`` used to be
+    ``{"data": {...}}``, but Home Assistant merges the payload *flat*
+    (``data={**entry.data, **updates}``): the stored ``oauth_token`` kept its old
+    value while a stray ``data`` key appeared beside it, and the resulting
+    ``changed=True`` reloaded the entry, so it looked like it had worked.
+    """
+
+    entry, form, question, result = _drive_discovery_overwrite(monkeypatch, answer=True)
 
     assert form.get("step_id") == "discovery"
-    assert confirmed["type"] == "abort"
+    assert question.get("step_id") == "discovery_overwrite"
+    assert result["type"] == "abort"
+    assert result["reason"] == "credentials_updated"
     assert entry.data[CONF_OAUTH_TOKEN] == "aas_et/NEW_TOKEN_VALUE", (
         "the confirmed discovery must replace the stored credentials"
     )
@@ -497,6 +533,29 @@ def test_discovery_confirmation_replaces_credentials_in_entry_data(
     assert entry.data[CONF_GOOGLE_EMAIL] == "existing@example.com", (
         "unrelated entry data must survive the merge"
     )
+
+
+def test_discovery_overwrite_declined_keeps_stored_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Answering no must write nothing and say so.
+
+    A dialog whose rejection is never exercised is an ornament: the no-path is
+    the only reason the question is worth asking.
+    """
+
+    entry, _form, _question, result = _drive_discovery_overwrite(
+        monkeypatch, answer=False
+    )
+
+    assert result["type"] == "abort"
+    assert result["reason"] == "credentials_kept", (
+        "declining must not report 'already_configured' either"
+    )
+    assert entry.data[CONF_OAUTH_TOKEN] == "aas_et/OLD_TOKEN_VALUE", (
+        "declining must leave the stored credentials untouched"
+    )
+    assert "data" not in entry.data
 
 
 def test_async_step_discovery_update_info_existing_entry(

@@ -1237,6 +1237,12 @@ _FIELD_REPAIR_DEVICES = "device_ids"
 # form.
 _FIELD_USE_FOUND_BUNDLE = "use_found_bundle"
 
+# Discovery for an account that is already configured: "replace the stored
+# credentials with the ones just discovered?". Unset means "no", which leaves the
+# entry untouched. Defaults to yes, because a discovery for a configured account
+# follows a login the user just performed on purpose.
+_FIELD_OVERWRITE_CREDENTIALS = "overwrite_credentials"
+
 _SUBENTRIES_DOCS_URL = (
     "https://github.com/BSkando/GoogleFindMy-HA/blob/main/README.md"
     "#subentries-and-feature-groups"
@@ -3836,6 +3842,11 @@ class ConfigFlow(
         self._pending_discovery_updates: dict[str, Any] | None = None
         self._pending_discovery_existing_entry: ConfigEntry | None = None
         self._discovery_confirm_pending = False
+        # Survives _clear_discovery_confirmation_state on purpose: the overwrite
+        # question is asked *after* the discovery card has been confirmed and
+        # that state torn down.
+        self._pending_overwrite_payload: CloudDiscoveryData | None = None
+        self._pending_overwrite_updates: dict[str, Any] | None = None
         # Two-phase-delete (F4): a container-login fetch stages its result here so
         # the ack (which tells the container to delete its on-disk secret) is only
         # sent AFTER the config entry is actually created in device_selection. If
@@ -4449,19 +4460,17 @@ class ConfigFlow(
                 self._clear_discovery_confirmation_state()
             else:
                 updates = self._pending_discovery_updates
-                existing_entry = self._pending_discovery_existing_entry
                 self._clear_discovery_confirmation_state()
 
                 if updates is not None and pending_payload is not None:
-                    try:
-                        await self._async_prepare_account_context(
-                            email=pending_payload.email,
-                            preferred_unique_id=pending_payload.unique_id,
-                            updates=updates,
-                        )
-                    except data_entry_flow.AbortFlow:
-                        return self.async_abort(reason="already_configured")
-                    return self.async_abort(reason="already_configured")
+                    # The account is already configured. Do not write yet: ask
+                    # first, because this replaces working credentials. The old
+                    # behaviour wrote unconditionally and reported
+                    # "already_configured", which said nothing about what had
+                    # happened to the credentials.
+                    self._pending_overwrite_payload = pending_payload
+                    self._pending_overwrite_updates = updates
+                    return await self.async_step_discovery_overwrite()
 
                 result = await self.async_step_device_selection()
                 # Delete-after-import: STAGED here, executed in
@@ -4550,6 +4559,67 @@ class ConfigFlow(
         return self.async_show_form(
             step_id="discovery",
             description_placeholders=placeholders,
+        )
+
+    async def async_step_discovery_overwrite(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Ask before replacing the credentials of an already configured account.
+
+        Reached from :meth:`async_step_discovery` once the discovery card has
+        been confirmed and the account turns out to have an entry already. The
+        answer decides between two aborts, both of which say what happened:
+        ``credentials_updated`` or ``credentials_kept``. Neither is
+        ``already_configured``, which used to end both outcomes and told the user
+        nothing about their credentials.
+
+        Declining writes nothing at all: the entry keeps the credentials it has,
+        and the bundle stays on disk, so the offer returns on the next scan.
+        """
+
+        payload = self._pending_overwrite_payload
+        updates = self._pending_overwrite_updates
+        if payload is None or updates is None:  # pragma: no cover - defensive
+            return self.async_abort(reason="already_configured")
+
+        if user_input is not None:
+            self._pending_overwrite_payload = None
+            self._pending_overwrite_updates = None
+
+            if not user_input.get(_FIELD_OVERWRITE_CREDENTIALS, False):
+                _LOGGER.info(
+                    "Discovery for %s declined: stored credentials kept",
+                    _mask_email_for_logs(payload.email),
+                )
+                return self.async_abort(reason="credentials_kept")
+
+            try:
+                await self._async_prepare_account_context(
+                    email=payload.email,
+                    preferred_unique_id=payload.unique_id,
+                    updates=updates,
+                )
+            except data_entry_flow.AbortFlow:
+                # The expected exit: the core applied ``updates`` to the entry
+                # and then aborted the flow, which is how it signals "this
+                # account is already configured".
+                pass
+            _LOGGER.info(
+                "Discovery for %s confirmed: stored credentials replaced",
+                _mask_email_for_logs(payload.email),
+            )
+            return self.async_abort(reason="credentials_updated")
+
+        return self.async_show_form(
+            step_id="discovery_overwrite",
+            data_schema=vol.Schema(
+                {vol.Required(_FIELD_OVERWRITE_CREDENTIALS, default=True): bool}
+            ),
+            description_placeholders={
+                # The account is the user's own and is shown to them in their own
+                # UI, so it is spelled out here; only the *log* is redacted.
+                "email": payload.email,
+            },
         )
 
     async def async_step_discovery_update_info(
