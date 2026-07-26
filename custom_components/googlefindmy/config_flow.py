@@ -3491,7 +3491,15 @@ async def _ingest_discovery_credentials(
     *,
     existing_entry: ConfigEntry | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any] | None]:
-    """Validate discovery credentials and prepare flow + entry payloads."""
+    """Validate discovery credentials and prepare flow + entry payloads.
+
+    The second element is the ``updates`` payload for
+    ``_abort_if_unique_id_configured``. Home Assistant merges it *flat* into the
+    entry (``data={**entry.data, **updates}``, ``config_entries.py``), so it must
+    be the entry data itself, not ``{"data": ...}``: a nested payload would leave
+    every credential on its old value and add a stray ``data`` key inside
+    ``entry.data`` instead.
+    """
 
     candidates = list(discovery.candidates)
     secrets_bundle = (
@@ -3560,7 +3568,7 @@ async def _ingest_discovery_credentials(
             updated.pop(DATA_AAS_TOKEN, None)
         if fcm_credentials is not None:
             updated["fcm_credentials"] = fcm_credentials
-        updates: dict[str, Any] | None = {"data": updated}
+        updates: dict[str, Any] | None = updated
     else:
         updates = None
 
@@ -4641,7 +4649,7 @@ class ConfigFlow(
         self._auth_data = auth_data
 
         if updates is None:
-            updates = {"data": dict(existing_entry.data)}
+            updates = dict(existing_entry.data)
 
         _LOGGER.info(
             "Handling discovery-update-info flow for %s",  # noqa: G004 - logging mask helper
@@ -4667,19 +4675,14 @@ class ConfigFlow(
             hass = None
 
         if hass is not None:
-            update_payload: dict[str, Any] = {}
-            if "data" in updates_to_apply:
-                update_payload["data"] = updates_to_apply["data"]
-            if "options" in updates_to_apply:
-                update_payload["options"] = updates_to_apply["options"]
-
-            try:
-                hass.config_entries.async_update_entry(existing_entry, **update_payload)
-            except TypeError:  # Legacy cores without options support
-                hass.config_entries.async_update_entry(
-                    existing_entry,
-                    data=update_payload.get("data", existing_entry.data),
-                )
+            # ``updates_to_apply`` *is* the entry data, flat, the same payload
+            # ``_abort_if_unique_id_configured`` merged above. It is applied
+            # again here because that call only reaches the entry when the core
+            # aborts; unpacking a nested ``data`` key would be wrong now and was
+            # what hid the nesting defect before.
+            hass.config_entries.async_update_entry(
+                existing_entry, data=updates_to_apply
+            )
 
             # Delete-after-import (update case): STAGED here, executed from the
             # durability gate in async_setup_entry. `async_update_entry` only

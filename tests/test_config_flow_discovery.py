@@ -11,6 +11,7 @@ from collections.abc import Callable, Mapping
 from typing import Any
 
 import pytest
+from homeassistant.config_entries import ConfigEntryState
 from homeassistant.helpers import frame
 
 from custom_components.googlefindmy import config_flow
@@ -327,8 +328,11 @@ def test_async_step_discovery_existing_entry_updates(
             existing_entry=entry,
         )
         assert updates is not None
-        assert updates["data"][CONF_OAUTH_TOKEN] == "aas_et/NEW_TOKEN_VALUE"
-        assert updates["data"].get(DATA_SECRET_BUNDLE) is None
+        # Flat, not ``{"data": ...}``: Home Assistant merges the payload into
+        # ``entry.data`` directly.
+        assert "data" not in updates
+        assert updates[CONF_OAUTH_TOKEN] == "aas_et/NEW_TOKEN_VALUE"
+        assert updates.get(DATA_SECRET_BUNDLE) is None
 
         abort_calls: list[dict[str, Any] | None] = []
         recorded_forms = record_flow_forms(flow)
@@ -352,8 +356,9 @@ def test_async_step_discovery_existing_entry_updates(
         assert len(abort_calls) == 1
         payload = abort_calls[0]
         assert payload is not None
-        data_updates = payload.get("data", {}) if isinstance(payload, dict) else {}
-        assert data_updates.get(CONF_OAUTH_TOKEN) == "aas_et/NEW_TOKEN_VALUE"
+        assert isinstance(payload, dict)
+        assert "data" not in payload
+        assert payload.get(CONF_OAUTH_TOKEN) == "aas_et/NEW_TOKEN_VALUE"
         assert recorded_forms == ["discovery"]
         return discovery_form, abort_result, abort_calls, recorded_forms
 
@@ -363,6 +368,135 @@ def test_async_step_discovery_existing_entry_updates(
     assert len(abort_calls) == 1
     assert abort_result["type"] == "abort"
     assert abort_result["reason"] == "already_configured"
+
+
+def test_discovery_confirmation_replaces_credentials_in_entry_data(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Confirming a discovery for a configured account must replace the token.
+
+    Regression guard for the nested-payload defect. ``updates`` used to be
+    ``{"data": {...}}``, but Home Assistant merges the payload *flat*
+    (``data={**entry.data, **updates}``): the stored ``oauth_token`` kept its old
+    value while a stray ``data`` key appeared beside it, and the resulting
+    ``changed=True`` reloaded the entry, so it looked like it had worked.
+
+    The assertions deliberately inspect ``entry.data`` rather than the payload
+    handed to the abort helper. Checking the argument is exactly what let the
+    defect through.
+    """
+
+    async def _fake_pick(
+        hass: Any,
+        email: str,
+        candidates: list[tuple[str, str]],
+        *,
+        secrets_bundle: dict[str, Any] | None = None,
+    ) -> str | None:
+        return candidates[0][1]
+
+    monkeypatch.setattr(config_flow, "async_pick_working_token", _fake_pick)
+
+    class _Entry:
+        def __init__(self) -> None:
+            self.entry_id = "existing-entry"
+            self.unique_id = unique_account_id("existing@example.com")
+            self.data: dict[str, Any] = {
+                CONF_GOOGLE_EMAIL: "existing@example.com",
+                CONF_OAUTH_TOKEN: "aas_et/OLD_TOKEN_VALUE",
+            }
+            self.subentries: dict[str, Any] = {}
+            # Home Assistant's own ``_abort_if_unique_id_configured`` runs here,
+            # so the entry has to answer the attributes that helper reads.
+            self.state = ConfigEntryState.LOADED
+            self.source = "user"
+            self.domain = config_flow.DOMAIN
+
+    entry = _Entry()
+
+    class _ConfigEntries(ConfigEntriesDomainUniqueIdLookupMixin):
+        def __init__(self) -> None:
+            self.reloaded: list[str] = []
+            self.setup_calls: list[str] = []
+            attach_config_entries_flow_manager(self)
+
+        def async_entries(self, domain: str) -> list[Any]:
+            assert domain == config_flow.DOMAIN
+            return [entry]
+
+        def async_update_entry(self, target: Any, **updates: Any) -> bool:
+            # Mirror Home Assistant: the ``data`` keyword replaces the mapping
+            # wholesale; the merge happened in the caller.
+            if "data" in updates:
+                target.data = dict(updates["data"])
+            return True
+
+        def async_reload(self, entry_id: str) -> None:
+            self.reloaded.append(entry_id)
+
+        def async_get_entry(self, entry_id: str) -> Any | None:
+            return entry if entry_id == entry.entry_id else None
+
+        def async_get_subentries(self, entry_id: str) -> list[Any]:
+            return []
+
+        async def async_setup(self, entry_id: str) -> bool:
+            self.setup_calls.append(entry_id)
+            return True
+
+    class _FlowHass:
+        def __init__(self) -> None:
+            prepare_flow_hass_config_entries(
+                self,
+                _ConfigEntries,
+                frame_module=frame,
+            )
+
+    async def _exercise() -> tuple[dict[str, Any], dict[str, Any]]:
+        hass = _FlowHass()
+        flow = config_flow.ConfigFlow()
+        flow.hass = hass  # type: ignore[assignment]
+        flow.context = {}
+        set_config_flow_unique_id(flow, None)
+
+        async def _set_unique_id(
+            value: str, *, raise_on_progress: bool = False
+        ) -> None:
+            set_config_flow_unique_id(flow, value)
+
+        flow.async_set_unique_id = _set_unique_id  # type: ignore[assignment]
+
+        payload = {
+            CONF_GOOGLE_EMAIL: "existing@example.com",
+            "candidate_tokens": ["aas_et/NEW_TOKEN_VALUE"],
+        }
+
+        form = await flow.async_step_discovery(payload)
+        if inspect.isawaitable(form):
+            form = await form
+        assert form["type"] == "form"
+        assert entry.data[CONF_OAUTH_TOKEN] == "aas_et/OLD_TOKEN_VALUE", (
+            "showing the confirmation form must not write anything yet"
+        )
+
+        confirmed = await flow.async_step_discovery({})
+        if inspect.isawaitable(confirmed):
+            confirmed = await confirmed
+        return form, confirmed
+
+    form, confirmed = asyncio.run(_exercise())
+
+    assert form.get("step_id") == "discovery"
+    assert confirmed["type"] == "abort"
+    assert entry.data[CONF_OAUTH_TOKEN] == "aas_et/NEW_TOKEN_VALUE", (
+        "the confirmed discovery must replace the stored credentials"
+    )
+    assert "data" not in entry.data, (
+        "a nested 'data' key inside entry.data is the defect signature"
+    )
+    assert entry.data[CONF_GOOGLE_EMAIL] == "existing@example.com", (
+        "unrelated entry data must survive the merge"
+    )
 
 
 def test_async_step_discovery_update_info_existing_entry(
@@ -439,7 +573,7 @@ def test_async_step_discovery_update_info_existing_entry(
         assert existing_entry is entry
         return (
             {"data": {CONF_OAUTH_TOKEN: "unused"}},
-            {"data": {CONF_OAUTH_TOKEN: "aas_et/UPDATED"}},
+            {CONF_OAUTH_TOKEN: "aas_et/UPDATED"},
         )
 
     monkeypatch.setattr(
