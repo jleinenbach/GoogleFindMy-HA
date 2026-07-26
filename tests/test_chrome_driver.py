@@ -321,6 +321,10 @@ def _clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.delenv("GOOGLEFINDMY_CHROME_PATH", raising=False)
     monkeypatch.delenv("GOOGLEFINDMY_CHROME_VERSION", raising=False)
+    # Neutralize the container signal so the non-container kill/teardown tests
+    # observe the pkill path regardless of the ambient environment; tests that
+    # exercise the container guard set it explicitly.
+    monkeypatch.delenv("GOOGLEFINDMY_CONTAINER_LOGIN", raising=False)
 
 
 # ---------------------------------------------------------------------------
@@ -663,6 +667,82 @@ def test_kill_existing_chrome_processes_windows(
     chrome_driver._kill_existing_chrome_processes()
 
     assert calls == [["taskkill", "/f", "/im", "chrome.exe"]]
+
+
+# ---------------------------------------------------------------------------
+# _is_container_login / container pre-kill + teardown guard (regression)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [("1", True), ("0", False), ("", False), (None, False)],
+)
+def test_is_container_login_reads_env(
+    monkeypatch: pytest.MonkeyPatch, value: str | None, expected: bool
+) -> None:
+    """The container signal is the exact string ``"1"`` in the shared env var."""
+
+    if value is None:
+        monkeypatch.delenv("GOOGLEFINDMY_CONTAINER_LOGIN", raising=False)
+    else:
+        monkeypatch.setenv("GOOGLEFINDMY_CONTAINER_LOGIN", value)
+
+    assert chrome_driver._is_container_login() is expected
+
+
+def test_kill_existing_chrome_processes_skipped_in_container(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression: inside the docker-login container the broad ``pkill -f chrome``
+    must be skipped.
+
+    In the ``selenium/standalone-chrome`` base image ``pkill -f chrome`` matches
+    the Java Selenium Grid node and its exit makes supervisord tear the whole
+    stack down (crash log: ``selenium-standalone (exit status 143)`` ->
+    ``received SIGINT`` -> noVNC/vnc/xvfb stopped). Without the guard this test
+    fails because ``subprocess.run`` is invoked.
+    """
+
+    monkeypatch.setenv("GOOGLEFINDMY_CONTAINER_LOGIN", "1")
+    monkeypatch.setattr(platform, "system", lambda: "Linux")
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda *a, **k: pytest.fail("pkill must not run inside the container"),
+    )
+
+    # Must be a no-op on the kill path (no subprocess call, no raise).
+    chrome_driver._kill_existing_chrome_processes()
+
+
+def test_safe_quit_driver_skips_force_kill_in_container(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression: the teardown ``pkill -f chromedriver`` is skipped in the
+    container too, so it cannot collapse the shared Selenium/noVNC stack; the
+    driver is still quit normally.
+    """
+
+    monkeypatch.setenv("GOOGLEFINDMY_CONTAINER_LOGIN", "1")
+    monkeypatch.setattr(platform, "system", lambda: "Linux")
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda *a, **k: pytest.fail(
+            "chromedriver force-kill must not run inside the container"
+        ),
+    )
+
+    quit_calls = {"n": 0}
+
+    class _Driver:
+        def quit(self) -> None:
+            quit_calls["n"] += 1
+
+    chrome_driver.safe_quit_driver(_Driver())  # type: ignore[arg-type]
+
+    assert quit_calls["n"] == 1
 
 
 # ---------------------------------------------------------------------------

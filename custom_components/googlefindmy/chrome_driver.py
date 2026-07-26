@@ -225,11 +225,37 @@ def get_chrome_version(chrome_path: str, *, prefer_binary: bool = False) -> int 
     return None
 
 
+def _is_container_login() -> bool:
+    """Return True when running inside the docker-login container.
+
+    The entrypoint sets ``GOOGLEFINDMY_CONTAINER_LOGIN=1`` for the standalone
+    login process (``Auth/auth_flow.py`` reads the same signal). Inside the
+    ``selenium/standalone-chrome`` base image the broad process kills below are
+    actively harmful: ``pkill -f chrome`` / ``pkill -f chromedriver`` match on
+    the *full* command line and hit the Java Selenium Grid node (its argv
+    references chrome/chromedriver). That node's unexpected exit makes
+    supervisord tear down the whole stack -- xvfb, vnc and noVNC included --
+    destroying the very display the login needs. undetected-chromedriver manages
+    its own driver lifecycle, so the pre-emptive kill is unnecessary here anyway.
+    """
+    return os.environ.get("GOOGLEFINDMY_CONTAINER_LOGIN") == "1"
+
+
 def _kill_existing_chrome_processes() -> None:
     """Terminate any existing Chrome processes to avoid conflicts.
 
     This helps prevent issues when Chrome is already running or has zombie processes.
     """
+    if _is_container_login():
+        # In the selenium/standalone-chrome image a broad ``pkill -f chrome``
+        # kills the Grid node and collapses the noVNC/X stack (see
+        # _is_container_login). Skip the pre-kill; undetected-chromedriver
+        # cleans up its own driver.
+        LOGGER.debug(
+            "Container login detected; skipping broad Chrome pre-kill to "
+            "preserve the Selenium/noVNC stack."
+        )
+        return
     try:
         if platform.system() == "Windows":
             subprocess.run(
@@ -474,7 +500,16 @@ def safe_quit_driver(driver: RemoteWebDriver | None) -> None:
     finally:
         # Force kill any remaining processes
         try:
-            if platform.system() == "Windows":
+            if _is_container_login():
+                # ``pkill -f chromedriver`` would also match the Selenium Grid
+                # node and tear down the shared noVNC/X stack (see
+                # _is_container_login). ``driver.quit()`` above already released
+                # this driver, so leave the shared container stack alone.
+                LOGGER.debug(
+                    "Container login detected; skipping chromedriver "
+                    "force-kill to preserve the Selenium/noVNC stack."
+                )
+            elif platform.system() == "Windows":
                 subprocess.run(
                     ["taskkill", "/f", "/im", "chromedriver.exe"],
                     capture_output=True,
