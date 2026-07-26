@@ -2561,7 +2561,7 @@ def _async_mark_cleanup_ticket_entry_promised(
     later staging on the same flow can be followed by another call.
 
     No claim of "the last thing this flow does" is made here, and none would
-    hold: ``async_step_discovery`` inspects the ``CREATE_ENTRY`` FlowResult of
+    hold: ``async_step_discovery_confirm`` inspects the ``CREATE_ENTRY`` FlowResult of
     ``async_step_device_selection`` and stages a further job *afterwards*,
     inside the very same flow. Each site that can produce or follow a
     ``CREATE_ENTRY`` therefore marks for itself; what makes that safe is the
@@ -3369,23 +3369,6 @@ class CloudDiscoveryData:
     title: str | None = None
 
 
-def _discovery_payload_equivalent(
-    first: CloudDiscoveryData, second: CloudDiscoveryData
-) -> bool:
-    """Return True when two normalized discovery payloads are equivalent."""
-
-    if first.unique_id != second.unique_id or first.email != second.email:
-        return False
-
-    if first.candidates != second.candidates:
-        return False
-
-    if first.secrets_bundle is None or second.secrets_bundle is None:
-        return first.secrets_bundle is None and second.secrets_bundle is None
-
-    return dict(first.secrets_bundle) == dict(second.secrets_bundle)
-
-
 def _normalize_and_validate_discovery_payload(
     payload: Mapping[str, Any] | None,
 ) -> CloudDiscoveryData:
@@ -3840,7 +3823,6 @@ class ConfigFlow(
         self._subentry_key_service = SERVICE_SUBENTRY_KEY
         self._pending_discovery_payload: CloudDiscoveryData | None = None
         self._pending_discovery_updates: dict[str, Any] | None = None
-        self._discovery_confirm_pending = False
         # Survives _clear_discovery_confirmation_state on purpose: the overwrite
         # question is asked *after* the discovery card has been confirmed and
         # that state torn down.
@@ -4369,7 +4351,6 @@ class ConfigFlow(
         prompt to keep the state machine in sync with subsequent submissions.
         """
 
-        self._discovery_confirm_pending = False
         self._pending_discovery_payload = None
         self._pending_discovery_updates = None
         context = getattr(self, "context", None)
@@ -4404,7 +4385,15 @@ class ConfigFlow(
     async def async_step_discovery(
         self, discovery_info: Mapping[str, Any] | None
     ) -> FlowResult:
-        """Handle cloud-triggered discovery payloads."""
+        """Handle cloud-triggered discovery payloads.
+
+        Entry point only. Home Assistant calls this with the payload; the
+        confirmation the form asks for comes back in
+        :meth:`async_step_discovery_confirm`, because the form carries its own
+        ``step_id``. A step that showed its form under ``step_id="discovery"``
+        would be re-entered *here* on submit and would have to tell a submit
+        apart from a fresh payload by itself.
+        """
 
         context_obj = getattr(self, "context", None)
         context_source: str | None = None
@@ -4421,9 +4410,8 @@ class ConfigFlow(
             payload_keys,
         )
         _LOGGER.debug(
-            "discovery: context_source=%s, pending_confirm=%s, payload_keys=%s",
+            "discovery: context_source=%s, payload_keys=%s",
             context_source,
-            getattr(self, "_discovery_confirm_pending", False),
             payload_keys,
         )
 
@@ -4435,80 +4423,11 @@ class ConfigFlow(
             )
             return await self.async_step_discovery_update_info(discovery_info)
 
-        if self._discovery_confirm_pending:
-            pending_payload = self._pending_discovery_payload
-            is_submission = not discovery_info
-            if (
-                not is_submission
-                and isinstance(discovery_info, Mapping)
-                and pending_payload is not None
-            ):
-                try:
-                    normalized_candidate = _normalize_and_validate_discovery_payload(
-                        discovery_info
-                    )
-                except Exception:  # noqa: BLE001
-                    is_submission = False
-                else:
-                    is_submission = _discovery_payload_equivalent(
-                        normalized_candidate, pending_payload
-                    )
-
-            if not is_submission:
-                self._clear_discovery_confirmation_state()
-            else:
-                updates = self._pending_discovery_updates
-                self._clear_discovery_confirmation_state()
-
-                if updates is not None and pending_payload is not None:
-                    # The account is already configured. Do not write yet: ask
-                    # first, because this replaces working credentials. The old
-                    # behaviour wrote unconditionally and reported
-                    # "already_configured", which said nothing about what had
-                    # happened to the credentials.
-                    self._pending_overwrite_payload = pending_payload
-                    self._pending_overwrite_updates = updates
-                    return await self.async_step_discovery_overwrite()
-
-                result = await self.async_step_device_selection()
-                # Delete-after-import: STAGED here, executed in
-                # async_setup_entry. A CREATE_ENTRY FlowResult is only a
-                # promise: Home Assistant adds the entry afterwards in
-                # ConfigEntriesFlowManager.async_finish_flow, so deleting the
-                # on-disk copies here would drop the credentials before they
-                # are persisted. Aborted device selection stages nothing and
-                # leaves the watched bundles in place so the flow can be
-                # retried. Only the copies the import actually consumed are
-                # removed (see the hook docstring): a co-located bundle of a
-                # different account and a same-account bundle that got fresher
-                # while the user was confirming both survive.
-                if (
-                    isinstance(result, Mapping)
-                    and result.get("type")
-                    == data_entry_flow.FlowResultType.CREATE_ENTRY
-                ):
-                    _async_stage_container_cleanup(
-                        getattr(self, "hass", None),
-                        flow_id=self._async_cleanup_ticket_id(),
-                        unique_id=self.unique_id,
-                        job=PendingContainerCleanup(
-                            imported_stable_key=_stable_key_for_discovery_payload(
-                                pending_payload
-                            ),
-                            imported_digest=_digest_for_discovery_payload(
-                                pending_payload
-                            ),
-                        ),
-                    )
-                    # This staging happens AFTER the CREATE_ENTRY result, so
-                    # the mark the create path set in async_step_device_selection
-                    # predates the ticket this call may just have created. Mark
-                    # again here, at the site that staged last: without it the
-                    # flow removal Home Assistant performs right after
-                    # async_finish_flow drops a ticket that belongs to an entry
-                    # which exists and whose setup may still be retrying.
-                    self._async_mark_own_cleanup_ticket_entry_promised()
-                return result
+        # A fresh payload supersedes a confirmation that is still pending: the
+        # user has not answered the old card, and the new payload is the more
+        # recent truth. Clearing here also drops ``confirm_only`` from the
+        # context, which _set_confirm_only re-arms below for the new card.
+        self._clear_discovery_confirmation_state()
 
         try:
             normalized = _normalize_and_validate_discovery_payload(discovery_info or {})
@@ -4551,12 +4470,81 @@ class ConfigFlow(
         self.context["title_placeholders"] = placeholders
         self._pending_discovery_payload = normalized
         self._pending_discovery_updates = updates
-        self._discovery_confirm_pending = True
         self._set_confirm_only()
         return self.async_show_form(
-            step_id="discovery",
+            step_id="discovery_confirm",
             description_placeholders=placeholders,
         )
+
+    async def async_step_discovery_confirm(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Handle the confirmation of the discovery card.
+
+        Home Assistant routes here because :meth:`async_step_discovery` showed
+        its form under ``step_id="discovery_confirm"``. That is the whole reason
+        this method exists as a step of its own: ``discovery_confirm`` is the
+        name Home Assistant reserves for a discovery confirmation form (and the
+        only one of the two that may carry a translated text), so the submit no
+        longer re-enters the entry point and no longer has to be told apart from
+        an incoming payload.
+        """
+
+        pending_payload = self._pending_discovery_payload
+        updates = self._pending_discovery_updates
+        if pending_payload is None:
+            # No card is pending: the flow was resumed without one, or the
+            # state was cleared by a newer payload. Nothing to confirm.
+            return self.async_abort(reason="invalid_discovery_info")
+
+        self._clear_discovery_confirmation_state()
+
+        if updates is not None:
+            # The account is already configured. Do not write yet: ask
+            # first, because this replaces working credentials. The old
+            # behaviour wrote unconditionally and reported
+            # "already_configured", which said nothing about what had
+            # happened to the credentials.
+            self._pending_overwrite_payload = pending_payload
+            self._pending_overwrite_updates = updates
+            return await self.async_step_discovery_overwrite()
+
+        result = await self.async_step_device_selection()
+        # Delete-after-import: STAGED here, executed in
+        # async_setup_entry. A CREATE_ENTRY FlowResult is only a
+        # promise: Home Assistant adds the entry afterwards in
+        # ConfigEntriesFlowManager.async_finish_flow, so deleting the
+        # on-disk copies here would drop the credentials before they
+        # are persisted. Aborted device selection stages nothing and
+        # leaves the watched bundles in place so the flow can be
+        # retried. Only the copies the import actually consumed are
+        # removed (see the hook docstring): a co-located bundle of a
+        # different account and a same-account bundle that got fresher
+        # while the user was confirming both survive.
+        if (
+            isinstance(result, Mapping)
+            and result.get("type") == data_entry_flow.FlowResultType.CREATE_ENTRY
+        ):
+            _async_stage_container_cleanup(
+                getattr(self, "hass", None),
+                flow_id=self._async_cleanup_ticket_id(),
+                unique_id=self.unique_id,
+                job=PendingContainerCleanup(
+                    imported_stable_key=_stable_key_for_discovery_payload(
+                        pending_payload
+                    ),
+                    imported_digest=_digest_for_discovery_payload(pending_payload),
+                ),
+            )
+            # This staging happens AFTER the CREATE_ENTRY result, so
+            # the mark the create path set in async_step_device_selection
+            # predates the ticket this call may just have created. Mark
+            # again here, at the site that staged last: without it the
+            # flow removal Home Assistant performs right after
+            # async_finish_flow drops a ticket that belongs to an entry
+            # which exists and whose setup may still be retrying.
+            self._async_mark_own_cleanup_ticket_entry_promised()
+        return result
 
     async def async_step_discovery_overwrite(
         self, user_input: dict[str, Any] | None = None
