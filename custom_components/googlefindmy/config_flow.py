@@ -4678,6 +4678,10 @@ class ConfigFlow(
         actually written. The entry can disappear while this form is open, and
         then the guard returns instead of aborting and writes nothing; that
         case continues as a first import of the same credentials.
+
+        Accepting also stages the delete-after-import cleanup of the bundle,
+        exactly as the non-interactive update path does, so an accepted file is
+        eventually consumed instead of being rediscovered on every restart.
         """
 
         payload = self._pending_overwrite_payload
@@ -4709,6 +4713,15 @@ class ConfigFlow(
                 # and then aborted the flow, which is how it signals "this
                 # account is already configured".
                 written = True
+                # The exception skipped the assignment above, so the entry has
+                # to be resolved again -- and deliberately *after* the write,
+                # because the cleanup ticket below needs the entry's fresh
+                # ``modified_at`` as its durability watermark.
+                hass_obj = getattr(self, "hass", None)
+                if hass_obj is not None and hasattr(hass_obj, "config_entries"):
+                    existing_entry = _find_entry_by_email(
+                        cast(HomeAssistant, hass_obj), payload.email
+                    )
 
             if not written:
                 # Returning instead of aborting means the unique-id guard never
@@ -4738,6 +4751,33 @@ class ConfigFlow(
                         _mask_email_for_logs(payload.email),
                     )
                     return self.async_abort(reason="already_configured")
+
+            # Delete-after-import (update case), the same staging the
+            # non-interactive update path performs: STAGED here, executed from
+            # the durability gate in async_setup_entry, which the reload
+            # scheduled above arms. Without it an accepted bundle is never
+            # consumed -- the watcher only remembers it in the process-local
+            # ``_settled_signatures``, so the next Home Assistant restart
+            # rediscovers the unchanged file and asks this very question again,
+            # for good. A declined bundle is deliberately left alone (see the
+            # decline branch above), which is what keeps it available.
+            #
+            # No entry means no watermark, and ``entry=None`` would stage a
+            # *create-path* ticket, i.e. authorise the irreversible delete on
+            # "the file exists" alone. Staging nothing is the fail-safe answer:
+            # the bundle stays on disk and the login container's TTL delete
+            # takes over.
+            if existing_entry is not None:
+                _async_stage_container_cleanup_for(
+                    getattr(self, "hass", None),
+                    flow_id=self._async_cleanup_ticket_id(),
+                    unique_id=getattr(existing_entry, "unique_id", None),
+                    job=PendingContainerCleanup(
+                        imported_stable_key=_stable_key_for_discovery_payload(payload),
+                        imported_digest=_digest_for_discovery_payload(payload),
+                    ),
+                    entry=existing_entry,
+                )
 
             _LOGGER.info(
                 "Discovery for %s confirmed: stored credentials replaced",

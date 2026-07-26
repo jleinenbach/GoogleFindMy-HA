@@ -8,6 +8,7 @@ import inspect
 import json
 import types
 from collections.abc import Callable, Mapping
+from datetime import UTC, datetime
 from typing import Any
 
 import pytest
@@ -417,6 +418,10 @@ async def _prepare_configured_account_flow(
             self.state = ConfigEntryState.LOADED
             self.source = "user"
             self.domain = config_flow.DOMAIN
+            # The durability watermark the delete-after-import ticket is gated
+            # on. Without it the staging drops the job by design, so a stub
+            # lacking it would make the cleanup assertions vacuously pass.
+            self.modified_at = datetime(2026, 1, 1, tzinfo=UTC)
 
     entry = _Entry()
 
@@ -458,6 +463,9 @@ async def _prepare_configured_account_flow(
 
     class _FlowHass:
         def __init__(self) -> None:
+            # The staging area of the delete-after-import tickets lives in
+            # ``hass.data``; a stub without it could not observe them.
+            self.data: dict[str, Any] = {}
             prepare_flow_hass_config_entries(
                 self,
                 _ConfigEntries,
@@ -497,10 +505,12 @@ async def _drive_discovery_overwrite(
     *,
     answer: bool,
     discovery_source: str | None = None,
-) -> tuple[Any, dict[str, Any], dict[str, Any], dict[str, Any]]:
+) -> tuple[Any, dict[str, Any], dict[str, Any], dict[str, Any], Any]:
     """Drive a discovery for an already configured account to ``answer``.
 
-    Returns ``(entry, discovery_card, overwrite_question, result)``.
+    Returns ``(entry, discovery_card, overwrite_question, result, flow)``. The
+    flow comes last so callers that only assert on the outcome can ignore it;
+    the cleanup-staging guards need it to reach ``flow.hass.data``.
     """
 
     entry, flow = await _prepare_configured_account_flow(monkeypatch)
@@ -529,7 +539,7 @@ async def _drive_discovery_overwrite(
     if inspect.isawaitable(result):
         result = await result
 
-    return entry, form, question, result
+    return entry, form, question, result, flow
 
 
 @pytest.mark.asyncio
@@ -545,7 +555,7 @@ async def test_discovery_overwrite_confirmed_replaces_credentials_in_entry_data(
     ``changed=True`` reloaded the entry, so it looked like it had worked.
     """
 
-    entry, form, question, result = await _drive_discovery_overwrite(
+    entry, form, question, result, _flow = await _drive_discovery_overwrite(
         monkeypatch, answer=True
     )
 
@@ -574,7 +584,7 @@ async def test_discovery_overwrite_declined_keeps_stored_credentials(
     the only reason the question is worth asking.
     """
 
-    entry, _form, _question, result = await _drive_discovery_overwrite(
+    entry, _form, _question, result, _flow = await _drive_discovery_overwrite(
         monkeypatch, answer=False
     )
 
@@ -749,7 +759,7 @@ async def test_discovery_from_watched_file_update_still_asks_to_overwrite(
     have silenced exactly this dialog.
     """
 
-    entry, form, question, result = await _drive_discovery_overwrite(
+    entry, form, question, result, _flow = await _drive_discovery_overwrite(
         monkeypatch,
         answer=True,
         discovery_source=config_flow.DISCOVERY_UPDATE_SOURCE,
@@ -759,6 +769,71 @@ async def test_discovery_from_watched_file_update_still_asks_to_overwrite(
     assert question.get("step_id") == "discovery_overwrite"
     assert result["reason"] == "credentials_updated"
     assert entry.data[CONF_OAUTH_TOKEN] == "aas_et/NEW_TOKEN_VALUE"
+
+
+def _staged_cleanup_tickets(flow: Any) -> list[Any]:
+    """Return the delete-after-import tickets staged on ``flow.hass``."""
+
+    bucket = flow.hass.data.get(config_flow.DOMAIN) or {}
+    return list(bucket.get(config_flow.PENDING_CONTAINER_CLEANUP_KEY) or [])
+
+
+@pytest.mark.asyncio
+async def test_discovery_overwrite_confirmed_stages_the_bundle_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An accepted overwrite must consume the bundle that carried it.
+
+    The watcher remembers a processed bundle only in the process-local
+    ``DiscoveryManager._settled_signatures``. Writing the credentials without
+    staging the delete-after-import cleanup therefore ends the question for this
+    Home Assistant run only: the next restart starts with an empty signature
+    set, rediscovers the unchanged file and asks again, forever. The
+    non-interactive update path stages exactly this ticket, and the interactive
+    one has to match it.
+    """
+
+    entry, _form, _question, result, flow = await _drive_discovery_overwrite(
+        monkeypatch, answer=True
+    )
+
+    assert result["reason"] == "credentials_updated"
+
+    tickets = _staged_cleanup_tickets(flow)
+    assert len(tickets) == 1, "the accepted bundle must be staged for deletion"
+    ticket = tickets[0]
+    assert ticket.entry_id == entry.entry_id, (
+        "an update-path ticket names its entry; without that correlation Home "
+        "Assistant's flow removal would discard it right after this abort"
+    )
+    assert ticket.min_modified_at == entry.modified_at, (
+        "the durability watermark is what keeps the delete behind the store save"
+    )
+    assert len(ticket.jobs) == 1
+    assert ticket.jobs[0].imported_stable_key is not None, (
+        "a job without a stable key would not identify the bundle to remove"
+    )
+
+
+@pytest.mark.asyncio
+async def test_discovery_overwrite_declined_keeps_the_bundle_on_disk(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A declined overwrite must leave the file where it is.
+
+    The counter-direction of the guard above: staging the cleanup on both
+    answers would delete the credentials the user just refused to apply, and the
+    refusal only means something as long as the file stays available.
+    """
+
+    _entry, _form, _question, result, flow = await _drive_discovery_overwrite(
+        monkeypatch, answer=False
+    )
+
+    assert result["reason"] == "credentials_kept"
+    assert _staged_cleanup_tickets(flow) == [], (
+        "declining must not schedule the deletion of the declined bundle"
+    )
 
 
 def test_async_step_discovery_update_info_existing_entry(
