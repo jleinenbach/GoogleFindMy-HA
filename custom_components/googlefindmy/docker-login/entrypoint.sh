@@ -320,6 +320,78 @@ function exit_if_terminating {
     exit "${rc}"
   fi
 }
+
+# --- One-click handoff banner (track B) --------------------------------------
+# A function, not an inline block, so the regression test can RUN it against
+# several bind values instead of grepping the script for hopeful substrings.
+#
+# The address printed here must be the one the endpoint is actually published on.
+# That address is decided on the HOST (`ports:` in docker-compose.oneclick.yml,
+# from GFMY_ONECLICK_BIND), so the overlay forwards the variable into the
+# container and this function follows it -- never the other way round, exactly
+# like the noVNC URL follows GFMY_NOVNC_BIND at the top of this file. Printing a
+# fixed 127.0.0.1 next to a widened publish is not a cosmetic mismatch: it is the
+# one field the operator types into Home Assistant.
+function print_oneclick_banner {
+  local bind bare loopback
+  bind="${GFMY_ONECLICK_BIND:-127.0.0.1}"
+  # An empty value means "nobody set it": Compose interpolates its own
+  # `:-127.0.0.1` default in that case, so loopback is what actually gets bound.
+  [ -n "${bind}" ] || bind="127.0.0.1"
+  # Strip one enclosing IPv6 bracket pair ("[::1]" -> "::1") before classifying,
+  # mirroring the noVNC derivation above; the brackets stay in what we print,
+  # because that is the form a URL/host field needs.
+  bare="${bind#[}"
+  bare="${bare%]}"
+  case "${bare}" in
+    127.* | ::1 | localhost) loopback=1 ;;
+    *) loopback=0 ;;
+  esac
+
+  echo ""
+  echo "=================================================================="
+  echo "[entrypoint] ONE-CLICK login ready. In Home Assistant choose the"
+  echo "[entrypoint] 'Container login' auth method and enter:"
+  echo "[entrypoint]     host: ${bind}   port: 7901"
+  echo "[entrypoint]     pairing code: ${GFMY_PAIRING_CODE}"
+  echo "[entrypoint]"
+  if [ "${loopback}" -eq 1 ]; then
+    echo "[entrypoint] That address is the loopback of the DOCKER HOST, not of Home"
+    echo "[entrypoint] Assistant. It works when Home Assistant shares this host's"
+    echo "[entrypoint] network namespace (HAOS, HA Core, network_mode: host). A Home"
+    echo "[entrypoint] Assistant in its own BRIDGED container cannot reach it: there,"
+    echo "[entrypoint] 127.0.0.1 is the HA container itself. Three ways out:"
+    echo "[entrypoint]   * put both containers on one Docker network (the launcher"
+    echo "[entrypoint]     needs --use-aliases for the name to resolve) and enter this"
+    echo "[entrypoint]     container's service name here instead;"
+    echo "[entrypoint]   * skip the port and let Home Assistant import the file"
+    echo "[entrypoint]     docker-login/data/secrets.json, which it does on its own;"
+    echo "[entrypoint]   * publish on a LAN address of this host and enter that:"
+    echo "[entrypoint]     GFMY_ONECLICK_BIND=<ADDRESS> GFMY_ONECLICK=1 bash login.sh"
+    echo "[entrypoint] From another machine you can also tunnel:"
+    echo "[entrypoint]   ssh -L 7901:127.0.0.1:7901 <host>"
+    echo "[entrypoint] but only if the tunnel's local end sits inside the network"
+    echo "[entrypoint] namespace Home Assistant itself uses."
+  else
+    echo "[entrypoint] That address is reachable beyond this host, and this endpoint"
+    echo "[entrypoint] serves your Google credentials UNENCRYPTED (plain http). Use it"
+    echo "[entrypoint] inside a trusted LAN or on this host only, and only for the few"
+    echo "[entrypoint] seconds the handoff takes -- never across the internet. What"
+    echo "[entrypoint] guards it meanwhile: the one-time pairing code above, a"
+    echo "[entrypoint] 300-second expiry, a single successful fetch, and a lockout"
+    echo "[entrypoint] after five wrong codes."
+  fi
+  echo "[entrypoint]"
+  echo "[entrypoint] If Home Assistant cannot reach the port, the host publish is"
+  echo "[entrypoint] missing: 7901 is an OPT-IN overlay so that a busy port never"
+  echo "[entrypoint] blocks the file/cleartext tracks. The launcher adds it for you"
+  echo "[entrypoint] (GFMY_ONECLICK=1 bash login.sh); a manual run needs it spelled out:"
+  echo "[entrypoint]   docker compose -f docker-compose.yml -f docker-compose.oneclick.yml \\"
+  echo "[entrypoint]     run --build --service-ports --rm googlefindmy-login"
+  echo "=================================================================="
+  echo ""
+}
+
 trap cleanup EXIT
 trap 'on_signal TERM 143' TERM
 trap 'on_signal INT 130' INT
@@ -444,22 +516,7 @@ if [ "${_rc}" -eq 0 ] && [ "${GFMY_ONECLICK:-}" = "1" ] && [ -f "${_secrets_path
   # prominently; only the code is shown, never the token/bundle.
   GFMY_PAIRING_CODE="$(python3 -c 'import secrets;print(secrets.token_urlsafe(16))')"
   export GFMY_PAIRING_CODE GOOGLEFINDMY_SECRETS_PATH="${_secrets_path}"
-  echo ""
-  echo "=================================================================="
-  echo "[entrypoint] ONE-CLICK login ready. In Home Assistant choose the"
-  echo "[entrypoint] 'Container login' auth method and enter:"
-  echo "[entrypoint]     host: 127.0.0.1   port: 7901"
-  echo "[entrypoint]     pairing code: ${GFMY_PAIRING_CODE}"
-  echo "[entrypoint] (From another machine, tunnel: ssh -L 7901:127.0.0.1:7901 <host>)"
-  echo "[entrypoint]"
-  echo "[entrypoint] If Home Assistant cannot reach the port, the host publish is"
-  echo "[entrypoint] missing: 7901 is an OPT-IN overlay so that a busy port never"
-  echo "[entrypoint] blocks the file/cleartext tracks. The launcher adds it for you"
-  echo "[entrypoint] (GFMY_ONECLICK=1 bash login.sh); a manual run needs it spelled out:"
-  echo "[entrypoint]   docker compose -f docker-compose.yml -f docker-compose.oneclick.yml \\"
-  echo "[entrypoint]     run --build --service-ports --rm googlefindmy-login"
-  echo "=================================================================="
-  echo ""
+  print_oneclick_banner
   # Backgrounded and tracked, for the SAME reason main.py is (see the launch
   # comment above): with a FOREGROUND server bash would defer its TERM/INT traps
   # for up to the full TTL, so a `docker stop` during the wait would hit SIGKILL

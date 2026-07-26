@@ -58,6 +58,15 @@ services:
       # Adding this overlay IS the opt-in, so one-click defaults to ON here;
       # an explicit GFMY_ONECLICK from your shell still wins.
       GFMY_ONECLICK: "${GFMY_ONECLICK:-1}"
+      # The host bind of the token port, forwarded for the SAME reason
+      # docker-compose.yml forwards GFMY_NOVNC_BIND: a bare `docker compose run`
+      # does not hand the launcher's shell environment to the container, and the
+      # `ports:` entry below is read by COMPOSE ON THE HOST, never by the
+      # container. Without this line the entrypoint would have to guess, and it
+      # would guess "127.0.0.1" -- printing a handoff address that a widened run
+      # does not serve on, while the launcher printed the real one. Same value,
+      # same default, one truth. It is an address only; it grants nothing.
+      GFMY_ONECLICK_BIND: "${GFMY_ONECLICK_BIND:-}"
     ports:
       # Merged onto (not replacing) the base file's noVNC publish. Three-part
       # mapping HOST_IP:HOST_PORT:CONTAINER_PORT; the leading host address is the

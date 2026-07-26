@@ -1688,6 +1688,7 @@ def _run_handoff_section(
         f"{_extract_shell_function(entrypoint, 'on_signal')}\n"
         f"{_extract_shell_function(entrypoint, 'wait_for_tracked_child')}\n"
         f"{_extract_shell_function(entrypoint, 'exit_if_terminating')}\n"
+        f"{_extract_shell_function(entrypoint, 'print_oneclick_banner')}\n"
     )
     proc = subprocess.run(
         ["bash", "-c", preamble + script],
@@ -3078,3 +3079,155 @@ def test_entrypoint_derivation_never_overrides_a_launcher_verdict() -> None:
     )
     assert out["HARDEN"] == "1", "launcher HARDEN verdict must be preserved"
     assert out["TLS"] == "", "launcher --no-tls (TLS empty) must not be overridden to 1"
+
+
+# --- One-click handoff banner (track B): the address the operator types in -----
+#
+# The banner is the last thing the login prints and the only place the operator
+# reads the host/port/pairing triple from. Until the bind became configurable it
+# printed a literal ``127.0.0.1``; with GFMY_ONECLICK_BIND that literal becomes a
+# claim the run does not keep. These tests run the REAL banner function out of
+# entrypoint.sh, so they regress with the script instead of drifting away from it.
+
+
+def _run_oneclick_banner(bind: str | None) -> str:
+    """Execute the real ``print_oneclick_banner`` with a given published bind."""
+
+    banner = _extract_shell_function(_read("entrypoint.sh"), "print_oneclick_banner")
+    env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "GFMY_PAIRING_CODE": "CODE"}
+    if bind is not None:
+        env["GFMY_ONECLICK_BIND"] = bind
+    proc = subprocess.run(  # noqa: S603 - fixed argv, no shell
+        ["bash", "-c", f"set -e\n{banner}\nprint_oneclick_banner\n"],
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=30,
+        check=False,
+    )
+    assert proc.returncode == 0, f"banner failed: {proc.stderr!r}"
+    return proc.stdout
+
+
+@pytest.mark.parametrize(
+    ("bind", "expected"),
+    [
+        (None, "127.0.0.1"),  # unset -> Compose's own :-127.0.0.1 default
+        ("", "127.0.0.1"),  # empty -> same, an empty value widens nothing
+        ("127.0.0.1", "127.0.0.1"),
+        ("192.168.1.21", "192.168.1.21"),
+        ("[::1]", "[::1]"),  # brackets kept: that is the form a host field needs
+    ],
+)
+def test_oneclick_banner_prints_the_address_it_is_published_on(
+    bind: str | None, expected: str
+) -> None:
+    """The banner must follow the publish, never assert an address of its own.
+
+    The host part of the publish comes from GFMY_ONECLICK_BIND (see the overlay's
+    ``ports:``). A hard-coded 127.0.0.1 in the banner is not a cosmetic mismatch:
+    it is the single field the operator copies into Home Assistant, so on a widened
+    run it sends them to an address that serves nothing while the launcher printed
+    the real one two screens earlier.
+    """
+
+    host_lines = [ln for ln in _run_oneclick_banner(bind).splitlines() if "host:" in ln]
+    assert len(host_lines) == 1, f"expected exactly one host line, got {host_lines!r}"
+    assert f"host: {expected}   port: 7901" in host_lines[0], (
+        f"with GFMY_ONECLICK_BIND={bind!r} the banner must offer {expected!r}; "
+        f"printed {host_lines[0]!r}."
+    )
+
+
+def test_oneclick_banner_names_the_bridged_home_assistant_case() -> None:
+    """On the loopback default the banner must say WHOSE loopback it is.
+
+    ``127.0.0.1`` inside a bridged Home Assistant container points at that
+    container, not at the Docker host, so the published port is unreachable there.
+    ``config_flow.py``'s data_description and the README both spell this out; the
+    banner used to print the address with no caveat at all, which is where the
+    operator actually is when they need it.
+    """
+
+    out = _run_oneclick_banner("127.0.0.1")
+
+    assert "DOCKER HOST" in out, "the banner must say whose loopback this is"
+    assert "BRIDGED" in out, (
+        "the banner must name the bridged Home Assistant case, the one deployment "
+        "for which the printed address does not work"
+    )
+    # All three documented ways out, so the caveat is actionable rather than a dead end.
+    assert "Docker network" in out, "the shared-network route must be offered"
+    assert "docker-login/data/secrets.json" in out, "the file handoff must be offered"
+    assert "GFMY_ONECLICK_BIND=<ADDRESS>" in out, "the LAN bind must be offered"
+    # The tunnel hint survives, with the precision the README carries (383-384).
+    assert "ssh -L 7901:127.0.0.1:7901" in out, "the tunnel hint must not be lost"
+    assert "namespace Home Assistant itself uses" in out, (
+        "the tunnel only helps when its local end sits in HA's network namespace; "
+        "without that sentence it reads as a fix for the bridged case, which it is not"
+    )
+
+
+def test_oneclick_banner_warns_about_clear_text_on_a_widened_bind() -> None:
+    """A non-loopback publish must carry the clear-text warning, in the banner too.
+
+    The endpoint serves the freshly minted Google credentials over plain http; the
+    HA client has no TLS counterpart to noVNC's. While the publish was pinned to
+    loopback that was harmless because the bytes never left the machine. Once it can
+    leave, saying so is the whole mitigation -- and it has to be said where the
+    operator is, not only in the launcher output they scrolled past.
+    """
+
+    out = _run_oneclick_banner("192.168.1.21")
+
+    assert "192.168.1.21" in out
+    assert "UNENCRYPTED" in out, "a widened bind must be called out as clear text"
+    for phrase in ("trusted LAN", "seconds the handoff takes"):
+        assert phrase in out, f"the widened-bind warning must state: {phrase!r}"
+    # The loopback caveat must NOT appear here: it would contradict the address printed.
+    assert "BRIDGED" not in out, (
+        "the bridged-loopback caveat belongs to the loopback branch only; printing "
+        "it next to a LAN address tells the operator their working address is wrong"
+    )
+
+
+def test_oneclick_overlay_forwards_the_bind_into_the_container() -> None:
+    """The banner can only follow the publish if the value crosses the boundary.
+
+    ``ports:`` is read by Compose ON THE HOST, and a bare ``docker compose run``
+    does not hand the launcher's shell environment to the container. Without this
+    passthrough the entrypoint would fall back to 127.0.0.1 and print it -- the
+    exact mismatch the banner tests above forbid. Same reasoning, and the same
+    ``:-`` default, as GFMY_NOVNC_BIND in docker-compose.yml.
+    """
+
+    overlay = yaml.safe_load(_read(ONECLICK_COMPOSE))
+    env = overlay["services"][LOGIN_SERVICE].get("environment", {})
+    assert env.get("GFMY_ONECLICK_BIND") == "${GFMY_ONECLICK_BIND:-}", (
+        f"{ONECLICK_COMPOSE} must forward GFMY_ONECLICK_BIND to the container as "
+        f"'${{GFMY_ONECLICK_BIND:-}}' (found {env.get('GFMY_ONECLICK_BIND')!r}), so "
+        "the banner names the address the port is really published on. The empty "
+        "default keeps the container's own 127.0.0.1 fallback in charge; a literal "
+        "default here would be a second place to forget when the first one changes."
+    )
+
+
+def test_oneclick_banner_is_wired_into_the_track_b_block() -> None:
+    """A perfect banner nobody calls is worth nothing.
+
+    Pins the call site itself: exactly one invocation, inside the GFMY_ONECLICK
+    gate, and after the pairing code exists (the banner prints it).
+    """
+
+    code = _code_lines(_read("entrypoint.sh"))
+    calls = [i for i, ln in enumerate(code) if ln.strip() == "print_oneclick_banner"]
+    assert len(calls) == 1, f"expected exactly one banner call, found {len(calls)}"
+    preceding = "\n".join(code[: calls[0]])
+    assert 'GFMY_PAIRING_CODE="$(python3' in preceding, (
+        "the banner must run after the pairing code is minted, else it prints an "
+        "empty code line"
+    )
+    assert '[ "${GFMY_ONECLICK:-}" = "1" ]' in preceding, (
+        "the banner must stay inside the track B gate: printing a handoff address "
+        "for a port that was never published would send the operator nowhere"
+    )
