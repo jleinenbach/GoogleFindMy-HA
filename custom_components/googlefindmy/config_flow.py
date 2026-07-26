@@ -101,6 +101,7 @@ except ImportError:  # Pre-2025.5 HA builds do not expose the helper.
     OperationNotAllowed = type("OperationNotAllowed", (HomeAssistantError,), {})
 
 from .const import (
+    CLOUD_SCANNER_DISCOVERY_SOURCE,
     CONF_GOOGLE_EMAIL,
     CONF_OAUTH_TOKEN,
     CONFIG_ENTRY_VERSION,
@@ -3367,6 +3368,36 @@ class CloudDiscoveryData:
     candidates: tuple[tuple[str, str], ...]
     secrets_bundle: Mapping[str, Any] | None
     title: str | None = None
+    # Which producer assembled the payload (``discovery_source``). Kept because
+    # the flow context does not survive as a discriminator: discovery.py
+    # downgrades every non-Home-Assistant source to plain ``discovery``, so the
+    # tracker rescan and a genuine credential import arrive indistinguishable
+    # unless the payload itself says who sent it. ``None`` means the payload
+    # carried no marker, which is treated as a credential import: asking one
+    # question too many beats replacing working credentials unasked.
+    source: str | None = None
+
+
+def _is_credential_import_discovery(discovery: CloudDiscoveryData) -> bool:
+    """Return True when the payload represents credentials someone supplied.
+
+    Only such a payload may raise the overwrite question, because only there is
+    a human waiting who meant to replace something. The tracker rescan in
+    ``device_tracker.py`` re-submits the credentials the entry already stores;
+    asking whether to replace them with themselves would be a dialog about
+    nothing.
+
+    The flow context cannot answer this: ``discovery.py`` downgrades every source
+    that is not a Home Assistant ``SOURCE_*`` constant to plain ``discovery``,
+    and the file watcher's own ``discovery_update_info`` is downgraded the same
+    way, so both producers arrive under an identical context source. Hence the
+    check reads the payload marker.
+
+    An unmarked payload counts as an import: replacing working credentials
+    unasked is the worse failure, so an unknown producer gets the question.
+    """
+
+    return discovery.source != CLOUD_SCANNER_DISCOVERY_SOURCE
 
 
 def _discovery_payload_equivalent(
@@ -3482,12 +3513,14 @@ def _normalize_and_validate_discovery_payload(
     if unique_id is None:
         raise DiscoveryFlowError("invalid_discovery_info")
 
+    source = payload_dict.get("discovery_source")
     return CloudDiscoveryData(
         email=email_candidate,
         unique_id=unique_id,
         candidates=tuple(candidates),
         secrets_bundle=secrets_bundle,
         title=str(title) if isinstance(title, str) else None,
+        source=source if isinstance(source, str) and source else None,
     )
 
 
@@ -4461,14 +4494,35 @@ class ConfigFlow(
                 self._clear_discovery_confirmation_state()
 
                 if updates is not None and pending_payload is not None:
-                    # The account is already configured. Do not write yet: ask
-                    # first, because this replaces working credentials. The old
-                    # behaviour wrote unconditionally and reported
-                    # "already_configured", which said nothing about what had
-                    # happened to the credentials.
-                    self._pending_overwrite_payload = pending_payload
-                    self._pending_overwrite_updates = updates
-                    return await self.async_step_discovery_overwrite()
+                    if _is_credential_import_discovery(pending_payload):
+                        # The account is already configured and a human just
+                        # supplied credentials. Do not write yet: ask first,
+                        # because this replaces working credentials. The old
+                        # behaviour wrote unconditionally and reported
+                        # "already_configured", which said nothing about what
+                        # had happened to the credentials.
+                        self._pending_overwrite_payload = pending_payload
+                        self._pending_overwrite_updates = updates
+                        return await self.async_step_discovery_overwrite()
+
+                    # A tracker rescan re-submits the credentials the entry
+                    # already stores. There is nothing to replace and nobody to
+                    # ask, so this keeps the pre-existing behaviour: apply the
+                    # payload and abort as already configured.
+                    _LOGGER.debug(
+                        "Discovery from %s for a configured account: "
+                        "applying updates without asking",
+                        pending_payload.source,
+                    )
+                    try:
+                        await self._async_prepare_account_context(
+                            email=pending_payload.email,
+                            preferred_unique_id=pending_payload.unique_id,
+                            updates=updates,
+                        )
+                    except data_entry_flow.AbortFlow:
+                        return self.async_abort(reason="already_configured")
+                    return self.async_abort(reason="already_configured")
 
                 result = await self.async_step_device_selection()
                 # Delete-after-import: STAGED here, executed in

@@ -381,16 +381,15 @@ def test_async_step_discovery_existing_entry_updates(
     assert abort_result["reason"] == "credentials_updated"
 
 
-async def _drive_discovery_overwrite(
-    monkeypatch: pytest.MonkeyPatch, *, answer: bool
-) -> tuple[Any, dict[str, Any], dict[str, Any], dict[str, Any]]:
-    """Drive a discovery for an already configured account to ``answer``.
+async def _prepare_configured_account_flow(
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[Any, Any]:
+    """Return ``(entry, flow)`` for an account that is already configured.
 
-    Returns ``(entry, discovery_card, overwrite_question, result)``. The entry is
-    a live object: the manager stub applies ``async_update_entry`` to it, so the
-    callers can assert on ``entry.data`` instead of on the payload handed to the
-    abort helper. Checking the argument is exactly what let the nested-payload
-    defect through.
+    The entry is a live object: the manager stub applies ``async_update_entry``
+    to it, so callers can assert on ``entry.data`` instead of on the payload
+    handed to the abort helper. Checking the argument is exactly what let the
+    nested-payload defect through.
     """
 
     async def _fake_pick(
@@ -470,10 +469,36 @@ async def _drive_discovery_overwrite(
 
     flow.async_set_unique_id = _set_unique_id  # type: ignore[assignment]
 
-    payload = {
+    return entry, flow
+
+
+def _discovery_payload_for_configured_account(
+    discovery_source: str | None = None,
+) -> dict[str, Any]:
+    """Return a discovery payload carrying fresh credentials for that account."""
+
+    payload: dict[str, Any] = {
         CONF_GOOGLE_EMAIL: "existing@example.com",
         "candidate_tokens": ["aas_et/NEW_TOKEN_VALUE"],
     }
+    if discovery_source is not None:
+        payload["discovery_source"] = discovery_source
+    return payload
+
+
+async def _drive_discovery_overwrite(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    answer: bool,
+    discovery_source: str | None = None,
+) -> tuple[Any, dict[str, Any], dict[str, Any], dict[str, Any]]:
+    """Drive a discovery for an already configured account to ``answer``.
+
+    Returns ``(entry, discovery_card, overwrite_question, result)``.
+    """
+
+    entry, flow = await _prepare_configured_account_flow(monkeypatch)
+    payload = _discovery_payload_for_configured_account(discovery_source)
 
     form = await flow.async_step_discovery(payload)
     if inspect.isawaitable(form):
@@ -555,6 +580,73 @@ async def test_discovery_overwrite_declined_keeps_stored_credentials(
         "declining must leave the stored credentials untouched"
     )
     assert "data" not in entry.data
+
+
+@pytest.mark.asyncio
+async def test_discovery_from_tracker_rescan_does_not_ask_to_overwrite(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A tracker rescan must not raise the overwrite question.
+
+    ``device_tracker.py`` re-submits the credentials the entry already stores
+    whenever it spots new trackers. Asking whether to replace them with
+    themselves would be a dialog about nothing, and its text would claim a
+    credentials file had been found when none was. The context source cannot
+    tell the producers apart (``discovery.py`` downgrades every non-Home-
+    Assistant source to plain ``discovery``), so the payload marker decides.
+    """
+
+    entry, flow = await _prepare_configured_account_flow(monkeypatch)
+    payload = _discovery_payload_for_configured_account(
+        config_flow.CLOUD_SCANNER_DISCOVERY_SOURCE
+    )
+
+    form = await flow.async_step_discovery(payload)
+    if inspect.isawaitable(form):
+        form = await form
+    assert form["type"] == "form"
+
+    result = await flow.async_step_discovery({})
+    if inspect.isawaitable(result):
+        result = await result
+
+    assert result["type"] == "abort", (
+        "a rescan of an already configured account must not open a dialog"
+    )
+    assert result.get("step_id") != "discovery_overwrite"
+    assert result["reason"] == "already_configured", (
+        "the rescan keeps the abort behaviour it had before the dialog existed"
+    )
+    assert entry.data[CONF_OAUTH_TOKEN] == "aas_et/NEW_TOKEN_VALUE", (
+        "the rescan still applies its payload, exactly as it did before"
+    )
+    assert "data" not in entry.data
+
+
+@pytest.mark.asyncio
+async def test_discovery_from_watched_file_update_still_asks_to_overwrite(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The real credential import must keep the question.
+
+    This is the case the dialog exists for: the file watcher spots a fresh
+    ``secrets.json`` for an account that is already configured. It marks such a
+    payload ``discovery_update_info``, which Home Assistant does not know as a
+    source, so the flow arrives here under the ordinary ``discovery`` context
+    just like a rescan does. Gating on the context instead of the payload would
+    have silenced exactly this dialog.
+    """
+
+    entry, form, question, result = await _drive_discovery_overwrite(
+        monkeypatch,
+        answer=True,
+        discovery_source=config_flow.DISCOVERY_UPDATE_SOURCE,
+    )
+
+    assert form.get("step_id") == "discovery"
+    assert question.get("step_id") == "discovery_overwrite"
+    assert result["reason"] == "credentials_updated"
+    assert entry.data[CONF_OAUTH_TOKEN] == "aas_et/NEW_TOKEN_VALUE"
 
 
 def test_async_step_discovery_update_info_existing_entry(
