@@ -147,6 +147,7 @@ from .const import (
     OPT_SPEED_GATE_ENABLED,
     OPT_STALE_THRESHOLD,
     OPTION_KEYS,
+    OPTIONAL_CREDENTIAL_KEYS,
     SECRETS_EXTRA_WATCH_PATHS,
     SERVICE_FEATURE_PLATFORMS,
     SERVICE_SUBENTRY_KEY,
@@ -3289,7 +3290,13 @@ def _find_entry_by_email(hass: HomeAssistant, email: str) -> ConfigEntry | None:
 #: merge cannot do on its own -- hence the full-data payload built by
 #: :func:`_merge_credential_updates`, and hence the absence check in
 #: :func:`_entry_carries_credentials`.
-_OPTIONAL_CREDENTIAL_KEYS: Final = (DATA_SECRET_BUNDLE, DATA_AAS_TOKEN)
+#:
+#: The removal has a second, deferred half: the entry-scoped token cache mirrors
+#: these keys, and ``async_setup_entry`` would seed a removed one straight back
+#: from that mirror. It therefore reads the same constant from ``const.py``,
+#: which is the single source of truth for both halves -- a local copy here and
+#: a local copy there is precisely how the two could drift apart.
+_OPTIONAL_CREDENTIAL_KEYS: Final = OPTIONAL_CREDENTIAL_KEYS
 
 
 def _entry_carries_credentials(entry: ConfigEntry, updates: Mapping[str, Any]) -> bool:

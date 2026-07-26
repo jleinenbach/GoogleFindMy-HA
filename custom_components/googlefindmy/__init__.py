@@ -189,6 +189,7 @@ from .const import (
     OPT_MIN_POLL_INTERVAL,
     OPT_OPTIONS_SCHEMA_VERSION,
     OPTION_KEYS,
+    OPTIONAL_CREDENTIAL_KEYS,
     SERVICE_DEVICE_TRANSLATION_KEY,
     SERVICE_FEATURE_PLATFORMS,
     SERVICE_SUBENTRY_KEY,
@@ -7431,17 +7432,59 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
     aas_token_entry = entry.data.get(DATA_AAS_TOKEN)
     google_email = entry.data.get(CONF_GOOGLE_EMAIL)
 
+    # The entry is the source of truth for credentials; the cache is a mirror of
+    # them. Recovering a value from the cache is therefore only right where the
+    # entry carries no credentials at all, which is the gap this seed was built
+    # for: a migrated installation whose credentials never reached entry.data.
+    #
+    # Where the entry does carry credentials, a *missing* optional key is a
+    # statement rather than a gap. Whoever replaced the credentials -- the
+    # discovery overwrite, the watched-file import, reauth, the options login --
+    # left the key out because the new ones no longer come with a bundle or an
+    # ``aas_et/`` token, and a flat merge cannot express that any other way.
+    # Recovering it here would hand the integration back exactly the credentials
+    # the user just replaced, so it is dropped from the cache instead: not
+    # merely skipped, because the cache-first fallbacks elsewhere (see
+    # _collect_entry_credential_tokens) would otherwise keep finding it. This
+    # mirrors what _async_seed_manual_credentials has long done for a superseded
+    # AAS token; the bundle branch below simply had no counterpart.
+    #
+    # Only the keys the entry mirrors are dropped. Material derived from a
+    # bundle (owner_key, shared_key, fcm_credentials) belongs to the same
+    # account, is refreshed in place, and stays.
+    entry_carries_credentials = bool(secrets_data or oauth_token or aas_token_entry)
+
     cache_snapshot: Mapping[str, Any] | None = None
     try:
         cache_snapshot = await cache.all()
     except Exception as err:  # pragma: no cover - defensive cache read
         _LOGGER.debug("[%s] TokenCache snapshot read failed: %s", entry.entry_id, err)
 
-    if not secrets_data and cache_snapshot:
+    if entry_carries_credentials:
+        for key in OPTIONAL_CREDENTIAL_KEYS:
+            if entry.data.get(key):
+                continue
+            if not cache_snapshot or not cache_snapshot.get(key):
+                continue
+            try:
+                await cache.async_set_cached_value(key, None)
+            except Exception as err:  # pragma: no cover - defensive cache write
+                _LOGGER.debug(
+                    "[%s] Dropping superseded cached credential '%s' failed: %s",
+                    entry.entry_id,
+                    key,
+                    err,
+                )
+            else:
+                _LOGGER.debug(
+                    "[%s] Dropped superseded cached credential '%s'; the entry "
+                    "no longer carries it",
+                    entry.entry_id,
+                    key,
+                )
+    elif cache_snapshot:
         secrets_data = cache_snapshot.get(DATA_SECRET_BUNDLE)
-    if not oauth_token and cache_snapshot:
         oauth_token = cache_snapshot.get(CONF_OAUTH_TOKEN)
-    if not aas_token_entry and cache_snapshot:
         aas_token_entry = cache_snapshot.get(DATA_AAS_TOKEN)
 
     if secrets_data:
@@ -8168,7 +8211,14 @@ async def _async_seed_manual_credentials(
     aas_token_entry: str | None,
     google_email: str,
 ) -> None:
-    """Persist manual credential updates and clear stale AAS tokens when absent."""
+    """Persist manual credential updates and clear stale AAS tokens when absent.
+
+    The clearing below is now the second line of defence: the credential seed in
+    :func:`async_setup_entry` already drops a cached AAS token that the entry no
+    longer carries, for the bundle branch as well as this one. Keeping it here is
+    deliberate -- this helper is also the surface a caller reaches directly, and
+    ``cache.set(key, None)`` on an already absent key is a no-op.
+    """
 
     token_to_save = oauth_token or aas_token_entry
     if isinstance(token_to_save, str) and token_to_save:

@@ -54,7 +54,16 @@ This is architecturally an **AAS regeneration** triggered from the ADM layer. It
 | Layer | HA mode | Standalone CLI (`main.py`) |
 |-------|---------|----------------------------|
 | **Volatile** | `TokenCache` (in-memory dict) | `_FileCache._data` (in-memory dict) |
-| **Persistent** | `entry.data` (HA database) — survives `cache.set(key, None)` and is re-seeded on every restart (`__init__.py:6897-6901`) | `secrets.json` — **only store**; a naive `set(key, None)` would permanently delete the value |
+| **Persistent** | `entry.data` (HA database) — survives `cache.set(key, None)` and is re-seeded on every restart (credential seed in `__init__.async_setup_entry`) | `secrets.json` — **only store**; a naive `set(key, None)` would permanently delete the value |
+
+The seed runs in one direction only, and deliberately so: `entry.data` is the
+source of truth, the cache is its mirror. A credential key the entry *lacks* is
+therefore not recovered from the cache but dropped from it, because credentials
+that replace older ones express "this account has no bundle / no AAS token any
+more" by leaving the key out (`const.OPTIONAL_CREDENTIAL_KEYS`, written by
+`config_flow._merge_credential_updates`). The one exception is an entry that
+carries no credentials at all: that is the migration gap the seed exists for, and
+there the cache is read back in full.
 
 ### Soft invalidation (standalone)
 
