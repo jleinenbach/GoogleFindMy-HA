@@ -381,7 +381,7 @@ def test_async_step_discovery_existing_entry_updates(
     assert abort_result["reason"] == "credentials_updated"
 
 
-def _drive_discovery_overwrite(
+async def _drive_discovery_overwrite(
     monkeypatch: pytest.MonkeyPatch, *, answer: bool
 ) -> tuple[Any, dict[str, Any], dict[str, Any], dict[str, Any]]:
     """Drive a discovery for an already configured account to ``answer``.
@@ -459,54 +459,50 @@ def _drive_discovery_overwrite(
                 frame_module=frame,
             )
 
-    async def _exercise() -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
-        hass = _FlowHass()
-        flow = config_flow.ConfigFlow()
-        flow.hass = hass  # type: ignore[assignment]
-        flow.context = {}
-        set_config_flow_unique_id(flow, None)
+    hass = _FlowHass()
+    flow = config_flow.ConfigFlow()
+    flow.hass = hass  # type: ignore[assignment]
+    flow.context = {}
+    set_config_flow_unique_id(flow, None)
 
-        async def _set_unique_id(
-            value: str, *, raise_on_progress: bool = False
-        ) -> None:
-            set_config_flow_unique_id(flow, value)
+    async def _set_unique_id(value: str, *, raise_on_progress: bool = False) -> None:
+        set_config_flow_unique_id(flow, value)
 
-        flow.async_set_unique_id = _set_unique_id  # type: ignore[assignment]
+    flow.async_set_unique_id = _set_unique_id  # type: ignore[assignment]
 
-        payload = {
-            CONF_GOOGLE_EMAIL: "existing@example.com",
-            "candidate_tokens": ["aas_et/NEW_TOKEN_VALUE"],
-        }
+    payload = {
+        CONF_GOOGLE_EMAIL: "existing@example.com",
+        "candidate_tokens": ["aas_et/NEW_TOKEN_VALUE"],
+    }
 
-        form = await flow.async_step_discovery(payload)
-        if inspect.isawaitable(form):
-            form = await form
-        assert form["type"] == "form"
-        assert entry.data[CONF_OAUTH_TOKEN] == "aas_et/OLD_TOKEN_VALUE", (
-            "showing the confirmation form must not write anything yet"
-        )
+    form = await flow.async_step_discovery(payload)
+    if inspect.isawaitable(form):
+        form = await form
+    assert form["type"] == "form"
+    assert entry.data[CONF_OAUTH_TOKEN] == "aas_et/OLD_TOKEN_VALUE", (
+        "showing the confirmation form must not write anything yet"
+    )
 
-        question = await flow.async_step_discovery({})
-        if inspect.isawaitable(question):
-            question = await question
-        assert question["type"] == "form"
-        assert question.get("step_id") == "discovery_overwrite"
-        assert entry.data[CONF_OAUTH_TOKEN] == "aas_et/OLD_TOKEN_VALUE", (
-            "asking the question must not write anything yet"
-        )
+    question = await flow.async_step_discovery({})
+    if inspect.isawaitable(question):
+        question = await question
+    assert question["type"] == "form"
+    assert question.get("step_id") == "discovery_overwrite"
+    assert entry.data[CONF_OAUTH_TOKEN] == "aas_et/OLD_TOKEN_VALUE", (
+        "asking the question must not write anything yet"
+    )
 
-        result = await flow.async_step_discovery_overwrite(
-            {config_flow._FIELD_OVERWRITE_CREDENTIALS: answer}
-        )
-        if inspect.isawaitable(result):
-            result = await result
-        return form, question, result
+    result = await flow.async_step_discovery_overwrite(
+        {config_flow._FIELD_OVERWRITE_CREDENTIALS: answer}
+    )
+    if inspect.isawaitable(result):
+        result = await result
 
-    form, question, result = asyncio.run(_exercise())
     return entry, form, question, result
 
 
-def test_discovery_overwrite_confirmed_replaces_credentials_in_entry_data(
+@pytest.mark.asyncio
+async def test_discovery_overwrite_confirmed_replaces_credentials_in_entry_data(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Answering yes must replace the stored credentials, flat, in ``entry.data``.
@@ -518,7 +514,9 @@ def test_discovery_overwrite_confirmed_replaces_credentials_in_entry_data(
     ``changed=True`` reloaded the entry, so it looked like it had worked.
     """
 
-    entry, form, question, result = _drive_discovery_overwrite(monkeypatch, answer=True)
+    entry, form, question, result = await _drive_discovery_overwrite(
+        monkeypatch, answer=True
+    )
 
     assert form.get("step_id") == "discovery"
     assert question.get("step_id") == "discovery_overwrite"
@@ -535,7 +533,8 @@ def test_discovery_overwrite_confirmed_replaces_credentials_in_entry_data(
     )
 
 
-def test_discovery_overwrite_declined_keeps_stored_credentials(
+@pytest.mark.asyncio
+async def test_discovery_overwrite_declined_keeps_stored_credentials(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Answering no must write nothing and say so.
@@ -544,7 +543,7 @@ def test_discovery_overwrite_declined_keeps_stored_credentials(
     the only reason the question is worth asking.
     """
 
-    entry, _form, _question, result = _drive_discovery_overwrite(
+    entry, _form, _question, result = await _drive_discovery_overwrite(
         monkeypatch, answer=False
     )
 
