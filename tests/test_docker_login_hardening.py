@@ -732,6 +732,42 @@ def test_stray_oneclick_bind_does_not_block_a_login_without_the_port(
     )
 
 
+def test_stray_oneclick_bind_is_ignored_when_only_the_env_switches_off(
+    tmp_path: Path,
+) -> None:
+    """The same must hold for ``GFMY_ONECLICK=0`` without any ``--track``.
+
+    The third way into the gate, and the one an operator reaches by accident:
+    both switches sit in a shell profile, so ``login.sh`` is started plainly at
+    a terminal. That path has a different run-up from ``--track``:
+    ``set_track_option`` never runs, ``track_from_cli`` stays 0, and with a real
+    tty the menu is suppressed by ``oneclick_env_set`` alone. Only the gate
+    itself is shared, which is exactly why it is worth pinning separately -- a
+    guard is only as good as the narrowest path that reaches it.
+    """
+
+    work, env = _launcher_sandbox(tmp_path)
+    env["GFMY_ONECLICK"] = "0"
+    env["GFMY_ONECLICK_BIND"] = "0.0.0.0"
+    returncode, out = _run_launcher_on_tty(work, env, "\n")
+
+    assert returncode == 0, (
+        "GFMY_ONECLICK=0 publishes no 7901, so a stray wildcard bind must not "
+        f"abort the login; got {returncode} (output={out!r})"
+    )
+    assert "How should the finished credentials reach" not in out, (
+        "a preset GFMY_ONECLICK must still suppress the handoff menu."
+    )
+    argline = next(line for line in out.splitlines() if "DOCKER_ARGS: " in line)
+    assert ONECLICK_COMPOSE not in argline, (
+        f"one-click is off, so the overlay must not be added; got {argline!r}"
+    )
+    bindline = next(line for line in out.splitlines() if "ONECLICK_BIND: " in line)
+    assert "0.0.0.0" not in bindline, (
+        f"the wildcard must not travel on to the compose child; got {bindline!r}"
+    )
+
+
 @pytest.mark.parametrize("wildcard", ["0.0.0.0", "::", "*"])
 def test_wildcard_oneclick_bind_is_refused(tmp_path: Path, wildcard: str) -> None:
     """A wildcard bind for 7901 must abort, not merely warn.
