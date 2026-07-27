@@ -583,7 +583,7 @@ async def async_setup_entry(
                         "Device tracker setup: no coordinator snapshot for subentry %s "
                         "(config_subentry_id=%s, visible_device_ids=%s, "
                         "enabled_device_ids=%s, snapshot_keys=%s, snapshot_cache_size=%d, "
-                        "initial_discovery_done=%s, post_reconfigure=%s)"
+                        "post_reconfigure=%s)"
                     ),
                     tracker_subentry_key,
                     getattr(meta, "config_subentry_id", None),
@@ -591,7 +591,6 @@ async def async_setup_entry(
                     ", ".join(enabled_ids) or "<empty>",
                     ", ".join(snapshot_keys) or "<empty>",
                     len(snapshot_map) if isinstance(snapshot_map, Mapping) else 0,
-                    getattr(coordinator, "_initial_discovery_done", None),
                     bool(reconfigure_marker),
                 )
                 _schedule_tracker_entities([], True)

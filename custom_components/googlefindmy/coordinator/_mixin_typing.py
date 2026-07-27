@@ -102,7 +102,6 @@ class _MixinBase:
     _last_list_poll_mono: float
     _last_nonempty_wall: float
     _force_device_list_refresh: bool
-    _initial_discovery_done: bool
     _fcm_defer_started_mono: float
     _consecutive_transient_auth_failures: int
     _last_transient_auth_error: str | None

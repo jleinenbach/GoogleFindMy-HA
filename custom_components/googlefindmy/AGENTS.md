@@ -51,15 +51,15 @@ A release that bumps only some files ships an inconsistent version string.
 Before tagging a release, grep all three:
 `git grep -nE '"version"|INTEGRATION_VERSION|^version = ' custom_components/googlefindmy/manifest.json custom_components/googlefindmy/const.py pyproject.toml`.
 
-### Quick-start reminder: avoid false-positive tracker discovery
+### Quick-start reminder: a new tracker is an entity, not a discovery
 
-When restoring `device_tracker` entities on startup, confirm the cloud discovery trigger only fires for **truly new** tracker
-entities. Reuse the coordinator's registry helpers (for example, `find_tracker_entity_entry`) **after** entities are scheduled
-to detect whether each scheduled entity already exists in the entity registry and skip the discovery flow when all restored
-devices are known. Centralizing this post-scheduling gate prevents redundant pre-checks and keeps the "X devices found"
-notification from reappearing after restarts when no new hardware has been added. Cross-link:
+A tracker that appears in the account is added silently: no discovery flow, no card, no user click. There is no cloud
+discovery trigger in `device_tracker.py` any more, and no "X devices found" notification for trackers. Discovery is reserved
+for a new account and for refreshed credentials of an existing one. The registry check **after** entities are scheduled is
+still there, but it serves a different purpose: it is the input to a single self-healing reload, and it is only judged once a
+grace period has passed, because scheduling an entity and registering it are not the same instant. Cross-link:
 [`agents/runtime_patterns/AGENTS.md`](agents/runtime_patterns/AGENTS.md#tracker-registry-gating)
-tracks the canonical post-scheduling gate that platform guides should mirror.
+carries the canonical contract; that file wins if the two ever drift.
 
 ### Async test execution contract
 

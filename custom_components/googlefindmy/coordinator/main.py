@@ -757,10 +757,6 @@ class GoogleFindMyCoordinator(
         )  # diagnostics-only set from latest non-empty list
         self._semantic_label_cache: dict[str, SemanticLabelRecord] = {}
 
-        # Flag to separate initial discovery from later runtime additions.
-        # After the first successful non-empty device list is processed, this becomes True.
-        self._initial_discovery_done: bool = False
-
         # Presence smoothing (TTL):
         # - Per-device "last seen in full list" timestamp (monotonic)
         # - Cold-start marker: timestamp of last non-empty list (monotonic)

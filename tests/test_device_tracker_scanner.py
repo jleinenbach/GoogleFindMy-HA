@@ -303,6 +303,42 @@ async def test_the_run_that_adds_a_tracker_never_schedules_a_reload(
 
 
 @pytest.mark.asyncio
+async def test_an_account_without_trackers_still_completes_the_platform_setup(
+    deterministic_config_subentry_id: Callable[[Any, str, str | None], str],
+) -> None:
+    """An empty snapshot adds nothing, and adds it explicitly.
+
+    Home Assistant treats a platform that never calls ``async_add_entities`` as
+    an unfinished setup, and an unfinished setup makes the later unload fail. So
+    the empty case is not a silent return: it schedules an empty add. It must
+    also stay silent in every other respect, because "no devices" is a normal
+    state for a fresh account, not a defect to be healed by a reload.
+    """
+
+    del deterministic_config_subentry_id
+
+    device_tracker = _device_tracker_module()
+    hass = _HassStub()
+    added: list[list[Any]] = []
+
+    coordinator = _make_coordinator(device_tracker, hass, [], registry_hit=False)
+    entry = _make_entry(coordinator)
+    coordinator.config_entry = entry
+
+    def _capture(entities: Iterable[Any], update_before_add: bool = False) -> None:
+        added.append(list(entities))
+
+    await device_tracker.async_setup_entry(hass, entry, _capture)
+
+    # Measured, not assumed: the bootstrap pass and the listener pass each add
+    # once, and both add nothing. The count is incidental, the property is not.
+    assert added, "an omitted add leaves the platform unfinished and breaks unload"
+    assert all(batch == [] for batch in added)
+    assert hass.reloaded == []
+    assert coordinator.registry_lookups == []
+
+
+@pytest.mark.asyncio
 async def test_a_later_listener_run_is_not_treated_as_a_barrier(
     probe_timer: _ProbeTimer,
     deterministic_config_subentry_id: Callable[[Any, str, str | None], str],
@@ -378,6 +414,39 @@ async def test_no_reload_when_the_registry_confirms_the_trackers(
     probe_timer.fire()
 
     assert coordinator.registry_lookups == ["tracker-1"]
+    assert hass.reloaded == []
+
+
+@pytest.mark.asyncio
+async def test_a_second_probe_run_judges_nothing_a_second_time(
+    probe_timer: _ProbeTimer,
+    deterministic_config_subentry_id: Callable[[Any, str, str | None], str],
+) -> None:
+    """The probe judges each addition once, and only once.
+
+    It consumes the pending ids when it runs. A further run with nothing pending
+    must be a no-op: asking the registry again would cost a lookup per device for
+    an answer nobody waits for, and treating "nothing pending" as "nothing found"
+    would reload a perfectly healthy entry.
+    """
+
+    del deterministic_config_subentry_id
+
+    device_tracker = _device_tracker_module()
+    hass = _HassStub()
+    added: list[list[Any]] = []
+    coordinator, _entry = await _set_up_platform(
+        device_tracker, hass, registry_hit=True, added=added
+    )
+
+    probe_timer.fire()
+    assert coordinator.registry_lookups == ["tracker-1"]
+
+    probe_timer.fire()
+
+    assert coordinator.registry_lookups == ["tracker-1"], (
+        "the second run must not ask the registry again"
+    )
     assert hass.reloaded == []
 
 
