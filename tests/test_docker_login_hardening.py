@@ -335,10 +335,11 @@ def test_track_menu_defaults_to_the_file_handoff_on_a_bare_enter(
     """Enter, Enter must keep the historical behaviour: the file handoff only.
 
     Track A is the only handoff that needs no terminal output and no manual copy,
-    and it runs on every launch anyway. Making it the default answer is what keeps
-    the question from changing anything for the people who just press Enter -- and
-    it is the property that silently breaks if the menu ever grows a "no default"
-    or reorders its options.
+    and it is the one that leaves ``data/secrets.json`` in place (track B prints
+    the bundle and the container then deletes that file). Making A the default
+    answer is what keeps the question from changing anything for the people who
+    just press Enter -- and it is the property that silently breaks if the menu
+    ever grows a "no default" or reorders its options.
     """
 
     work, env = _launcher_sandbox(tmp_path)
@@ -449,6 +450,49 @@ def test_login_cmd_mirrors_the_track_menu_and_the_bind_guard() -> None:
         "GFMY_CLEARTEXT must be in the trailing-blank trim list: `set VAR=1 && "
         "login.cmd` stores the blank, and the container compares against a bare "
         '"1".'
+    )
+
+
+@pytest.mark.parametrize(
+    ("name", "sink"),
+    [
+        ("login.sh", "./data/secrets.json"),
+        ("login.cmd", r".\data\secrets.json"),
+        ("README.md", "data/secrets.json"),
+    ],
+)
+def test_track_b_is_described_as_replacing_the_file_handoff(
+    name: str, sink: str
+) -> None:
+    """Track B deletes the file, so no user-facing text may call it additive.
+
+    ``entrypoint.sh`` prints the bundle and then removes ``secrets.json``. Text
+    that describes B as an addition ("also print", "this always happens", "never
+    a replacement") sends users to Home Assistant's watched-file import for a
+    file that is no longer on disk -- exactly the contradiction Codex flagged on
+    PR #1218. The menus, the ``--track`` help and the README paragraphs must all
+    say "instead", and each must name the deletion at least once, so a future
+    edit cannot quietly restore the additive wording in one place while the
+    cost table in the README still says the opposite.
+    """
+
+    text = _read(name)
+    assert sink in text, f"{name} must still document the file handoff sink."
+
+    lowered = text.lower()
+    for additive in ("also print", "this always happens", "never a replacement"):
+        assert additive not in lowered, (
+            f"{name} still describes track B as additive ({additive!r}); it "
+            "replaces the file handoff, because the file is deleted after it "
+            "is printed."
+        )
+    assert "instead" in lowered, (
+        f"{name} must present track B as printing the bundle INSTEAD of keeping "
+        "the file."
+    )
+    assert "delete" in lowered, (
+        f"{name} must name the deletion of the file, which is what makes track "
+        "B a replacement rather than an addition."
     )
 
 

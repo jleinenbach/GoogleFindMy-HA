@@ -31,12 +31,13 @@ rem `ipconfig` output in batch is locale-dependent and unreliable, so pass --ip.
 rem
 rem Handoff track: on a normal run this script ASKS which way the finished
 rem credentials should reach Home Assistant -- A the file in .\data (the default a
-rem bare Enter picks), B also printed in this terminal. Answer it up front with
-rem `login.cmd --track b`, or the old way:
+rem bare Enter picks), B the bundle printed in this terminal INSTEAD, after which
+rem the container deletes that file. They are alternatives, not layers. Answer it
+rem up front with `login.cmd --track b`, or the old way:
 rem   set GFMY_CLEARTEXT=1
 rem   login.cmd
 rem Either of those skips the question. No extra port is published in either
-rem case, so the file handoff and GFMY_CLEARTEXT=1 always start.
+rem case, so both tracks start without one.
 setlocal
 pushd "%~dp0"
 
@@ -160,10 +161,12 @@ if defined TRACK_FROM_CLI goto :track_done
 if defined CLEARTEXT_ENV_SET goto :track_done
 echo.
 echo [login] How should the finished credentials reach Home Assistant?
-echo [login]   A) File only: .\data\secrets.json  (this always happens)
+echo [login]   A) File only: .\data\secrets.json  (the file stays)
 echo [login]      Needs: Home Assistant can see that folder, e.g. this repo lives
 echo [login]      under config\custom_components on the HA machine.
-echo [login]   B) Also print the bundle in this terminal
+echo [login]   B) Print the bundle in this terminal INSTEAD of keeping it
+echo [login]      The file is deleted right after printing, so this REPLACES A:
+echo [login]      no watched-file import afterwards.
 echo [login]      Last resort: the credentials then sit in your scrollback, in
 echo [login]      "docker logs" and in the clipboard you paste them from.
 set "TRACK_CHOICE="
@@ -280,7 +283,8 @@ exit /b 2
 :track_invalid
 echo [login] --track needs a or b. 1>&2
 echo [login]   a = file handoff only (.\data\secrets.json, the default) 1>&2
-echo [login]   b = also print the bundle in this terminal 1>&2
+echo [login]   b = print the bundle in this terminal instead; the container 1>&2
+echo [login]       deletes the file after printing it 1>&2
 popd
 endlocal
 exit /b 2
@@ -292,8 +296,9 @@ echo   --ip ^<ADDRESS^>  Bind the noVNC viewer (port 7900) to ^<ADDRESS^> and pr
 echo                   that address as the URL to open. Use a concrete LAN
 echo                   address of this Docker host, e.g. login.cmd --ip 192.168.1.21
 echo   --track a^|b     Pick how the credentials reach Home Assistant without being
-echo                   asked: a = file only (default), b = also print the bundle
-echo                   in this terminal.
+echo                   asked: a = file only (default), b = print the bundle in
+echo                   this terminal INSTEAD, after which the container deletes
+echo                   the file.
 echo   --help          Show this help and exit.
 echo.
 echo Without --track and without GFMY_CLEARTEXT this script asks
@@ -306,9 +311,11 @@ echo   GFMY_CLEARTEXT=1      print the bundle in this terminal at the end
 goto :eof
 
 :set_track
-rem --track a^|b -^> the same switch the menu sets. Track A is not a switch: the
-rem file in .\data is written on every run, so "a" means "turn the other one
-rem off", which is what the historical default did.
+rem --track a^|b -^> the same switch the menu sets. Track A is not a switch:
+rem main.py writes the file in .\data on every run, so "a" means "turn the other
+rem one off", which is what the historical default did. Leaving it off is what
+rem makes the file SURVIVE the run -- with the switch on, entrypoint.sh deletes
+rem it again right after printing the bundle.
 set "GFMY_CLEARTEXT="
 if /i "%~1"=="a" goto :set_track_ok
 if /i "%~1"=="b" goto :set_track_b

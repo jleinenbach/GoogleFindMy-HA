@@ -60,8 +60,9 @@ Usage: bash login.sh [--ip <ADDRESS>] [--track a|b] [--help]
                   a plain http viewer instead (e.g. when you tunnel it yourself).
                   Ignored for a loopback bind, which is plain either way.
   --track a|b     Pick how the finished credentials reach Home Assistant, without
-                  being asked: a = file only (default), b = also print the bundle
-                  in this terminal. Equivalent to GFMY_CLEARTEXT.
+                  being asked: a = file only (default), b = print the bundle in
+                  this terminal INSTEAD -- the container deletes the file right
+                  after printing it. Equivalent to GFMY_CLEARTEXT.
   --help          Show this help and exit.
 
 Without --ip and without GFMY_NOVNC_BIND/GFMY_NOVNC_URL_HOST, and only on an
@@ -71,8 +72,9 @@ IP). A non-interactive run keeps the historical loopback default unchanged.
 
 The same rule applies to the handoff track: on an interactive terminal, and only
 when neither --track nor GFMY_CLEARTEXT was given, the launcher asks which way
-you want. Track A (the file in ./data) always runs, so a bare Enter keeps
-exactly the historical behaviour.
+you want. A bare Enter picks track A (the file in ./data), which keeps exactly
+the historical behaviour. The two tracks are alternatives, not layers: track B
+prints the bundle and the container then deletes that file.
 
 Environment (see the comment block at the top of this file):
   GFMY_NOVNC_BIND       host bind for noVNC 7900         (default 127.0.0.1)
@@ -263,8 +265,10 @@ set_ip_option() {
 # --track a|b: the non-interactive spelling of the handoff menu below. It sets
 # the SAME switch the menu sets, so there is exactly one signal path into the
 # container (entrypoint.sh keeps comparing against the literal "1"). Track A is
-# not a switch at all: the file in ./data is written on every run, so "a" means
-# "turn the other one off", which is also what the historical default did.
+# not a switch at all: main.py writes the file in ./data on every run, so "a"
+# means "turn the other one off", which is also what the historical default did.
+# Leaving it off is what makes the file SURVIVE the run: with the switch on,
+# entrypoint.sh deletes it again right after printing the bundle.
 set_track_option() {
   case "$1" in
     a | A)
@@ -276,7 +280,8 @@ set_track_option() {
     *)
       echo "[login] --track needs a or b, got '$1'." >&2
       echo "[login]   a = file handoff only (./data/secrets.json, the default)" >&2
-      echo "[login]   b = also print the bundle in this terminal" >&2
+      echo "[login]   b = print the bundle in this terminal instead (the" >&2
+      echo "[login]       container deletes the file after printing it)" >&2
       exit 2
       ;;
   esac
@@ -445,20 +450,29 @@ EOF
 # read from the terminal, re-ask on a bad answer. It sets only the switch that
 # already exists, so nothing new travels into the container.
 #
-# Track A is the DEFAULT on a bare Enter, and deliberately so: the file in ./data
-# is written on every run anyway, it needs no port, no network and no shared
-# secret, and Home Assistant picks it up by itself when it can see that folder.
-# B is an addition on top of A, never a replacement for it.
+# Track A is the DEFAULT on a bare Enter, and deliberately so: it needs no port,
+# no network and no shared secret, and Home Assistant picks the file up by itself
+# when it can see that folder.
+#
+# The two are ALTERNATIVES, not layers, and the menu must say so. main.py writes
+# ./data/secrets.json on every run, but with track B entrypoint.sh prints it and
+# then deletes it, so choosing B gives up the watched-file import rather than
+# adding to it. Any wording that presents B as an addition to A would send users
+# looking for a file that is no longer there; the guard
+# test_track_b_is_described_as_replacing_the_file_handoff keeps that wording out
+# of both launchers and the README at once.
 prompt_for_track() {
   local choice
   while true; do
     {
       echo ""
       echo "[login] How should the finished credentials reach Home Assistant?"
-      echo "[login]   A) File only: ./data/secrets.json  (this always happens)"
+      echo "[login]   A) File only: ./data/secrets.json  (the file stays)"
       echo "[login]      Needs: Home Assistant can see that folder, e.g. this repo"
       echo "[login]      lives under config/custom_components on the HA machine."
-      echo "[login]   B) Also print the bundle in this terminal"
+      echo "[login]   B) Print the bundle in this terminal INSTEAD of keeping it"
+      echo "[login]      The file is deleted right after printing, so this"
+      echo "[login]      REPLACES A: no watched-file import afterwards."
       echo "[login]      Last resort: the credentials then sit in your scrollback,"
       echo "[login]      in 'docker logs' and in the clipboard you paste them from."
       printf '[login] Choice [Enter = A]: '

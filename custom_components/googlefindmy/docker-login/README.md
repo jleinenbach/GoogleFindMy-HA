@@ -171,9 +171,12 @@ the finished `secrets.json` is handed back to you (see
 
 On an interactive terminal the launcher **asks which handoff you want** before it
 starts anything: `A` (the file in `./data`, the default a bare Enter picks) or
-`B` (also print the bundle in this terminal). Pass `--track a|b`, or set
-`GFMY_CLEARTEXT` yourself, and the question is skipped. Track A runs in every
-case — B is an addition on top of it, never a replacement.
+`B` (print the bundle in this terminal instead). Pass `--track a|b`, or set
+`GFMY_CLEARTEXT` yourself, and the question is skipped. The two are
+**alternatives, not layers**: the login always writes `data/secrets.json`, but
+track B prints it and the container then deletes it, so B gives up the
+watched-file import rather than adding to it (see
+[Which handoff did you choose](#which-handoff-did-you-choose-and-what-does-it-cost)).
 
 **The two launchers differ here, and it matters for automation.** `login.sh`
 gates the question on a real TTY (`[ -t 0 ]`), so a non-interactive run (CI, a
@@ -386,8 +389,9 @@ entry when the cache holds several).
 
 By default the login writes `data/secrets.json` and you import that file into
 Home Assistant. One optional switch prints the bundle instead, for the case
-where Home Assistant cannot see this directory. It is off unless you opt in and
-does not change the classic file behaviour.
+where Home Assistant cannot see this directory. It is off unless you opt in;
+when you do opt in, it **replaces** the file handoff, because the file is
+deleted right after it is printed.
 
 ### Track B: terminal clear-text copy (`GFMY_CLEARTEXT=1`)
 
