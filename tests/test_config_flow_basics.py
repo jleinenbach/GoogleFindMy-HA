@@ -1217,7 +1217,6 @@ class TestLoggingNeverLeaksAccountAddresses:
     _MODULES = (
         "config_flow.py",
         "__init__.py",
-        "container_login.py",
         "discovery.py",
     )
     _EMAIL_NAMES = frozenset(

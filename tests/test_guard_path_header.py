@@ -26,11 +26,11 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 _TESTS_DIR = _REPO_ROOT / "tests"
 
 # Production modules this branch adds. They were written after the convention
-# existed, so the lenient retrofit posture does not apply to them.
-NEW_PRODUCTION_MODULES: set[str] = {
-    "custom_components/googlefindmy/container_login.py",
-    "custom_components/googlefindmy/docker-login/token_server.py",
-}
+# existed, so the lenient retrofit posture does not apply to them. Currently
+# empty: the two modules pinned here went away with the credential-fetching
+# handoff that PR #1218 removed. The set and its two guards stay in place so the
+# next added module gets pinned instead of re-deriving the rule.
+NEW_PRODUCTION_MODULES: set[str] = set()
 
 # Pre-existing test files that predate this guard and still lack the path header.
 # Do not add new entries; add the header to new files instead. Shrinking this list

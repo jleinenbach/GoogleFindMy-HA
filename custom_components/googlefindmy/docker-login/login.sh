@@ -18,25 +18,13 @@
 #      local account can).
 #   4. Build + run exactly ONE ephemeral container in the foreground
 #      (`docker compose run --rm`), which also attaches your terminal so the
-#      interactive "Press Enter" login prompt reaches Python.
+#      login CLI can ask you for the account e-mail if it needs to.
 #
-# THREE ADDRESS ROLES, deliberately separate (do not merge them again). They
-# exist because the two published ports serve different consumers: 7901 is
-# machine-to-machine (Home Assistant on this host), 7900 is opened by a browser
-# that usually runs on a DIFFERENT machine than the Docker host.
+# TWO ADDRESS ROLES, deliberately separate (do not merge them again). The single
+# published port (7900) is opened by a browser that usually runs on a DIFFERENT
+# machine than the Docker host, so where it BINDS and what gets PRINTED are two
+# different questions.
 #
-#   token endpoint (7901)  NOT configurable, pinned to 127.0.0.1 in
-#                          docker-compose.oneclick.yml. That pin is the no-LAN
-#                          guarantee for an endpoint that serves Google
-#                          credentials in cleartext, which therefore gets no
-#                          environment override surface at all: one stray
-#                          variable must not be able to widen it. Home Assistant
-#                          reaches it when it shares this host's network namespace
-#                          (HAOS, HA Core, `network_mode: host`). HA in a bridge
-#                          network has its OWN loopback and cannot; that case is
-#                          served by the shared-network route in README.md,
-#                          which publishes no host port at all, or by the file
-#                          handoff.
 #   GFMY_NOVNC_BIND        host address noVNC (7900) binds to. Default 127.0.0.1.
 #   GFMY_NOVNC_URL_HOST    address PRINTED for you to open in a browser. Defaults
 #                          to GFMY_NOVNC_BIND. A wildcard value, whether it comes
@@ -53,19 +41,17 @@
 # 0.0.0.0 wildcard, which publishes on every interface):
 #   bash login.sh --ip 192.168.1.21
 #
-# Optional one-click handoff:
-#   GFMY_ONECLICK=1 bash login.sh
-# only then does this script add docker-compose.oneclick.yml, which publishes the
-# token endpoint on host loopback (127.0.0.1, port 7901). Without it no 7901 port
-# is published at all, so the file handoff and GFMY_CLEARTEXT=1 still start on a
-# host where port 7901 is already in use.
+# Optional terminal handoff:
+#   GFMY_CLEARTEXT=1 bash login.sh       (or answer B to the menu, or --track b)
+# prints the finished bundle in this terminal at the end, for manual copy/paste
+# into Home Assistant, and removes the file afterwards. No extra port is opened.
 set -euo pipefail
 
 cd "$(dirname "$0")"
 
 usage() {
   cat <<'EOF'
-Usage: bash login.sh [--ip <ADDRESS>] [--help]
+Usage: bash login.sh [--ip <ADDRESS>] [--track a|b] [--help]
 
   --ip <ADDRESS>  Bind the noVNC viewer (port 7900) to <ADDRESS> and print that
                   address as the URL to open. Use a concrete LAN address of this
@@ -73,6 +59,10 @@ Usage: bash login.sh [--ip <ADDRESS>] [--help]
   --no-tls        On a LAN bind, do NOT enable the self-signed TLS viewer; serve
                   a plain http viewer instead (e.g. when you tunnel it yourself).
                   Ignored for a loopback bind, which is plain either way.
+  --track a|b     Pick how the finished credentials reach Home Assistant, without
+                  being asked: a = file only (default), b = print the bundle in
+                  this terminal INSTEAD -- the container deletes the file right
+                  after printing it. Equivalent to GFMY_CLEARTEXT.
   --help          Show this help and exit.
 
 Without --ip and without GFMY_NOVNC_BIND/GFMY_NOVNC_URL_HOST, and only on an
@@ -80,13 +70,16 @@ interactive terminal, the launcher asks which address to open the noVNC viewer
 on (a numbered menu of detected LAN addresses, a loopback entry, or a free-text
 IP). A non-interactive run keeps the historical loopback default unchanged.
 
+The same rule applies to the handoff track: on an interactive terminal, and only
+when neither --track nor GFMY_CLEARTEXT was given, the launcher asks which way
+you want. A bare Enter picks track A (the file in ./data), which keeps exactly
+the historical behaviour. The two tracks are alternatives, not layers: track B
+prints the bundle and the container then deletes that file.
+
 Environment (see the comment block at the top of this file):
   GFMY_NOVNC_BIND       host bind for noVNC 7900         (default 127.0.0.1)
   GFMY_NOVNC_URL_HOST   address printed for your browser (default: the bind)
-  GFMY_ONECLICK=1       add the opt-in overlay that publishes port 7901
-
-The token endpoint (7901) is not configurable here: it is pinned to 127.0.0.1
-in docker-compose.oneclick.yml, on purpose.
+  GFMY_CLEARTEXT=1      print the bundle in this terminal at the end
 EOF
 }
 
@@ -99,6 +92,16 @@ novnc_bind_env_set=0
 [ -n "${GFMY_NOVNC_BIND+set}" ] && novnc_bind_env_set=1
 novnc_url_host_env_set=0
 [ -n "${GFMY_NOVNC_URL_HOST+set}" ] && novnc_url_host_env_set=1
+
+# Same capture for the handoff switch (AP-5). The interactive track menu must be
+# able to tell "the operator said nothing" from "the operator said off", so a
+# deliberate GFMY_CLEARTEXT=0 keeps suppressing the question instead of being
+# re-asked on every run.
+cleartext_env_set=0
+[ -n "${GFMY_CLEARTEXT+set}" ] && cleartext_env_set=1
+# Set to 1 by set_track_option when --track is passed, so the menu is skipped for
+# the same reason --ip skips the address menu: the operator already chose.
+track_from_cli=0
 
 novnc_bind="${GFMY_NOVNC_BIND:-127.0.0.1}"
 novnc_url_host="${GFMY_NOVNC_URL_HOST:-}"
@@ -259,6 +262,33 @@ set_ip_option() {
   ip_from_cli=1
 }
 
+# --track a|b: the non-interactive spelling of the handoff menu below. It sets
+# the SAME switch the menu sets, so there is exactly one signal path into the
+# container (entrypoint.sh keeps comparing against the literal "1"). Track A is
+# not a switch at all: main.py writes the file in ./data on every run, so "a"
+# means "turn the other one off", which is also what the historical default did.
+# Leaving it off is what makes the file SURVIVE the run: with the switch on,
+# entrypoint.sh deletes it again right after printing the bundle.
+set_track_option() {
+  case "$1" in
+    a | A)
+      GFMY_CLEARTEXT=""
+      ;;
+    b | B)
+      GFMY_CLEARTEXT=1
+      ;;
+    *)
+      echo "[login] --track needs a or b, got '$1'." >&2
+      echo "[login]   a = file handoff only (./data/secrets.json, the default)" >&2
+      echo "[login]   b = print the bundle in this terminal instead (the" >&2
+      echo "[login]       container deletes the file after printing it)" >&2
+      exit 2
+      ;;
+  esac
+  export GFMY_CLEARTEXT
+  track_from_cli=1
+}
+
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --ip)
@@ -271,6 +301,18 @@ while [ "$#" -gt 0 ]; do
       ;;
     --ip=*)
       set_ip_option "${1#--ip=}"
+      shift
+      ;;
+    --track)
+      if [ "$#" -lt 2 ]; then
+        echo "[login] --track needs a value, e.g. --track a" >&2
+        exit 2
+      fi
+      set_track_option "$2"
+      shift 2
+      ;;
+    --track=*)
+      set_track_option "${1#--track=}"
       shift
       ;;
     --no-tls)
@@ -403,6 +445,55 @@ EOF
   done
 }
 
+# Interactive handoff-track chooser (AP-5). Same shape as prompt_for_ip above:
+# menu on stderr so the behavioural launcher tests keep parsing a clean stdout,
+# read from the terminal, re-ask on a bad answer. It sets only the switch that
+# already exists, so nothing new travels into the container.
+#
+# Track A is the DEFAULT on a bare Enter, and deliberately so: it needs no port,
+# no network and no shared secret, and Home Assistant picks the file up by itself
+# when it can see that folder.
+#
+# The two are ALTERNATIVES, not layers, and the menu must say so. main.py writes
+# ./data/secrets.json on every run, but with track B entrypoint.sh prints it and
+# then deletes it, so choosing B gives up the watched-file import rather than
+# adding to it. Any wording that presents B as an addition to A would send users
+# looking for a file that is no longer there; the guard
+# test_track_b_is_described_as_replacing_the_file_handoff keeps that wording out
+# of both launchers and the README at once.
+prompt_for_track() {
+  local choice
+  while true; do
+    {
+      echo ""
+      echo "[login] How should the finished credentials reach Home Assistant?"
+      echo "[login]   A) File only: ./data/secrets.json  (the file stays)"
+      echo "[login]      Needs: Home Assistant can see that folder, e.g. this repo"
+      echo "[login]      lives under config/custom_components on the HA machine."
+      echo "[login]   B) Print the bundle in this terminal INSTEAD of keeping it"
+      echo "[login]      The file is deleted right after printing, so this"
+      echo "[login]      REPLACES A: no watched-file import afterwards."
+      echo "[login]      Last resort: the credentials then sit in your scrollback,"
+      echo "[login]      in 'docker logs' and in the clipboard you paste them from."
+      printf '[login] Choice [Enter = A]: '
+    } >&2
+    read -r choice || choice=""
+    case "$choice" in
+      "" | a | A)
+        return 0
+        ;;
+      b | B)
+        GFMY_CLEARTEXT=1
+        export GFMY_CLEARTEXT
+        return 0
+        ;;
+      *)
+        echo "[login] Please answer A or B (bare Enter picks A)." >&2
+        ;;
+    esac
+  done
+}
+
 # Interactive address selection (AP-1): only on a real terminal AND only when the
 # operator pinned nothing explicitly (no --ip, no GFMY_NOVNC_BIND/URL_HOST). In
 # CI or any non-interactive pipe `[ -t 0 ]` is false, so this is skipped and the
@@ -436,12 +527,23 @@ novnc_bind="$(bracket_if_ipv6 "$novnc_bind")"
 
 export GFMY_NOVNC_BIND="$novnc_bind"
 # Also export the browsable host so docker-compose can build the noVNC URL that
-# the in-container login flow prints at its "Press Enter" prompt. This is the
+# the in-container login flow prints in its instruction block. This is the
 # fully normalised value (wildcards resolved to a concrete address, IPv6
 # bracketed), i.e. exactly what belongs in a URL. Re-exporting under the same
 # input name is safe: it is read once at startup (above) and only consumed by
 # child processes (docker compose) from here on.
 export GFMY_NOVNC_URL_HOST="$novnc_url_host"
+
+# Handoff track (AP-5). Placed AFTER the noVNC normalisation on purpose, so the
+# two questions reach the operator in the order they matter. The gate mirrors the
+# address menu above -- a real terminal, and nothing pinned by --track or by
+# GFMY_CLEARTEXT -- so CI, a pipe and every documented
+# `GFMY_CLEARTEXT=1 bash login.sh` invocation reach the code below completely
+# UNCHANGED.
+if [ -t 0 ] && [ "${track_from_cli}" -eq 0 ] \
+   && [ "${cleartext_env_set}" -eq 0 ]; then
+  prompt_for_track
+fi
 
 mkdir -p data
 
@@ -527,19 +629,13 @@ else
   fi
 fi
 
-# Compose files: the base file publishes only noVNC (7900). The one-click token
-# endpoint (7901) lives in an OPT-IN overlay, so a host that already uses 7901
-# can never block the file handoff (./data) or the GFMY_CLEARTEXT=1 output,
-# which do not need that port. Gate matches entrypoint.sh exactly: "1" means on.
+# Compose files: the base file publishes only noVNC (7900). No other port is
+# published, so a host with a busy port can never block the file handoff
+# (./data) or the GFMY_CLEARTEXT=1 terminal output.
 compose_files=(-f docker-compose.yml)
-if [ "${GFMY_ONECLICK:-}" = "1" ]; then
-  compose_files+=(-f docker-compose.oneclick.yml)
-  echo "[login] One-click enabled: token endpoint published on 127.0.0.1 port 7901."
-  echo "[login] Home Assistant must reach that address; it does when HA shares this"
-  echo "[login] host's network namespace (HAOS, HA Core, network_mode: host)."
-fi
 # Passing an explicit -f turns off Compose's implicit override auto-load, so
-# re-add a user override file when there is one (README: shared-network route).
+# re-add a user override file when there is one, so a docker-compose.override.yml
+# next to these files keeps working.
 # At most one, mirroring Compose's own auto-load: it picks a single override
 # file, so merging both spellings here would silently apply a stale leftover.
 for _override in docker-compose.override.yml docker-compose.override.yaml; do
@@ -550,6 +646,6 @@ for _override in docker-compose.override.yml docker-compose.override.yaml; do
 done
 
 # `run --rm` (not `up`): fresh one-shot container, removed on exit, with your
-# terminal attached so the interactive "Press Enter" login prompt works.
+# terminal attached so the login CLI can prompt for the account e-mail.
 # `--service-ports` publishes the ports declared by the selected compose files.
 docker compose "${compose_files[@]}" run --build --service-ports --rm googlefindmy-login

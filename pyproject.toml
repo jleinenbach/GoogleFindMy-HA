@@ -11,7 +11,7 @@ name = "googlefindmy-ha"
 # script/stamp_version.py, so on those lines the hand-tag/stamp path is primary,
 # not a fallback. Canonical anchor:
 # custom_components/googlefindmy/AGENTS.md ("Version bump touches three files").
-version = "1.7.15.4"
+version = "1.7.15.6"
 description = "Home Assistant integration for Google's Find My Device network."
 readme = "README.md"
 license = "MIT"
@@ -352,10 +352,6 @@ omit = [
     # behavior (fatal HTTP classification, credential/decryption recovery) and
     # dedicated regressions in tests/test_fcm*.py, so they stay under coverage.
     "custom_components/googlefindmy/Auth/firebase_messaging/proto/*",
-    # The docker-login/ helper (token_server.py) runs only inside the login
-    # container, never in the HA runtime. Its lines exercised by
-    # tests/test_token_server.py would otherwise drift the fail_under floor.
-    "custom_components/googlefindmy/docker-login/*",
 ]
 
 [tool.coverage.report]

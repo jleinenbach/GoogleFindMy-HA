@@ -8,7 +8,7 @@
     "step": {
       "user": {
         "title": "Authentification Google Find My Device",
-        "description": "Choisissez comment vous connecter. La connexion par conteneur en un clic démarre pour vous un conteneur de navigateur déjà préparé et nécessite une machine sous Docker. GoogleFindMyTools secrets.json convient si vous avez déjà ce fichier ou si vous pouvez exécuter GoogleFindMyTools avec Chrome sur un ordinateur.",
+        "description": "Choisissez comment vous connecter. GoogleFindMyTools secrets.json convient si vous avez déjà ce fichier ou si vous pouvez exécuter GoogleFindMyTools avec Chrome sur un ordinateur.",
         "data": {
           "auth_method": "Méthode d’authentification"
         }
@@ -44,28 +44,6 @@
           "secrets_json": "Contenu du fichier secrets.json"
         }
       },
-      "container_login": {
-        "title": "Connexion par conteneur en un clic",
-        "description": "Connectez-vous via le conteneur de connexion fourni. Exécutez-le sur l'hôte Docker lui-même ; le conteneur Home Assistant n'a pas de socket Docker.\n\n1. Ouvrez un terminal sur l'hôte Docker et placez-vous dans le dossier `custom_components/googlefindmy/docker-login/` de cette intégration.\n2. Démarrez-le avec `GFMY_ONECLICK=1 bash login.sh` (Windows : `set GFMY_ONECLICK=1 && login.cmd`).\n3. Terminez la connexion Google dans la fenêtre noVNC.\n4. Le conteneur affiche ensuite un code d'appairage dans ce même terminal. L'étape suivante le demande.\n\nVisionneuse noVNC (mot de passe : `secret`) : {novnc_access}\n\nLa visionneuse est ouverte par votre navigateur, qui s'exécute souvent sur une autre machine que l'hôte Docker ; elle n'est donc liée que si l'hôte ci-dessus est une adresse IP non locale. Avec une liaison en loopback, ouvrez-la sur l'hôte Docker lui-même, créez un tunnel avec `ssh -L 7900:127.0.0.1:7900 DOCKER-HOST`, ou relancez le lanceur avec `--ip ADRESSE` et utilisez l'adresse affichée.\n\nInstructions complètes : {docs_url} (dossier `custom_components/googlefindmy/docker-login/`).",
-        "data": {
-          "host": "Hôte du conteneur",
-          "port": "Port du conteneur"
-        },
-        "data_description": {
-          "host": "Nom d'hôte ou adresse IP du conteneur de connexion. La valeur par défaut `127.0.0.1` est la boucle locale de l'hôte Docker : elle ne fonctionne que si Home Assistant partage l'espace réseau de cet hôte ; un Home Assistant en mode bridge ne peut pas l'atteindre. Deux solutions : placer les deux conteneurs sur un même réseau Docker, lancer le lanceur de sorte que `docker compose run` reçoive `--use-aliases` (sans cette option le nom de service ne se résout pas, voir le README) et saisir ici le nom de service du conteneur, ou se passer du réseau et laisser le conteneur transmettre le fichier via `docker-login/data/secrets.json`, que cette intégration importe d'elle-même. Le port des identifiants est lié à cette boucle locale dans `docker-compose.oneclick.yml` ; aucun réglage ne permet de le changer.",
-          "port": "Port sur lequel le conteneur de connexion fournit les identifiants. Il n'est publié que si le lanceur s'exécute avec la surcouche `docker-compose.oneclick.yml` ; le fichier compose simple ne le publie pas."
-        }
-      },
-      "container_pairing": {
-        "title": "Saisissez le code d'appairage",
-        "description": "Terminez d'abord la connexion Google dans la fenêtre noVNC. Le conteneur affiche ensuite le code d'appairage dans le terminal où s'exécute le lanceur (ou dans `docker logs` si vous l'avez démarré en arrière-plan).",
-        "data": {
-          "pairing_code": "Code d'appairage"
-        },
-        "data_description": {
-          "pairing_code": "Le code que le conteneur affiche dans le terminal du lanceur une fois la connexion terminée. Il est régénéré à chaque exécution, reste valide 5 minutes et se bloque après 5 tentatives erronées ; dans ce cas, arrêtez le conteneur et relancez le lanceur."
-        }
-      },
       "device_selection": {
         "title": "Paramètres d’interrogation",
         "description": "Les nouveaux appareils détectés apparaissent désactivés et peuvent être activés dans les paramètres de l’appareil. Configurez ici les paramètres généraux d’interrogation :\n• Intervalle d’interrogation de position : fréquence de démarrage d’un nouveau cycle (60–3600 secondes)\n• Délai entre les interrogations d’appareil : intervalle entre les requêtes pour chaque appareil au sein d’un cycle (1–60 secondes)\n\nFiltre Google Home : activé par défaut avec les mots-clés nest/google/home/mini/hub/display/chromecast/speaker. Remplace les coordonnées de la zone Home pour les détections Google/Nest/Chromecast et ignore les rapports \"home\" répétés pendant 15 minutes. Ajustez ici les mots-clés si vos appareils utilisent d’autres noms.",
@@ -91,18 +69,11 @@
       },
       "reauth_confirm": {
         "title": "Se réauthentifier",
-        "description": "Vos identifiants pour **{email}** semblent invalides ou expirés. Fournissez de nouveaux identifiants ci-dessous.\n\nCollez le contenu complet d'un nouveau **secrets.json** (généré en exécutant GoogleFindMyTools), ou reconnectez-vous via le conteneur de connexion en saisissant un code d'appairage.\n\nRemarque : l'adresse e-mail du compte est fixe pour cette réauthentification ; pour utiliser un autre compte, supprimez puis réajoutez l'intégration.",
+        "description": "Vos identifiants pour **{email}** semblent invalides ou expirés. Fournissez de nouveaux identifiants ci-dessous.\n\nCollez le contenu complet d'un nouveau **secrets.json** (généré en exécutant GoogleFindMyTools).\n\nRemarque : l'adresse e-mail du compte est fixe pour cette réauthentification ; pour utiliser un autre compte, supprimez puis réajoutez l'intégration.",
         "data": {
-          "secrets_json": "Nouveau secrets.json (contenu complet)",
-          "container_host": "Hôte du conteneur",
-          "container_port": "Port du conteneur",
-          "pairing_code": "Code d'appairage"
+          "secrets_json": "Nouveau secrets.json (contenu complet)"
         },
-        "data_description": {
-          "container_host": "Nom d'hôte ou adresse IP du conteneur de connexion. Conservez la valeur par défaut, sauf si vous exécutez le conteneur ailleurs.",
-          "container_port": "Port sur lequel le conteneur de connexion fournit les identifiants. Conservez la valeur par défaut, sauf si vous l'avez modifié.",
-          "pairing_code": "Saisissez un code d'appairage pour vous réauthentifier via le conteneur de connexion au lieu de coller secrets.json."
-        }
+        "data_description": {}
       },
       "migrate_complete": {
         "title": "Migration terminée",
@@ -122,13 +93,7 @@
       "choose_one": "Veuillez fournir exactement une méthode d’authentification.",
       "required": "Ce champ est obligatoire.",
       "unknown": "Erreur inattendue.",
-      "email_mismatch": "Les identifiants fournis appartiennent à un autre compte Google. Pour ajouter ce compte, créez une nouvelle intégration ; la réauthentification ne peut pas changer le compte de cette entrée.",
-      "container_unreachable": "Impossible de joindre le conteneur de connexion. Assurez-vous qu'il est en cours d'exécution et que l'hôte et le port sont corrects.",
-      "container_timeout": "Le conteneur de connexion n'a pas répondu à temps. Veuillez réessayer.",
-      "container_auth_failed": "L'authentification auprès du conteneur de connexion a échoué. Vérifiez le code d'appairage et réessayez.",
-      "container_code_used": "Ce code d'appairage a déjà été utilisé ou a expiré. Redémarrez le conteneur de connexion et utilisez le nouveau code.",
-      "container_code_too_short": "Le code d'appairage est trop court. Copiez le code complet depuis le conteneur de connexion.",
-      "container_login_failed": "La connexion par conteneur n'a pas pu être menée à bien. Veuillez réessayer."
+      "email_mismatch": "Les identifiants fournis appartiennent à un autre compte Google. Pour ajouter ce compte, créez une nouvelle intégration ; la réauthentification ne peut pas changer le compte de cette entrée."
     },
     "abort": {
       "already_configured": "Google Find My Device est déjà configuré.",
@@ -294,18 +259,12 @@
       },
       "credentials": {
         "title": "Mettre à jour les identifiants (optionnel)",
-        "description": "Mettez à jour vos identifiants. Les valeurs existantes ne sont pas affichées pour des raisons de sécurité.\n\nCollez le contenu complet d'un nouveau **secrets.json** (généré en exécutant GoogleFindMyTools), ou reconnectez-vous via le conteneur de connexion en saisissant un code d'appairage.\n\nUne fois soumis, les identifiants sont validés et enregistrés ; l'intégration se recharge sans modifier les noms de vos entités.",
+        "description": "Mettez à jour vos identifiants. Les valeurs existantes ne sont pas affichées pour des raisons de sécurité.\n\nCollez le contenu complet d'un nouveau **secrets.json** (généré en exécutant GoogleFindMyTools).\n\nUne fois soumis, les identifiants sont validés et enregistrés ; l'intégration se recharge sans modifier les noms de vos entités.",
         "data": {
           "new_secrets_json": "Nouveau secrets.json (contenu complet)",
-          "container_host": "Hôte du conteneur",
-          "container_port": "Port du conteneur",
-          "pairing_code": "Code d'appairage",
           "subentry": "Groupe de fonctionnalités"
         },
         "data_description": {
-          "container_host": "Nom d'hôte ou adresse IP du conteneur de connexion. Conservez la valeur par défaut, sauf si vous exécutez le conteneur ailleurs.",
-          "container_port": "Port sur lequel le conteneur de connexion fournit les identifiants. Conservez la valeur par défaut, sauf si vous l'avez modifié.",
-          "pairing_code": "Saisissez un code d'appairage pour mettre à jour les identifiants via le conteneur de connexion au lieu de coller secrets.json.",
           "subentry": "Appliquez les mises à jour d'identifiants au groupe de fonctionnalités sélectionné. Consultez le guide [Sous-entrées et groupes de fonctionnalités]({subentries_docs_url}) pour plus de détails sur le flux de travail."
         }
       },
@@ -389,13 +348,7 @@
       "duplicate_name": "Le nom sémantique existe déjà. Choisissez un autre nom.",
       "duplicate_semantic_location": "Le nom sémantique existe déjà. Choisissez un autre nom.",
       "unknown": "Erreur inattendue.",
-      "invalid_subentry": "Choisissez un groupe de fonctionnalités valide.",
-      "container_unreachable": "Impossible de joindre le conteneur de connexion. Assurez-vous qu'il est en cours d'exécution et que l'hôte et le port sont corrects.",
-      "container_timeout": "Le conteneur de connexion n'a pas répondu à temps. Veuillez réessayer.",
-      "container_auth_failed": "L'authentification auprès du conteneur de connexion a échoué. Vérifiez le code d'appairage et réessayez.",
-      "container_code_used": "Ce code d'appairage a déjà été utilisé ou a expiré. Redémarrez le conteneur de connexion et utilisez le nouveau code.",
-      "container_code_too_short": "Le code d'appairage est trop court. Copiez le code complet depuis le conteneur de connexion.",
-      "container_login_failed": "La connexion par conteneur n'a pas pu être menée à bien. Veuillez réessayer."
+      "invalid_subentry": "Choisissez un groupe de fonctionnalités valide."
     },
     "abort": {
       "reconfigure_successful": "Reconfiguration réussie.",
@@ -877,7 +830,6 @@
     },
     "auth_method": {
       "options": {
-        "container_login": "Connexion par conteneur en un clic",
         "secrets_json": "GoogleFindMyTools secrets.json"
       }
     }

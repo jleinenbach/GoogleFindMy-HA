@@ -926,7 +926,7 @@ def _default_container_data_path() -> Path:
     ``docker-login/data`` sibling directory of this integration package. On a
     single-host install (Home Assistant and the login container share a
     filesystem) that file is directly readable, so watching it makes Track A
-    zero-config: a one-click login lands the bundle here and discovery imports it
+    zero-config: a container login lands the bundle here and discovery imports it
     without the user having to configure any extra watch path. It is deliberately
     a *deterministic default* (not an option) so the common case needs no setup;
     :data:`SECRETS_EXTRA_WATCH_PATHS` remains the advanced override for

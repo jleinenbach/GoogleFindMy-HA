@@ -7,24 +7,18 @@ rem config\custom_components\googlefindmy\docker-login\ so no git clone is neede
 rem
 rem It cd's to its own folder, creates ./data (where secrets.json is persisted),
 rem then builds + runs exactly ONE ephemeral container in the foreground
-rem (`docker compose run --rm`), which attaches your terminal so the interactive
-rem "Press Enter" login prompt works. Docker Desktop maps the bind-mount
+rem (`docker compose run --rm`), which attaches your terminal so the login CLI
+rem can ask you for the account e-mail if needed. Docker Desktop maps the bind-mount
 rem permissions, so no UID handoff or chmod is needed here.
 rem
-rem Three ADDRESS ROLES, deliberately separate (mirrors login.sh):
-rem   token endpoint 7901  NOT configurable here: pinned to 127.0.0.1 in
-rem                        docker-compose.oneclick.yml. That pin is the no-LAN
-rem                        guarantee for an endpoint serving Google credentials
-rem                        in cleartext, which therefore gets no environment
-rem                        override surface at all: one stray variable must not
-rem                        be able to widen it.
+rem Two ADDRESS ROLES, deliberately separate (mirrors login.sh):
 rem   GFMY_NOVNC_BIND      host bind for the noVNC viewer (7900). Default 127.0.0.1.
 rem   GFMY_NOVNC_URL_HOST  address PRINTED for you to open in a browser.
 rem                        Defaults to the noVNC bind.
 rem
-rem The split exists because the two ports serve different consumers: 7901 is
-rem machine-to-machine (Home Assistant on this host), 7900 is opened by a browser
-rem that usually runs on a DIFFERENT machine than the Docker host.
+rem They are separate because where the viewer BINDS and what a browser is told
+rem to OPEN are two different questions: that browser usually runs on a DIFFERENT
+rem machine than the Docker host.
 rem
 rem On loopback (the default) noVNC uses the fixed password "secret". A LAN bind
 rem hardens it: the container mints a per-run password and serves self-signed
@@ -35,13 +29,15 @@ rem   login.cmd --ip 192.168.1.21
 rem Unlike login.sh this script does NOT auto-detect LAN addresses: parsing
 rem `ipconfig` output in batch is locale-dependent and unreliable, so pass --ip.
 rem
-rem Optional one-click handoff, run these two lines in a terminal:
-rem   set GFMY_ONECLICK=1
+rem Handoff track: on a normal run this script ASKS which way the finished
+rem credentials should reach Home Assistant -- A the file in .\data (the default a
+rem bare Enter picks), B the bundle printed in this terminal INSTEAD, after which
+rem the container deletes that file. They are alternatives, not layers. Answer it
+rem up front with `login.cmd --track b`, or the old way:
+rem   set GFMY_CLEARTEXT=1
 rem   login.cmd
-rem only then does this script add docker-compose.oneclick.yml, which publishes the
-rem token endpoint on host loopback (127.0.0.1, port 7901). Without it no 7901 port
-rem is published at all, so the file handoff and GFMY_CLEARTEXT=1 still start on a
-rem host where port 7901 is already in use.
+rem Either of those skips the question. No extra port is published in either
+rem case, so both tracks start without one.
 setlocal
 pushd "%~dp0"
 
@@ -49,14 +45,22 @@ rem Strip trailing blanks from EVERY inbound GFMY_* switch before anything reads
 rem or forwards one. `set VAR=1 && login.cmd` is the form users reach for, and
 rem cmd.exe stores everything up to the `&&` INCLUDING the blank in front of it,
 rem so the value arrives as "1 " (measured with a real cmd.exe). Both consumers
-rem compare strictly against "1": this script for GFMY_ONECLICK, and
-rem entrypoint.sh inside the container for GFMY_ONECLICK and GFMY_CLEARTEXT,
-rem which reach it because Compose interpolates our process environment. So the
+rem compare strictly against "1": this script for GFMY_CLEARTEXT, and
+rem entrypoint.sh inside the container for the same variable, which reaches it
+rem because Compose interpolates our process environment. So the
 rem list below is not "what this script reads", it is "what a user can set and
 rem what survives into Compose or the container": the ${GFMY_*} names of
 rem docker-compose.yml plus GFMY_NOVNC_URL_HOST, which only this script uses.
 rem Without the trim the wrong mode starts silently, with exit code 0.
-for %%V in (GFMY_ONECLICK GFMY_CLEARTEXT GFMY_ARGS GFMY_HOST_UID GFMY_HOST_GID GFMY_NOVNC_BIND GFMY_NOVNC_URL_HOST GFMY_NOVNC_HARDEN GFMY_NOVNC_TLS) do call :trim_trailing_blanks %%V
+for %%V in (GFMY_CLEARTEXT GFMY_ARGS GFMY_HOST_UID GFMY_HOST_GID GFMY_NOVNC_BIND GFMY_NOVNC_URL_HOST GFMY_NOVNC_HARDEN GFMY_NOVNC_TLS) do call :trim_trailing_blanks %%V
+
+rem Remember what the caller pinned BEFORE anything defaults it, so the track
+rem menu below can tell "said nothing" from "said off" (AP-5). cmd.exe has no
+rem empty-but-defined state for these: `set VAR=` removes the name, so `if
+rem defined` is the exact counterpart of bash's `${VAR+set}` test here.
+set "CLEARTEXT_ENV_SET="
+if defined GFMY_CLEARTEXT set "CLEARTEXT_ENV_SET=1"
+set "TRACK_FROM_CLI="
 
 set "NOVNC_BIND=%GFMY_NOVNC_BIND%"
 if "%NOVNC_BIND%"=="" set "NOVNC_BIND=127.0.0.1"
@@ -69,8 +73,10 @@ if "%~1"=="" goto :args_done
 if /i "%~1"=="--help" goto :usage
 if /i "%~1"=="-h" goto :usage
 if /i "%~1"=="--ip" goto :parse_ip
+if /i "%~1"=="--track" goto :parse_track
 set "ARG=%~1"
 if /i "%ARG:~0,5%"=="--ip=" goto :parse_ip_inline
+if /i "%ARG:~0,8%"=="--track=" goto :parse_track_inline
 echo [login] Unknown option: "%~1" 1>&2
 goto :usage_error
 :parse_ip
@@ -85,6 +91,18 @@ set "CANDIDATE=%ARG:~5%"
 if "%CANDIDATE%"=="" goto :ip_missing
 call :validate_ip "%CANDIDATE%" || goto :ip_invalid
 call :set_novnc_from_ip "%CANDIDATE%"
+shift
+goto :parse_args
+:parse_track
+if "%~2"=="" goto :track_missing
+call :set_track "%~2" || goto :track_invalid
+shift
+shift
+goto :parse_args
+:parse_track_inline
+set "CANDIDATE=%ARG:~8%"
+if "%CANDIDATE%"=="" goto :track_missing
+call :set_track "%CANDIDATE%" || goto :track_invalid
 shift
 goto :parse_args
 :args_done
@@ -121,6 +139,40 @@ rem <ADDRESS>` run would leave GFMY_NOVNC_URL_HOST at its original (usually empt
 rem value and the URL printed inside the container would fall back to localhost.
 rem login.sh exports both at the same point, for that reason.
 set "GFMY_NOVNC_URL_HOST=%NOVNC_URL_HOST%"
+
+rem Handoff track menu (AP-5), mirroring prompt_for_track in login.sh: same two
+rem options, same A default, same precedence (an explicit --track or a preset
+rem GFMY_CLEARTEXT skips the question entirely).
+rem
+rem Two deliberate differences from the bash version. There is no `[ -t 0 ]`
+rem equivalent in batch, so the question is simply asked. At EOF (no redirect, or
+rem an exhausted one) `set /p` leaves the variable untouched and execution
+rem continues on the A default -- the historical behaviour. Be precise about the
+rem remaining case, because it is a real cost and not a no-op: if stdin IS
+rem redirected and still has content, `set /p` CONSUMES its first line. So
+rem `login.cmd < answers.txt` feeds that first line to this prompt instead of to
+rem the container's e-mail question, and a line beginning with b silently selects
+rem that track. Non-interactive Windows runs should therefore pass the track
+rem explicitly (`--track a`, or a preset GFMY_CLEARTEXT),
+rem which skips this block entirely via the guards below. And an unrecognised
+rem answer falls back to A instead of re-asking, because a re-ask loop would spin
+rem forever against a redirected stdin that can never satisfy it.
+if defined TRACK_FROM_CLI goto :track_done
+if defined CLEARTEXT_ENV_SET goto :track_done
+echo.
+echo [login] How should the finished credentials reach Home Assistant?
+echo [login]   A) File only: .\data\secrets.json  (the file stays)
+echo [login]      Needs: Home Assistant can see that folder, e.g. this repo lives
+echo [login]      under config\custom_components on the HA machine.
+echo [login]   B) Print the bundle in this terminal INSTEAD of keeping it
+echo [login]      The file is deleted right after printing, so this REPLACES A:
+echo [login]      no watched-file import afterwards.
+echo [login]      Last resort: the credentials then sit in your scrollback, in
+echo [login]      "docker logs" and in the clipboard you paste them from.
+set "TRACK_CHOICE="
+set /p "TRACK_CHOICE=[login] Choice [Enter = A]: "
+if /i "%TRACK_CHOICE%"=="b" set "GFMY_CLEARTEXT=1"
+:track_done
 
 rem LAN-bind hardening (AP-7 + AP-8), mirroring login.sh. On a non-loopback bind
 rem raise a single verdict, GFMY_NOVNC_HARDEN=1, that the CONTAINER acts on:
@@ -171,16 +223,13 @@ echo [login]   ssh -L 7900:127.0.0.1:7900 ^<docker-host^>
 echo [login] or re-run bound to a LAN address: login.cmd --ip ^<ADDRESS^>
 :hint_done
 
-rem Compose files: the base file publishes only noVNC (7900). The one-click token
-rem endpoint (7901) lives in an OPT-IN overlay, so a host that already uses 7901
-rem can never block the file handoff (.\data) or the GFMY_CLEARTEXT=1 output,
-rem which do not need that port. Gate matches entrypoint.sh exactly: "1" means on.
+rem Compose files: the base file publishes only noVNC (7900). No other port is
+rem published, so a host with a busy port can never block the file handoff
+rem (.\data) or the GFMY_CLEARTEXT=1 terminal output.
 set "COMPOSE_FILES=-f docker-compose.yml"
-if "%GFMY_ONECLICK%"=="1" set "COMPOSE_FILES=%COMPOSE_FILES% -f docker-compose.oneclick.yml"
-if "%GFMY_ONECLICK%"=="1" echo [login] One-click enabled: token endpoint published on 127.0.0.1 port 7901.
-if "%GFMY_ONECLICK%"=="1" echo [login] Home Assistant must reach that address; it does when HA shares this host's network namespace.
 rem Passing an explicit -f turns off Compose's implicit override auto-load, so
-rem re-add a user override file when there is one (README: shared-network route).
+rem re-add a user override file when there is one, so a docker-compose.override.yml
+rem next to these files keeps working.
 rem At most one, mirroring Compose's own auto-load: it picks a single override
 rem file, so merging both spellings here would silently apply a stale leftover.
 rem Kept as flat, line-wise statements on purpose: inside a parenthesised block
@@ -192,7 +241,7 @@ if exist docker-compose.override.yaml set "COMPOSE_FILES=%COMPOSE_FILES% -f dock
 :override_done
 
 rem `run --rm` (not `up`): fresh one-shot container with your terminal attached so
-rem the "Press Enter" prompt works; `--service-ports` publishes the ports declared
+rem the e-mail prompt works; `--service-ports` publishes the ports declared
 rem by the selected compose files.
 docker compose %COMPOSE_FILES% run --build --service-ports --rm googlefindmy-login
 
@@ -225,20 +274,57 @@ popd
 endlocal
 exit /b 2
 
+:track_missing
+echo [login] --track needs a value: a or b. Example: login.cmd --track a 1>&2
+popd
+endlocal
+exit /b 2
+
+:track_invalid
+echo [login] --track needs a or b. 1>&2
+echo [login]   a = file handoff only (.\data\secrets.json, the default) 1>&2
+echo [login]   b = print the bundle in this terminal instead; the container 1>&2
+echo [login]       deletes the file after printing it 1>&2
+popd
+endlocal
+exit /b 2
+
 :print_usage
-echo Usage: login.cmd [--ip ^<ADDRESS^>] [--help]
+echo Usage: login.cmd [--ip ^<ADDRESS^>] [--track a^|b] [--help]
 echo.
 echo   --ip ^<ADDRESS^>  Bind the noVNC viewer (port 7900) to ^<ADDRESS^> and print
 echo                   that address as the URL to open. Use a concrete LAN
 echo                   address of this Docker host, e.g. login.cmd --ip 192.168.1.21
+echo   --track a^|b     Pick how the credentials reach Home Assistant without being
+echo                   asked: a = file only (default), b = print the bundle in
+echo                   this terminal INSTEAD, after which the container deletes
+echo                   the file.
 echo   --help          Show this help and exit.
 echo.
+echo Without --track and without GFMY_CLEARTEXT this script asks
+echo which handoff you want; a bare Enter keeps the historical file-only default.
+echo.
 echo Environment (see the comment block at the top of this file):
-echo   (the token endpoint 7901 is pinned to 127.0.0.1 in the compose overlay)
 echo   GFMY_NOVNC_BIND       host bind for noVNC 7900          (default 127.0.0.1)
 echo   GFMY_NOVNC_URL_HOST   address printed for your browser  (default: the bind)
-echo   GFMY_ONECLICK=1       add the opt-in overlay that publishes port 7901
+echo   GFMY_CLEARTEXT=1      print the bundle in this terminal at the end
 goto :eof
+
+:set_track
+rem --track a^|b -^> the same switch the menu sets. Track A is not a switch:
+rem main.py writes the file in .\data on every run, so "a" means "turn the other
+rem one off", which is what the historical default did. Leaving it off is what
+rem makes the file SURVIVE the run -- with the switch on, entrypoint.sh deletes
+rem it again right after printing the bundle.
+set "GFMY_CLEARTEXT="
+if /i "%~1"=="a" goto :set_track_ok
+if /i "%~1"=="b" goto :set_track_b
+exit /b 1
+:set_track_b
+set "GFMY_CLEARTEXT=1"
+:set_track_ok
+set "TRACK_FROM_CLI=1"
+exit /b 0
 
 :validate_ip
 rem Accept only an IP literal, mirroring is_ip_literal() in login.sh. A host

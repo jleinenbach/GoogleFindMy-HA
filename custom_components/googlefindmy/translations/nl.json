@@ -8,7 +8,7 @@
     "step": {
       "user": {
         "title": "Google Find My Device – Aanmelding",
-        "description": "Kies hoe je je wilt aanmelden. De aanmelding met de één-klik-container start een voorbereide browsercontainer voor je en vereist een machine met Docker. GoogleFindMyTools secrets.json past als je dat bestand al hebt of GoogleFindMyTools zelf met Chrome op een computer kunt uitvoeren.",
+        "description": "Kies hoe je je wilt aanmelden. GoogleFindMyTools secrets.json past als je dat bestand al hebt of GoogleFindMyTools zelf met Chrome op een computer kunt uitvoeren.",
         "data": {
           "auth_method": "Aanmeldingsmethode"
         }
@@ -44,28 +44,6 @@
           "secrets_json": "Inhoud van secrets.json-bestand"
         }
       },
-      "container_login": {
-        "title": "Aanmelden via container met één klik",
-        "description": "Meld je aan via de meegeleverde aanmeldcontainer. Voer hem uit op de Docker-host zelf; de Home Assistant-container heeft geen Docker-socket.\n\n1. Open een shell op de Docker-host en ga naar de map `custom_components/googlefindmy/docker-login/` van deze integratie.\n2. Start hem met `GFMY_ONECLICK=1 bash login.sh` (Windows: `set GFMY_ONECLICK=1 && login.cmd`).\n3. Rond de Google-aanmelding af in het noVNC-venster.\n4. De container drukt daarna een koppelcode af in datzelfde terminalvenster. De volgende stap vraagt erom.\n\nnoVNC-viewer (wachtwoord: `secret`): {novnc_access}\n\nDe viewer wordt geopend door je browser, die vaak op een andere machine draait dan de Docker-host; daarom wordt hij alleen gelinkt als de host hierboven een niet-loopback IP-adres is. Bij een loopback-binding open je hem op de Docker-host zelf, tunnel je hem met `ssh -L 7900:127.0.0.1:7900 DOCKER-HOST`, of start je de launcher opnieuw met `--ip ADRES` en gebruik je het afgedrukte adres.\n\nVolledige instructies: {docs_url} (map `custom_components/googlefindmy/docker-login/`).",
-        "data": {
-          "host": "Containerhost",
-          "port": "Containerpoort"
-        },
-        "data_description": {
-          "host": "Hostnaam of IP-adres van de aanmeldcontainer. De standaardwaarde `127.0.0.1` is de loopback van de Docker-host en werkt dus alleen als Home Assistant de netwerkruimte van die host deelt; een Home Assistant in bridge-modus kan hem niet bereiken. Twee uitwegen: zet beide containers in één Docker-netwerk, start de launcher zo dat `docker compose run` `--use-aliases` meekrijgt (zonder die optie lost de servicenaam niet op, zie de README) en vul hier de servicenaam van de container in, of sla het netwerk helemaal over en laat de container het bestand doorgeven via `docker-login/data/secrets.json`, dat deze integratie zelf importeert. De poort voor de inloggegevens is in `docker-compose.oneclick.yml` vast aan die loopback gebonden; er is geen instelling voor.",
-          "port": "Poort waarop de aanmeldcontainer de inloggegevens aanbiedt. Hij wordt alleen gepubliceerd als de launcher draait met de overlay `docker-compose.oneclick.yml`; het gewone compose-bestand publiceert hem niet."
-        }
-      },
-      "container_pairing": {
-        "title": "Voer de koppelcode in",
-        "description": "Rond eerst de Google-aanmelding af in het noVNC-venster. De container drukt de koppelcode daarna af in de terminal waarin de launcher draait (of in `docker logs` als je hem losgekoppeld hebt gestart).",
-        "data": {
-          "pairing_code": "Koppelcode"
-        },
-        "data_description": {
-          "pairing_code": "De code die de container in de terminal van de launcher afdrukt zodra de aanmelding klaar is. Hij wordt bij elke uitvoering opnieuw gegenereerd, is 5 minuten geldig en blokkeert na 5 mislukte pogingen; stop in dat geval de container en start de launcher opnieuw."
-        }
-      },
       "device_selection": {
         "title": "Polling-instellingen",
         "description": "Nieuw ontdekte apparaten verschijnen uitgeschakeld en kunnen worden ingeschakeld in de apparaatinstellingen. Configureer hier de algemene pollingparameters:\n• Locatie-pollinginterval: Hoe vaak een nieuwe pollingcyclus wordt gestart (60–3600 seconden)\n• Apparaat-pollingvertraging: Vertraging tussen het pollen van individuele apparaten binnen een cyclus (1–60 seconden)\n\nGoogle Home-filter: Standaard ingeschakeld met trefwoorden nest/google/home/mini/hub/display/chromecast/speaker. Voor Google/Nest/Chromecast-detecties worden de coördinaten van de Thuiszone ingevuld en worden herhaalde \"thuis\"-meldingen 15 minuten lang onderdrukt. Pas de trefwoorden hier aan als je apparaten andere namen gebruiken.",
@@ -91,18 +69,11 @@
       },
       "reauth_confirm": {
         "title": "Opnieuw authenticeren",
-        "description": "Je inloggegevens voor **{email}** lijken ongeldig of verlopen te zijn. Geef hieronder nieuwe inloggegevens op.\n\nPlak de volledige inhoud van een nieuwe **secrets.json** (gegenereerd door GoogleFindMyTools uit te voeren), of meld je opnieuw aan via de aanmeldcontainer door een koppelcode in te voeren.\n\nLet op: het account-e-mailadres ligt vast voor deze herauthenticatie; om een ander account te gebruiken, verwijder je de integratie en voeg je deze opnieuw toe.",
+        "description": "Je inloggegevens voor **{email}** lijken ongeldig of verlopen te zijn. Geef hieronder nieuwe inloggegevens op.\n\nPlak de volledige inhoud van een nieuwe **secrets.json** (gegenereerd door GoogleFindMyTools uit te voeren).\n\nLet op: het account-e-mailadres ligt vast voor deze herauthenticatie; om een ander account te gebruiken, verwijder je de integratie en voeg je deze opnieuw toe.",
         "data": {
-          "secrets_json": "Nieuwe secrets.json (volledige inhoud)",
-          "container_host": "Containerhost",
-          "container_port": "Containerpoort",
-          "pairing_code": "Koppelcode"
+          "secrets_json": "Nieuwe secrets.json (volledige inhoud)"
         },
-        "data_description": {
-          "container_host": "Hostnaam of IP-adres van de aanmeldcontainer. Laat de standaardwaarde staan, tenzij je de container ergens anders draait.",
-          "container_port": "Poort waarop de aanmeldcontainer de inloggegevens aanbiedt. Laat de standaardwaarde staan, tenzij je die hebt gewijzigd.",
-          "pairing_code": "Voer een koppelcode in om opnieuw te authenticeren via de aanmeldcontainer in plaats van secrets.json te plakken."
-        }
+        "data_description": {}
       },
       "migrate_complete": {
         "title": "Migratie voltooid",
@@ -122,13 +93,7 @@
       "choose_one": "Geef precies één inlogmethode op.",
       "required": "Dit veld is verplicht.",
       "unknown": "Er is een onverwachte fout opgetreden.",
-      "email_mismatch": "De opgegeven inloggegevens behoren tot een ander Google-account. Om dat account toe te voegen, maak een nieuwe integratie aan; herauthenticatie kan het account voor dit item niet wijzigen.",
-      "container_unreachable": "Kan de aanmeldcontainer niet bereiken. Zorg ervoor dat hij draait en dat de host en poort correct zijn.",
-      "container_timeout": "De aanmeldcontainer reageerde niet op tijd. Probeer het opnieuw.",
-      "container_auth_failed": "Authenticatie met de aanmeldcontainer is mislukt. Controleer de koppelcode en probeer het opnieuw.",
-      "container_code_used": "Deze koppelcode is al gebruikt of is verlopen. Herstart de aanmeldcontainer en gebruik de nieuwe code.",
-      "container_code_too_short": "De koppelcode is te kort. Kopieer de volledige code uit de aanmeldcontainer.",
-      "container_login_failed": "De containeraanmelding kon niet worden voltooid. Probeer het opnieuw."
+      "email_mismatch": "De opgegeven inloggegevens behoren tot een ander Google-account. Om dat account toe te voegen, maak een nieuwe integratie aan; herauthenticatie kan het account voor dit item niet wijzigen."
     },
     "abort": {
       "already_configured": "Google Find My Device is al geconfigureerd.",
@@ -294,18 +259,12 @@
       },
       "credentials": {
         "title": "Inloggegevens bijwerken (optioneel)",
-        "description": "Werk je inloggegevens bij. Bestaande waarden worden om veiligheidsredenen niet getoond.\n\nPlak de volledige inhoud van een nieuwe **secrets.json** (gegenereerd door GoogleFindMyTools uit te voeren), of meld je opnieuw aan via de aanmeldcontainer door een koppelcode in te voeren.\n\nZodra je verzendt, worden de inloggegevens gevalideerd en opgeslagen; de integratie wordt opnieuw geladen zonder je entiteitsnamen te wijzigen.",
+        "description": "Werk je inloggegevens bij. Bestaande waarden worden om veiligheidsredenen niet getoond.\n\nPlak de volledige inhoud van een nieuwe **secrets.json** (gegenereerd door GoogleFindMyTools uit te voeren).\n\nZodra je verzendt, worden de inloggegevens gevalideerd en opgeslagen; de integratie wordt opnieuw geladen zonder je entiteitsnamen te wijzigen.",
         "data": {
           "new_secrets_json": "Nieuwe secrets.json (volledige inhoud)",
-          "container_host": "Containerhost",
-          "container_port": "Containerpoort",
-          "pairing_code": "Koppelcode",
           "subentry": "Functiegroep"
         },
         "data_description": {
-          "container_host": "Hostnaam of IP-adres van de aanmeldcontainer. Laat de standaardwaarde staan, tenzij je de container ergens anders draait.",
-          "container_port": "Poort waarop de aanmeldcontainer de inloggegevens aanbiedt. Laat de standaardwaarde staan, tenzij je die hebt gewijzigd.",
-          "pairing_code": "Voer een koppelcode in om inloggegevens bij te werken via de aanmeldcontainer in plaats van secrets.json te plakken.",
           "subentry": "Pas de inloggegevensupdates toe op de geselecteerde functiegroep. Raadpleeg de gids [Subentries en functiegroepen]({subentries_docs_url}) voor details over de werkwijze."
         }
       },
@@ -389,13 +348,7 @@
       "duplicate_name": "Semantische naam bestaat al. Kies een andere naam.",
       "duplicate_semantic_location": "Semantische naam bestaat al. Kies een andere naam.",
       "unknown": "Er is een onverwachte fout opgetreden.",
-      "invalid_subentry": "Kies een geldige functiegroep.",
-      "container_unreachable": "Kan de aanmeldcontainer niet bereiken. Zorg ervoor dat hij draait en dat de host en poort correct zijn.",
-      "container_timeout": "De aanmeldcontainer reageerde niet op tijd. Probeer het opnieuw.",
-      "container_auth_failed": "Authenticatie met de aanmeldcontainer is mislukt. Controleer de koppelcode en probeer het opnieuw.",
-      "container_code_used": "Deze koppelcode is al gebruikt of is verlopen. Herstart de aanmeldcontainer en gebruik de nieuwe code.",
-      "container_code_too_short": "De koppelcode is te kort. Kopieer de volledige code uit de aanmeldcontainer.",
-      "container_login_failed": "De containeraanmelding kon niet worden voltooid. Probeer het opnieuw."
+      "invalid_subentry": "Kies een geldige functiegroep."
     },
     "abort": {
       "reconfigure_successful": "Herconfiguratie geslaagd.",
@@ -877,7 +830,6 @@
     },
     "auth_method": {
       "options": {
-        "container_login": "Aanmelden via container met één klik",
         "secrets_json": "GoogleFindMyTools secrets.json"
       }
     }

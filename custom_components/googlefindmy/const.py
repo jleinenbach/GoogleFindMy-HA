@@ -31,7 +31,7 @@ CONFIG_ENTRY_VERSION: int = 2
 # NOTE: no ": str" annotation on purpose -- semantic-release's version_variables
 # regex only matches `NAME = "x"`, not `NAME: str = "x"`. Re-adding the annotation
 # would silently skip this file on the automated version bump.
-INTEGRATION_VERSION = "1.7.15.4"
+INTEGRATION_VERSION = "1.7.15.6"
 
 # --------------------------------------------------------------------------------------
 # Shared textual constants
@@ -735,36 +735,6 @@ def map_token_hex_digest(seed: str) -> str:
     return hashlib.sha256(seed.encode()).hexdigest()[:16]
 
 
-# --------------------------------------------------------------------------------------
-# Container login (one-click Docker login handoff)
-# --------------------------------------------------------------------------------------
-# Two distinct container ports keep the human-facing noVNC console and the
-# machine-facing token endpoint separated. ``CONTAINER_NOVNC_PORT`` is only ever
-# rendered as a clickable link/hint, while ``CONTAINER_TOKEN_PORT`` is the default
-# for the loopback fetch that pulls the freshly minted ``secrets.json``.
-CONTAINER_NOVNC_PORT: int = 7900
-CONTAINER_TOKEN_PORT: int = 7901
-
-# Total aiohttp timeout budget (seconds) for a single container fetch/ack call.
-CONTAINER_FETCH_TIMEOUT: int = 30
-
-# Minimum accepted length of the pairing nonce (``secrets.token_urlsafe(16)`` ->
-# 22 url-safe characters == 128 bit of entropy); shorter values are rejected
-# before any network round-trip.
-CONTAINER_NONCE_MIN_LEN: int = 16
-
-# Hard cap (bytes) on the container response body to bound memory and abuse; the
-# freshly minted bundle is small, so a generous but finite ceiling is enough.
-CONTAINER_MAX_RESPONSE_BYTES: int = 1024 * 1024
-
-# Lockout threshold: after this many failed pairing attempts the token endpoint
-# refuses further ``GET /secrets`` calls (bruteforce guard).
-CONTAINER_NONCE_MAX_ATTEMPTS: int = 5
-
-# Time-to-live (seconds) for the one-shot token endpoint. After this window the
-# server deletes the bundle and shuts down even without an explicit ACK.
-CONTAINER_TOKEN_TTL: int = 300
-
 # Options key holding an optional list of *additional* ``secrets.json`` paths the
 # discovery watcher observes on top of the default ``Auth/secrets.json``.
 SECRETS_EXTRA_WATCH_PATHS: str = "secrets_extra_watch_paths"
@@ -878,12 +848,5 @@ __all__ = [
     "WEEK_SECONDS",
     "map_token_secret_seed",
     "map_token_hex_digest",
-    "CONTAINER_NOVNC_PORT",
-    "CONTAINER_TOKEN_PORT",
-    "CONTAINER_FETCH_TIMEOUT",
-    "CONTAINER_NONCE_MIN_LEN",
-    "CONTAINER_MAX_RESPONSE_BYTES",
-    "CONTAINER_NONCE_MAX_ATTEMPTS",
-    "CONTAINER_TOKEN_TTL",
     "SECRETS_EXTRA_WATCH_PATHS",
 ]

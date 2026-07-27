@@ -8,7 +8,7 @@
     "step": {
       "user": {
         "title": "Autenticación de Google Find My Device",
-        "description": "Elige cómo quieres iniciar sesión. El inicio de sesión con contenedor en un clic arranca por ti un contenedor de navegador ya preparado y necesita una máquina con Docker. GoogleFindMyTools secrets.json es la opción adecuada si ya tienes ese archivo o puedes ejecutar GoogleFindMyTools con Chrome en un ordenador.",
+        "description": "Elige cómo quieres iniciar sesión. GoogleFindMyTools secrets.json es la opción adecuada si ya tienes ese archivo o puedes ejecutar GoogleFindMyTools con Chrome en un ordenador.",
         "data": {
           "auth_method": "Método de autenticación"
         }
@@ -44,28 +44,6 @@
           "secrets_json": "Contenido del archivo secrets.json"
         }
       },
-      "container_login": {
-        "title": "Inicio de sesión con contenedor en un clic",
-        "description": "Inicia sesión mediante el contenedor de inicio de sesión incluido. Ejecútalo en el propio host de Docker; el contenedor de Home Assistant no tiene socket de Docker.\n\n1. Abre un terminal en el host de Docker y entra en la carpeta `custom_components/googlefindmy/docker-login/` de esta integración.\n2. Inícialo con `GFMY_ONECLICK=1 bash login.sh` (Windows: `set GFMY_ONECLICK=1 && login.cmd`).\n3. Completa el inicio de sesión de Google en la ventana de noVNC.\n4. A continuación el contenedor imprime un código de emparejamiento en ese mismo terminal. El siguiente paso lo pedirá.\n\nVisor noVNC (contraseña: `secret`): {novnc_access}\n\nEl visor lo abre tu navegador, que a menudo se ejecuta en una máquina distinta del host de Docker, por lo que solo se enlaza cuando el host indicado arriba es una dirección IP que no es de loopback. Con una vinculación de loopback, ábrelo en el propio host de Docker, haz un túnel con `ssh -L 7900:127.0.0.1:7900 DOCKER-HOST`, o vuelve a ejecutar el lanzador con `--ip DIRECCION` y usa la dirección que imprime.\n\nInstrucciones completas: {docs_url} (carpeta `custom_components/googlefindmy/docker-login/`).",
-        "data": {
-          "host": "Host del contenedor",
-          "port": "Puerto del contenedor"
-        },
-        "data_description": {
-          "host": "Nombre de host o dirección IP del contenedor de inicio de sesión. El valor predeterminado `127.0.0.1` es el loopback del host de Docker, así que solo funciona si Home Assistant comparte el espacio de red de ese host; un Home Assistant en modo bridge no puede alcanzarlo. Dos salidas: poner ambos contenedores en la misma red de Docker, arrancar el lanzador de modo que `docker compose run` use `--use-aliases` (sin esa opción el nombre de servicio no se resuelve, ver el README) e indicar aquí el nombre de servicio del contenedor, o prescindir de la red y dejar que el contenedor entregue el archivo mediante `docker-login/data/secrets.json`, que esta integración importa por su cuenta. El puerto de credenciales está fijado a ese loopback en `docker-compose.oneclick.yml`; no hay ningún ajuste para cambiarlo.",
-          "port": "Puerto por el que el contenedor sirve las credenciales. Solo se publica cuando el lanzador se ejecuta con la superposición `docker-compose.oneclick.yml`; el archivo compose normal no lo publica."
-        }
-      },
-      "container_pairing": {
-        "title": "Introduce el código de emparejamiento",
-        "description": "Completa primero el inicio de sesión de Google en la ventana de noVNC. Después el contenedor imprime el código de emparejamiento en el terminal donde se ejecuta el lanzador (o en `docker logs` si lo iniciaste en segundo plano).",
-        "data": {
-          "pairing_code": "Código de emparejamiento"
-        },
-        "data_description": {
-          "pairing_code": "El código que el contenedor imprime en el terminal del lanzador una vez finalizado el inicio de sesión. Se genera de nuevo en cada ejecución, es válido durante 5 minutos y se bloquea tras 5 intentos fallidos; en ese caso, detén el contenedor y vuelve a iniciar el lanzador."
-        }
-      },
       "device_selection": {
         "title": "Ajustes de sondeo",
         "description": "Los dispositivos descubiertos recientemente aparecen desactivados y se pueden activar en la configuración del dispositivo. Configura aquí los parámetros generales de sondeo:\n• Intervalo de sondeo de ubicación: con qué frecuencia iniciar un nuevo ciclo de sondeo (60–3600 segundos)\n• Retardo entre sondeos de dispositivos: intervalo entre las consultas de cada dispositivo dentro de un ciclo (1–60 segundos)\n\nFiltro Google Home: activado por defecto con las palabras clave nest/google/home/mini/hub/display/chromecast/speaker. Sustituye las coordenadas de la zona Home para detecciones de Google/Nest/Chromecast y atenúa informes repetidos de \"home\" durante 15 minutos. Ajusta aquí las palabras clave si tus dispositivos usan otros nombres.",
@@ -91,18 +69,11 @@
       },
       "reauth_confirm": {
         "title": "Volver a autenticar",
-        "description": "Tus credenciales para **{email}** parecen no ser válidas o haber caducado. Proporciona nuevas credenciales a continuación.\n\nPega el contenido completo de un nuevo **secrets.json** (generado ejecutando GoogleFindMyTools) o vuelve a iniciar sesión mediante el contenedor de inicio de sesión introduciendo un código de emparejamiento.\n\nNota: El correo de la cuenta es fijo para esta reautenticación; para usar una cuenta diferente, elimina la integración y vuelve a añadirla.",
+        "description": "Tus credenciales para **{email}** parecen no ser válidas o haber caducado. Proporciona nuevas credenciales a continuación.\n\nPega el contenido completo de un nuevo **secrets.json** (generado ejecutando GoogleFindMyTools).\n\nNota: El correo de la cuenta es fijo para esta reautenticación; para usar una cuenta diferente, elimina la integración y vuelve a añadirla.",
         "data": {
-          "secrets_json": "Nuevo secrets.json (contenido completo)",
-          "container_host": "Host del contenedor",
-          "container_port": "Puerto del contenedor",
-          "pairing_code": "Código de emparejamiento"
+          "secrets_json": "Nuevo secrets.json (contenido completo)"
         },
-        "data_description": {
-          "container_host": "Nombre de host o dirección IP del contenedor de inicio de sesión. Deja el valor predeterminado a menos que ejecutes el contenedor en otro lugar.",
-          "container_port": "Puerto por el que el contenedor de inicio de sesión sirve las credenciales. Deja el valor predeterminado a menos que lo hayas cambiado.",
-          "pairing_code": "Introduce un código de emparejamiento para volver a autenticarte mediante el contenedor de inicio de sesión en lugar de pegar secrets.json."
-        }
+        "data_description": {}
       },
       "migrate_complete": {
         "title": "Migración completada",
@@ -122,13 +93,7 @@
       "choose_one": "Proporciona exactamente un método de credenciales.",
       "required": "Este campo es obligatorio.",
       "unknown": "Error inesperado.",
-      "email_mismatch": "Las credenciales proporcionadas pertenecen a otra cuenta de Google. Para añadir esa cuenta, crea una integración nueva; la reautenticación no puede cambiar la cuenta de esta entrada.",
-      "container_unreachable": "No se pudo contactar con el contenedor de inicio de sesión. Asegúrate de que esté en ejecución y de que el host y el puerto sean correctos.",
-      "container_timeout": "El contenedor de inicio de sesión no respondió a tiempo. Vuelve a intentarlo.",
-      "container_auth_failed": "Falló la autenticación con el contenedor de inicio de sesión. Comprueba el código de emparejamiento y vuelve a intentarlo.",
-      "container_code_used": "Este código de emparejamiento ya se ha usado o ha caducado. Reinicia el contenedor de inicio de sesión y usa el nuevo código.",
-      "container_code_too_short": "El código de emparejamiento es demasiado corto. Copia el código completo del contenedor de inicio de sesión.",
-      "container_login_failed": "No se pudo completar el inicio de sesión con el contenedor. Vuelve a intentarlo."
+      "email_mismatch": "Las credenciales proporcionadas pertenecen a otra cuenta de Google. Para añadir esa cuenta, crea una integración nueva; la reautenticación no puede cambiar la cuenta de esta entrada."
     },
     "abort": {
       "already_configured": "Google Find My Device ya está configurado.",
@@ -294,18 +259,12 @@
       },
       "credentials": {
         "title": "Actualizar credenciales (opcional)",
-        "description": "Actualiza tus credenciales. Los valores existentes no se muestran por seguridad.\n\nPega el contenido completo de un nuevo **secrets.json** (generado ejecutando GoogleFindMyTools) o vuelve a iniciar sesión mediante el contenedor de inicio de sesión introduciendo un código de emparejamiento.\n\nUna vez enviadas, las credenciales se validan y se almacenan; la integración se recarga sin cambiar los nombres de tus entidades.",
+        "description": "Actualiza tus credenciales. Los valores existentes no se muestran por seguridad.\n\nPega el contenido completo de un nuevo **secrets.json** (generado ejecutando GoogleFindMyTools).\n\nUna vez enviadas, las credenciales se validan y se almacenan; la integración se recarga sin cambiar los nombres de tus entidades.",
         "data": {
           "new_secrets_json": "Nuevo secrets.json (contenido completo)",
-          "container_host": "Host del contenedor",
-          "container_port": "Puerto del contenedor",
-          "pairing_code": "Código de emparejamiento",
           "subentry": "Grupo de funciones"
         },
         "data_description": {
-          "container_host": "Nombre de host o dirección IP del contenedor de inicio de sesión. Deja el valor predeterminado a menos que ejecutes el contenedor en otro lugar.",
-          "container_port": "Puerto por el que el contenedor de inicio de sesión sirve las credenciales. Deja el valor predeterminado a menos que lo hayas cambiado.",
-          "pairing_code": "Introduce un código de emparejamiento para actualizar las credenciales mediante el contenedor de inicio de sesión en lugar de pegar secrets.json.",
           "subentry": "Aplica las actualizaciones de credenciales al grupo de funciones seleccionado. Consulta la guía [Subentradas y grupos de funciones]({subentries_docs_url}) para conocer los detalles del flujo de trabajo."
         }
       },
@@ -389,13 +348,7 @@
       "duplicate_name": "El nombre semántico ya existe. Elige un nombre diferente.",
       "duplicate_semantic_location": "El nombre semántico ya existe. Elige un nombre diferente.",
       "unknown": "Error inesperado.",
-      "invalid_subentry": "Elige un grupo de funciones válido.",
-      "container_unreachable": "No se pudo contactar con el contenedor de inicio de sesión. Asegúrate de que esté en ejecución y de que el host y el puerto sean correctos.",
-      "container_timeout": "El contenedor de inicio de sesión no respondió a tiempo. Vuelve a intentarlo.",
-      "container_auth_failed": "Falló la autenticación con el contenedor de inicio de sesión. Comprueba el código de emparejamiento y vuelve a intentarlo.",
-      "container_code_used": "Este código de emparejamiento ya se ha usado o ha caducado. Reinicia el contenedor de inicio de sesión y usa el nuevo código.",
-      "container_code_too_short": "El código de emparejamiento es demasiado corto. Copia el código completo del contenedor de inicio de sesión.",
-      "container_login_failed": "No se pudo completar el inicio de sesión con el contenedor. Vuelve a intentarlo."
+      "invalid_subentry": "Elige un grupo de funciones válido."
     },
     "abort": {
       "reconfigure_successful": "Reconfiguración correcta.",
@@ -877,7 +830,6 @@
     },
     "auth_method": {
       "options": {
-        "container_login": "Inicio de sesión con contenedor en un clic",
         "secrets_json": "GoogleFindMyTools secrets.json"
       }
     }

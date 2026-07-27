@@ -613,28 +613,31 @@ async def test_async_setup_entry_leaves_modern_entries_intact(
 # The paths that update an *existing* entry stage through the same area, but
 # their tickets name the entry and carry a ``modified_at`` watermark, because
 # for them the entry id was in storage long before the update. Those semantics
-# are covered in ``tests/test_config_flow_container_login.py`` and
+# are covered in ``tests/test_config_flow_cleanup_tickets.py`` and
 # ``tests/test_container_cleanup_persist_probe.py``; the tests here stay on the
 # ``async_setup_entry`` side of the seam.
 # ---------------------------------------------------------------------------
 
 
-def _install_ack_recorder(monkeypatch: pytest.MonkeyPatch, recorded: list[str]) -> None:
-    """Record every container ack the deferred cleanup sends."""
+def _install_cleanup_recorder(
+    monkeypatch: pytest.MonkeyPatch, recorded: list[str]
+) -> None:
+    """Record every deferred watched-secrets delete the cleanup runs.
 
-    async def _fake_ack(
-        _session: Any,
-        _host: str,
-        _port: int,
-        _nonce: str,
-        delete_token: str,
+    Recorded by digest, which is what tells two staged jobs apart in the tests
+    below; the delete itself touches the filesystem and is covered where it
+    lives.
+    """
+
+    async def _fake_delete(
+        _hass: Any,
         *,
-        timeout: float,
+        imported_stable_key: str | None = None,
+        imported_digest: str | None = None,
     ) -> None:
-        recorded.append(delete_token)
+        recorded.append(imported_digest or "")
 
-    monkeypatch.setattr(config_flow, "ack_consumed", _fake_ack)
-    monkeypatch.setattr(config_flow, "async_get_clientsession", lambda _hass: object())
+    monkeypatch.setattr(config_flow, "_async_delete_watched_secrets", _fake_delete)
 
 
 def _install_persistence_probe(
@@ -673,22 +676,18 @@ async def _drain_cleanup_tasks(entry: _StubConfigEntry) -> None:
         await asyncio.gather(*pending)
 
 
-def _stage_ack_cleanup(
-    hass: Any, unique_id: str | None, token: str, *, flow_id: str = "flow-1"
+def _stage_import_cleanup(
+    hass: Any, unique_id: str | None, digest: str, *, flow_id: str = "flow-1"
 ) -> None:
-    """Stage one ack-only cleanup job exactly as the config flow does."""
+    """Stage one delete-after-import cleanup job exactly as the flow does."""
 
     config_flow._async_stage_container_cleanup(
         hass,
         flow_id=flow_id,
         unique_id=unique_id,
         job=config_flow.PendingContainerCleanup(
-            ack=config_flow._ContainerAckTarget(
-                host="127.0.0.1",
-                port=7901,
-                pairing_code="pairing-code-abcdef0123456789",
-                delete_token=token,
-            )
+            imported_stable_key="email:user@example.com",
+            imported_digest=digest,
         ),
     )
 
@@ -756,7 +755,7 @@ async def test_cleanup_is_dropped_when_the_storage_probe_raises(
 
     hass = SimpleNamespace(data={})
     acked: list[str] = []
-    _install_ack_recorder(monkeypatch, acked)
+    _install_cleanup_recorder(monkeypatch, acked)
 
     async def _exploding_probe(
         _hass: Any, _entry_id: str, *, min_modified_at: Any = None
@@ -767,7 +766,7 @@ async def test_cleanup_is_dropped_when_the_storage_probe_raises(
         config_flow, "_async_config_entry_is_persisted", _exploding_probe
     )
 
-    _stage_ack_cleanup(hass, "user@example.com", "delete-token-xyz")
+    _stage_import_cleanup(hass, "user@example.com", "delete-token-xyz")
     jobs = config_flow._async_claim_container_cleanup(
         hass, unique_id="user@example.com"
     )
@@ -800,13 +799,13 @@ async def test_async_setup_entry_runs_staged_container_cleanup(
     hass = harness.hass
 
     acked: list[str] = []
-    _install_ack_recorder(monkeypatch, acked)
+    _install_cleanup_recorder(monkeypatch, acked)
     _install_persistence_probe(monkeypatch, persisted=True)
 
     entry.data[DATA_SECRET_BUNDLE] = {"username": "user@example.com"}
     harness.cache.values = {integration.username_string: "user@example.com"}
 
-    _stage_ack_cleanup(hass, entry.unique_id, "delete-token-xyz")
+    _stage_import_cleanup(hass, entry.unique_id, "delete-token-xyz")
     # Still staged, not executed, before setup runs.
     assert acked == []
 
@@ -843,13 +842,13 @@ async def test_async_setup_entry_reload_does_not_repeat_cleanup(
     hass = harness.hass
 
     acked: list[str] = []
-    _install_ack_recorder(monkeypatch, acked)
+    _install_cleanup_recorder(monkeypatch, acked)
     _install_persistence_probe(monkeypatch, persisted=True)
 
     entry.data[DATA_SECRET_BUNDLE] = {"username": "user@example.com"}
     harness.cache.values = {integration.username_string: "user@example.com"}
 
-    _stage_ack_cleanup(hass, entry.unique_id, "delete-token-xyz")
+    _stage_import_cleanup(hass, entry.unique_id, "delete-token-xyz")
 
     assert await integration.async_setup(hass, {}) is True
     assert await integration.async_setup_entry(hass, entry) is True
@@ -869,9 +868,8 @@ async def test_async_setup_entry_survives_failing_cleanup_job(
 ) -> None:
     """A cleanup job that raises must not turn a good setup into a failed one.
 
-    The login container falls back to its TTL delete and the secrets watcher
-    re-imports a surviving file, so a failed cleanup is recoverable while a
-    failed setup is not.
+    The secrets watcher re-imports a surviving file, so a failed cleanup is
+    recoverable while a failed setup is not.
     """
 
     loop = asyncio.get_running_loop()
@@ -883,22 +881,21 @@ async def test_async_setup_entry_survives_failing_cleanup_job(
     hass = harness.hass
 
     async def _boom(*_args: Any, **_kwargs: Any) -> None:
-        raise RuntimeError("ack exploded")
+        raise RuntimeError("delete exploded")
 
-    monkeypatch.setattr(config_flow, "ack_consumed", _boom)
-    monkeypatch.setattr(config_flow, "async_get_clientsession", lambda _hass: object())
+    monkeypatch.setattr(config_flow, "_async_delete_watched_secrets", _boom)
     _install_persistence_probe(monkeypatch, persisted=True)
 
     entry.data[DATA_SECRET_BUNDLE] = {"username": "user@example.com"}
     harness.cache.values = {integration.username_string: "user@example.com"}
 
-    _stage_ack_cleanup(hass, entry.unique_id, "delete-token-xyz")
+    _stage_import_cleanup(hass, entry.unique_id, "delete-token-xyz")
 
     assert await integration.async_setup(hass, {}) is True
     assert await integration.async_setup_entry(hass, entry) is True
     await _drain_cleanup_tasks(entry)
-    # Consumed despite the failure: retrying an ack forever would be worse than
-    # letting the container's TTL fallback handle it.
+    # Consumed despite the failure: retrying the delete forever would be worse
+    # than leaving the file for the watcher's next scan.
     assert config_flow.PENDING_CONTAINER_CLEANUP_KEY not in hass.data[DOMAIN]
 
 
@@ -959,13 +956,13 @@ async def test_async_setup_entry_claims_account_less_ticket(
     hass = harness.hass
 
     acked: list[str] = []
-    _install_ack_recorder(monkeypatch, acked)
+    _install_cleanup_recorder(monkeypatch, acked)
     _install_persistence_probe(monkeypatch, persisted=True)
 
     entry.data[DATA_SECRET_BUNDLE] = {"username": "user@example.com"}
     harness.cache.values = {integration.username_string: "user@example.com"}
 
-    _stage_ack_cleanup(hass, None, "orphan-delete-token")
+    _stage_import_cleanup(hass, None, "orphan-delete-token")
     staged = hass.data[DOMAIN][config_flow.PENDING_CONTAINER_CLEANUP_KEY]
     assert [ticket.unique_id for ticket in staged] == [None]
 
@@ -1004,13 +1001,13 @@ async def test_setup_does_not_clean_up_before_the_entry_is_stored(
     hass = harness.hass
 
     acked: list[str] = []
-    _install_ack_recorder(monkeypatch, acked)
+    _install_cleanup_recorder(monkeypatch, acked)
     _install_persistence_probe(monkeypatch, persisted=False)
 
     entry.data[DATA_SECRET_BUNDLE] = {"username": "user@example.com"}
     harness.cache.values = {integration.username_string: "user@example.com"}
 
-    _stage_ack_cleanup(hass, entry.unique_id, "delete-token-xyz")
+    _stage_import_cleanup(hass, entry.unique_id, "delete-token-xyz")
 
     assert await integration.async_setup(hass, {}) is True
     assert await integration.async_setup_entry(hass, entry) is True
@@ -1042,7 +1039,7 @@ async def test_cleanup_task_cancellation_keeps_the_credentials(
     hass = harness.hass
 
     acked: list[str] = []
-    _install_ack_recorder(monkeypatch, acked)
+    _install_cleanup_recorder(monkeypatch, acked)
 
     probe_reached = asyncio.Event()
 
@@ -1060,7 +1057,7 @@ async def test_cleanup_task_cancellation_keeps_the_credentials(
     entry.data[DATA_SECRET_BUNDLE] = {"username": "user@example.com"}
     harness.cache.values = {integration.username_string: "user@example.com"}
 
-    _stage_ack_cleanup(hass, entry.unique_id, "delete-token-xyz")
+    _stage_import_cleanup(hass, entry.unique_id, "delete-token-xyz")
 
     assert await integration.async_setup(hass, {}) is True
     assert await integration.async_setup_entry(hass, entry) is True
@@ -1101,14 +1098,14 @@ async def test_setup_claims_only_its_own_flow_ticket(
     hass = harness.hass
 
     acked: list[str] = []
-    _install_ack_recorder(monkeypatch, acked)
+    _install_cleanup_recorder(monkeypatch, acked)
     _install_persistence_probe(monkeypatch, persisted=True)
 
     entry.data[DATA_SECRET_BUNDLE] = {"username": "user@example.com"}
     harness.cache.values = {integration.username_string: "user@example.com"}
 
-    _stage_ack_cleanup(hass, entry.unique_id, "token-flow-a", flow_id="flow-a")
-    _stage_ack_cleanup(hass, entry.unique_id, "token-flow-b", flow_id="flow-b")
+    _stage_import_cleanup(hass, entry.unique_id, "token-flow-a", flow_id="flow-a")
+    _stage_import_cleanup(hass, entry.unique_id, "token-flow-b", flow_id="flow-b")
 
     assert await integration.async_setup(hass, {}) is True
     assert await integration.async_setup_entry(hass, entry) is True
@@ -1259,8 +1256,8 @@ async def test_duplicate_account_abort_discards_staged_cleanup(
     That branch leaves ``async_setup_entry`` with a *final* ``return False``,
     far above the cleanup runner at the end of the function, and Home Assistant
     does not retry it. Without an explicit discard the job would sit in
-    ``hass.data`` for the rest of the process lifetime, holding a pairing nonce
-    and a delete token, and the bucket could grow without bound.
+    ``hass.data`` for the rest of the process lifetime and the bucket could grow
+    without bound.
 
     Discarded, not executed: nothing about this account was set up, so the
     fail-safe direction applies. The watched credential file stays on disk (the
@@ -1277,7 +1274,7 @@ async def test_duplicate_account_abort_discards_staged_cleanup(
     hass = harness.hass
 
     acked: list[str] = []
-    _install_ack_recorder(monkeypatch, acked)
+    _install_cleanup_recorder(monkeypatch, acked)
 
     watched = tmp_path / "data" / "secrets.json"
     watched.parent.mkdir(parents=True, exist_ok=True)
@@ -1289,7 +1286,7 @@ async def test_duplicate_account_abort_discards_staged_cleanup(
         watch_paths=(watched,)
     )
 
-    # A job with both halves: an ack AND a delete of the imported copy.
+    # A staged delete of the imported copy.
     config_flow._async_stage_container_cleanup(
         hass,
         flow_id="flow-duplicate",
@@ -1297,12 +1294,6 @@ async def test_duplicate_account_abort_discards_staged_cleanup(
         job=config_flow.PendingContainerCleanup(
             imported_stable_key="email:user@example.com",
             imported_digest="deadbeef",
-            ack=config_flow._ContainerAckTarget(
-                host="127.0.0.1",
-                port=7901,
-                pairing_code="pairing-code-abcdef0123456789",
-                delete_token="duplicate-delete-token",
-            ),
         ),
     )
 
@@ -1345,12 +1336,12 @@ async def test_config_entry_not_ready_keeps_staged_cleanup(
     hass = harness.hass
 
     acked: list[str] = []
-    _install_ack_recorder(monkeypatch, acked)
+    _install_cleanup_recorder(monkeypatch, acked)
 
     entry.data[DATA_SECRET_BUNDLE] = {"username": "user@example.com"}
     harness.cache.values = {integration.username_string: "user@example.com"}
 
-    _stage_ack_cleanup(hass, entry.unique_id, "retry-delete-token")
+    _stage_import_cleanup(hass, entry.unique_id, "retry-delete-token")
 
     async def _not_ready(*_args: Any, **_kwargs: Any) -> None:
         raise ConfigEntryNotReady("try again later")
@@ -1365,7 +1356,7 @@ async def test_config_entry_not_ready_keeps_staged_cleanup(
     assert acked == []
     staged = hass.data[DOMAIN][config_flow.PENDING_CONTAINER_CLEANUP_KEY]
     assert [ticket.unique_id for ticket in staged] == [entry.unique_id]
-    assert [job.ack.delete_token for job in staged[0].jobs] == ["retry-delete-token"]
+    assert [job.imported_digest for job in staged[0].jobs] == ["retry-delete-token"]
 
 
 def test_service_stats_unique_id_migration_prefers_service_subentry(

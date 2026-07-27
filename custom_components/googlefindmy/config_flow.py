@@ -17,8 +17,7 @@ Key design decisions (Best Practice):
   mutates the in-memory entry and schedules Home Assistant's *debounced* store
   save (`ConfigEntries._async_save_and_notify` -> `_async_schedule_save` ->
   `Store.async_delay_save(SAVE_DELAY)`); it does not commit before returning.
-  Deleting imported secrets files or acking the login container is therefore
-  always staged in memory (`hass.data[DOMAIN]["pending_container_cleanup"]`, one
+  Deleting an imported secrets file is therefore always staged in memory (`hass.data[DOMAIN]["pending_container_cleanup"]`, one
   ticket per flow) and handed to a durability gate by `async_setup_entry`, which
   executes the jobs only once the *relevant* state has provably reached Home
   Assistant's storage. The create case waits for the entry to appear at all; the
@@ -40,8 +39,8 @@ Key design decisions (Best Practice):
 Security & privacy:
 - No secrets in logs or exceptions; messages are redacted and bounded.
 - No secrets are written to disk or to Home Assistant storage by the flow. The
-  staged cleanup jobs live in `hass.data` only (in-memory): they carry a
-  pairing nonce and a delete token, which must never reach persistent storage.
+  staged cleanup jobs live in `hass.data` only (in-memory): they name a file to
+  delete, never a credential.
 - Email addresses are normalized (lowercased) before being used as unique IDs.
 
 Docstring & comments:
@@ -54,7 +53,6 @@ from __future__ import annotations
 
 import asyncio
 import inspect
-import ipaddress
 import json
 import logging
 import os
@@ -106,11 +104,6 @@ from .const import (
     CONF_GOOGLE_EMAIL,
     CONF_OAUTH_TOKEN,
     CONFIG_ENTRY_VERSION,
-    CONTAINER_FETCH_TIMEOUT,
-    CONTAINER_NONCE_MIN_LEN,
-    CONTAINER_NOVNC_PORT,
-    CONTAINER_TOKEN_PORT,
-    CONTAINER_TOKEN_TTL,
     CONTRIBUTOR_MODE_HIGH_TRAFFIC,
     CONTRIBUTOR_MODE_IN_ALL_AREAS,
     DATA_AAS_TOKEN,
@@ -160,15 +153,6 @@ from .const import (
     TRACKER_SUBENTRY_TRANSLATION_KEY,
     coerce_ignored_mapping,
     service_device_identifier,
-)
-from .container_login import (
-    ContainerAuthError,
-    ContainerLoginError,
-    ContainerTimeoutError,
-    ContainerUnreachableError,
-    ack_consumed,
-    fetch_secrets_from_container,
-    normalise_host_literal,
 )
 from .email_utils import normalize_email, normalize_email_or_default, unique_account_id
 from .integration_modules import (
@@ -863,7 +847,7 @@ async def _async_delete_watched_secrets(
     * :data:`SECRETS_EXTRA_WATCH_PATHS` may point at bundles of **different**
       Google accounts, and the account key of an identified bundle collapses to
       ``email:<addr>`` whenever an email is present.
-    * The login container may write **fresher** credentials of the *same*
+    * A login container may write **fresher** credentials of the *same*
       account while the discovery flow is still waiting for the user's
       confirmation. Matching on the account key alone would then delete that
       newer bundle even though the entry only holds the older payload.
@@ -905,9 +889,9 @@ async def _async_delete_watched_secrets(
     only unlinks while the digest still matches what the decision was based on
     (:func:`discovery.read_secrets_bundle`). That closes the window down to the
     gap between that re-read and ``os.remove``, which POSIX offers no atomic
-    primitive for; a container writing into exactly that gap can still lose its
-    bundle, but the login container then keeps its own copy until the ack
-    arrives.
+    primitive for; a container writing into exactly that gap can still lose the
+    copy it just wrote, and the watcher re-imports whatever survives on its next
+    scan.
 
     The removal is idempotent (a missing file is a no-op) and never raises: a
     non-writable external path only logs a warning so the flow completes. Because
@@ -1254,13 +1238,6 @@ _SUBENTRY_PLACEHOLDERS: dict[str, str] = {
     "subentries_docs_url": _SUBENTRIES_DOCS_URL,
 }
 
-# Documentation entry point for the bundled login container. Kept out of the
-# translated strings on purpose: hassfest rejects a literal URL inside any
-# translation value ("the string should not contain URLs, please use
-# description placeholders instead"), so the address lives here and reaches the
-# form as the ``docs_url`` placeholder, exactly like the subentry docs above.
-_CONTAINER_LOGIN_DOCS_URL = "https://github.com/BSkando/GoogleFindMy-HA"
-
 # ---------------------------
 # Validators (format/plausibility)
 # ---------------------------
@@ -1461,13 +1438,6 @@ def _map_api_exc_to_error_key(err: Exception) -> str:
 # ---------------------------
 _AUTH_METHOD_SECRETS = "secrets_json"
 _AUTH_METHOD_INDIVIDUAL = "individual_tokens"
-_AUTH_METHOD_CONTAINER = "container_login"
-
-# Shared TCP-port validator. ``cv.port`` does not exist on the pinned Home
-# Assistant version used in CI (it raises ``AttributeError`` at import/build
-# time and fails the whole test job), so every port field validates through this
-# single voluptuous chain instead: coerce to int, then bound to a valid port.
-_PORT_VALIDATOR = vol.All(vol.Coerce(int), vol.Range(min=1, max=65535))
 
 
 def _extra_watch_paths_to_text(raw: object) -> str:
@@ -1515,7 +1485,6 @@ STEP_USER_DATA_SCHEMA = vol.Schema(
     {
         vol.Required("auth_method"): vol.In(
             {
-                _AUTH_METHOD_CONTAINER: "One-click container login",
                 _AUTH_METHOD_SECRETS: "GoogleFindMyTools secrets.json",
                 # _AUTH_METHOD_INDIVIDUAL: "Manual token + email",  # Disabled: broken manual token path is intentionally hidden.
             }
@@ -1639,8 +1608,8 @@ def _persist_secrets_bundle(
     """Build the shared secrets-bundle sub-dict for every persist surface.
 
     This is the single source of truth for the credential sub-dict written by
-    the paste and container-login paths across initial setup, reauth and
-    options. Extracting it prevents a fourth copy-paste divergence -- most
+    the paste and preflight-import paths across initial setup, reauth and
+    options. Extracting it prevents a further copy-paste divergence -- most
     notably the ``fcm_credentials`` line, which is the historically
     divergence-prone one and therefore lives *inside* this helper.
 
@@ -1683,117 +1652,15 @@ def _persist_secrets_bundle(
     return bundle
 
 
-def _map_container_error(exc: ContainerLoginError) -> str:
-    """Map a typed container-login exception to an HA error key.
-
-    The referenced keys (``container_unreachable`` etc.) live in
-    ``strings.json``/translations; this function only produces the keys, it
-    never logs the pairing nonce or any token.
-
-    Auth failures are split by cause because the remedies differ. The token
-    server is one-shot: after the bundle has been handed out, every further
-    ``GET /secrets`` answers ``410``. A flow that fails *after* a successful
-    fetch (a transient token validation error, say) re-shows its form with the
-    same code, and the retry then hits that ``410``. Telling the user to "check
-    the pairing code" would be wrong -- the code was right, it is simply spent --
-    so this case maps to ``container_code_used``, which asks for a restart of the
-    login container. The distinction is carried by
-    :class:`~.container_login.ContainerAuthError`'s ``code_used`` flag; it is
-    read defensively via ``getattr`` so an older client module (without the
-    attribute) degrades to the generic auth message instead of raising.
-    """
-
-    if isinstance(exc, ContainerUnreachableError):
-        return "container_unreachable"
-    if isinstance(exc, ContainerTimeoutError):
-        return "container_timeout"
-    if isinstance(exc, ContainerAuthError):
-        if getattr(exc, "code_used", False):
-            return "container_code_used"
-        return "container_auth_failed"
-    return "container_login_failed"
-
-
-def _classify_novnc_host(host: str) -> str:
-    """Classify ``host`` for noVNC link rendering.
-
-    Returns ``"linkable"``, ``"loopback"`` or ``"hostname"``.
-
-    The token endpoint (``CONTAINER_TOKEN_PORT``) and the noVNC viewer
-    (``CONTAINER_NOVNC_PORT``) have different consumers, so the address that
-    reaches one does not necessarily reach the other. ``host`` is entered for
-    the machine-to-machine token fetch and is resolved from Home Assistant's
-    network namespace, while the noVNC URL is opened by the *user's browser*,
-    which commonly runs on a different machine than the Docker host. Rendering
-    a clickable link is therefore only honest for a non-loopback IP address:
-
-    * ``loopback`` - Home Assistant reaches the container over the host
-      loopback, but a browser on another machine never will.
-    * ``hostname`` - anything that is not an IP literal, notably the compose
-      service name used by the documented shared-network route; container-only
-      DNS does not resolve in a browser.
-
-    Deliberately no ``homeassistant.helpers.network.get_url()`` fallback here:
-    with ``external_url`` unset and Nabu Casa remote UI active, its external
-    branch returns the *public* cloud URL, and its internal branch returns
-    whatever ``internal_url`` says, which behind a reverse proxy need not
-    resolve in the user's browser either. Both would be worse than no link.
-    """
-
-    candidate = normalise_host_literal(host or "")
-    if not candidate:
-        return "hostname"
-    try:
-        address = ipaddress.ip_address(candidate)
-    except ValueError:
-        return "hostname"
-    if address.is_loopback or address.is_unspecified:
-        return "loopback"
-    return "linkable"
-
-
-def _novnc_access_placeholder(host: str) -> str:
-    """Render the noVNC access placeholder for ``host``.
-
-    Returns a markdown link only when the address is browser-reachable; the
-    fallback is inline code, never a link, so the UI cannot offer a target that
-    is known not to work. Neither branch contains prose (one is the address
-    itself, the other a fixed URL skeleton), so this value needs no translation
-    while the surrounding sentence stays fully translatable.
-
-    The address is read through the shared ``normalise_host_literal`` (the same
-    one the token client uses, so classification and rendering can never
-    disagree) and re-rendered from the parsed value rather than interpolated
-    raw. An IPv6 literal is therefore bracketed exactly once in either
-    spelling; interpolating ``host`` verbatim would emit
-    ``http://2001:db8::1:7900``, which no browser can parse.
-    """
-
-    candidate = normalise_host_literal(host or "")
-    if _classify_novnc_host(candidate) == "linkable":
-        address = ipaddress.ip_address(candidate)
-        literal = (
-            f"[{address.compressed}]"
-            if isinstance(address, ipaddress.IPv6Address)
-            else address.compressed
-        )
-        url = f"http://{literal}:{CONTAINER_NOVNC_PORT}"
-        return f"[{url}]({url})"
-    # No angle-bracket placeholder here: hassfest rejects HTML-looking sequences
-    # in translated strings, and this value is substituted straight into one.
-    return f"`http://DOCKER-HOST:{CONTAINER_NOVNC_PORT}`"
-
-
 def _count_supplied_credential_methods(
     user_input: Mapping[str, Any], field_names: tuple[str, ...]
 ) -> int:
     """Count how many of ``field_names`` carry a non-blank value.
 
-    Credential forms accept several mutually exclusive methods. The container
-    ``GET`` is one-shot, so a submission carrying more than one method has to be
-    rejected *before* any network call: otherwise the pasted bundle is silently
-    dropped and the pairing code is burned. Kept as one helper so the precedence
-    is not re-derived at each call site (reauth and options share it).
+    Credential forms accept several mutually exclusive methods. A submission
+    carrying more than one has to be rejected rather than resolved by
+    precedence, because picking a winner would silently discard the other input.
+    Kept as one helper so the rule is not re-derived at each call site.
     """
 
     return sum(1 for name in field_names if str(user_input.get(name) or "").strip())
@@ -1806,8 +1673,7 @@ def _format_bundle_age(mtime: float) -> str:
     is not a wrong bundle), so this value never enters a decision; it exists so
     the user can tell a leftover from a login they just performed.
 
-    Prose-free on purpose, exactly like :func:`_novnc_access_placeholder`: the
-    value is substituted into a translated sentence and is not itself
+    Prose-free on purpose: the value is substituted into a translated sentence and is not itself
     translatable, so it must not carry English words. A clock that jumped
     backwards (or a file stamped in the future) clamps to ``0m`` rather than
     rendering a negative age.
@@ -1822,221 +1688,6 @@ def _format_bundle_age(mtime: float) -> str:
     if hours:
         return f"{hours}h {minutes}m"
     return f"{minutes}m"
-
-
-_CONTAINER_DEFAULT_HOST = "127.0.0.1"
-"""Default login-container address of the setup flow (host loopback).
-
-Named because the split into an address step and a pairing step made the
-literal a *flow state* default that three places have to agree on (form
-rendering, submission fallback and the pairing fetch); the reauth/options forms
-keep their own inline default because they never carry the address across steps.
-"""
-
-
-def _container_login_schema(*, host: str, port: int) -> vol.Schema:
-    """Build the container *address* form schema with the given defaults.
-
-    Deliberately without ``pairing_code``: the login container only prints that
-    code once the Google sign-in inside the noVNC session has finished, i.e.
-    strictly *after* the user needs the address to open that session. Asking for
-    all three fields at once demanded a value that could not exist yet, so the
-    address and the code live in two consecutive steps
-    (:meth:`ConfigFlow.async_step_container_login` and
-    :meth:`ConfigFlow.async_step_container_pairing`).
-    """
-
-    return vol.Schema(
-        {
-            vol.Required("host", default=host): str,
-            vol.Required("port", default=port): _PORT_VALIDATOR,
-        }
-    )
-
-
-def _container_pairing_schema(*, pairing_code: str = "") -> vol.Schema:
-    """Build the container *pairing-code* form schema with the given default.
-
-    ``pairing_code`` is prefilled from the flow state so a code that was already
-    typed survives a detour back to the address step (an unreachable container
-    is an address problem, not a code problem); the user must not have to go
-    back to the launcher terminal and read the code off it again.
-
-    The code is printed on the entrypoint's stdout, i.e. in the terminal running
-    the launcher (or ``docker logs``), not inside the noVNC viewer -- the viewer
-    renders the X display served by ``supervisord``, which was started before
-    the code was generated and never inherits it.
-    """
-
-    return vol.Schema({vol.Required("pairing_code", default=pairing_code): str})
-
-
-@dataclass(frozen=True, slots=True)
-class _ContainerAckTarget:
-    """Everything (and only what) the second phase of the delete needs.
-
-    Split out of :class:`_ContainerFetchResult` so a *deferred* ack can be
-    staged without carrying the credential payload (``parsed``/``token``)
-    along with it: the ack is a pure "you may drop your copy now" message to
-    the login container, addressed by host/port and authorised by the pairing
-    nonce plus the one-shot delete token.
-    """
-
-    host: str
-    port: int
-    pairing_code: str
-    delete_token: str
-    fetched_monotonic: float | None = None
-    """``time.monotonic()`` of the fetch, or ``None`` when unknown.
-
-    Used only to grade the log level of a failed ack (see
-    :func:`_container_ttl_certainly_elapsed`), never for a decision that
-    changes behaviour.
-    """
-
-
-@dataclass(slots=True)
-class _ContainerFetchResult:
-    """Outcome of a successful container-login fetch + token validation."""
-
-    parsed: dict[str, Any]
-    token: str
-    email: str
-    host: str
-    port: int
-    pairing_code: str
-    delete_token: str
-    fetched_monotonic: float | None = None
-
-    @property
-    def ack_target(self) -> _ContainerAckTarget:
-        """Return the ack addressing/authorisation data without the credentials."""
-
-        return _ContainerAckTarget(
-            host=self.host,
-            port=self.port,
-            pairing_code=self.pairing_code,
-            delete_token=self.delete_token,
-            fetched_monotonic=self.fetched_monotonic,
-        )
-
-
-def _container_ttl_certainly_elapsed(target: _ContainerAckTarget) -> bool:
-    """Report whether the container's token TTL has provably run out by now.
-
-    Unless it has been shut down earlier, the login container deletes its copy
-    and shuts the endpoint down :data:`CONTAINER_TOKEN_TTL` seconds after the
-    *server* started, regardless of whether anyone fetched or acked
-    (``docker-login/token_server.py``). The ack fires at the very end of
-    ``async_setup_entry``, i.e. after credential validation, the first
-    coordinator refresh, FCM registration and the platform forward, so on a slow
-    instance the TTL routinely wins the race. That is the normal, harmless
-    ending: the TTL deletes exactly the same file the ack would have deleted,
-    and the bundle is already in the config entry.
-
-    What this predicate does *not* say is that the file is gone: it reports
-    elapsed time, and the early-shutdown paths (a lockout, which keeps the file
-    deliberately, or a failed delete) never reach the TTL branch at all. The
-    caller therefore uses it only to pick a log level, never to conclude that
-    the credential was cleaned up.
-
-    The elapsed time is measured from the *fetch*, which happens after the
-    server started, so this is a lower bound on the server's age: when it says
-    the TTL has passed, it has. ``None`` (age unknown, e.g. a job staged by an
-    older version) is reported as "not certain" so the noisier log level wins.
-    """
-
-    if target.fetched_monotonic is None:
-        return False
-    return (time.monotonic() - target.fetched_monotonic) >= CONTAINER_TOKEN_TTL
-
-
-async def _async_send_container_ack(
-    hass: HomeAssistant, target: _ContainerAckTarget
-) -> None:
-    """Send the second phase of the two-phase delete (best effort).
-
-    Module-level so both the flow-bound mixin helper and the deferred cleanup
-    runner (:func:`_async_execute_container_cleanup`, armed from
-    ``async_setup_entry``) share one implementation instead of two copies of
-    the same error handling.
-
-    A *successful* ack includes an HTTP 410 whose body confirms the deletion
-    ("already gone"): the on-disk secret is then provably absent, which is all
-    the ack ever wanted. A 410 that merely reports the endpoint's attempt
-    lockout is **not** success -- the container keeps ``secrets.json`` in that
-    case -- and ``ack_consumed`` raises for it. See
-    :func:`~.container_login._require_ack_deleted`.
-    """
-
-    session = async_get_clientsession(hass)
-    try:
-        await ack_consumed(
-            session,
-            target.host,
-            target.port,
-            target.pairing_code,
-            target.delete_token,
-            timeout=CONTAINER_FETCH_TIMEOUT,
-        )
-    except ContainerLoginError as exc:
-        # Non-fatal for the setup either way: the bundle is already in the
-        # config entry, and the container usually deletes on its own TTL
-        # fallback. Never log the nonce or the delete token.
-        #
-        # The three branches below differ in exactly one thing: what can be said
-        # *honestly* about the container's copy of ``secrets.json``.
-        #
-        # 1. The container proved it kept the file (``secret_retained``), which
-        #    today is only the ack-path lockout 410. A locked-out server
-        #    preserves ``secrets.json`` on purpose (so the file handoff and the
-        #    copy/paste track keep working) and then exits, so nothing removes
-        #    it later. Promising an automatic cleanup here would be false; the
-        #    operator has to delete the leftover copy. Deliberately keyed on the
-        #    flag and NOT on ``ContainerAuthError``: a plain 401/403 shares that
-        #    class while leaving the TTL fallback intact, and it is the routine
-        #    outcome of a late ack meeting a *restarted* container (the old
-        #    pairing nonce no longer matches). Checked first so a proven
-        #    leftover can never be downgraded by branch 2.
-        # 2. Unreachable/timed out *after* the TTL has provably run out. By far
-        #    the likeliest ending is that the TTL fallback won the race and
-        #    deleted the same file, but it is not the only one: a container that
-        #    already exited after a lockout, or whose own delete failed
-        #    (``500 {"error": "delete_failed"}``), is equally silent, and a
-        #    closed port carries no body to tell those apart. Debug is therefore
-        #    a deliberate trade, not a proof of cleanliness -- the benign case is
-        #    the routine one and would otherwise warn on every slow setup, while
-        #    the rare leftover is already reported by the container's own log.
-        # 3. Anything else (an unreachable endpoint that should still be up, or
-        #    a rejected/unclassifiable ack): a real problem, and the TTL fallback
-        #    is still ahead of it.
-        expected_ttl_shutdown = isinstance(
-            exc, (ContainerUnreachableError, ContainerTimeoutError)
-        ) and _container_ttl_certainly_elapsed(target)
-        if exc.secret_retained:
-            _LOGGER.warning(
-                "Container ack failed (%s) and the login container kept its "
-                "secrets.json: it hit its pairing lockout, which preserves the "
-                "file on purpose, and nothing removes it automatically "
-                "afterwards. Delete that file manually once the container has "
-                "stopped",
-                type(exc).__name__,
-            )
-        elif expected_ttl_shutdown:
-            _LOGGER.debug(
-                "Container ack skipped (%s): the %ds token TTL had already "
-                "elapsed, so the container is expected to have deleted its copy "
-                "itself",
-                type(exc).__name__,
-                CONTAINER_TOKEN_TTL,
-            )
-        else:
-            _LOGGER.warning(
-                "Container ack failed (%s); the container is expected to fall "
-                "back to its TTL delete, unless it had already stopped for "
-                "another reason",
-                type(exc).__name__,
-            )
 
 
 PENDING_CONTAINER_CLEANUP_KEY = "pending_container_cleanup"
@@ -2075,22 +1726,19 @@ class PendingContainerCleanup:
     afterwards in ``ConfigEntriesFlowManager.async_finish_flow`` (see
     ``homeassistant/config_entries.py``, ``await self.config_entries.async_add(
     entry)``), i.e. after the step has already returned. Deleting the on-disk
-    credentials or acking the login container from inside the step would
-    therefore destroy the only remaining copy while the entry may still fail to
-    materialise.
+    credentials from inside the step would therefore destroy the only remaining
+    copy while the entry may still fail to materialise.
 
     So the flow stages the job here and ``async_setup_entry`` hands it to the
     durability gate (:func:`async_schedule_pending_container_cleanup`). The
     staging area is deliberately **in-memory only** (``hass.data``) and is never
-    written to Home Assistant storage: it carries a pairing nonce and a delete
-    token. Losing it on a crash is the *desired* failure direction: the job is
-    gone, the credential file is still there, and the secrets watcher re-imports
-    it on its next scan.
+    written to Home Assistant storage. Losing it on a crash is the *desired*
+    failure direction: the job is gone, the credential file is still there, and
+    the secrets watcher re-imports it on its next scan.
     """
 
     imported_stable_key: str | None = None
     imported_digest: str | None = None
-    ack: _ContainerAckTarget | None = None
 
 
 @dataclass(slots=True)
@@ -2247,8 +1895,7 @@ def _async_stage_container_cleanup_for(
     ``modified_at``: without it the gate would degrade to "the entry id exists",
     which was already true before the update and would therefore authorise the
     irreversible cleanup on no evidence at all. Dropping is the fail-safe
-    outcome -- the credential file stays on disk and the login container falls
-    back to its TTL delete.
+    outcome -- the credential file stays on disk and the watcher re-imports it.
     """
 
     if hass is None:
@@ -2344,9 +1991,8 @@ def _async_claim_container_cleanup_ticket(
     the flow is still running. They are only sound because a flow that Home
     Assistant removes without producing an entry takes its own ticket with it
     (:func:`_async_discard_cleanup_ticket_for_flow`). Without that, an aborted
-    same-account flow would leave a ticket behind for the winning entry to claim
-    and to ack -- which is what the FIFO order alone was wrongly assumed to
-    prevent.
+    same-account flow would leave a ticket behind for the winning entry to
+    claim -- which is what the FIFO order alone was wrongly assumed to prevent.
     """
 
     found = _async_staged_cleanup_tickets(hass)
@@ -2456,7 +2102,7 @@ def async_discard_pending_container_cleanup_for_entry(
     Those fallbacks exist for the create path, where a flow cannot yet know its
     entry id; applying them here would let a removed entry discard the ticket of
     a *different*, still running same-account flow, leaving that flow's watched
-    bundle undeleted and its container un-acked.
+    bundle undeleted.
 
     This addressing alone is therefore **not sufficient** on the removal path,
     and callers must not treat it as such. An entry can outlive an uncorrelated
@@ -2475,8 +2121,8 @@ def async_discard_pending_container_cleanup_for_entry(
 
     Every matching ticket is dropped in one pass. There is no upper bound: the
     staging list is finite, and a cutoff would strand exactly the tickets this
-    call exists to clear, leaving pairing nonces and delete tokens in
-    ``hass.data`` for the rest of the process lifetime.
+    call exists to clear, leaving stale delete jobs in ``hass.data`` for the rest
+    of the process lifetime.
 
     Args:
         hass: The Home Assistant instance holding the staging bucket.
@@ -2844,10 +2490,9 @@ async def _async_execute_container_cleanup(
 ) -> None:
     """Execute already claimed cleanup jobs (best effort, isolated per job).
 
-    Every job is isolated: a failing delete must not skip the ack of the next
-    job, and no failure here may turn a working setup into a failed one, because
-    the login container has a TTL fallback and the watcher re-imports a
-    surviving file.
+    Every job is isolated: a failing delete must not skip the next job, and no
+    failure here may turn a working setup into a failed one, because the watcher
+    re-imports a surviving file.
     """
 
     for job in jobs:
@@ -2860,11 +2505,6 @@ async def _async_execute_container_cleanup(
                 )
             except Exception as err:  # noqa: BLE001 - cleanup must never fail setup
                 _LOGGER.warning("Deferred watched-secrets cleanup failed: %s", err)
-        if job.ack is not None:
-            try:
-                await _async_send_container_ack(hass, job.ack)
-            except Exception as err:  # noqa: BLE001 - cleanup must never fail setup
-                _LOGGER.warning("Deferred container ack failed: %s", err)
 
 
 @_typed_callback
@@ -2876,8 +2516,8 @@ def async_discard_pending_container_cleanup(
     For setup paths that end in a **final** ``return False`` (currently the
     duplicate-account guard in ``async_setup_entry``), which never reach the
     cleanup scheduler at the end of the function. Without this the staged job
-    would sit in ``hass.data`` for the whole process lifetime, holding a pairing
-    nonce and a delete token, and the staging area could grow without bound.
+    would sit in ``hass.data`` for the whole process lifetime and the staging
+    area could grow without bound.
 
     Discards exactly the one ticket this entry would have claimed, using the
     same selection rule as :func:`_async_claim_container_cleanup`: a failed
@@ -2886,9 +2526,8 @@ def async_discard_pending_container_cleanup(
 
     Discarding, not running, is the deliberate choice: the entry is not being
     set up, so the credentials must stay where they are. The watched
-    ``secrets.json`` copies are kept on disk (the secrets watcher re-imports
-    them on its next scan) and the login container is not acked, so it drops its
-    own copy on its TTL.
+    ``secrets.json`` copies are kept on disk and the secrets watcher re-imports
+    them on its next scan.
 
     This must NOT be called for a retryable abort such as
     ``ConfigEntryNotReady``: Home Assistant retries that setup, and the job has
@@ -3166,21 +2805,16 @@ def _interpret_credentials_choice(
 # ---------------------------
 _REAUTH_FIELD_SECRETS = "secrets_json"
 _REAUTH_FIELD_TOKEN = "new_oauth_token"
-_REAUTH_FIELD_PAIRING_CODE = "pairing_code"
 
-# Mutually exclusive credential inputs per form, in the order they appear.
-# ``_REAUTH_FIELD_TOKEN`` stays listed although its UI input is commented out
+# Mutually exclusive credential inputs of the options form, in the order they
+# appear. ``new_oauth_token`` stays listed although its UI input is commented out
 # (broken manual path, see agents/config_flow/AGENTS.md): if it is ever
-# re-enabled the exclusivity check must already cover it.
-_REAUTH_CREDENTIAL_FIELDS: tuple[str, ...] = (
-    _REAUTH_FIELD_SECRETS,
-    _REAUTH_FIELD_TOKEN,
-    _REAUTH_FIELD_PAIRING_CODE,
-)
+# re-enabled the exclusivity check must already cover it. The reauth form has no
+# counterpart any more: it offers exactly one field, so there is nothing to be
+# exclusive about.
 _OPTIONS_CREDENTIAL_FIELDS: tuple[str, ...] = (
     "new_secrets_json",
     "new_oauth_token",
-    _REAUTH_FIELD_PAIRING_CODE,
 )
 
 
@@ -3678,127 +3312,20 @@ async def _ingest_discovery_credentials(
 
 
 class _ContainerLoginMixin:
-    """Shared one-click container-login helpers for config and options flows.
+    """Shared cleanup-ticket helpers for the config and options flows.
 
-    Both ``ConfigFlow`` and ``OptionsFlowHandler`` refresh credentials through the
-    login container, so the fetch and the cleanup staging live here as the single
-    source.
+    Both ``ConfigFlow`` and ``OptionsFlowHandler`` can stage a deferred delete
+    for a ``secrets.json`` copy they imported off disk, so the ticket bookkeeping
+    lives here as the single source.
 
-    The two annotated slots below are *declarations*, not defaults: the concrete
-    handlers create them in their ``__init__`` (``ConfigFlow`` uses both,
-    ``OptionsFlowHandler`` only the ticket id), and every read here goes through
+    The annotated slot below is a *declaration*, not a default: the concrete
+    handlers create it in their ``__init__``, and every read here goes through
     ``getattr`` with a default so a directly instantiated handler cannot trip
     over a missing attribute.
     """
 
     hass: HomeAssistant
-    _container_pending_ack: _ContainerFetchResult | None
     _container_cleanup_ticket_id: str | None
-
-    # ------------------ Step: one-click container login ------------------
-    async def _async_container_fetch(
-        self,
-        *,
-        host: str,
-        port: int,
-        pairing_code: str,
-        errors: dict[str, str],
-    ) -> _ContainerFetchResult | None:
-        """Fetch + validate a container-login bundle through the shared parsers.
-
-        Runs the fetch (``fetch_secrets_from_container``) and pushes the raw
-        bundle through the SAME validation path as the paste flow
-        (``normalize_secrets_bundle`` + ``async_pick_working_token``), so the
-        container path never becomes a second validation/divergence source. On
-        any failure it writes an error key into ``errors`` and returns ``None``;
-        the two-phase-delete ``ack_consumed`` is left to the caller so it only
-        runs after Home Assistant has actually persisted the bundle.
-
-        The pairing nonce is length-checked here rather than in the individual
-        steps: this method is the single chokepoint in front of the network, so
-        the guarantee :data:`CONTAINER_NONCE_MIN_LEN` documents ("shorter values
-        are rejected before any network round-trip") holds for the setup, the
-        reauth and the options path alike, without three copies of the same
-        check. A truncated code can only be a typo, and refusing it locally
-        keeps the container's lockout counter untouched.
-        """
-
-        if len(pairing_code) < CONTAINER_NONCE_MIN_LEN:
-            _LOGGER.debug(
-                "Rejecting container pairing code before fetch: %d chars < %d",
-                len(pairing_code),
-                CONTAINER_NONCE_MIN_LEN,
-            )
-            errors["pairing_code"] = "container_code_too_short"
-            return None
-
-        session = async_get_clientsession(self.hass)
-        # Age reference for the ack log level only (the container's TTL runs from
-        # its own start, so this is a lower bound); see
-        # _container_ttl_certainly_elapsed.
-        fetched_monotonic = time.monotonic()
-        try:
-            raw_bundle, delete_token = await fetch_secrets_from_container(
-                session,
-                host,
-                port,
-                pairing_code,
-                timeout=CONTAINER_FETCH_TIMEOUT,
-            )
-        except ContainerLoginError as exc:
-            _LOGGER.debug("Container login fetch failed: %s", type(exc).__name__)
-            errors["base"] = _map_container_error(exc)
-            return None
-
-        parsed = normalize_secrets_bundle(dict(raw_bundle))
-        if _reject_if_shared_key_missing(parsed, errors):
-            return None
-
-        email = normalize_email(_extract_email_from_secrets(parsed))
-        if not email:
-            errors["base"] = "invalid_token"
-            return None
-
-        cands = _extract_oauth_candidates_from_secrets(parsed)
-        if not cands:
-            errors["base"] = "invalid_token"
-            return None
-
-        try:
-            chosen = await async_pick_working_token(
-                self.hass,
-                email,
-                cands,
-                secrets_bundle=parsed,
-            )
-        except (DependencyNotReady, ImportError) as exc:
-            _register_dependency_error(errors, exc)
-            return None
-
-        if not chosen:
-            _log_token_validation_failure(email=email, candidates=cands)
-            errors["base"] = "cannot_connect"
-            return None
-
-        to_persist = chosen
-        if _disqualifies_for_persistence(to_persist):
-            alt = next(
-                (v for (_src, v) in cands if not _disqualifies_for_persistence(v)),
-                None,
-            )
-            if alt:
-                to_persist = alt
-
-        return _ContainerFetchResult(
-            parsed=parsed,
-            token=to_persist,
-            email=email,
-            host=host,
-            port=port,
-            pairing_code=pairing_code,
-            delete_token=delete_token,
-            fetched_monotonic=fetched_monotonic,
-        )
 
     @_typed_callback
     def _async_cleanup_ticket_id(self) -> str:
@@ -3852,58 +3379,6 @@ class _ContainerLoginMixin:
             getattr(self, "hass", None), self._async_cleanup_ticket_id()
         )
 
-    @_typed_callback
-    def _async_stage_container_ack_result(
-        self, result: _ContainerFetchResult, *, entry: ConfigEntry | None = None
-    ) -> None:
-        """Stage the ack of an explicit fetch result (reauth/options paths).
-
-        Those paths hold the fetch result in a local variable instead of the
-        flow-bound ``_container_pending_ack`` slot, so they hand it in directly.
-        See :meth:`_async_stage_container_ack` for why the ack is staged rather
-        than sent, and for the meaning of ``entry``.
-        """
-
-        _async_stage_container_cleanup_for(
-            getattr(self, "hass", None),
-            flow_id=self._async_cleanup_ticket_id(),
-            unique_id=getattr(self, "unique_id", None),
-            job=PendingContainerCleanup(ack=result.ack_target),
-            entry=entry,
-        )
-
-    @_typed_callback
-    def _async_stage_container_ack(self, entry: ConfigEntry | None = None) -> None:
-        """Hand a deferred container ack over to ``async_setup_entry``.
-
-        The ack is the second phase of the two-phase delete: it tells the login
-        container to drop its on-disk ``secrets.json``. It must therefore never
-        be sent from inside a flow step, because no flow step has a durable
-        entry behind it:
-
-        * ``async_create_entry`` only builds a FlowResult; Home Assistant adds
-          and stores the entry afterwards, in
-          ``ConfigEntriesFlowManager.async_finish_flow``.
-        * ``async_update_entry`` (and ``async_update_reload_and_abort``, which
-          wraps it) mutates the in-memory entry and schedules a **debounced**
-          store save; it does not commit before returning either.
-
-        ``entry`` selects between the two: ``None`` is the create path (the
-        ticket is correlated by account only, and the gate waits for the entry
-        to appear at all), an entry is an update path (the ticket names the
-        entry and the gate additionally waits for a stored ``modified_at`` at
-        least as recent as the update that just happened).
-
-        Clearing ``self._container_pending_ack`` first keeps the no-double-ack
-        guarantee: a second call is a no-op.
-        """
-
-        pending = getattr(self, "_container_pending_ack", None)
-        if pending is None:
-            return
-        self._container_pending_ack = None
-        self._async_stage_container_ack_result(pending, entry=entry)
-
 
 # ---------------------------
 # Config Flow
@@ -3945,21 +3420,6 @@ class ConfigFlow(
         # that state torn down.
         self._pending_overwrite_payload: CloudDiscoveryData | None = None
         self._pending_overwrite_auth: dict[str, Any] | None = None
-        # Two-phase-delete (F4): a container-login fetch stages its result here so
-        # the ack (which tells the container to delete its on-disk secret) is only
-        # sent AFTER the config entry is actually created in device_selection. If
-        # the user aborts before CREATE_ENTRY the bundle survives (retryable).
-        self._container_pending_ack: _ContainerFetchResult | None = None
-        # Address of the login container, collected in ``container_login`` and
-        # consumed by ``container_pairing`` (the pairing code only exists after
-        # the sign-in the address step points the user at). Held on the config
-        # flow rather than on _ContainerLoginMixin because the options flow
-        # shares that mixin and asks for address and code in a single form.
-        self._container_host: str | None = None
-        self._container_port: int | None = None
-        # Pairing code typed in ``container_pairing``. Survives the detour back
-        # to the address step on ``container_unreachable``.
-        self._container_pairing_code: str = ""
         # One-shot marker for the local-bundle preflight scan in
         # ``async_step_user``; see _async_preflight_local_bundle. Lives here and
         # not on _ContainerLoginMixin because the preflight is a *setup* step
@@ -5309,8 +4769,6 @@ class ConfigFlow(
         if user_input is not None:
             method = user_input.get("auth_method")
             _LOGGER.debug("User step: method selected = %s", method)
-            if method == _AUTH_METHOD_CONTAINER:
-                return await self.async_step_container_login()
             if method == _AUTH_METHOD_SECRETS:
                 return await self.async_step_secrets_json()
             if method == _AUTH_METHOD_INDIVIDUAL:
@@ -5567,11 +5025,10 @@ class ConfigFlow(
     def _async_stage_local_bundle_cleanup(self) -> None:
         """Hand a preflight import's delete-after-import job to the gate.
 
-        Same reasoning and same primitive as
-        :meth:`_ContainerLoginMixin._async_stage_container_ack`: a CREATE_ENTRY
-        FlowResult is a promise, not a stored entry, so the irreversible delete
-        waits behind the durability gate that ``async_setup_entry`` arms.
-        Clearing the slot first makes a second call a no-op.
+        A CREATE_ENTRY FlowResult is a promise, not a stored entry, so the
+        irreversible delete waits behind the durability gate that
+        ``async_setup_entry`` arms. Clearing the slot first makes a second call
+        a no-op.
         """
 
         pending = self._local_bundle_pending_cleanup
@@ -5668,116 +5125,6 @@ class ConfigFlow(
 
         return self.async_show_form(
             step_id="secrets_json", data_schema=schema, errors=errors
-        )
-
-    def _async_show_container_login_form(
-        self, errors: dict[str, str] | None = None
-    ) -> FlowResult:
-        """Render the container *address* form for the current flow state.
-
-        One renderer for both entry points into that form: the step itself and
-        the way back out of ``container_pairing`` when the container turned out
-        to be unreachable. Sharing it keeps the noVNC placeholder tied to the
-        host that is actually displayed in the same form.
-        """
-
-        host = self._container_host or _CONTAINER_DEFAULT_HOST
-        port = self._container_port or CONTAINER_TOKEN_PORT
-        return self.async_show_form(
-            step_id="container_login",
-            data_schema=_container_login_schema(host=host, port=port),
-            errors=errors or {},
-            description_placeholders={
-                # Always present, so the translated description can reference it
-                # unconditionally without risking a KeyError while rendering.
-                "novnc_access": _novnc_access_placeholder(host),
-                "docs_url": _CONTAINER_LOGIN_DOCS_URL,
-            },
-        )
-
-    async def async_step_container_login(
-        self, user_input: dict[str, Any] | None = None
-    ) -> FlowResult:
-        """Collect the login container's address, then ask for the pairing code.
-
-        First half of the split one-click login. The code the container prints
-        only exists once the user has completed the Google sign-in in the noVNC
-        session, and the address collected here is what makes that session
-        reachable in the first place, so this step must not demand the code.
-        """
-
-        if user_input is not None:
-            host = (
-                str(user_input.get("host") or "").strip()
-                or self._container_host
-                or _CONTAINER_DEFAULT_HOST
-            )
-            port = int(
-                user_input.get("port") or self._container_port or CONTAINER_TOKEN_PORT
-            )
-            self._container_host = host
-            self._container_port = port
-            return await self.async_step_container_pairing()
-
-        return self._async_show_container_login_form()
-
-    async def async_step_container_pairing(
-        self, user_input: dict[str, Any] | None = None
-    ) -> FlowResult:
-        """Fetch the secrets bundle with the pairing code shown by the container.
-
-        Second half of the split one-click login: address and port come from the
-        flow state that ``container_login`` filled in. The fetch, error mapping
-        and success handling are the ones the single-form step used to run.
-
-        An unreachable container is the one failure whose remedy lives in the
-        *other* step (wrong host/port, container not started), so that case
-        returns to the address form while the code typed here is kept in
-        ``self._container_pairing_code`` and prefilled on the way back.
-        """
-
-        errors: dict[str, str] = {}
-        host = self._container_host or _CONTAINER_DEFAULT_HOST
-        port = self._container_port or CONTAINER_TOKEN_PORT
-
-        if user_input is not None:
-            pairing_code = str(user_input.get("pairing_code") or "").strip()
-            self._container_pairing_code = pairing_code
-
-            if not pairing_code:
-                errors["pairing_code"] = "required"
-            else:
-                result = await self._async_container_fetch(
-                    host=host,
-                    port=port,
-                    pairing_code=pairing_code,
-                    errors=errors,
-                )
-                if result is not None:
-                    await self._async_prepare_account_context(email=result.email)
-                    self._auth_data = {
-                        DATA_AUTH_METHOD: _AUTH_METHOD_SECRETS,
-                        CONF_OAUTH_TOKEN: result.token,
-                        CONF_GOOGLE_EMAIL: result.email,
-                    }
-                    self._auth_data.update(
-                        _persist_secrets_bundle(result.parsed, result.token)
-                    )
-                    # Two-phase delete (F4): do NOT ack here. Stage the result so
-                    # the ack fires only after the entry is actually created in
-                    # device_selection; if the user cancels in between, the
-                    # container keeps the bundle for a retry (TTL fallback).
-                    self._container_pending_ack = result
-                    return await self.async_step_device_selection()
-                if errors.get("base") == "container_unreachable":
-                    return self._async_show_container_login_form(dict(errors))
-
-        return self.async_show_form(
-            step_id="container_pairing",
-            data_schema=_container_pairing_schema(
-                pairing_code=self._container_pairing_code
-            ),
-            errors=errors,
         )
 
     # ------------------ Step: manual token + email ------------------
@@ -6035,14 +5382,6 @@ class ConfigFlow(
                     self.context.pop("is_reconfigure", None)
                     self.context.pop("reauth_success_reason_override", None)
                     self.context.pop("reconfigure_options", None)
-                    # Two-phase-delete ack (F4): STAGED, not sent. The update
-                    # above only scheduled Home Assistant's debounced save, so
-                    # the ack has to wait behind the same durability gate as the
-                    # create path. Staged BEFORE the reload on purpose: the
-                    # reload runs the async_setup_entry that claims the ticket,
-                    # so a ticket staged afterwards would sit unclaimed until
-                    # some later reload.
-                    self._async_stage_container_ack(entry_for_update)
                     await self._async_reload_entry_after_reconfigure(entry_for_update)
                     return self.async_abort(reason="reconfigure_successful")
             else:
@@ -6067,13 +5406,9 @@ class ConfigFlow(
                     or "Google Find My Device",
                     data=shadow,
                 )
-            # Entry *promised*, not yet stored: hand the deferred ack over to
-            # async_setup_entry (two-phase delete, F4/P2).
-            self._async_stage_container_ack()
-            # Same gate, same primitive for the preflight import: the bundle the
-            # user accepted in ``found_local_bundle`` is deleted from disk only
-            # after the entry has been observed in storage (delete-ALL rule; no
-            # asymmetry between the watcher path and the preflight path).
+            # Entry *promised*, not yet stored: the bundle the user accepted in
+            # ``found_local_bundle`` is deleted from disk only after the entry
+            # has been observed in storage (two-phase delete, F4/P2).
             self._async_stage_local_bundle_cleanup()
             # ... and pin the ticket to that promise BEFORE Home Assistant runs
             # async_finish_flow. From here on the flow's removal no longer means
@@ -6350,79 +5685,6 @@ class ConfigFlow(
             return await flow_result
         return flow_result
 
-    async def _async_reauth_container_persist(
-        self,
-        *,
-        entry: ConfigEntry,
-        fixed_email: str,
-        user_input: dict[str, Any],
-        errors: dict[str, str],
-    ) -> FlowResult | None:
-        """Container-login reauth branch feeding the shared persist path.
-
-        Mirrors the main paste-reauth persist semantics (``{**entry.data}``
-        merge, ``_persist_secrets_bundle``, ``pop(DATA_AAS_TOKEN)`` else-branch,
-        ``_async_clear_cached_aas_token`` side effect) so the container and paste
-        reauth paths can never diverge. Returns a ``FlowResult`` on success or
-        ``None`` when an error was recorded (caller re-shows the form).
-        """
-
-        host = str(user_input.get("container_host") or "127.0.0.1").strip() or (
-            "127.0.0.1"
-        )
-        port = int(user_input.get("container_port") or CONTAINER_TOKEN_PORT)
-        pairing_code = str(user_input.get("pairing_code") or "").strip()
-
-        result = await self._async_container_fetch(
-            host=host,
-            port=port,
-            pairing_code=pairing_code,
-            errors=errors,
-        )
-        if result is None:
-            return None
-
-        # The reauth entry is bound to a fixed email; a bundle for a different
-        # account must not silently overwrite it.
-        if fixed_email and result.email and result.email != fixed_email:
-            existing = _find_entry_by_email(self.hass, result.email)
-            if existing is not None:
-                return self.async_abort(reason="already_configured")
-            errors["base"] = "email_mismatch"
-            return None
-
-        updated_data = {
-            **entry.data,
-            DATA_AUTH_METHOD: _AUTH_METHOD_SECRETS,
-            **_persist_secrets_bundle(result.parsed, result.token),
-        }
-        if not (isinstance(result.token, str) and result.token.startswith("aas_et/")):
-            updated_data.pop(DATA_AAS_TOKEN, None)
-        await self._async_clear_cached_aas_token(entry)
-        _LOGGER.info(
-            "Container reauth for %s: shared_key present in secrets bundle",
-            _mask_email_for_logs(fixed_email),
-        )
-        success_reason = self.context.get(
-            "reauth_success_reason_override",
-            "reauth_successful",
-        )
-        # Update first, then STAGE the two-phase-delete ack (F4). Staging, not
-        # sending: `async_update_reload_and_abort` calls `async_update_entry`,
-        # which only bumps the in-memory entry and schedules the debounced store
-        # save, so nothing is committed when it returns. It also schedules the
-        # reload of this entry, and that reload's `async_setup_entry` is what
-        # arms the durability gate for the ticket staged here. Both calls are
-        # `@callback`s with no await between them, so the ticket is in place
-        # before the reload can run.
-        persist_result = self.async_update_reload_and_abort(
-            entry=entry,
-            data=updated_data,
-            reason=success_reason,
-        )
-        self._async_stage_container_ack_result(result, entry=entry)
-        return persist_result
-
     async def async_step_reauth_confirm(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
@@ -6440,11 +5702,6 @@ class ConfigFlow(
                     vol.Optional(_REAUTH_FIELD_SECRETS): selector(
                         {"text": {"multiline": True}}
                     ),
-                    vol.Optional("container_host", default="127.0.0.1"): str,
-                    vol.Optional(
-                        "container_port", default=CONTAINER_TOKEN_PORT
-                    ): _PORT_VALIDATOR,
-                    vol.Optional("pairing_code"): str,
                     # vol.Optional(_REAUTH_FIELD_TOKEN): str,  # Disabled: manual reauth token path is intentionally hidden until fixed.
                 }
             )
@@ -6452,40 +5709,11 @@ class ConfigFlow(
             schema = vol.Schema(
                 {
                     vol.Optional(_REAUTH_FIELD_SECRETS): str,
-                    vol.Optional("container_host", default="127.0.0.1"): str,
-                    vol.Optional(
-                        "container_port", default=CONTAINER_TOKEN_PORT
-                    ): _PORT_VALIDATOR,
-                    vol.Optional("pairing_code"): str,
                     # vol.Optional(_REAUTH_FIELD_TOKEN): str,  # Disabled: manual reauth token path is intentionally hidden until fixed.
                 }
             )
 
-        if (
-            user_input is not None
-            and _count_supplied_credential_methods(
-                user_input, _REAUTH_CREDENTIAL_FIELDS
-            )
-            > 1
-        ):
-            # Reject a mixed submission BEFORE any network call: the container
-            # GET is one-shot, so picking a winner here would silently drop the
-            # pasted bundle and burn the pairing code. Mirrors the `choose_one`
-            # verdict that _interpret_reauth_choice() gives for secrets+token.
-            errors["base"] = "choose_one"
-        elif (
-            user_input is not None
-            and (user_input.get(_REAUTH_FIELD_PAIRING_CODE) or "").strip()
-        ):
-            container_result = await self._async_reauth_container_persist(
-                entry=entry,
-                fixed_email=fixed_email,
-                user_input=user_input,
-                errors=errors,
-            )
-            if container_result is not None:
-                return container_result
-        elif user_input is not None:
+        if user_input is not None:
             method, payload, err = _interpret_reauth_choice(user_input)
             if err:
                 if err == "invalid_json":
@@ -8799,68 +8027,6 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin, _ContainerLoginMixi
 
         return self.async_show_form(step_id="repairs_delete", data_schema=schema)
 
-    # ---------- Credentials refresh ----------
-    async def _async_options_container_persist(
-        self,
-        *,
-        entry: ConfigEntry,
-        selected_option: Any,
-        user_input: dict[str, Any],
-        errors: dict[str, str],
-    ) -> FlowResult | None:
-        """Container-login options branch feeding the shared persist path.
-
-        Mirrors the options paste persist semantics (``{**entry.data}`` merge,
-        ``_persist_secrets_bundle``, ``pop(DATA_AAS_TOKEN)`` else-branch,
-        ``_async_clear_cached_aas_token`` + update + reload) so the container and
-        paste options paths cannot diverge. Returns a ``FlowResult`` on success
-        or ``None`` when an error was recorded (caller re-shows the form).
-        """
-
-        host = str(user_input.get("container_host") or "127.0.0.1").strip() or (
-            "127.0.0.1"
-        )
-        port = int(user_input.get("container_port") or CONTAINER_TOKEN_PORT)
-        pairing_code = str(user_input.get("pairing_code") or "").strip()
-
-        result = await self._async_container_fetch(
-            host=host,
-            port=port,
-            pairing_code=pairing_code,
-            errors=errors,
-        )
-        if result is None:
-            return None
-
-        entry_email = normalize_email_or_default(entry.data.get(CONF_GOOGLE_EMAIL))
-        if entry_email and result.email and result.email != entry_email:
-            errors["base"] = "email_mismatch"
-            return None
-
-        updated_data = {
-            **entry.data,
-            DATA_AUTH_METHOD: _AUTH_METHOD_SECRETS,
-            **_persist_secrets_bundle(result.parsed, result.token),
-        }
-        if not (isinstance(result.token, str) and result.token.startswith("aas_et/")):
-            updated_data.pop(DATA_AAS_TOKEN, None)
-
-        await self._async_clear_cached_aas_token(entry)
-        self.hass.config_entries.async_update_entry(entry, data=updated_data)
-        if selected_option is not None:
-            await self._async_refresh_subentry_entry_title(entry, selected_option)
-        # STAGE the ack (F4), do not send it: `async_update_entry` only schedules
-        # the debounced store save. Staged after the title refresh, because that
-        # may update the entry again and would then move the watermark forward;
-        # reading `modified_at` here always yields the latest scheduled write.
-        # Staged before the reload for the same reason as the reconfigure path:
-        # the reload's `async_setup_entry` is what claims the ticket.
-        self._async_stage_container_ack_result(result, entry=entry)
-        self.hass.async_create_task(
-            self.hass.config_entries.async_reload(entry.entry_id)
-        )
-        return self.async_abort(reason="reconfigure_successful")
-
     async def async_step_credentials(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
@@ -8885,11 +8051,6 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin, _ContainerLoginMixi
                     vol.Optional("new_secrets_json"): selector(
                         {"text": {"multiline": True}}
                     ),
-                    vol.Optional("container_host", default="127.0.0.1"): str,
-                    vol.Optional(
-                        "container_port", default=CONTAINER_TOKEN_PORT
-                    ): _PORT_VALIDATOR,
-                    vol.Optional("pairing_code"): str,
                     # vol.Optional("new_oauth_token"): str,  # Disabled: broken manual token path stays hidden until fixed.
                 }
             )
@@ -8900,11 +8061,6 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin, _ContainerLoginMixi
                         subentry_choices
                     ),
                     vol.Optional("new_secrets_json"): str,
-                    vol.Optional("container_host", default="127.0.0.1"): str,
-                    vol.Optional(
-                        "container_port", default=CONTAINER_TOKEN_PORT
-                    ): _PORT_VALIDATOR,
-                    vol.Optional("pairing_code"): str,
                     # vol.Optional("new_oauth_token"): str,  # Disabled: broken manual token path stays hidden until fixed.
                 }
             )
@@ -8917,28 +8073,14 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin, _ContainerLoginMixi
                 new_token = (user_input.get("new_oauth_token") or "").strip()
                 has_token = bool(new_token)
                 has_secrets = bool((user_input.get("new_secrets_json") or "").strip())
-                has_container = bool((user_input.get("pairing_code") or "").strip())
                 supplied = _count_supplied_credential_methods(
                     user_input, _OPTIONS_CREDENTIAL_FIELDS
                 )
                 if supplied != 1:
                     # Exactly one credential method per submission. Zero is the
                     # pre-existing "nothing entered" case; more than one must
-                    # fail here too, before any network call, because the
-                    # container GET is one-shot: silently picking a winner would
-                    # discard the pasted bundle AND burn the pairing code.
+                    # fail here too, before anything is written.
                     errors["base"] = "choose_one"
-                elif has_container:
-                    entry = self.config_entry
-                    selected_option = option_map.get(selected_key)
-                    container_result = await self._async_options_container_persist(
-                        entry=entry,
-                        selected_option=selected_option,
-                        user_input=user_input,
-                        errors=errors,
-                    )
-                    if container_result is not None:
-                        return container_result
                 else:
                     try:
                         entry = self.config_entry

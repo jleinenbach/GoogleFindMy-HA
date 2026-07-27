@@ -225,8 +225,8 @@ _cleaned=0
 # child this entrypoint WAITS ON goes through this single slot (supervisord is
 # backgrounded separately and torn down in cleanup, see
 # wait_for_tracked_child below), so on_signal has exactly one place to check. In
-# the gaps between children (waiting for the X display, between main.py and the
-# token server) the slot is empty on purpose and on_signal exits directly.
+# the gaps around the child (waiting for the X display, before main.py starts)
+# the slot is empty on purpose and on_signal exits directly.
 CHILD_PID=""
 # Set to the conventional 128+signal code once a terminating signal has been
 # relayed to a child. Needed because a child may absorb the signal and still exit
@@ -320,6 +320,7 @@ function exit_if_terminating {
     exit "${rc}"
   fi
 }
+
 trap cleanup EXIT
 trap 'on_signal TERM 143' TERM
 trap 'on_signal INT 130' INT
@@ -334,10 +335,11 @@ for i in $(seq 1 30); do
 done
 
 # Neutral status line only: it must NOT read as the call to action. The single
-# actionable prompt (open the URL, press Enter, sign in) is printed by the login
-# flow (auth_flow.py) at the point it actually blocks, and ONLY on a real login
-# -- a second run with an existing secrets.json returns early and shows no such
-# prompt. Uses the real URL passed via compose (LAN address with --ip, else
+# actionable instruction block (open the URL, sign in to the Chrome window that
+# comes up there) is printed by the login flow (auth_flow.py) right before it
+# starts Chrome, and ONLY on a real login -- a second run with an existing
+# secrets.json returns early and shows no such block. Uses the real URL passed
+# via compose (LAN address with --ip, else
 # loopback); a manual `docker run` falls back to localhost.
 echo "[entrypoint] noVNC available at ${GOOGLEFINDMY_NOVNC_URL:-http://localhost:7900} (password: ${GOOGLEFINDMY_NOVNC_PASSWORD:-secret})."
 
@@ -365,9 +367,9 @@ export GOOGLEFINDMY_CONTAINER_LOGIN
 # the background under supervisord and floods this console with a "Started
 # Selenium Standalone ... 4444" banner. That banner is irrelevant to the login
 # (the flow drives undetected-chromedriver directly, not the grid), but if it
-# prints AFTER the auth prompt the user mistakes the trailing 4444 line for a
-# hang. Wait for the grid to report ready first so the single actionable
-# "Press Enter" prompt from auth_flow.py is the LAST line on screen. Bounded and
+# prints AFTER the auth instructions the user mistakes the trailing 4444 line for
+# a hang. Wait for the grid to report ready first so the single actionable
+# instruction block from auth_flow.py is the LAST thing on screen. Bounded and
 # best-effort: on timeout (or without curl) we simply continue, and this touches
 # none of the trap/wait/signal machinery above.
 if command -v curl >/dev/null 2>&1; then
@@ -389,8 +391,8 @@ cd /app/gfmy
 # Backgrounding in a non-interactive script (job control off) has two side effects we
 # must undo, or the first-run login breaks:
 #   1. stdin: bash points an async child's stdin at /dev/null unless an explicit
-#      redirection overrides it. main.py's interactive `input("Press Enter")` prompt
-#      would then hit EOF and abort the login. The `<&0` at the async boundary (NOT
+#      redirection overrides it. main.py's `input("Enter your Google account email:")`
+#      prompt would then hit EOF and abort the login. The `<&0` at the async boundary (NOT
 #      inside the subshell, where fd 0 is already /dev/null) restores the entrypoint's
 #      terminal stdin (which `docker compose run` attaches).
 #   2. SIGINT/SIGQUIT: bash hard-ignores (SIG_IGN) these in an async child; Python
@@ -412,98 +414,18 @@ wait_for_tracked_child || _rc=$?
 exit_if_terminating "${_rc}"
 
 # --------------------------------------------------------------------------
-# Post-login handoff tracks (only after a successful main.py run; unset -> the
+# Post-login terminal handoff (only after a successful main.py run; unset -> the
 # historical behaviour is completely unchanged).
 #
-# GFMY_ONECLICK and GFMY_CLEARTEXT are INDEPENDENT switches (as documented in
-# docker-compose.yml and README.md), so the two blocks below are two separate
-# `if`s evaluated in sequence, never an if/elif chain: with both set, Track C
-# has to stay reachable after the token server returned. Each block re-tests
-# `-f "${_secrets_path}"`, which is what keeps the sequence honest -- the server
-# consumes (deletes) the file on ack and on TTL, so Track C only ever prints a
-# bundle that is still there -- chiefly the lockout case, and likewise anything
-# else that leaves the file behind (a failed delete, for instance) -- never an
-# empty block.
-#
-# These run BLOCKING (the children themselves are backgrounded and tracked, see
-# below) *before* the final `exit`, so the EXIT trap's
-# cleanup (ownership handoff of /data + supervisor shutdown) fires strictly
-# AFTER the handoff is done. That is the BLOCKING-1 lifecycle fix: a One-Click
-# token server that must outlive main.py cannot hang off the EXIT trap, so it
-# runs here, and cleanup's /data ownership handoff is naturally deferred until
-# it returns (ack-delete or TTL). The `secrets.json` the server reads still
-# exists at this point (main.py wrote it; cleanup has not run yet).
+# This runs BLOCKING *before* the final `exit`, so the EXIT trap's cleanup
+# (ownership handoff of /data + supervisor shutdown) fires strictly AFTER the
+# handoff is done. The secrets.json it reads still exists at this point (main.py
+# wrote it; cleanup has not run yet).
 # --------------------------------------------------------------------------
 _secrets_path="${GOOGLEFINDMY_SECRETS_PATH:-/data/secrets.json}"
 
-if [ "${_rc}" -eq 0 ] && [ "${GFMY_ONECLICK:-}" = "1" ] && [ -f "${_secrets_path}" ]; then
-  # Track B: hand the freshly minted bundle to Home Assistant over a one-shot,
-  # nonce-authenticated, loopback-only endpoint (see token_server.py). The
-  # pairing code is generated at RUNTIME (never a compose default) and printed
-  # prominently; only the code is shown, never the token/bundle.
-  GFMY_PAIRING_CODE="$(python3 -c 'import secrets;print(secrets.token_urlsafe(16))')"
-  export GFMY_PAIRING_CODE GOOGLEFINDMY_SECRETS_PATH="${_secrets_path}"
-  echo ""
-  echo "=================================================================="
-  echo "[entrypoint] ONE-CLICK login ready. In Home Assistant choose the"
-  echo "[entrypoint] 'Container login' auth method and enter:"
-  echo "[entrypoint]     host: 127.0.0.1   port: 7901"
-  echo "[entrypoint]     pairing code: ${GFMY_PAIRING_CODE}"
-  echo "[entrypoint] (From another machine, tunnel: ssh -L 7901:127.0.0.1:7901 <host>)"
-  echo "[entrypoint]"
-  echo "[entrypoint] If Home Assistant cannot reach the port, the host publish is"
-  echo "[entrypoint] missing: 7901 is an OPT-IN overlay so that a busy port never"
-  echo "[entrypoint] blocks the file/cleartext tracks. The launcher adds it for you"
-  echo "[entrypoint] (GFMY_ONECLICK=1 bash login.sh); a manual run needs it spelled out:"
-  echo "[entrypoint]   docker compose -f docker-compose.yml -f docker-compose.oneclick.yml \\"
-  echo "[entrypoint]     run --build --service-ports --rm googlefindmy-login"
-  echo "=================================================================="
-  echo ""
-  # Backgrounded and tracked, for the SAME reason main.py is (see the launch
-  # comment above): with a FOREGROUND server bash would defer its TERM/INT traps
-  # for up to the full TTL, so a `docker stop` during the wait would hit SIGKILL
-  # after the (default 10 s) grace period and the EXIT cleanup would never run --
-  # leaving the 0600 bundle owned by the container UID and supervisor unstopped.
-  # `trap - INT QUIT` restores Python's default SIGINT disposition in the async
-  # child so token_server.py's KeyboardInterrupt path stays reachable; no `<&0`
-  # here, the server never reads stdin.
-  #
-  # This blocks until one of four things happens. In the first three we fall
-  # through to the final exit -> EXIT trap cleanup (ownership handoff +
-  # supervisor stop):
-  #   - Home Assistant acks the handoff  -> secrets.json is deleted (consumed),
-  #   - the TTL elapses without an ack   -> secrets.json is deleted (fallback),
-  #   - the pairing code is locked out   -> the endpoint closes but secrets.json
-  #     is KEPT on purpose, so no login has to be repeated: the file handoff
-  #     (Track A) still works, and if GFMY_CLEARTEXT is also set the next block
-  #     prints the bundle. Note that the two are alternatives, not cumulative:
-  #     Track C is ephemeral by contract and removes the file after printing it,
-  #     so with both switches the clear-text output REPLACES the file handoff.
-  # The fourth is a terminating signal, and it does NOT fall through: see the
-  # check right after the wait. secrets.json is then left on disk unless the
-  # server had already consumed it, which is the safe
-  # direction -- no login has to be repeated, and the EXIT trap still hands the
-  # file's ownership back to the host user.
-  ( trap - INT QUIT; exec python3 /app/gfmy/docker-login/token_server.py ) &
-  CHILD_PID=$!
-  _srv_rc=0
-  wait_for_tracked_child || _srv_rc=$?
-  # The server dying because we are shutting down is NOT "the server finished":
-  # without this the clear-text track below would dump the whole bundle into the
-  # container log on a `docker stop`. token_server.py installs no SIGTERM handler,
-  # so the file it would otherwise have consumed is still there and that `-f` test
-  # would pass.
-  exit_if_terminating "${_srv_rc}"
-fi
-
-# Deliberately a fresh `if`, not an `elif` on the block above: the switches are
-# independent, so with GFMY_ONECLICK=1 *and* GFMY_CLEARTEXT=1 this is the
-# promised fallback for the lockout case, where the server left secrets.json in
-# place on purpose. The `-f` test is re-evaluated AFTER the server returned, so
-# an acked or TTL-expired (i.e. deleted) bundle prints nothing at all. The
-# clear-text block exists exactly once and serves both entry paths.
 if [ "${_rc}" -eq 0 ] && [ "${GFMY_CLEARTEXT:-}" = "1" ] && [ -f "${_secrets_path}" ]; then
-  # Track C: no port is opened. Print the full secrets.json in a clearly
+  # Track B: no port is opened. Print the full secrets.json in a clearly
   # delimited block on THIS script's stdout, i.e. in the terminal that runs the
   # launcher (or in `docker logs`). That is a different sink from the noVNC
   # viewer, which renders the X display served by supervisord and never sees
@@ -522,7 +444,7 @@ if [ "${_rc}" -eq 0 ] && [ "${GFMY_CLEARTEXT:-}" = "1" ] && [ -f "${_secrets_pat
   # Report the real outcome instead of asserting it. A silenced `rm` claimed the
   # bundle was gone even when it was not (a readable file under a directory that
   # is no longer writable), leaving the full credentials on disk with no warning
-  # -- the opposite of what Track C promises.
+  # -- the opposite of what Track B promises.
   if rm -f "${_secrets_path}" 2>/dev/null; then
     echo "[entrypoint] The file has been removed."
   else

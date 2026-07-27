@@ -649,7 +649,7 @@ async def test_manager_watches_container_data_default_zero_config(
 
     Even with an empty options set (no ``SECRETS_EXTRA_WATCH_PATHS``), the manager
     must build its watcher over BOTH zero-config defaults so a same-machine
-    one-click login is imported without any extra configuration.
+    container login is imported without any extra configuration.
     """
 
     captured: dict[str, Any] = {}
@@ -1110,8 +1110,6 @@ async def test_discovery_confirm_stages_delete_instead_of_running_it(
     # The staged identity is the one of the file that must eventually go.
     assert jobs[0].imported_stable_key == on_disk.stable_key
     assert jobs[0].imported_digest == on_disk.digest
-    # A pure delete job carries no container ack.
-    assert jobs[0].ack is None
 
 
 async def test_aborted_discovery_confirm_stages_nothing(tmp_path: Path) -> None:
