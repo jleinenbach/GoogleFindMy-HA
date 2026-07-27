@@ -2037,7 +2037,6 @@ async def test_accepted_local_bundle_stages_the_watcher_delete_primitive(
     assert scanned is not None
     assert pending.imported_stable_key == scanned.stable_key
     assert pending.imported_digest == scanned.digest
-    assert pending.ack is None
 
     # The hand-over the create path performs is the generic staging primitive.
     flow._async_stage_local_bundle_cleanup()

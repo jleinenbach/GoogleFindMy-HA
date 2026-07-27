@@ -8,7 +8,7 @@
     "step": {
       "user": {
         "title": "Autenticação do Google Encontrar Meu Dispositivo",
-        "description": "Escolha como você quer fazer login. O login por contêiner em um clique inicia para você um contêiner de navegador já preparado e precisa de uma máquina com Docker. GoogleFindMyTools secrets.json é a escolha certa se você já tem esse arquivo ou pode executar o GoogleFindMyTools com o Chrome em um computador.",
+        "description": "Escolha como você quer fazer login. GoogleFindMyTools secrets.json é a escolha certa se você já tem esse arquivo ou pode executar o GoogleFindMyTools com o Chrome em um computador.",
         "data": {
           "auth_method": "Método de autenticação"
         }
@@ -28,28 +28,6 @@
         "description": "Execute o GoogleFindMyTools (Chrome) para gerar os tokens de autenticação, depois cole abaixo o conteúdo completo do arquivo Auth/secrets.json.",
         "data": {
           "secrets_json": "Conteúdo do arquivo secrets.json"
-        }
-      },
-      "container_login": {
-        "title": "Login em contêiner com um clique",
-        "description": "Faça login pelo contêiner de login incluído. Execute-o no próprio host Docker; o contêiner do Home Assistant não tem socket do Docker.\n\n1. Abra um shell no host Docker e entre na pasta `custom_components/googlefindmy/docker-login/` desta integração.\n2. Inicie-o com `GFMY_ONECLICK=1 bash login.sh` (Windows: `set GFMY_ONECLICK=1 && login.cmd`).\n3. Conclua o login do Google na janela do noVNC.\n4. Em seguida, o contêiner imprime um código de pareamento nesse mesmo terminal. A próxima etapa pede esse código.\n\nVisualizador noVNC (senha: `secret`): {novnc_access}\n\nO visualizador é aberto pelo seu navegador, que muitas vezes roda em uma máquina diferente do host Docker, por isso ele só é vinculado quando o host acima é um endereço IP fora do loopback. Com um bind de loopback, abra-o no próprio host Docker, faça um túnel com `ssh -L 7900:127.0.0.1:7900 DOCKER-HOST` ou execute o inicializador novamente com `--ip ENDERECO` e use o endereço exibido.\n\nInstruções completas: {docs_url} (pasta `custom_components/googlefindmy/docker-login/`).",
-        "data": {
-          "host": "Host do contêiner",
-          "port": "Porta do contêiner"
-        },
-        "data_description": {
-          "host": "Nome de host ou endereço IP do contêiner de login. O padrão `127.0.0.1` é o loopback do host Docker, então ele só funciona se o Home Assistant compartilhar o espaço de rede desse host; um Home Assistant em modo bridge não o alcança. Duas saídas: colocar os dois contêineres na mesma rede Docker, iniciar o inicializador de modo que `docker compose run` receba `--use-aliases` (sem essa opção o nome de serviço não é resolvido, veja o README) e informar aqui o nome de serviço do contêiner, ou dispensar a rede e deixar o contêiner entregar o arquivo por `docker-login/data/secrets.json`, que esta integração importa sozinha. A porta das credenciais é publicada em `127.0.0.1`, a menos que você tenha dito outra coisa ao inicializador com `GFMY_ONECLICK_BIND`; informe aqui o endereço que o inicializador exibiu. Um vínculo ampliado transmite as credenciais sem criptografia, então use-o apenas em uma rede local confiável e somente durante o momento da entrega.",
-          "port": "Porta em que o contêiner de login fornece as credenciais. Ela só é publicada quando o inicializador roda com a sobreposição `docker-compose.oneclick.yml`; o arquivo compose simples não a publica."
-        }
-      },
-      "container_pairing": {
-        "title": "Digite o código de pareamento",
-        "description": "Conclua primeiro o login do Google na janela do noVNC. Em seguida, o contêiner imprime o código de pareamento no terminal em que o inicializador roda (ou em `docker logs`, se você o iniciou em segundo plano).",
-        "data": {
-          "pairing_code": "Código de pareamento"
-        },
-        "data_description": {
-          "pairing_code": "O código que o contêiner imprime no terminal do inicializador assim que o login termina. Ele é gerado novamente a cada execução, vale 5 minutos e bloqueia após 5 tentativas erradas; nesse caso, pare o contêiner e inicie o inicializador de novo."
         }
       },
       "device_selection": {
@@ -77,18 +55,11 @@
       },
       "reauth_confirm": {
         "title": "Reautenticar",
-        "description": "Suas credenciais para **{email}** parecem inválidas ou expiradas. Forneça novas credenciais abaixo.\n\nCole o conteúdo completo de um novo **secrets.json** (gerado ao executar o GoogleFindMyTools) ou faça login novamente pelo contêiner de login inserindo um código de pareamento.\n\nObservação: o e-mail da conta é fixo para esta reautenticação; para usar uma conta diferente, remova e adicione a integração novamente.",
+        "description": "Suas credenciais para **{email}** parecem inválidas ou expiradas. Forneça novas credenciais abaixo.\n\nCole o conteúdo completo de um novo **secrets.json** (gerado ao executar o GoogleFindMyTools).\n\nObservação: o e-mail da conta é fixo para esta reautenticação; para usar uma conta diferente, remova e adicione a integração novamente.",
         "data": {
-          "secrets_json": "Novo secrets.json (conteúdo completo)",
-          "container_host": "Host do contêiner",
-          "container_port": "Porta do contêiner",
-          "pairing_code": "Código de pareamento"
+          "secrets_json": "Novo secrets.json (conteúdo completo)"
         },
-        "data_description": {
-          "container_host": "Nome de host ou endereço IP do contêiner de login. Mantenha o padrão, a menos que você execute o contêiner em outro lugar.",
-          "container_port": "Porta em que o contêiner de login fornece as credenciais. Mantenha o padrão, a menos que você a tenha alterado.",
-          "pairing_code": "Insira um código de pareamento para reautenticar pelo contêiner de login em vez de colar o secrets.json."
-        }
+        "data_description": {}
       },
       "migrate_complete": {
         "title": "Migração concluída",
@@ -108,13 +79,7 @@
       "choose_one": "Forneça exatamente um método de credencial.",
       "required": "Este campo é obrigatório.",
       "unknown": "Ocorreu um erro inesperado.",
-      "email_mismatch": "As credenciais fornecidas pertencem a uma conta Google diferente. ",
-      "container_unreachable": "Não foi possível acessar o contêiner de login. Verifique se ele está em execução e se o host e a porta estão corretos.",
-      "container_timeout": "O contêiner de login não respondeu a tempo. Tente novamente.",
-      "container_auth_failed": "A autenticação com o contêiner de login falhou. Verifique o código de pareamento e tente novamente.",
-      "container_code_used": "Este código de pareamento já foi usado ou expirou. Reinicie o contêiner de login e use o novo código.",
-      "container_code_too_short": "O código de pareamento é muito curto. Copie o código completo do contêiner de login.",
-      "container_login_failed": "Não foi possível concluir o login pelo contêiner. Tente novamente."
+      "email_mismatch": "As credenciais fornecidas pertencem a uma conta Google diferente. "
     },
     "abort": {
       "already_configured": "O Google Encontrar Meu Dispositivo já está configurado.",
@@ -278,18 +243,12 @@
       },
       "credentials": {
         "title": "Atualizar credenciais (opcional)",
-        "description": "Atualize suas credenciais. Os valores existentes não são exibidos por segurança.\n\nCole o conteúdo completo de um novo **secrets.json** (gerado ao executar o GoogleFindMyTools) ou faça login novamente pelo contêiner de login inserindo um código de pareamento.\n\nApós o envio, as credenciais são validadas e armazenadas; a integração é recarregada sem alterar os nomes das suas entidades.",
+        "description": "Atualize suas credenciais. Os valores existentes não são exibidos por segurança.\n\nCole o conteúdo completo de um novo **secrets.json** (gerado ao executar o GoogleFindMyTools).\n\nApós o envio, as credenciais são validadas e armazenadas; a integração é recarregada sem alterar os nomes das suas entidades.",
         "data": {
           "new_secrets_json": "Novo secrets.json (conteúdo completo)",
-          "container_host": "Host do contêiner",
-          "container_port": "Porta do contêiner",
-          "pairing_code": "Código de pareamento",
           "subentry": "Grupo de recursos"
         },
         "data_description": {
-          "container_host": "Nome de host ou endereço IP do contêiner de login. Mantenha o padrão, a menos que você execute o contêiner em outro lugar.",
-          "container_port": "Porta em que o contêiner de login fornece as credenciais. Mantenha o padrão, a menos que você a tenha alterado.",
-          "pairing_code": "Insira um código de pareamento para atualizar as credenciais pelo contêiner de login em vez de colar o secrets.json.",
           "subentry": "Aplique as atualizações de credenciais ao grupo de recursos selecionado. Consulte o guia [Subentradas e grupos de recursos]({subentries_docs_url}) para detalhes do fluxo de trabalho."
         }
       },
@@ -373,13 +332,7 @@
       "duplicate_name": "O nome semântico já existe. Escolha um nome diferente.",
       "duplicate_semantic_location": "O nome semântico já existe. Escolha um nome diferente.",
       "unknown": "Ocorreu um erro inesperado.",
-      "invalid_subentry": "Escolha um grupo de recursos válido.",
-      "container_unreachable": "Não foi possível acessar o contêiner de login. Verifique se ele está em execução e se o host e a porta estão corretos.",
-      "container_timeout": "O contêiner de login não respondeu a tempo. Tente novamente.",
-      "container_auth_failed": "A autenticação com o contêiner de login falhou. Verifique o código de pareamento e tente novamente.",
-      "container_code_used": "Este código de pareamento já foi usado ou expirou. Reinicie o contêiner de login e use o novo código.",
-      "container_code_too_short": "O código de pareamento é muito curto. Copie o código completo do contêiner de login.",
-      "container_login_failed": "Não foi possível concluir o login pelo contêiner. Tente novamente."
+      "invalid_subentry": "Escolha um grupo de recursos válido."
     },
     "abort": {
       "reconfigure_successful": "Reconfiguração bem-sucedida.",
@@ -861,7 +814,6 @@
     },
     "auth_method": {
       "options": {
-        "container_login": "Login em contêiner com um clique",
         "secrets_json": "GoogleFindMyTools secrets.json"
       }
     }

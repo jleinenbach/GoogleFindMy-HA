@@ -511,7 +511,7 @@ async def test_async_remove_entry_drains_only_this_entrys_cleanup_tickets() -> N
     ``async_discard_pending_container_cleanup_for_entry``. Without this test the
     seam is unverified: a later refactor to ``unique_id`` would make
     ``ticket.entry_id == <unique_id>`` never match, the tickets would survive the
-    removal holding a pairing nonce and a delete token, and no test would go red.
+    removal unclaimable, and no test would go red.
     The foreign ticket pins the other direction -- the drain must not reach
     across entries.
     """
@@ -520,7 +520,6 @@ async def test_async_remove_entry_drains_only_this_entrys_cleanup_tickets() -> N
     from custom_components.googlefindmy.config_flow import (
         PENDING_CONTAINER_CLEANUP_KEY,
     )
-    from custom_components.googlefindmy.const import CONTAINER_TOKEN_PORT
 
     def _stage(hass: Any, *, flow_id: str, entry: Any) -> None:
         config_flow._async_stage_container_cleanup_for(
@@ -528,12 +527,8 @@ async def test_async_remove_entry_drains_only_this_entrys_cleanup_tickets() -> N
             flow_id=flow_id,
             unique_id=getattr(entry, "unique_id", None),
             job=config_flow.PendingContainerCleanup(
-                ack=config_flow._ContainerAckTarget(
-                    host="127.0.0.1",
-                    port=CONTAINER_TOKEN_PORT,
-                    pairing_code="pair-code",
-                    delete_token="delete-token",
-                )
+                imported_stable_key="email:user@example.com",
+                imported_digest="deadbeef",
             ),
             entry=entry,
         )
@@ -578,7 +573,6 @@ async def test_async_remove_entry_discards_the_ticket_it_cannot_name() -> None:
     from custom_components.googlefindmy.config_flow import (
         PENDING_CONTAINER_CLEANUP_KEY,
     )
-    from custom_components.googlefindmy.const import CONTAINER_TOKEN_PORT
 
     entry = make_config_entry(
         entry_id="entry-remove", unique_id="user@example.com", title="Find My Entry"
@@ -593,12 +587,8 @@ async def test_async_remove_entry_discards_the_ticket_it_cannot_name() -> None:
         flow_id="flow-create",
         unique_id=entry.unique_id,
         job=config_flow.PendingContainerCleanup(
-            ack=config_flow._ContainerAckTarget(
-                host="127.0.0.1",
-                port=CONTAINER_TOKEN_PORT,
-                pairing_code="pair-code",
-                delete_token="delete-token",
-            )
+            imported_stable_key="email:user@example.com",
+            imported_digest="deadbeef",
         ),
         entry=None,
     )
@@ -638,7 +628,6 @@ async def test_async_remove_entry_leaves_a_foreign_accounts_ticket_alone() -> No
     from custom_components.googlefindmy.config_flow import (
         PENDING_CONTAINER_CLEANUP_KEY,
     )
-    from custom_components.googlefindmy.const import CONTAINER_TOKEN_PORT
 
     entry = make_config_entry(
         entry_id="entry-remove", unique_id="user@example.com", title="Find My Entry"
@@ -652,12 +641,8 @@ async def test_async_remove_entry_leaves_a_foreign_accounts_ticket_alone() -> No
         flow_id="flow-other-account",
         unique_id="other@example.com",
         job=config_flow.PendingContainerCleanup(
-            ack=config_flow._ContainerAckTarget(
-                host="127.0.0.1",
-                port=CONTAINER_TOKEN_PORT,
-                pairing_code="pair-code",
-                delete_token="delete-token",
-            )
+            imported_stable_key="email:user@example.com",
+            imported_digest="deadbeef",
         ),
         entry=None,
     )

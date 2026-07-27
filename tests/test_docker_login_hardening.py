@@ -42,35 +42,13 @@ Codex review finding on PR #1208:
   a non-interactive script otherwise gives an async child ``/dev/null`` stdin (the
   ``input()`` login prompt hits EOF) and hard-ignores SIGINT (Python drops Ctrl-C),
   both regressions of the backgrounding fix above.
-* The one-click token port (7901) must be an OPT-IN publish. The launchers always
-  pass ``--service-ports``, so anything declared in ``docker-compose.yml`` is
-  published on EVERY run; an unconditional 7901 entry made the container fail to
-  start on a host where that port was already taken, which also broke the file
-  handoff (``./data``) and the ``GFMY_CLEARTEXT=1`` output, neither of which uses
-  the port. The publish therefore lives in the opt-in overlay
-  ``docker-compose.oneclick.yml`` that the launchers add only for
-  ``GFMY_ONECLICK=1`` (Codex P2 on PR #1211). When it IS published, the host part
-  defaults to loopback and is widened only by an explicit ``GFMY_ONECLICK_BIND``
-  (the counterpart of ``GFMY_NOVNC_BIND`` for noVNC 7900, with two extra rules
-  the launchers enforce: a wildcard is refused, and a LAN value is warned about
-  because this endpoint serves clear-text tokens).
-* ``GFMY_ONECLICK`` and ``GFMY_CLEARTEXT`` are documented (compose + README) as
-  INDEPENDENT switches, but the clear-text track hung off the one-click branch as
-  an ``elif``, so with both set it was never evaluated -- in the documented lockout
-  case the token server deliberately KEEPS ``secrets.json``, yet the requested
-  clear-text fallback stayed silent. The tracks are now two separate ``if``s, each
-  re-testing ``-f "${_secrets_path}"`` so an acked/TTL-consumed (deleted) bundle
-  still prints nothing (Codex P2 on PR #1211).
-* The One-Click token server ran as a FOREGROUND child. Bash is PID 1 (exec-form
-  ``ENTRYPOINT``) and defers its TERM/INT traps until a foreground child returns,
-  which for this server can be its full 300 s TTL -- so ``docker stop`` escalated
-  to SIGKILL after the grace period and the EXIT cleanup (``/data`` ownership
-  handoff + supervisor shutdown) never ran, leaving the 0600 bundle owned by the
-  container UID (Codex P2 on PR #1211). Both long-running children now go through
-  one tracked slot and one wait helper. Backgrounding alone is not enough: the
-  child then dies on the relayed signal and its ``wait`` returns NORMALLY, so a
-  shutdown check after the wait stops the run instead of falling through into the
-  clear-text track and dumping the bundle into the container log.
+* Only the noVNC viewer (7900) may be published. The launchers always pass
+  ``--service-ports``, so anything declared in ``docker-compose.yml`` is published
+  on EVERY run; a second port entry made the container fail to start on a host
+  where that port was already taken, which also broke the file handoff (``./data``)
+  and the ``GFMY_CLEARTEXT=1`` output, neither of which uses a port. The token
+  endpoint that once carried a second publish was removed with PR #1218, so the
+  compose file declares exactly one port and no overlay exists.
 * The login image installs ``setuptools`` alongside ``requirements.txt`` in its
   build step. undetected-chromedriver 3.5.5 (the current PyPI top) still imports
   the stdlib ``distutils`` that Python 3.12+ removed (PEP 632); the
@@ -100,8 +78,6 @@ DOCKER_LOGIN = Path("custom_components/googlefindmy/docker-login")
 # Build context root for the login image (docker-compose.yml `build.context: ..`).
 BUILD_CONTEXT = DOCKER_LOGIN.parent
 LOGIN_SERVICE = "googlefindmy-login"
-# Opt-in overlay carrying the one-click token-port publish (Codex P2, PR #1211).
-ONECLICK_COMPOSE = "docker-compose.oneclick.yml"
 
 
 def _read(name: str) -> str:
@@ -140,7 +116,7 @@ def test_launcher_uses_compose_run_not_up(launcher: str) -> None:
 
     text = _read(launcher)
     # `docker compose [-f ...] run`: the launchers now select their compose files
-    # explicitly (base always, the one-click overlay only on opt-in), so the
+    # explicitly (the base file always, a user override when present), so the
     # invocation carries flags between `compose` and `run`. The subcommand must
     # still be `run` -- match it as a word, not the bare literal string.
     assert re.search(r"docker compose\s+(?:\S+\s+)*run\b", text), (
@@ -190,8 +166,8 @@ def test_compose_binds_novnc_to_loopback_by_default() -> None:
 def _compose_service_ports(compose_file: str) -> list[str]:
     """Return the login service's declared port publishes from ``compose_file``.
 
-    Parsed from YAML (not grepped) so the extensive *comments* about port 7901 in
-    both files cannot make a guard pass or fail by accident: only real ``ports:``
+    Parsed from YAML (not grepped) so the extensive *comments* around the ports
+    block cannot make a guard pass or fail by accident: only real ``ports:``
     entries count.
     """
 
@@ -200,209 +176,31 @@ def _compose_service_ports(compose_file: str) -> list[str]:
     return [str(entry) for entry in service.get("ports", [])]
 
 
-def test_base_compose_does_not_publish_the_oneclick_token_port() -> None:
-    """The base compose must publish noVNC only, never the one-click token port.
-
-    Both launchers start the service with ``--service-ports``, so every entry in
-    the base file's ``ports:`` list is published on EVERY run. With 7901 declared
-    unconditionally, a host that already used that port (another service, a
-    leftover container) made the container fail to start altogether -- taking down
-    the two handoff tracks that never touch the port: the file handoff through
-    ``./data`` and the ``GFMY_CLEARTEXT=1`` terminal output. Compose cannot drop a
-    single ``ports:`` entry conditionally, so the publish moved into the opt-in
-    overlay asserted below (Codex P2 on PR #1211).
-    """
-
-    ports = _compose_service_ports("docker-compose.yml")
-
-    assert not [p for p in ports if "7901" in p], (
-        "docker-compose.yml must NOT declare a publish for the one-click token "
-        f"port 7901 (found {ports!r}); it belongs in {ONECLICK_COMPOSE}, which the "
-        "launchers add only for GFMY_ONECLICK=1. Otherwise a busy host port 7901 "
-        "blocks the file-handoff and clear-text tracks that do not need it."
-    )
-    # noVNC stays published in every track (it is how you perform the login).
-    assert any("7900" in p for p in ports), (
-        "docker-compose.yml must keep publishing the noVNC viewer port 7900 for "
-        f"all tracks (found {ports!r})."
-    )
-
-
-def test_oneclick_overlay_publishes_token_port_with_a_loopback_default() -> None:
-    """The overlay must publish 7901 as ``${GFMY_ONECLICK_BIND:-127.0.0.1}:7901:7901``.
-
-    The endpoint serves the freshly minted tokens in the clear, so the host-side
-    publish IS the security boundary (the in-container bind is ``0.0.0.0`` on
-    purpose, because Docker's bridge DNATs the published port onto eth0 rather
-    than onto container loopback).
-
-    Until the bind became configurable this was a literal ``127.0.0.1``. That pin
-    made the one-click track usable only where the file handoff already works --
-    a Home Assistant in its own bridge container, or on another machine, cannot
-    reach the Docker host's loopback -- so the host part is now variable-driven,
-    exactly like noVNC's ``GFMY_NOVNC_BIND``. What must NOT change: the DEFAULT is
-    loopback, so an unset variable can never widen anything, and neither a
-    wildcard publish (``0.0.0.0:7901:7901``) nor a bare ``7901:7901`` may appear.
-    The launchers add the checks Compose cannot express (wildcard refused,
-    clear-text warning); see the behavioural tests further down.
-    """
-
-    overlay = DOCKER_LOGIN / ONECLICK_COMPOSE
-    assert overlay.is_file(), (
-        f"{ONECLICK_COMPOSE} must exist next to docker-compose.yml: it carries the "
-        "opt-in one-click token-port publish that the launchers add on demand."
-    )
-
-    ports = _compose_service_ports(ONECLICK_COMPOSE)
-    token_ports = [p for p in ports if "7901" in p]
-    assert token_ports == ["${GFMY_ONECLICK_BIND:-127.0.0.1}:7901:7901"], (
-        f"{ONECLICK_COMPOSE} must publish the token port exactly as "
-        f"'${{GFMY_ONECLICK_BIND:-127.0.0.1}}:7901:7901' (found {ports!r}): one "
-        "variable, one loopback default. A second spelling, a missing default or "
-        "a non-loopback default would widen the publish without anyone asking."
-    )
-    # The overlay must not silently take over other ports (noVNC is merged in from
-    # the base file, including its GFMY_NOVNC_BIND behaviour).
-    assert ports == token_ports, (
-        f"{ONECLICK_COMPOSE} must only add the token port; noVNC's publish (and its "
-        f"GFMY_NOVNC_BIND handling) stays in docker-compose.yml. Found {ports!r}."
-    )
-
-    overlay_yaml = yaml.safe_load(_read(ONECLICK_COMPOSE))
-    assert "network_mode" not in overlay_yaml["services"][LOGIN_SERVICE], (
-        f"{ONECLICK_COMPOSE} must not set network_mode: `host` removes the bridge "
-        "and the publish indirection, so the container's 0.0.0.0 bind would land on "
-        "the host's LAN interfaces."
-    )
-
-
-@pytest.mark.parametrize("compose_file", ["docker-compose.yml", ONECLICK_COMPOSE])
-def test_token_port_has_exactly_one_bind_knob_defaulting_to_loopback(
-    compose_file: str,
-) -> None:
-    """A LAN bind for 7901 must stay opt-in, single-spelled and loopback by default.
-
-    The token port hands out credentials in the clear, so widening it is allowed
-    but must always be somebody's explicit decision: exactly ONE variable, always
-    with a loopback default, and never a wildcard or a bare mapping (both of which
-    publish on every interface without naming an address).
-
-    This is the successor of the older "no LAN opt-in at all" rule. That rule was
-    dropped deliberately -- it left the one-click handoff reachable only from the
-    machine where the file handoff already works -- but everything it protected
-    against (a silent widening) is still asserted here.
-    """
-
-    allowed = "${GFMY_ONECLICK_BIND:-127.0.0.1}:7901:7901"
-    for entry in _compose_service_ports(compose_file):
-        if "7901" not in entry:
-            continue
-        assert entry == allowed, (
-            f"{compose_file} publishes the token port as {entry!r}. It must be "
-            f"exactly {allowed!r}: no wildcard, no bare mapping, no second variable "
-            "name, and never a default other than loopback."
-        )
-
-    text = _read(compose_file)
-    assert "0.0.0.0:7901" not in text, (
-        f"{compose_file} must never bind the token port to all interfaces."
-    )
-    # A bare `7901:7901` (optionally quoted, no host-IP prefix) publishes on
-    # 0.0.0.0. The loopback form is preceded by a dot-separated IP, so it does not
-    # match this pattern.
-    assert re.search(r'(^|[\s"\'])7901:7901\b', text) is None, (
-        f"{compose_file} must not publish the token port without an explicit "
-        "127.0.0.1 host prefix; a bare mapping binds all interfaces."
-    )
-
-
 @pytest.mark.parametrize("launcher", ["login.sh", "login.cmd"])
 def test_launcher_selects_base_compose_explicitly(launcher: str) -> None:
     """Both launchers must name the base compose file when they select files.
 
     Once any ``-f`` is passed, Compose stops auto-discovering, so the base file has
-    to be listed too; otherwise the overlay alone would be an incomplete project.
+    to be listed too; the launchers re-add a user override file for the same
+    reason, and that override alone would be an incomplete project.
     """
 
     text = _read(launcher)
     assert "-f docker-compose.yml" in text, (
-        f"{launcher} must pass `-f docker-compose.yml` explicitly, because adding "
-        "the one-click overlay with -f disables Compose's implicit file discovery."
+        f"{launcher} must pass `-f docker-compose.yml` explicitly, because passing "
+        "any -f at all disables Compose's implicit file discovery."
     )
 
 
-@pytest.mark.parametrize("launcher", ["login.sh", "login.cmd"])
-def test_launcher_adds_oneclick_overlay_only_behind_the_oneclick_gate(
-    launcher: str,
-) -> None:
-    """The overlay (and thus the 7901 publish) may only be added for GFMY_ONECLICK=1.
-
-    If a launcher pulled the overlay in unconditionally the fix would be undone:
-    the file-handoff and clear-text tracks would again fail to start on a host
-    where port 7901 is taken.
-    """
-
-    text = _read(launcher)
-    assert ONECLICK_COMPOSE in text, (
-        f"{launcher} must be able to add {ONECLICK_COMPOSE} for the one-click track."
-    )
-
-    # Every line that actually passes the overlay to Compose must sit behind an
-    # explicit GFMY_ONECLICK check (same line for cmd, enclosing `if` for bash).
-    adding_lines = [
-        line
-        for line in text.splitlines()
-        if f"-f {ONECLICK_COMPOSE}" in line
-        and not line.lstrip().startswith(("#", "rem ", "REM "))
-    ]
-    assert adding_lines, (
-        f"{launcher} must contain an executable line adding `-f {ONECLICK_COMPOSE}`"
-    )
-
-    if launcher == "login.cmd":
-        for line in adding_lines:
-            assert 'if "%GFMY_ONECLICK%"=="1"' in line, (
-                "login.cmd must gate the overlay on the same line: "
-                f"found an unguarded {line!r}"
-            )
-        return
-
-    # bash: the add must live inside the `if [ "${GFMY_ONECLICK:-}" = "1" ]` block.
-    lines = text.splitlines()
-    add = next(i for i, line in enumerate(lines) if line in adding_lines)
-    # The ENCLOSING gate is the last one before the add, not the first one in the
-    # file: the same `= "1"` idiom is now also used earlier, where the token-port
-    # bind is derived for track B. Anchoring on the first occurrence would measure
-    # that unrelated block instead. The guard keeps its teeth, because an add
-    # moved out of its gate still lands after the matching `fi`.
-    gate = max(
-        i for i, line in enumerate(lines[:add]) if '"${GFMY_ONECLICK:-}" = "1"' in line
-    )
-    closing = next(
-        i for i, line in enumerate(lines[gate:], gate) if line.strip() == "fi"
-    )
-    assert gate < add < closing, (
-        "login.sh must add the one-click overlay INSIDE the GFMY_ONECLICK gate "
-        f"(gate at line {gate + 1}, add at line {add + 1}, fi at line {closing + 1})."
-    )
-
-
-@pytest.mark.parametrize(
-    ("oneclick", "expect_overlay"),
-    [(None, False), ("", False), ("0", False), ("1", True)],
-)
-def test_login_sh_behaviourally_selects_compose_files(
-    tmp_path: Path, oneclick: str | None, expect_overlay: bool
-) -> None:
+def test_login_sh_behaviourally_selects_compose_files(tmp_path: Path) -> None:
     """Behavioural proof: run the REAL login.sh against a stub ``docker``.
 
     Text guards can be fooled by a stale string elsewhere in the file; this test
     executes ``login.sh`` with a fake ``docker`` on ``PATH`` that only echoes its
     arguments, and asserts the ACTUAL command line. It therefore proves the
-    property that matters: without ``GFMY_ONECLICK=1`` nothing pulls in the 7901
-    publish, so a busy host port cannot block the file-handoff/clear-text tracks;
-    with it, the overlay is selected. The launcher's gate mirrors entrypoint.sh,
-    which also treats only the literal ``1`` as "on".
+    property that matters: exactly one compose file is selected and no second one
+    sneaks in, so a busy host port cannot block the file-handoff/clear-text
+    tracks.
     """
 
     bash = shutil.which("bash")
@@ -411,7 +209,7 @@ def test_login_sh_behaviourally_selects_compose_files(
 
     work = tmp_path / "docker-login"
     work.mkdir()
-    for name in ("login.sh", "docker-compose.yml", ONECLICK_COMPOSE):
+    for name in ("login.sh", "docker-compose.yml"):
         shutil.copy(DOCKER_LOGIN / name, work / name)
 
     bin_dir = tmp_path / "bin"
@@ -421,8 +219,6 @@ def test_login_sh_behaviourally_selects_compose_files(
     stub.chmod(0o755)
 
     env = {"PATH": f"{bin_dir}:/usr/bin:/bin", "HOME": str(tmp_path)}
-    if oneclick is not None:
-        env["GFMY_ONECLICK"] = oneclick
 
     proc = subprocess.run(
         [bash, str(work / "login.sh")],
@@ -442,16 +238,10 @@ def test_login_sh_behaviourally_selects_compose_files(
         f"login.sh must always select the base compose file; got {argline!r}"
     )
     assert "--service-ports" in argline and " run " in argline
-    if expect_overlay:
-        assert f"-f {ONECLICK_COMPOSE}" in argline, (
-            f"GFMY_ONECLICK={oneclick!r} must pull in the one-click overlay; "
-            f"got {argline!r}"
-        )
-    else:
-        assert ONECLICK_COMPOSE not in argline, (
-            f"GFMY_ONECLICK={oneclick!r} must NOT publish the token port: the "
-            f"overlay may not be selected. got {argline!r}"
-        )
+    assert argline.count("-f ") == 1, (
+        "login.sh must select exactly the base compose file: a second -f would "
+        f"publish a port the removed token endpoint once needed. got {argline!r}"
+    )
     assert "How should the finished credentials reach" not in proc.stderr.decode(), (
         "a non-interactive run must never print the handoff menu: CI, a pipe and "
         "`login.sh < /dev/null` have to behave exactly as they did before it existed."
@@ -459,27 +249,22 @@ def test_login_sh_behaviourally_selects_compose_files(
 
 
 def _launcher_sandbox(tmp_path: Path) -> tuple[Path, dict[str, str]]:
-    """Copy the launcher next to its compose files and stub out ``docker``.
+    """Copy the launcher next to its compose file and stub out ``docker``.
 
-    The stub echoes the compose invocation AND the token-endpoint bind that
-    ``login.sh`` exported for it. That second line is what makes the bind testable
-    without a Docker daemon: the overlay publishes
-    ``${GFMY_ONECLICK_BIND:-127.0.0.1}:7901:7901``, so the value Compose would
-    interpolate is exactly the value this child process sees.
+    The stub echoes the compose invocation, which is what makes the launcher's
+    file selection and its interactive menus testable without a Docker daemon.
     """
 
     work = tmp_path / "docker-login"
     work.mkdir()
-    for name in ("login.sh", "docker-compose.yml", ONECLICK_COMPOSE):
+    for name in ("login.sh", "docker-compose.yml"):
         shutil.copy(DOCKER_LOGIN / name, work / name)
 
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     stub = bin_dir / "docker"
     stub.write_text(
-        "#!/usr/bin/env bash\n"
-        'printf "DOCKER_ARGS: %s\\n" "$*"\n'
-        'printf "ONECLICK_BIND: %s\\n" "${GFMY_ONECLICK_BIND:-<unset>}"\n',
+        '#!/usr/bin/env bash\nprintf "DOCKER_ARGS: %s\\n" "$*"\n',
         "utf-8",
     )
     stub.chmod(0o755)
@@ -547,13 +332,13 @@ def _run_launcher_on_tty(
 def test_track_menu_defaults_to_the_file_handoff_on_a_bare_enter(
     tmp_path: Path,
 ) -> None:
-    """Enter, Enter must keep the historical behaviour: no overlay, no 7901.
+    """Enter, Enter must keep the historical behaviour: the file handoff only.
 
-    Track A is the only handoff that needs no port, no network and no shared
-    secret, and it runs on every launch anyway. Making it the default answer is
-    what keeps the new question from changing anything for the people who just
-    press Enter -- and it is the property that silently breaks if the menu ever
-    grows a "no default" or reorders its options.
+    Track A is the only handoff that needs no terminal output and no manual copy,
+    and it runs on every launch anyway. Making it the default answer is what keeps
+    the question from changing anything for the people who just press Enter -- and
+    it is the property that silently breaks if the menu ever grows a "no default"
+    or reorders its options.
     """
 
     work, env = _launcher_sandbox(tmp_path)
@@ -564,73 +349,12 @@ def test_track_menu_defaults_to_the_file_handoff_on_a_bare_enter(
     assert "How should the finished credentials reach" in out, (
         "an interactive run must ASK; that is the whole point of the change."
     )
-    argline = next(line for line in out.splitlines() if "DOCKER_ARGS: " in line)
-    assert ONECLICK_COMPOSE not in argline, (
-        f"a bare Enter must select track A, so no 7901 publish; got {argline!r}"
-    )
-    assert "GFMY_CLEARTEXT" not in out or "cleartext" not in argline.lower()
-
-
-def test_track_menu_answer_b_publishes_7901_on_the_novnc_address(
-    tmp_path: Path,
-) -> None:
-    """Answering B must add the overlay AND bind 7901 to a reachable address.
-
-    Both halves matter and neither is enough alone: without the overlay there is
-    no port, and without a non-loopback bind the port exists but a Home Assistant
-    outside this host's network namespace still cannot reach it -- which was the
-    original defect. The address menu answer (192.0.2.10) is offered as the
-    default for the token endpoint, so a bare Enter accepts it.
-    """
-
-    work, env = _launcher_sandbox(tmp_path)
-    # noVNC address, then track B, then accept the offered token-endpoint address.
-    returncode, out = _run_launcher_on_tty(work, env, "192.0.2.10\nb\n\n")
-
-    assert returncode == 0, out
-    argline = next(line for line in out.splitlines() if "DOCKER_ARGS: " in line)
-    assert f"-f {ONECLICK_COMPOSE}" in argline, (
-        f"answer B must pull in the one-click overlay; got {argline!r}"
-    )
-    bindline = next(line for line in out.splitlines() if "ONECLICK_BIND: " in line)
-    assert "192.0.2.10" in bindline, (
-        "answer B must carry the address the operator just confirmed into "
-        f"GFMY_ONECLICK_BIND, so the overlay publishes there; got {bindline!r}"
-    )
-    assert "UNENCRYPTED" in out, (
-        "a non-loopback token endpoint must say out loud that it ships the "
-        "credentials in clear text; that warning is the whole mitigation."
+    assert "GFMY_CLEARTEXT=1" not in out, (
+        "a bare Enter must select track A, so the clear-text switch stays off"
     )
 
 
-def test_preset_oneclick_env_skips_the_menu_and_keeps_loopback(
-    tmp_path: Path,
-) -> None:
-    """``GFMY_ONECLICK=1`` must behave exactly as it did before the menu existed.
-
-    This is the precedence rule: anything the operator already decided is not
-    asked again. It is also the compatibility promise for every script and every
-    README line that predates the menu -- including the loopback bind, which must
-    not start drifting to a LAN address just because a menu could now offer one.
-    """
-
-    work, env = _launcher_sandbox(tmp_path)
-    env["GFMY_ONECLICK"] = "1"
-    returncode, out = _run_launcher_on_tty(work, env, "\n")
-
-    assert returncode == 0, out
-    assert "How should the finished credentials reach" not in out, (
-        "a preset GFMY_ONECLICK must suppress the handoff menu entirely."
-    )
-    argline = next(line for line in out.splitlines() if "DOCKER_ARGS: " in line)
-    assert f"-f {ONECLICK_COMPOSE}" in argline
-    bindline = next(line for line in out.splitlines() if "ONECLICK_BIND: " in line)
-    assert "127.0.0.1" in bindline, (
-        f"the preset path must keep the loopback default; got {bindline!r}"
-    )
-
-
-@pytest.mark.parametrize("track", ["a", "b", "c"])
+@pytest.mark.parametrize("track", ["a", "b"])
 def test_track_flag_suppresses_the_menu(tmp_path: Path, track: str) -> None:
     """``--track`` is the scriptable spelling of the menu and must skip it."""
 
@@ -650,141 +374,33 @@ def test_track_flag_suppresses_the_menu(tmp_path: Path, track: str) -> None:
     argline = next(
         line for line in proc.stdout.splitlines() if line.startswith("DOCKER_ARGS: ")
     )
-    if track == "b":
-        assert f"-f {ONECLICK_COMPOSE}" in argline
-    else:
-        assert ONECLICK_COMPOSE not in argline
+    assert argline.count("-f ") == 1, (
+        f"--track {track} must not change the compose file selection; got {argline!r}"
+    )
 
 
-def test_explicit_oneclick_bind_reaches_the_publish(tmp_path: Path) -> None:
-    """An explicit ``GFMY_ONECLICK_BIND`` must win and reach Compose.
+# The letter of the removed third track, built rather than spelled: the repo-wide
+# removal sweep in tests/test_track_b_removal_guard.py searches for exactly that
+# spelling, and a literal here would make this file a false positive.
+_REMOVED_TRACK_LETTER = chr(ord("a") + 2)
 
-    This is the only route in a script or CI, where there is no menu to answer,
-    so it has to work without a terminal.
+
+def test_the_removed_third_track_is_refused_loudly(tmp_path: Path) -> None:
+    """The third track was the token endpoint and must now fail, not remap.
+
+    The endpoint was removed with PR #1218 and the former third track was
+    renumbered to B. Quietly mapping the old letter onto the new B would send a
+    script that pinned that spelling to a DIFFERENT handoff than it asked for,
+    which is exactly the deprecation shim this removal was meant to avoid. Run for
+    real against the stub docker, so a launcher that merely PRINTS a refusal while
+    continuing cannot pass.
     """
 
     work, env = _launcher_sandbox(tmp_path)
-    env["GFMY_ONECLICK"] = "1"
-    env["GFMY_ONECLICK_BIND"] = "192.0.2.10"
     bash = shutil.which("bash")
     assert bash is not None
     proc = subprocess.run(
-        [bash, str(work / "login.sh")],
-        capture_output=True,
-        text=True,
-        timeout=60,
-        check=False,
-        env=env,
-    )
-    assert proc.returncode == 0, proc.stderr
-    bindline = next(
-        line for line in proc.stdout.splitlines() if line.startswith("ONECLICK_BIND: ")
-    )
-    assert "192.0.2.10" in bindline, (
-        f"GFMY_ONECLICK_BIND must reach the compose child; got {bindline!r}"
-    )
-    assert "UNENCRYPTED" in proc.stdout, (
-        "a LAN bind of the token endpoint must warn about the clear-text transport"
-    )
-
-
-@pytest.mark.parametrize("track", ["a", "c"])
-def test_stray_oneclick_bind_does_not_block_a_login_without_the_port(
-    tmp_path: Path, track: str
-) -> None:
-    """Without one-click, ``GFMY_ONECLICK_BIND`` must not be validated at all.
-
-    ``entrypoint.sh`` gates its own wildcard refusal on ``GFMY_ONECLICK=1``,
-    because with the port switched off there is nothing to protect. The
-    launchers used to validate unconditionally, so a wildcard left over from an
-    earlier track-B run (or exported once in a shell profile) aborted a
-    file-handoff login that never publishes 7901. Fail-closed in direction, but
-    closed on a door that is not there.
-    """
-
-    work, env = _launcher_sandbox(tmp_path)
-    env["GFMY_ONECLICK_BIND"] = "0.0.0.0"
-    bash = shutil.which("bash")
-    assert bash is not None
-    proc = subprocess.run(
-        [bash, str(work / "login.sh"), "--track", track],
-        capture_output=True,
-        text=True,
-        timeout=60,
-        check=False,
-        env=env,
-    )
-    assert proc.returncode == 0, (
-        f"track {track} publishes no 7901, so a stray wildcard bind must not "
-        f"abort it; got {proc.returncode} (stderr={proc.stderr!r})"
-    )
-    argline = next(
-        line for line in proc.stdout.splitlines() if line.startswith("DOCKER_ARGS: ")
-    )
-    assert ONECLICK_COMPOSE not in argline, (
-        f"track {track} must not add the one-click overlay; got {argline!r}"
-    )
-    bindline = next(
-        line for line in proc.stdout.splitlines() if line.startswith("ONECLICK_BIND: ")
-    )
-    assert "0.0.0.0" not in bindline, (
-        f"the wildcard must not travel on to the compose child; got {bindline!r}"
-    )
-
-
-def test_stray_oneclick_bind_is_ignored_when_only_the_env_switches_off(
-    tmp_path: Path,
-) -> None:
-    """The same must hold for ``GFMY_ONECLICK=0`` without any ``--track``.
-
-    The third way into the gate, and the one an operator reaches by accident:
-    both switches sit in a shell profile, so ``login.sh`` is started plainly at
-    a terminal. That path has a different run-up from ``--track``:
-    ``set_track_option`` never runs, ``track_from_cli`` stays 0, and with a real
-    tty the menu is suppressed by ``oneclick_env_set`` alone. Only the gate
-    itself is shared, which is exactly why it is worth pinning separately -- a
-    guard is only as good as the narrowest path that reaches it.
-    """
-
-    work, env = _launcher_sandbox(tmp_path)
-    env["GFMY_ONECLICK"] = "0"
-    env["GFMY_ONECLICK_BIND"] = "0.0.0.0"
-    returncode, out = _run_launcher_on_tty(work, env, "\n")
-
-    assert returncode == 0, (
-        "GFMY_ONECLICK=0 publishes no 7901, so a stray wildcard bind must not "
-        f"abort the login; got {returncode} (output={out!r})"
-    )
-    assert "How should the finished credentials reach" not in out, (
-        "a preset GFMY_ONECLICK must still suppress the handoff menu."
-    )
-    argline = next(line for line in out.splitlines() if "DOCKER_ARGS: " in line)
-    assert ONECLICK_COMPOSE not in argline, (
-        f"one-click is off, so the overlay must not be added; got {argline!r}"
-    )
-    bindline = next(line for line in out.splitlines() if "ONECLICK_BIND: " in line)
-    assert "0.0.0.0" not in bindline, (
-        f"the wildcard must not travel on to the compose child; got {bindline!r}"
-    )
-
-
-@pytest.mark.parametrize("wildcard", ["0.0.0.0", "::", "*"])
-def test_wildcard_oneclick_bind_is_refused(tmp_path: Path, wildcard: str) -> None:
-    """A wildcard bind for 7901 must abort, not merely warn.
-
-    For the noVNC viewer a wildcard only widens a password-gated viewer, and the
-    launcher settles for a warning. This port hands out the credentials
-    themselves, and a concrete address can always replace the wildcard, so there
-    is no case in which continuing is the better answer.
-    """
-
-    work, env = _launcher_sandbox(tmp_path)
-    env["GFMY_ONECLICK"] = "1"
-    env["GFMY_ONECLICK_BIND"] = wildcard
-    bash = shutil.which("bash")
-    assert bash is not None
-    proc = subprocess.run(
-        [bash, str(work / "login.sh")],
+        [bash, str(work / "login.sh"), "--track", _REMOVED_TRACK_LETTER],
         capture_output=True,
         text=True,
         timeout=60,
@@ -792,12 +408,21 @@ def test_wildcard_oneclick_bind_is_refused(tmp_path: Path, wildcard: str) -> Non
         env=env,
     )
     assert proc.returncode == 2, (
-        f"a wildcard token-endpoint bind must exit 2; got {proc.returncode} "
-        f"(stdout={proc.stdout!r})"
+        f"login.sh must exit 2 on the removed track letter; got {proc.returncode} "
+        f"with {proc.stderr!r}"
     )
-    assert "wildcard" in proc.stderr, proc.stderr
     assert "DOCKER_ARGS: " not in proc.stdout, (
-        "the launcher must refuse BEFORE starting the container"
+        "the refusal must happen BEFORE compose starts, not alongside it"
+    )
+    assert "needs a or b" in proc.stderr, (
+        "the error must name exactly the two remaining tracks"
+    )
+    cmd = _read("login.cmd")
+    assert f'if /i "%~1"=="{_REMOVED_TRACK_LETTER}"' not in cmd, (
+        "login.cmd must not accept the removed track letter either"
+    )
+    assert "--track needs a or b." in cmd, (
+        "login.cmd must name exactly the two remaining tracks"
     )
 
 
@@ -805,9 +430,8 @@ def test_login_cmd_mirrors_the_track_menu_and_the_bind_guard() -> None:
     """``login.cmd`` cannot be executed here (no Windows), so pin it by text.
 
     Every property the bash tests above prove behaviourally has a counterpart
-    here, because a Windows user gets the same three tracks and the same refusal
-    of a wildcard bind -- a launcher that silently offered less would be the
-    quietest way for this hardening to go missing.
+    here, because a Windows user gets the same two tracks -- a launcher that
+    silently offered less would be the quietest way for this to go missing.
     """
 
     cmd = _read("login.cmd")
@@ -817,37 +441,14 @@ def test_login_cmd_mirrors_the_track_menu_and_the_bind_guard() -> None:
     assert 'set /p "TRACK_CHOICE=[login] Choice [Enter = A]: "' in cmd, (
         "the menu must default to track A on a bare Enter, like login.sh."
     )
-    for guard in ("ONECLICK_ENV_SET", "CLEARTEXT_ENV_SET", "TRACK_FROM_CLI"):
+    for guard in ("CLEARTEXT_ENV_SET", "TRACK_FROM_CLI"):
         assert f"if defined {guard} goto :track_done" in cmd, (
             f"a preset {guard} must skip the menu, mirroring the bash precedence."
         )
-    assert "GFMY_ONECLICK_BIND" in cmd.split("call :trim_trailing_blanks")[0], (
-        "GFMY_ONECLICK_BIND must be in the trailing-blank trim list: `set VAR=1 && "
-        "login.cmd` stores the blank, and an address with a trailing space becomes "
-        "an invalid docker port bind."
-    )
-    assert re.search(r"^:reject_wildcard$", cmd, re.MULTILINE), (
-        "login.cmd must define the wildcard refusal for the token endpoint."
-    )
-    wildcard_block = cmd.split("\n:oneclick_bind_wildcard\n", 1)[1].split("\n:", 1)[0]
-    for token in ("popd", "endlocal", "exit /b 2"):
-        assert token in wildcard_block, (
-            f":oneclick_bind_wildcard must {token} like the other early exits."
-        )
-    assert "UNENCRYPTED" in cmd, (
-        "login.cmd must warn about the clear-text transport on a LAN bind."
-    )
-    # Order, not mere presence: the explicit-bind jump must sit BEHIND the
-    # one-click gate. Reversed (as it was), a stray GFMY_ONECLICK_BIND aborts a
-    # track A/C login that never publishes 7901 -- the bash counterpart of this
-    # is test_stray_oneclick_bind_does_not_block_a_login_without_the_port.
-    gate = cmd.index('if not "%GFMY_ONECLICK%"=="1" goto :oneclick_bind_done')
-    explicit_jump = cmd.index(
-        "if defined ONECLICK_BIND_ENV_SET goto :oneclick_bind_explicit"
-    )
-    assert gate < explicit_jump, (
-        "login.cmd must check GFMY_ONECLICK before branching to the explicit-bind "
-        "validation, so track A/C ignores a stray token bind like login.sh does."
+    assert "GFMY_CLEARTEXT" in cmd.split("call :trim_trailing_blanks")[0], (
+        "GFMY_CLEARTEXT must be in the trailing-blank trim list: `set VAR=1 && "
+        "login.cmd` stores the blank, and the container compares against a bare "
+        '"1".'
     )
 
 
@@ -1267,37 +868,36 @@ def _extract_shell_function(entrypoint: str, name: str) -> str:
     raise AssertionError(f"could not locate `function {name}` in entrypoint.sh")
 
 
-def _extract_token_server_launch(entrypoint: str) -> str:
-    """Return the real backgrounded ``token_server.py`` launch line.
+def _extract_cli_launch(entrypoint: str) -> str:
+    """Return the real backgrounded ``main.py`` launch line.
 
     Feeding this verbatim into the behavioural test below is what makes it a
-    WIRING test and not merely a construct test: if the server is ever moved back
+    WIRING test and not merely a construct test: if the CLI is ever moved back
     into the foreground, this raises instead of silently exercising a hand-written
     backgrounding line that no longer reflects the script.
     """
 
     for line in _code_lines(entrypoint):
         stripped = line.strip()
-        if "exec python3" in stripped and "token_server.py" in stripped:
-            if not stripped.endswith(") &"):
+        if "exec python3" in stripped and "main.py" in stripped:
+            if not stripped.endswith("&") or stripped.endswith("&&"):
                 break
             return stripped
     raise AssertionError(
-        "could not locate a BACKGROUNDED `( ... exec python3 ... token_server.py ) &` "
-        "launch line in entrypoint.sh (a foreground invocation defers the signal "
-        "traps for up to the full TTL)"
+        "could not locate a BACKGROUNDED `( ... exec python3 main.py ... ) &` launch "
+        "line in entrypoint.sh (a foreground invocation defers the signal traps for "
+        "as long as the child runs)"
     )
 
 
 def test_every_tracked_wait_is_followed_by_the_shutdown_check() -> None:
-    """Both waits must be guarded, not just the one the report happened to name.
+    """EVERY tracked wait must be guarded, not just the one a report named.
 
     A tracked child dies on the relayed signal and its ``wait`` returns NORMALLY, so
     the status alone cannot distinguish "finished" from "shutting down" -- ``main.py``
-    even catches ``KeyboardInterrupt`` and returns 0. Guarding only the token-server
-    wait leaves the structurally identical CLI wait open: a relayed SIGINT would then
-    look like a successful login and the run would continue into the handoff tracks,
-    starting a token server nobody can reach or printing the bundle to the log.
+    even catches ``KeyboardInterrupt`` and returns 0. An unguarded wait therefore
+    reads as a successful login and the run continues into the handoff track,
+    printing the credential bundle into the container log on a plain `docker stop`.
     """
 
     code = _code_lines(_read("entrypoint.sh"))
@@ -1307,7 +907,11 @@ def test_every_tracked_wait_is_followed_by_the_shutdown_check() -> None:
         for i, ln in enumerate(code)
         if ln.lstrip().startswith("wait_for_tracked_child")
     ]
-    assert len(waits) == 2, f"expected exactly two tracked waits, found {len(waits)}"
+    # At least one, so a failed extraction cannot make the pairing check below
+    # vacuously true. The count itself is deliberately not pinned: it was two while
+    # the token endpoint had its own tracked child, and pinning it would turn every
+    # future tracked child into an edit here instead of a check.
+    assert waits, "expected at least one tracked wait in entrypoint.sh, found none"
     for i in waits:
         following = code[i + 1].lstrip()
         assert following.startswith("exit_if_terminating "), (
@@ -1466,66 +1070,18 @@ def test_terminating_marker_catches_a_child_that_exits_cleanly_on_the_signal(
     )
 
 
-def test_entrypoint_tracks_the_oneclick_token_server_like_the_cli_child() -> None:
-    """The One-Click token server must NOT run as a foreground child.
-
-    Codex: with ``GFMY_ONECLICK=1`` the server can wait for its full TTL (300 s).
-    Bash is PID 1 here (exec-form ``ENTRYPOINT``) and defers its TERM/INT traps until
-    the foreground child returns, so a ``docker stop`` during that wait escalates to
-    SIGKILL after the default 10 s grace period: the EXIT cleanup never runs, ``/data``
-    keeps container ownership and the 0600 bundle stays unreadable for the host user.
-    This is the exact failure the CLI launch already avoids -- the server has to use
-    the same tracked-child construct.
-    """
-
-    entrypoint = _read("entrypoint.sh")
-    code = _code_lines(entrypoint)
-
-    launch = _extract_token_server_launch(entrypoint)  # raises on a foreground call
-    assert launch.endswith(") &"), (
-        "the token server must be started in the BACKGROUND (`( ... ) &`), otherwise "
-        "bash defers the signal traps for up to the full TTL."
-    )
-    assert not any(
-        ln.strip() == "python3 /app/gfmy/docker-login/token_server.py || true"
-        for ln in code
-    ), "the bare foreground `python3 token_server.py || true` invocation must be gone."
-    assert "trap - INT QUIT; exec python3" in launch, (
-        "the server child must reset INT/QUIT before exec so Python installs its own "
-        "KeyboardInterrupt handler instead of inheriting SIG_IGN."
-    )
-    # Both long-running children go through the ONE tracked slot and the ONE wait
-    # helper; a second hand-rolled re-wait loop would be a copy waiting to drift.
-    assert sum(ln.strip() == "CHILD_PID=$!" for ln in code) == 2, (
-        "both the CLI child and the token server must publish their PID into the "
-        "single tracked slot on_signal relays to."
-    )
-    definitions = [
-        ln for ln in code if ln.startswith("function wait_for_tracked_child {")
-    ]
-    call_sites = [ln for ln in code if ln.lstrip().startswith("wait_for_tracked_child")]
-    assert len(definitions) == 1, (
-        "the signal-interrupted re-wait loop must exist exactly once, as a shared "
-        f"helper; found {len(definitions)} definitions."
-    )
-    assert len(call_sites) == 2, (
-        "expected exactly two call sites of the shared wait helper (CLI child and "
-        f"token server), no per-call-site copy of the loop; found {len(call_sites)}."
-    )
-
-
 def test_tracked_child_behaviourally_lets_cleanup_run_on_sigterm(
     tmp_path: Path,
 ) -> None:
     """Behavioural proof that a signal reaches cleanup while a long child is waiting.
 
     Runs the REAL ``on_signal`` / ``wait_for_tracked_child`` helpers AND the real
-    token-server launch line, all taken verbatim out of ``entrypoint.sh``, around a
+    CLI launch line, all taken verbatim out of ``entrypoint.sh``, around a
     long-sleeping stub child; sends SIGTERM to the outer bash and asserts the
     EXIT-trap cleanup runs PROMPTLY -- i.e. well within a Docker stop grace period
     rather than only after the child's own timeout. Taking the launch line from the
     file (rather than writing one here) is what also makes this a wiring test: moving
-    the server back into the foreground fails extraction instead of quietly passing.
+    the child back into the foreground fails extraction instead of quietly passing.
 
     The negative control is the construct Codex flagged: the very same script with the
     child in the FOREGROUND. There bash defers the trap until the child returns, so no
@@ -1542,9 +1098,9 @@ def test_tracked_child_behaviourally_lets_cleanup_run_on_sigterm(
     # executed program is swapped; the surrounding construct stays verbatim.
     child_sleep = 30
     grace = 5.0
-    real_launch = _extract_token_server_launch(entrypoint)
+    real_launch = _extract_cli_launch(entrypoint)
     stub_launch = re.sub(
-        r"exec python3 \S*token_server\.py", f"exec sleep {child_sleep}", real_launch
+        r"exec python3 main\.py[^)]*", f"exec sleep {child_sleep} ", real_launch
     )
     assert "exec sleep" in stub_launch, (
         f"could not substitute the stub into the real launch line: {real_launch!r}"
@@ -1552,7 +1108,7 @@ def test_tracked_child_behaviourally_lets_cleanup_run_on_sigterm(
 
     guard = (
         f"{_extract_shell_function(entrypoint, 'exit_if_terminating')}\n"
-        'exit_if_terminating "${_srv_rc}"'
+        'exit_if_terminating "${_rc}"'
     )
 
     def _run(tracked: bool, *, with_guard: bool = True) -> bool:
@@ -1564,8 +1120,8 @@ def test_tracked_child_behaviourally_lets_cleanup_run_on_sigterm(
         launch = (
             f"{stub_launch}\n"
             "CHILD_PID=$!\n"
-            "_srv_rc=0\n"
-            "wait_for_tracked_child || _srv_rc=$?\n"
+            "_rc=0\n"
+            "wait_for_tracked_child || _rc=$?\n"
             f"{guard if with_guard else ''}\n"
             if tracked
             else f"sleep {child_sleep} || true\n"
@@ -1762,214 +1318,6 @@ def test_readme_container_station_does_not_present_compose_up_first_login() -> N
     )
 
 
-# The post-login track dispatch of entrypoint.sh: from the resolved secrets path
-# down to (but excluding) the final `exit "${_rc}"`. The behavioural test below
-# runs this section VERBATIM (only the token-server program is swapped for a
-# stub), so it exercises the real branch structure instead of a paraphrase and
-# cannot be satisfied by a comment that merely claims the tracks are independent.
-_HANDOFF_START = '_secrets_path="${GOOGLEFINDMY_SECRETS_PATH:-/data/secrets.json}"'
-_HANDOFF_END = 'exit "${_rc}"'
-_TOKEN_SERVER_PATH = "/app/gfmy/docker-login/token_server.py"
-
-
-def _extract_handoff_section(entrypoint: str) -> str:
-    """Return the post-login track dispatch of ``entrypoint.sh``."""
-
-    start = entrypoint.find(_HANDOFF_START)
-    assert start != -1, (
-        "could not locate the `_secrets_path=` anchor that starts the post-login "
-        "handoff section in entrypoint.sh"
-    )
-    end = entrypoint.find(_HANDOFF_END, start)
-    assert end != -1, (
-        'could not locate the trailing `exit "${_rc}"` that ends the post-login '
-        "handoff section in entrypoint.sh"
-    )
-    return entrypoint[start:end]
-
-
-def _as_elif_chain(section: str) -> str:
-    """Re-create the pre-fix if/elif chain (mutation control for the guard below)."""
-
-    chained = section.replace(
-        'if [ "${_rc}" -eq 0 ] && [ "${GFMY_CLEARTEXT:-}" = "1" ]',
-        'elif [ "${_rc}" -eq 0 ] && [ "${GFMY_CLEARTEXT:-}" = "1" ]',
-        1,
-    )
-    assert chained != section, "clear-text condition not found; control is stale"
-    # Drop the `fi` that closes the one-click block, so the clear-text branch really
-    # chains onto it. Located structurally (last top-level `fi` before the `elif`)
-    # rather than by a text anchor next to the server call, which moves whenever the
-    # one-click block gains a line.
-    lines = chained.splitlines()
-    elif_at = next(i for i, ln in enumerate(lines) if ln.startswith("elif "))
-    close_at = max(i for i in range(elif_at) if lines[i] == "fi")
-    chained = "\n".join(lines[:close_at] + lines[close_at + 1 :]) + "\n"
-    assert chained.count("\nfi\n") == 1, (
-        "control must leave exactly the chain-closing `fi`; got "
-        f"{chained.count(chr(10) + 'fi' + chr(10))}"
-    )
-    return chained
-
-
-def _run_handoff_section(
-    section: str,
-    *,
-    tmp_path: Path,
-    oneclick: bool,
-    cleartext: bool,
-    server_consumes_secret: bool,
-) -> tuple[str, bool]:
-    """Execute the track dispatch with a stubbed token server.
-
-    ``server_consumes_secret`` models the two token-server outcomes that matter
-    here: ``True`` = ack/TTL (the server deleted ``secrets.json``), ``False`` =
-    lockout (the server deliberately KEPT the file). Returns the captured stdout
-    and whether the secrets file still exists afterwards.
-    """
-
-    secrets_file = tmp_path / "secrets.json"
-    secrets_file.write_text('{"token": "SECRET-BUNDLE-MARKER"}\n', encoding="utf-8")
-
-    server_stub = tmp_path / "token_server_stub.py"
-    server_stub.write_text(
-        "import os\n"
-        "if os.environ['STUB_CONSUMES_SECRET'] == '1':\n"
-        "    os.remove(os.environ['GOOGLEFINDMY_SECRETS_PATH'])\n"
-        "print('[stub] token server returned')\n",
-        encoding="utf-8",
-    )
-
-    script = section.replace(_TOKEN_SERVER_PATH, str(server_stub)).replace(
-        "python3", sys.executable
-    )
-    # The extracted section calls the tracked-child helpers, which are defined
-    # ABOVE it in entrypoint.sh. Without them bash reports "command not found",
-    # never waits for the backgrounded server, and the dispatch below races the
-    # stub -- a green-looking harness measuring nothing. Prepend the REAL helpers
-    # (and the state they own) so the section runs in its actual context.
-    entrypoint = _read("entrypoint.sh")
-    preamble = (
-        "set -e\n"
-        "_rc=0\n"
-        'CHILD_PID=""\n'
-        '_terminating=""\n'
-        f"{_extract_shell_function(entrypoint, 'on_signal')}\n"
-        f"{_extract_shell_function(entrypoint, 'wait_for_tracked_child')}\n"
-        f"{_extract_shell_function(entrypoint, 'exit_if_terminating')}\n"
-        f"{_extract_shell_function(entrypoint, 'print_oneclick_banner')}\n"
-    )
-    proc = subprocess.run(
-        ["bash", "-c", preamble + script],
-        env={
-            **os.environ,
-            "GFMY_ONECLICK": "1" if oneclick else "",
-            "GFMY_CLEARTEXT": "1" if cleartext else "",
-            "GOOGLEFINDMY_SECRETS_PATH": str(secrets_file),
-            "STUB_CONSUMES_SECRET": "1" if server_consumes_secret else "0",
-        },
-        capture_output=True,
-        timeout=60,
-        check=False,
-    )
-    assert proc.returncode == 0, (
-        f"handoff section exited {proc.returncode}: {proc.stderr.decode()!r}"
-    )
-    return proc.stdout.decode(), secrets_file.exists()
-
-
-def test_cleartext_track_runs_after_the_oneclick_server_even_with_both_switches(
-    tmp_path: Path,
-) -> None:
-    """``GFMY_ONECLICK=1`` must not swallow ``GFMY_CLEARTEXT=1`` (Codex P2, PR #1211).
-
-    The two switches are documented as independent in ``docker-compose.yml`` and
-    ``README.md``. While the clear-text track hung off the one-click branch as an
-    ``elif``, setting both selected one-click and the ``elif`` was never evaluated:
-    in the documented LOCKOUT case the token server keeps ``secrets.json`` on
-    purpose precisely so the fallbacks still work, yet Track C printed nothing and
-    the user lost the fallback they asked for.
-
-    This is a behavioural guard: it takes the REAL dispatch out of
-    ``entrypoint.sh``, stubs only the token server, and asserts the printed output
-    for the three outcomes. The mutation control re-creates the ``elif`` chain and
-    must fail to print the block -- so the test discriminates on the structure, not
-    on the comment next to it.
-    """
-
-    section = _extract_handoff_section(_read("entrypoint.sh"))
-
-    # 1) Both switches, LOCKOUT: the server kept the file, so Track C must print it
-    #    and then remove it (the file is not left lying around).
-    out, still_there = _run_handoff_section(
-        section,
-        tmp_path=tmp_path,
-        oneclick=True,
-        cleartext=True,
-        server_consumes_secret=False,
-    )
-    assert "ONE-CLICK login ready" in out, (
-        f"one-click track did not run with GFMY_ONECLICK=1; got: {out!r}"
-    )
-    assert "BEGIN secrets.json (copy)" in out and "SECRET-BUNDLE-MARKER" in out, (
-        "with GFMY_ONECLICK=1 AND GFMY_CLEARTEXT=1 the clear-text fallback must "
-        "still print the bundle the server kept after a lockout; got: " + repr(out)
-    )
-    assert not still_there, (
-        "Track C must remove the printed secrets.json so nothing lingers on disk"
-    )
-
-    # 2) Both switches, ACK/TTL: the server consumed (deleted) the bundle, so there
-    #    is nothing left to print -- no empty/misleading block.
-    out, still_there = _run_handoff_section(
-        section,
-        tmp_path=tmp_path,
-        oneclick=True,
-        cleartext=True,
-        server_consumes_secret=True,
-    )
-    assert "ONE-CLICK login ready" in out
-    assert "BEGIN secrets.json (copy)" not in out, (
-        "after the server consumed (deleted) secrets.json the clear-text block must "
-        f"NOT be printed; got: {out!r}"
-    )
-    assert not still_there
-
-    # 3) Clear-text alone: the historical path is unchanged (print, then remove).
-    out, still_there = _run_handoff_section(
-        section,
-        tmp_path=tmp_path,
-        oneclick=False,
-        cleartext=True,
-        server_consumes_secret=False,
-    )
-    assert "ONE-CLICK login ready" not in out
-    assert "SECRET-BUNDLE-MARKER" in out
-    assert not still_there
-
-    # 4) Mutation control: with the pre-fix ``elif`` chain the same lockout scenario
-    #    prints the one-click banner but NOT the clear-text block -- proving the
-    #    assertion in (1) fails on a regressed script instead of passing anyway.
-    control_out, control_still_there = _run_handoff_section(
-        _as_elif_chain(section),
-        tmp_path=tmp_path,
-        oneclick=True,
-        cleartext=True,
-        server_consumes_secret=False,
-    )
-    assert "ONE-CLICK login ready" in control_out, (
-        "control did not even reach the one-click branch; it proves nothing. "
-        f"got: {control_out!r}"
-    )
-    assert "BEGIN secrets.json (copy)" not in control_out, (
-        "sanity: the pre-fix elif chain must SKIP the clear-text track, otherwise "
-        f"this guard would pass without the fix. got: {control_out!r}"
-    )
-    assert control_still_there, (
-        "sanity: with the elif chain nothing prints or removes the kept bundle"
-    )
-
-
 def _entrypoint_code_lines() -> list[str]:
     """Return ``entrypoint.sh`` without comment-only and blank lines.
 
@@ -1981,13 +1329,14 @@ def _entrypoint_code_lines() -> list[str]:
 
 
 def test_entrypoint_keeps_one_clear_text_block_in_its_own_if(tmp_path: Path) -> None:
-    """The clear-text track is one block, in its own ``if``, after the one-click one.
+    """The clear-text track is exactly one block, in its own top-level ``if``.
 
-    Structural companion to the behavioural guard above: it pins the two properties
-    that behaviour alone cannot show -- that the fix was not implemented by
-    DUPLICATING the print block into both branches (the block must exist exactly
-    once and be reachable from both paths), and that the clear-text condition is a
-    top-level ``if`` placed after the one-click block was closed with ``fi``.
+    Two properties that behaviour alone cannot show: the print block exists
+    exactly ONCE (a second copy would be a second place to keep in sync), and its
+    condition re-tests the secrets file rather than trusting an earlier check.
+    Both were once carried by the removed token-endpoint branch and must not fall
+    away with it: the clear-text track deletes the bundle it printed, so a block that
+    ran without the file present would claim a removal it never performed.
     """
 
     del tmp_path  # structural guard: no filesystem scenario needed
@@ -2003,31 +1352,18 @@ def test_entrypoint_keeps_one_clear_text_block_in_its_own_if(tmp_path: Path) -> 
     )
     cleartext_idx = cleartext_conditions[0]
     assert code[cleartext_idx].startswith("if "), (
-        "the clear-text track must be its OWN top-level `if`, not an `elif` chained "
-        f"to the one-click branch; got: {code[cleartext_idx]!r}"
-    )
-
-    # It comes AFTER the one-click server call, and that branch is closed first.
-    server_idx = next(
-        i
-        for i, line in enumerate(code)
-        if _TOKEN_SERVER_PATH.rsplit("/", 1)[-1] in line
-    )
-    assert server_idx < cleartext_idx, (
-        "the clear-text track must be evaluated AFTER the token server returned"
-    )
-    assert any(line.strip() == "fi" for line in code[server_idx:cleartext_idx]), (
-        "the one-click branch must be closed with `fi` before the clear-text `if`"
+        "the clear-text track must be its OWN top-level `if`, so a future second "
+        f"track cannot chain onto it with an `elif`; got: {code[cleartext_idx]!r}"
     )
 
     # DRY: exactly one clear-text print block, and it re-tests the file's existence.
     assert sum("BEGIN secrets.json" in line for line in code) == 1, (
-        "the clear-text block must exist exactly ONCE and be reachable from both "
-        "paths; duplicating it into the one-click branch is not the fix."
+        "the clear-text block must exist exactly ONCE; a duplicate is a second "
+        "place to keep in sync, not a fix."
     )
     assert '[ -f "${_secrets_path}" ]' in code[cleartext_idx], (
-        "the clear-text condition must re-test the secrets file, so an acked or "
-        "TTL-consumed (deleted) bundle prints nothing."
+        "the clear-text condition must re-test the secrets file, so a bundle that "
+        "is no longer there prints nothing."
     )
 
 
@@ -2079,12 +1415,6 @@ def test_login_sh_handles_the_ip_flag_in_its_argument_parser() -> None:
     from another machine, and it has to be handled by the argument parser
     itself, not merely mentioned in the usage text (which is the failure mode a
     plain substring check would miss).
-
-    The token endpoint (7901) has its own, deliberately narrower opt-in:
-    ``GFMY_ONECLICK_BIND``, defaulting to loopback, guarded by
-    ``test_token_port_has_exactly_one_bind_knob_defaulting_to_loopback`` above and
-    by the launcher checks (wildcard refused, clear-text warning) further down. It
-    has no ``--ip``-style flag, so this test is about ``--ip`` only.
     """
 
     text = _read("login.sh")
@@ -2210,13 +1540,12 @@ def test_launchers_bracket_ipv6_before_printing_or_binding() -> None:
     # The bracketing must run on BOTH roles and AFTER the classification, so the
     # GFMY_NOVNC_BIND environment path is normalised too and the loopback /
     # wildcard comparisons still see the spelling the operator typed.
-    # Pinned by ROLE, not by a bare call count: since the token endpoint got its
-    # own bind (GFMY_ONECLICK_BIND) there are more call sites, and a count would
-    # have to be edited again for every further address role -- which is the kind
-    # of edit that quietly drops a role instead of adding one. Each variable that
-    # ends up in a docker port bind or in a printed URL must be assigned FROM the
-    # bracketing subroutine's output.
-    for role in ("NOVNC_BIND", "NOVNC_URL_HOST", "ONECLICK_BIND"):
+    # Pinned by ROLE, not by a bare call count: a count would have to be edited
+    # again for every further address role -- which is the kind of edit that
+    # quietly drops a role instead of adding one. Each variable that ends up in a
+    # docker port bind or in a printed URL must be assigned FROM the bracketing
+    # subroutine's output.
+    for role in ("NOVNC_BIND", "NOVNC_URL_HOST"):
         assert f'set "{role}=%BRACKETED%"' in cmd, (
             f"login.cmd must normalise {role} through :bracket_ipv6; an unbracketed "
             "IPv6 literal is printed as a broken URL and rejected by docker as a "
@@ -2266,9 +1595,8 @@ def test_login_cmd_validates_the_ip_value_like_login_sh() -> None:
     """
 
     cmd = _read("login.cmd")
-    # Pinned per --ip PARSING BRANCH rather than by a global call count: the token
-    # endpoint bind (GFMY_ONECLICK_BIND) runs through the same validator, so a
-    # count would grow with every new address input and stop testing "both --ip
+    # Pinned per --ip PARSING BRANCH rather than by a global call count: a count
+    # would grow with every new address input and stop testing "both --ip
     # spellings" specifically. Each branch is read up to the next label.
     for branch in (":parse_ip\n", ":parse_ip_inline\n"):
         block = cmd.split("\n" + branch, 1)[1].split("\n:", 1)[0]
@@ -2578,7 +1906,7 @@ def test_login_cmd_checks_empty_fields_before_splitting() -> None:
 
 
 def test_cleartext_cleanup_reports_a_failed_removal() -> None:
-    """Track C must not claim a removal it did not perform.
+    """The clear-text track must not claim a removal it did not perform.
 
     The clear-text fallback prints the whole bundle and then deletes it. A
     silenced ``rm -f ... 2>/dev/null || true`` next to a message asserting the
@@ -2652,97 +1980,28 @@ def test_no_output_is_located_in_the_novnc_viewer() -> None:
     )
 
 
-def test_no_english_source_locates_the_pairing_code_in_the_novnc_viewer() -> None:
-    """Class-level guard: the mislocation must not come back anywhere else.
-
-    ``test_no_output_is_located_in_the_novnc_viewer`` pins the two files where
-    the claim was first found. It is the class, not those two files, that has to
-    stay clean: the same sentence had already been copied into the config-flow
-    docstrings, the translation source and the flow's own tests. Pinning only
-    the reported spots is what let it survive there.
-
-    Two complementary measurements, because a phrase sweep cannot cross
-    languages:
-
-    * phrase sweep over the English-language sources (Python, ``strings.json``,
-      ``en.json``, tests);
-    * structural check over *all* locale files -- no text describing the pairing
-      code field may mention noVNC at all, in any language.
-
-    True statements survive both: the Google sign-in genuinely happens in the
-    noVNC window, and the step that asks for the address may say so.
-    """
-
-    import json as _json
-
-    integration = Path("custom_components/googlefindmy")
-    english_sources = [
-        integration / "config_flow.py",
-        integration / "container_login.py",
-        integration / "strings.json",
-        integration / "translations" / "en.json",
-        Path("tests") / "test_config_flow_container_login.py",
-        Path("tests") / "test_config_flow_initial_auth.py",
-    ]
-    banned = ("noVNC terminal", "noVNC screen", "inside the noVNC window")
-    for source in english_sources:
-        text = source.read_text(encoding="utf-8")
-        for phrase in banned:
-            assert phrase not in text, (
-                f"{source} must not locate the pairing code or the clear-text "
-                f"bundle in the noVNC viewer (found {phrase!r}); both are "
-                "printed on the entrypoint's stdout."
-            )
-        for marker in ("read off the noVNC", "re-read it from the noVNC"):
-            assert marker not in text, (
-                f"{source} still tells the user to read the pairing code off "
-                f"the noVNC session (found {marker!r})."
-            )
-
-    locales = [
-        integration / "strings.json",
-        *sorted((integration / "translations").glob("*.json")),
-    ]
-    assert len(locales) == 11, f"expected 11 text files, found {len(locales)}"
-    for locale in locales:
-        steps = _json.loads(locale.read_text(encoding="utf-8"))["config"]["step"]
-        for step_name, block in steps.items():
-            for section in ("data", "data_description"):
-                for field, value in (block.get(section) or {}).items():
-                    if "pairing" in field and isinstance(value, str):
-                        assert "noVNC" not in value, (
-                            f"{locale.name}: {step_name}.{section}.{field} still "
-                            "locates the pairing code in the noVNC viewer."
-                        )
-
-
 def test_login_cmd_trims_trailing_blanks_from_every_inbound_switch() -> None:
     """`set VAR=1 && login.cmd` must not silently start the wrong mode.
 
     cmd.exe stores everything up to the `&&` INCLUDING the blank in front of
     it, so that documented one-liner leaves the value as ``"1 "``. Measured
-    with a real cmd.exe: without a trim, `if "%GFMY_ONECLICK%"=="1"` is false
-    and the launcher starts without the one-click overlay while still reporting
-    success. The same environment is handed to `docker compose`, which
-    interpolates it into the container, where `entrypoint.sh` compares
-    ``GFMY_ONECLICK`` and ``GFMY_CLEARTEXT`` against ``"1"`` just as strictly.
+    with a real cmd.exe: without a trim, a strict ``=="1"`` comparison is false
+    and the launcher starts in the wrong mode while still reporting success. The
+    same environment is handed to `docker compose`, which interpolates it into
+    the container, where `entrypoint.sh` compares ``GFMY_CLEARTEXT`` against
+    ``"1"`` just as strictly.
 
-    The expected set is therefore DERIVED from the compose files rather than
-    restated here: every ``${GFMY_*}`` a compose file interpolates travels into
-    the container and has to be trimmed, so adding one there without adding it
-    to the launcher's list is exactly the regression this guards.
+    The expected set is therefore DERIVED from the compose file rather than
+    restated here: every ``${GFMY_*}`` it interpolates travels into the container
+    and has to be trimmed, so adding one there without adding it to the
+    launcher's list is exactly the regression this guards.
     """
 
     text = _read("login.cmd")
     lines = text.splitlines()
 
-    from_compose = set(
-        re.findall(
-            r"\$\{(GFMY_[A-Z_]+)",
-            _read("docker-compose.yml") + _read(ONECLICK_COMPOSE),
-        )
-    )
-    assert from_compose, "no ${GFMY_*} found in the compose files"
+    from_compose = set(re.findall(r"\$\{(GFMY_[A-Z_]+)", _read("docker-compose.yml")))
+    assert from_compose, "no ${GFMY_*} found in the compose file"
     # Only this script reads it, so no compose file mentions it.
     expected = from_compose | {"GFMY_NOVNC_URL_HOST"}
 
@@ -3248,241 +2507,3 @@ def test_entrypoint_derivation_never_overrides_a_launcher_verdict() -> None:
     )
     assert out["HARDEN"] == "1", "launcher HARDEN verdict must be preserved"
     assert out["TLS"] == "", "launcher --no-tls (TLS empty) must not be overridden to 1"
-
-
-# --- One-click handoff banner (track B): the address the operator types in -----
-#
-# The banner is the last thing the login prints and the only place the operator
-# reads the host/port/pairing triple from. Until the bind became configurable it
-# printed a literal ``127.0.0.1``; with GFMY_ONECLICK_BIND that literal becomes a
-# claim the run does not keep. These tests run the REAL banner function out of
-# entrypoint.sh, so they regress with the script instead of drifting away from it.
-
-
-def _run_oneclick_banner(bind: str | None) -> str:
-    """Execute the real ``print_oneclick_banner`` with a given published bind."""
-
-    banner = _extract_shell_function(_read("entrypoint.sh"), "print_oneclick_banner")
-    env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "GFMY_PAIRING_CODE": "CODE"}
-    if bind is not None:
-        env["GFMY_ONECLICK_BIND"] = bind
-    proc = subprocess.run(  # noqa: S603 - fixed argv, no shell
-        ["bash", "-c", f"set -e\n{banner}\nprint_oneclick_banner\n"],
-        capture_output=True,
-        text=True,
-        env=env,
-        timeout=30,
-        check=False,
-    )
-    assert proc.returncode == 0, f"banner failed: {proc.stderr!r}"
-    return proc.stdout
-
-
-@pytest.mark.parametrize(
-    ("bind", "expected"),
-    [
-        (None, "127.0.0.1"),  # unset -> Compose's own :-127.0.0.1 default
-        ("", "127.0.0.1"),  # empty -> same, an empty value widens nothing
-        ("127.0.0.1", "127.0.0.1"),
-        ("192.168.1.21", "192.168.1.21"),
-        ("[::1]", "[::1]"),  # brackets kept: that is the form a host field needs
-    ],
-)
-def test_oneclick_banner_prints_the_address_it_is_published_on(
-    bind: str | None, expected: str
-) -> None:
-    """The banner must follow the publish, never assert an address of its own.
-
-    The host part of the publish comes from GFMY_ONECLICK_BIND (see the overlay's
-    ``ports:``). A hard-coded 127.0.0.1 in the banner is not a cosmetic mismatch:
-    it is the single field the operator copies into Home Assistant, so on a widened
-    run it sends them to an address that serves nothing while the launcher printed
-    the real one two screens earlier.
-    """
-
-    host_lines = [ln for ln in _run_oneclick_banner(bind).splitlines() if "host:" in ln]
-    assert len(host_lines) == 1, f"expected exactly one host line, got {host_lines!r}"
-    assert f"host: {expected}   port: 7901" in host_lines[0], (
-        f"with GFMY_ONECLICK_BIND={bind!r} the banner must offer {expected!r}; "
-        f"printed {host_lines[0]!r}."
-    )
-
-
-def test_oneclick_banner_names_the_bridged_home_assistant_case() -> None:
-    """On the loopback default the banner must say WHOSE loopback it is.
-
-    ``127.0.0.1`` inside a bridged Home Assistant container points at that
-    container, not at the Docker host, so the published port is unreachable there.
-    ``config_flow.py``'s data_description and the README both spell this out; the
-    banner used to print the address with no caveat at all, which is where the
-    operator actually is when they need it.
-    """
-
-    out = _run_oneclick_banner("127.0.0.1")
-
-    assert "DOCKER HOST" in out, "the banner must say whose loopback this is"
-    assert "BRIDGED" in out, (
-        "the banner must name the bridged Home Assistant case, the one deployment "
-        "for which the printed address does not work"
-    )
-    # All three documented ways out, so the caveat is actionable rather than a dead end.
-    assert "Docker network" in out, "the shared-network route must be offered"
-    assert "docker-login/data/secrets.json" in out, "the file handoff must be offered"
-    assert "GFMY_ONECLICK_BIND=<ADDRESS>" in out, "the LAN bind must be offered"
-    # The tunnel hint survives, with the precision the README carries (383-384).
-    assert "ssh -L 7901:127.0.0.1:7901" in out, "the tunnel hint must not be lost"
-    assert "namespace Home Assistant itself uses" in out, (
-        "the tunnel only helps when its local end sits in HA's network namespace; "
-        "without that sentence it reads as a fix for the bridged case, which it is not"
-    )
-
-
-def test_oneclick_banner_warns_about_clear_text_on_a_widened_bind() -> None:
-    """A non-loopback publish must carry the clear-text warning, in the banner too.
-
-    The endpoint serves the freshly minted Google credentials over plain http; the
-    HA client has no TLS counterpart to noVNC's. While the publish was pinned to
-    loopback that was harmless because the bytes never left the machine. Once it can
-    leave, saying so is the whole mitigation -- and it has to be said where the
-    operator is, not only in the launcher output they scrolled past.
-    """
-
-    out = _run_oneclick_banner("192.168.1.21")
-
-    assert "192.168.1.21" in out
-    assert "UNENCRYPTED" in out, "a widened bind must be called out as clear text"
-    for phrase in ("trusted LAN", "seconds the handoff takes"):
-        assert phrase in out, f"the widened-bind warning must state: {phrase!r}"
-    # The loopback caveat must NOT appear here: it would contradict the address printed.
-    assert "BRIDGED" not in out, (
-        "the bridged-loopback caveat belongs to the loopback branch only; printing "
-        "it next to a LAN address tells the operator their working address is wrong"
-    )
-
-
-def test_oneclick_overlay_forwards_the_bind_into_the_container() -> None:
-    """The banner can only follow the publish if the value crosses the boundary.
-
-    ``ports:`` is read by Compose ON THE HOST, and a bare ``docker compose run``
-    does not hand the launcher's shell environment to the container. Without this
-    passthrough the entrypoint would fall back to 127.0.0.1 and print it -- the
-    exact mismatch the banner tests above forbid. Same reasoning, and the same
-    ``:-`` default, as GFMY_NOVNC_BIND in docker-compose.yml.
-    """
-
-    overlay = yaml.safe_load(_read(ONECLICK_COMPOSE))
-    env = overlay["services"][LOGIN_SERVICE].get("environment", {})
-    assert env.get("GFMY_ONECLICK_BIND") == "${GFMY_ONECLICK_BIND:-}", (
-        f"{ONECLICK_COMPOSE} must forward GFMY_ONECLICK_BIND to the container as "
-        f"'${{GFMY_ONECLICK_BIND:-}}' (found {env.get('GFMY_ONECLICK_BIND')!r}), so "
-        "the banner names the address the port is really published on. The empty "
-        "default keeps the container's own 127.0.0.1 fallback in charge; a literal "
-        "default here would be a second place to forget when the first one changes."
-    )
-
-
-def test_oneclick_banner_is_wired_into_the_track_b_block() -> None:
-    """A perfect banner nobody calls is worth nothing.
-
-    Pins the call site itself: exactly one invocation, inside the GFMY_ONECLICK
-    gate, and after the pairing code exists (the banner prints it).
-    """
-
-    code = _code_lines(_read("entrypoint.sh"))
-    calls = [i for i, ln in enumerate(code) if ln.strip() == "print_oneclick_banner"]
-    assert len(calls) == 1, f"expected exactly one banner call, found {len(calls)}"
-    preceding = "\n".join(code[: calls[0]])
-    assert 'GFMY_PAIRING_CODE="$(python3' in preceding, (
-        "the banner must run after the pairing code is minted, else it prints an "
-        "empty code line"
-    )
-    assert '[ "${GFMY_ONECLICK:-}" = "1" ]' in preceding, (
-        "the banner must stay inside the track B gate: printing a handoff address "
-        "for a port that was never published would send the operator nowhere"
-    )
-
-
-# --- Token-endpoint wildcard refusal inside the container ---------------------
-# Both launchers refuse a wildcard GFMY_ONECLICK_BIND, but neither runs on the
-# direct-Compose path that the handoff banner itself prints, and a `.env` beside
-# the compose files reaches the overlay without them. These tests pin the
-# in-container repetition of that refusal: the one place every entry path passes.
-
-
-def _run_wildcard_classifier(bind: str) -> int:
-    """Run the REAL ``oneclick_bind_is_wildcard`` from entrypoint.sh on one value."""
-
-    fn = _extract_shell_function(_read("entrypoint.sh"), "oneclick_bind_is_wildcard")
-    proc = subprocess.run(  # noqa: S603 - fixed argv, no shell
-        ["bash", "-c", f'{fn}\noneclick_bind_is_wildcard "$1"\n', "_", bind],
-        capture_output=True,
-        text=True,
-        env={"PATH": os.environ.get("PATH", "/usr/bin:/bin")},
-        timeout=30,
-        check=False,
-    )
-    return proc.returncode
-
-
-@pytest.mark.parametrize("bind", ["0.0.0.0", "::", "*", "[::]"])
-def test_entrypoint_classifies_every_wildcard_spelling(bind: str) -> None:
-    """All four wildcard spellings the launchers reject must be caught here too.
-
-    The bracketed IPv6 form matters: Compose accepts ``[::]`` in a ``ports:``
-    entry, so a classifier that only knows the bare ``::`` would wave through the
-    exact spelling a docker-compose user is most likely to write.
-    """
-
-    assert _run_wildcard_classifier(bind) == 0, (
-        f"{bind!r} must be classified as a wildcard; the launchers refuse it, and "
-        "an endpoint serving clear-text credentials on every interface is the one "
-        "outcome this bind knob exists to prevent"
-    )
-
-
-@pytest.mark.parametrize(
-    "bind", ["", "127.0.0.1", "::1", "[::1]", "localhost", "192.0.2.10"]
-)
-def test_entrypoint_lets_every_legitimate_bind_through(bind: str) -> None:
-    """The refusal must not overshoot: concrete and loopback binds stay allowed.
-
-    ``192.0.2.10`` is the documented LAN opt-in and the whole point of the knob;
-    the empty value is "nobody set it", where Compose interpolates its own
-    loopback default. A classifier that swallowed either would break the feature
-    it is meant to protect.
-    """
-
-    assert _run_wildcard_classifier(bind) != 0, (
-        f"{bind!r} is a legitimate bind and must pass; refusing it would disable "
-        "the documented LAN handoff (or the loopback default) outright"
-    )
-
-
-def test_entrypoint_refuses_a_wildcard_before_the_login_and_only_for_track_b() -> None:
-    """The refusal must be gated on GFMY_ONECLICK and sit before the sign-in.
-
-    Two properties, both load-bearing. Gated: with the endpoint switched off
-    nothing is published on 7901, so a stray GFMY_ONECLICK_BIND in the operator's
-    environment must not block a plain file-handoff login. Early: refusing after
-    the sign-in would cost the user a full Google login for a run that cannot
-    hand anything over, and would leave a fresh bundle on disk to protect.
-    """
-
-    entrypoint = _read("entrypoint.sh")
-
-    guard = 'if [ "${GFMY_ONECLICK:-}" = "1" ] \\\n  && oneclick_bind_is_wildcard'
-    assert guard in entrypoint, (
-        "the wildcard refusal must be gated on GFMY_ONECLICK=1: a stray bind "
-        "variable must not stop a file-only login that publishes no port at all"
-    )
-
-    guard_at = entrypoint.index(guard)
-    # The LAUNCH of main.py, not the first mention of it: the file's header
-    # comment names main.py in its second paragraph, so a plain `.index("main.py")`
-    # would compare against a comment and pass no matter where the guard sits.
-    login_at = entrypoint.index("exec python3 main.py")
-    assert guard_at < login_at, (
-        "the wildcard refusal must run BEFORE main.py: rejecting the handoff only "
-        "after the sign-in wastes the login and creates the very bundle it then "
-        "refuses to hand over"
-    )

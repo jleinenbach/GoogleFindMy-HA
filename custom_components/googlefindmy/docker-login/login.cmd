@@ -11,25 +11,14 @@ rem (`docker compose run --rm`), which attaches your terminal so the login CLI
 rem can ask you for the account e-mail if needed. Docker Desktop maps the bind-mount
 rem permissions, so no UID handoff or chmod is needed here.
 rem
-rem Three ADDRESS ROLES, deliberately separate (mirrors login.sh):
-rem   GFMY_ONECLICK_BIND   host bind for the token endpoint (7901). Default
-rem                        127.0.0.1, and only widened when you say so. That
-rem                        endpoint serves Google credentials in cleartext, so
-rem                        the host publish is the boundary: a wildcard is
-rem                        refused, and a LAN value is warned about before the
-rem                        container starts (trusted LAN or this host, for the
-rem                        seconds of the handoff, never an untrusted network).
-rem                        For a Home Assistant CONTAINER on this host, the
-rem                        gateway address of the Docker network HA is on is the
-rem                        narrowest choice: an address of this host, reachable
-rem                        from that network, not routed to the LAN.
+rem Two ADDRESS ROLES, deliberately separate (mirrors login.sh):
 rem   GFMY_NOVNC_BIND      host bind for the noVNC viewer (7900). Default 127.0.0.1.
 rem   GFMY_NOVNC_URL_HOST  address PRINTED for you to open in a browser.
 rem                        Defaults to the noVNC bind.
 rem
-rem The split exists because the two ports serve different consumers: 7901 is
-rem machine-to-machine (Home Assistant on this host), 7900 is opened by a browser
-rem that usually runs on a DIFFERENT machine than the Docker host.
+rem They are separate because where the viewer BINDS and what a browser is told
+rem to OPEN are two different questions: that browser usually runs on a DIFFERENT
+rem machine than the Docker host.
 rem
 rem On loopback (the default) noVNC uses the fixed password "secret". A LAN bind
 rem hardens it: the container mints a per-run password and serves self-signed
@@ -42,15 +31,12 @@ rem `ipconfig` output in batch is locale-dependent and unreliable, so pass --ip.
 rem
 rem Handoff track: on a normal run this script ASKS which way the finished
 rem credentials should reach Home Assistant -- A the file in .\data (the default a
-rem bare Enter picks), B also the token endpoint on 7901, C also printed in this
-rem terminal. Answer it up front with `login.cmd --track b`, or the old way:
-rem   set GFMY_ONECLICK=1
+rem bare Enter picks), B also printed in this terminal. Answer it up front with
+rem `login.cmd --track b`, or the old way:
+rem   set GFMY_CLEARTEXT=1
 rem   login.cmd
-rem Either of those skips the question. Only track B adds
-rem docker-compose.oneclick.yml, which publishes the token endpoint on port 7901
-rem (host side 127.0.0.1 unless GFMY_ONECLICK_BIND says otherwise). Without it no
-rem 7901 port is published at all, so the file handoff and GFMY_CLEARTEXT=1 still
-rem start on a host where port 7901 is already in use.
+rem Either of those skips the question. No extra port is published in either
+rem case, so the file handoff and GFMY_CLEARTEXT=1 always start.
 setlocal
 pushd "%~dp0"
 
@@ -58,27 +44,22 @@ rem Strip trailing blanks from EVERY inbound GFMY_* switch before anything reads
 rem or forwards one. `set VAR=1 && login.cmd` is the form users reach for, and
 rem cmd.exe stores everything up to the `&&` INCLUDING the blank in front of it,
 rem so the value arrives as "1 " (measured with a real cmd.exe). Both consumers
-rem compare strictly against "1": this script for GFMY_ONECLICK, and
-rem entrypoint.sh inside the container for GFMY_ONECLICK and GFMY_CLEARTEXT,
-rem which reach it because Compose interpolates our process environment. So the
+rem compare strictly against "1": this script for GFMY_CLEARTEXT, and
+rem entrypoint.sh inside the container for the same variable, which reaches it
+rem because Compose interpolates our process environment. So the
 rem list below is not "what this script reads", it is "what a user can set and
 rem what survives into Compose or the container": the ${GFMY_*} names of
 rem docker-compose.yml plus GFMY_NOVNC_URL_HOST, which only this script uses.
 rem Without the trim the wrong mode starts silently, with exit code 0.
-for %%V in (GFMY_ONECLICK GFMY_CLEARTEXT GFMY_ONECLICK_BIND GFMY_ARGS GFMY_HOST_UID GFMY_HOST_GID GFMY_NOVNC_BIND GFMY_NOVNC_URL_HOST GFMY_NOVNC_HARDEN GFMY_NOVNC_TLS) do call :trim_trailing_blanks %%V
+for %%V in (GFMY_CLEARTEXT GFMY_ARGS GFMY_HOST_UID GFMY_HOST_GID GFMY_NOVNC_BIND GFMY_NOVNC_URL_HOST GFMY_NOVNC_HARDEN GFMY_NOVNC_TLS) do call :trim_trailing_blanks %%V
 
 rem Remember what the caller pinned BEFORE anything defaults it, so the track
 rem menu below can tell "said nothing" from "said off" (AP-5). cmd.exe has no
 rem empty-but-defined state for these: `set VAR=` removes the name, so `if
 rem defined` is the exact counterpart of bash's `${VAR+set}` test here.
-set "ONECLICK_ENV_SET="
-if defined GFMY_ONECLICK set "ONECLICK_ENV_SET=1"
 set "CLEARTEXT_ENV_SET="
 if defined GFMY_CLEARTEXT set "CLEARTEXT_ENV_SET=1"
-set "ONECLICK_BIND_ENV_SET="
-if defined GFMY_ONECLICK_BIND set "ONECLICK_BIND_ENV_SET=1"
 set "TRACK_FROM_CLI="
-set "TRACK_FROM_PROMPT="
 
 set "NOVNC_BIND=%GFMY_NOVNC_BIND%"
 if "%NOVNC_BIND%"=="" set "NOVNC_BIND=127.0.0.1"
@@ -158,9 +139,9 @@ rem value and the URL printed inside the container would fall back to localhost.
 rem login.sh exports both at the same point, for that reason.
 set "GFMY_NOVNC_URL_HOST=%NOVNC_URL_HOST%"
 
-rem Handoff track menu (AP-5), mirroring prompt_for_track in login.sh: same three
+rem Handoff track menu (AP-5), mirroring prompt_for_track in login.sh: same two
 rem options, same A default, same precedence (an explicit --track or a preset
-rem GFMY_ONECLICK/GFMY_CLEARTEXT skips the question entirely).
+rem GFMY_CLEARTEXT skips the question entirely).
 rem
 rem Two deliberate differences from the bash version. There is no `[ -t 0 ]`
 rem equivalent in batch, so the question is simply asked. At EOF (no redirect, or
@@ -169,83 +150,26 @@ rem continues on the A default -- the historical behaviour. Be precise about the
 rem remaining case, because it is a real cost and not a no-op: if stdin IS
 rem redirected and still has content, `set /p` CONSUMES its first line. So
 rem `login.cmd < answers.txt` feeds that first line to this prompt instead of to
-rem the container's e-mail question, and a line beginning with b or c silently
-rem selects that track. Non-interactive Windows runs should therefore pass the
-rem track explicitly (`--track a`, or a preset GFMY_ONECLICK/GFMY_CLEARTEXT),
+rem the container's e-mail question, and a line beginning with b silently selects
+rem that track. Non-interactive Windows runs should therefore pass the track
+rem explicitly (`--track a`, or a preset GFMY_CLEARTEXT),
 rem which skips this block entirely via the guards below. And an unrecognised
 rem answer falls back to A instead of re-asking, because a re-ask loop would spin
 rem forever against a redirected stdin that can never satisfy it.
 if defined TRACK_FROM_CLI goto :track_done
-if defined ONECLICK_ENV_SET goto :track_done
 if defined CLEARTEXT_ENV_SET goto :track_done
-set "TRACK_FROM_PROMPT=1"
 echo.
 echo [login] How should the finished credentials reach Home Assistant?
 echo [login]   A) File only: .\data\secrets.json  (this always happens)
 echo [login]      Needs: Home Assistant can see that folder, e.g. this repo lives
 echo [login]      under config\custom_components on the HA machine.
-echo [login]   B) Also publish the one-shot token endpoint on port 7901
-echo [login]      Needs: Home Assistant can reach this host over the network.
-echo [login]      You will be asked which address it should use.
-echo [login]   C) Also print the bundle in this terminal
+echo [login]   B) Also print the bundle in this terminal
 echo [login]      Last resort: the credentials then sit in your scrollback, in
 echo [login]      "docker logs" and in the clipboard you paste them from.
 set "TRACK_CHOICE="
 set /p "TRACK_CHOICE=[login] Choice [Enter = A]: "
-if /i "%TRACK_CHOICE%"=="b" set "GFMY_ONECLICK=1"
-if /i "%TRACK_CHOICE%"=="c" set "GFMY_CLEARTEXT=1"
+if /i "%TRACK_CHOICE%"=="b" set "GFMY_CLEARTEXT=1"
 :track_done
-
-rem Host bind of the token endpoint (AP-6), mirroring login.sh: an explicit
-rem GFMY_ONECLICK_BIND wins, otherwise track B chosen at the prompt offers the
-rem address noVNC already uses, otherwise loopback. A wildcard is REFUSED here
-rem (not merely warned about, as it is for the noVNC viewer): port 7901 hands out
-rem the credentials themselves, and a concrete address can always replace it.
-rem The one-click gate comes FIRST, mirroring login.sh and the entrypoint: with
-rem track A or C nothing is published on 7901 and GFMY_ONECLICK_BIND is read by
-rem nobody, so a stray value from an earlier track-B run must not abort a
-rem file-only login. Leaving the loopback default in place also keeps a wildcard
-rem from travelling on in the environment.
-set "ONECLICK_BIND=127.0.0.1"
-if not "%GFMY_ONECLICK%"=="1" goto :oneclick_bind_done
-if defined ONECLICK_BIND_ENV_SET goto :oneclick_bind_explicit
-if not defined TRACK_FROM_PROMPT goto :oneclick_bind_done
-set "ONECLICK_BIND=%NOVNC_BIND%"
-call :reject_wildcard "%ONECLICK_BIND%" || set "ONECLICK_BIND=127.0.0.1"
-echo.
-echo [login] Which address of this host will Home Assistant use to fetch the
-echo [login] credentials from port 7901?
-echo [login]   Enter = %ONECLICK_BIND%
-echo [login]   127.0.0.1 only works for a Home Assistant that SHARES this host's
-echo [login]   network namespace, or for an SSH tunnel. A bridged HA container on
-echo [login]   this very host has its own loopback and cannot reach it.
-echo [login]   or type an address of this host:
-echo [login]     * HA in a Docker container here: the GATEWAY address of the
-echo [login]       network HA is on, e.g. 172.18.0.1 - an address of this host,
-echo [login]       reachable from that network, not routed to the LAN. Read it
-echo [login]       with: docker network inspect NETWORK -f "{{range .IPAM.Config}}{{.Gateway}}{{end}}"
-echo [login]     * HA on another machine: a LAN address, e.g. 192.168.1.21
-set "BIND_CHOICE="
-set /p "BIND_CHOICE=[login] Address [Enter = %ONECLICK_BIND%]: "
-if "%BIND_CHOICE%"=="" goto :oneclick_bind_done
-call :validate_ip "%BIND_CHOICE%" || goto :oneclick_bind_invalid
-call :reject_wildcard "%BIND_CHOICE%" || goto :oneclick_bind_wildcard
-call :bracket_ipv6 "%BIND_CHOICE%"
-set "ONECLICK_BIND=%BRACKETED%"
-goto :oneclick_bind_done
-:oneclick_bind_explicit
-set "ONECLICK_BIND=%GFMY_ONECLICK_BIND%"
-call :validate_ip "%ONECLICK_BIND%" || goto :oneclick_bind_invalid
-call :reject_wildcard "%ONECLICK_BIND%" || goto :oneclick_bind_wildcard
-call :bracket_ipv6 "%ONECLICK_BIND%"
-set "ONECLICK_BIND=%BRACKETED%"
-:oneclick_bind_done
-set "GFMY_ONECLICK_BIND=%ONECLICK_BIND%"
-set "ONECLICK_LOOPBACK="
-if "%ONECLICK_BIND:~0,4%"=="127." set "ONECLICK_LOOPBACK=1"
-if /i "%ONECLICK_BIND%"=="localhost" set "ONECLICK_LOOPBACK=1"
-if "%ONECLICK_BIND%"=="::1" set "ONECLICK_LOOPBACK=1"
-if "%ONECLICK_BIND%"=="[::1]" set "ONECLICK_LOOPBACK=1"
 
 rem LAN-bind hardening (AP-7 + AP-8), mirroring login.sh. On a non-loopback bind
 rem raise a single verdict, GFMY_NOVNC_HARDEN=1, that the CONTAINER acts on:
@@ -296,33 +220,13 @@ echo [login]   ssh -L 7900:127.0.0.1:7900 ^<docker-host^>
 echo [login] or re-run bound to a LAN address: login.cmd --ip ^<ADDRESS^>
 :hint_done
 
-rem Compose files: the base file publishes only noVNC (7900). The one-click token
-rem endpoint (7901) lives in an OPT-IN overlay, so a host that already uses 7901
-rem can never block the file handoff (.\data) or the GFMY_CLEARTEXT=1 output,
-rem which do not need that port. Gate matches entrypoint.sh exactly: "1" means on.
+rem Compose files: the base file publishes only noVNC (7900). No other port is
+rem published, so a host with a busy port can never block the file handoff
+rem (.\data) or the GFMY_CLEARTEXT=1 terminal output.
 set "COMPOSE_FILES=-f docker-compose.yml"
-if "%GFMY_ONECLICK%"=="1" set "COMPOSE_FILES=%COMPOSE_FILES% -f docker-compose.oneclick.yml"
-if not "%GFMY_ONECLICK%"=="1" goto :oneclick_msg_done
-echo [login] One-click enabled: token endpoint published on %ONECLICK_BIND% port 7901.
-if defined ONECLICK_LOOPBACK goto :oneclick_loopback_msg
-rem Hardening verdict for 7901, mirroring the noVNC warning above -- except that
-rem there is no TLS counterpart: the Home Assistant client speaks plain http on
-rem this port, which was harmless while the publish could not leave the host.
-echo [login] WARNING: that address is reachable beyond this host, and the token
-echo [login] endpoint serves your Google credentials UNENCRYPTED (plain http).
-echo [login] Guarded only by a one-time pairing code, a 300-second expiry, a
-echo [login] single successful fetch and a lockout after five wrong codes.
-echo [login] Use it for that short handoff only, and only inside your own LAN or
-echo [login] on this host: never across an untrusted network or the internet.
-goto :oneclick_msg_done
-:oneclick_loopback_msg
-echo [login] That is this host's loopback, so only a Home Assistant sharing this
-echo [login] host's network namespace reaches it. One in its own bridge container
-echo [login] or on another machine does not; for those, name a LAN address of this
-echo [login] host with: set GFMY_ONECLICK_BIND=^<ADDRESS^>
-:oneclick_msg_done
 rem Passing an explicit -f turns off Compose's implicit override auto-load, so
-rem re-add a user override file when there is one (README: shared-network route).
+rem re-add a user override file when there is one, so a docker-compose.override.yml
+rem next to these files keeps working.
 rem At most one, mirroring Compose's own auto-load: it picks a single override
 rem file, so merging both spellings here would silently apply a stale leftover.
 rem Kept as flat, line-wise statements on purpose: inside a parenthesised block
@@ -368,91 +272,51 @@ endlocal
 exit /b 2
 
 :track_missing
-echo [login] --track needs a value: a, b or c. Example: login.cmd --track a 1>&2
+echo [login] --track needs a value: a or b. Example: login.cmd --track a 1>&2
 popd
 endlocal
 exit /b 2
 
 :track_invalid
-echo [login] --track needs a, b or c. 1>&2
+echo [login] --track needs a or b. 1>&2
 echo [login]   a = file handoff only (.\data\secrets.json, the default) 1>&2
-echo [login]   b = also publish the one-shot token endpoint on port 7901 1>&2
-echo [login]   c = also print the bundle in this terminal 1>&2
-popd
-endlocal
-exit /b 2
-
-:oneclick_bind_invalid
-echo [login] The token endpoint bind needs an IP address of this Docker host, 1>&2
-echo [login] not a host name: the value becomes a docker port bind. 1>&2
-echo [login] Example: set GFMY_ONECLICK_BIND=192.168.1.21 1>&2
-popd
-endlocal
-exit /b 2
-
-:oneclick_bind_wildcard
-echo [login] A wildcard is refused for the token endpoint: port 7901 serves the 1>&2
-echo [login] Google credentials in clear text, so it must not listen on every 1>&2
-echo [login] interface. Name the one address Home Assistant uses: for HA in a 1>&2
-echo [login] Docker container on this host that is the gateway address of the 1>&2
-echo [login] network HA is on (set GFMY_ONECLICK_BIND=172.18.0.1), which the LAN 1>&2
-echo [login] does not reach; for HA on another machine a LAN address (e.g. 1>&2
-echo [login] set GFMY_ONECLICK_BIND=192.168.1.21). Unset keeps 127.0.0.1. 1>&2
+echo [login]   b = also print the bundle in this terminal 1>&2
 popd
 endlocal
 exit /b 2
 
 :print_usage
-echo Usage: login.cmd [--ip ^<ADDRESS^>] [--track a^|b^|c] [--help]
+echo Usage: login.cmd [--ip ^<ADDRESS^>] [--track a^|b] [--help]
 echo.
 echo   --ip ^<ADDRESS^>  Bind the noVNC viewer (port 7900) to ^<ADDRESS^> and print
 echo                   that address as the URL to open. Use a concrete LAN
 echo                   address of this Docker host, e.g. login.cmd --ip 192.168.1.21
-echo   --track a^|b^|c   Pick how the credentials reach Home Assistant without being
-echo                   asked: a = file only (default), b = also publish the token
-echo                   endpoint on 7901, c = also print the bundle in this terminal.
+echo   --track a^|b     Pick how the credentials reach Home Assistant without being
+echo                   asked: a = file only (default), b = also print the bundle
+echo                   in this terminal.
 echo   --help          Show this help and exit.
 echo.
-echo Without --track and without GFMY_ONECLICK/GFMY_CLEARTEXT this script asks
+echo Without --track and without GFMY_CLEARTEXT this script asks
 echo which handoff you want; a bare Enter keeps the historical file-only default.
 echo.
 echo Environment (see the comment block at the top of this file):
 echo   GFMY_NOVNC_BIND       host bind for noVNC 7900          (default 127.0.0.1)
 echo   GFMY_NOVNC_URL_HOST   address printed for your browser  (default: the bind)
-echo   GFMY_ONECLICK=1       add the opt-in overlay that publishes port 7901
 echo   GFMY_CLEARTEXT=1      print the bundle in this terminal at the end
-echo   GFMY_ONECLICK_BIND    host bind for the token endpoint 7901 (default 127.0.0.1)
-echo.
-echo The token endpoint serves the credentials UNENCRYPTED, so its bind defaults
-echo to 127.0.0.1 and is widened only on request: trusted LAN or this host, and
-echo only for the seconds the handoff takes. A wildcard bind is refused.
 goto :eof
 
 :set_track
-rem --track a^|b^|c -^> the same two switches the menu sets. Track A is not a
-rem switch: the file in .\data is written on every run, so "a" means "turn the
-rem other two off", which is what the historical default did.
-set "GFMY_ONECLICK="
+rem --track a^|b -^> the same switch the menu sets. Track A is not a switch: the
+rem file in .\data is written on every run, so "a" means "turn the other one
+rem off", which is what the historical default did.
 set "GFMY_CLEARTEXT="
 if /i "%~1"=="a" goto :set_track_ok
 if /i "%~1"=="b" goto :set_track_b
-if /i "%~1"=="c" goto :set_track_c
 exit /b 1
 :set_track_b
-set "GFMY_ONECLICK=1"
-goto :set_track_ok
-:set_track_c
 set "GFMY_CLEARTEXT=1"
 :set_track_ok
 set "TRACK_FROM_CLI=1"
-exit /b 0
-
-:reject_wildcard
-rem Exit code 1 means "this is a wildcard". Mirrors is_wildcard_addr in login.sh.
-if "%~1"=="0.0.0.0" exit /b 1
-if "%~1"=="::" exit /b 1
-if "%~1"=="[::]" exit /b 1
-if "%~1"=="*" exit /b 1
 exit /b 0
 
 :validate_ip

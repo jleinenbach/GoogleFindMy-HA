@@ -7137,11 +7137,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
         # Final abort (not a retryable ConfigEntryNotReady): this return never
         # reaches the cleanup runner at the end of the function, so any job the
         # config flow staged for this account would linger in hass.data for the
-        # whole process lifetime, holding a pairing nonce and a delete token.
+        # whole process lifetime.
         # Discard it instead of running it: the entry is not set up, so the
         # credentials must stay put. The secrets watcher re-imports the file on
-        # its next scan and the un-acked login container drops its copy on its
-        # own TTL.
+        # its next scan.
         try:
             from .config_flow import (  # noqa: PLC0415 - lazy, avoids an import cycle
                 async_discard_pending_container_cleanup,
@@ -7816,9 +7815,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
     await _async_refresh_device_urls(hass)
 
     # Post-persist cleanup (P2): the config flow can only *stage* irreversible
-    # cleanups (deleting the imported secrets.json copies, acking the login
-    # container so it drops its copy), because `ConfigFlow.async_create_entry`
-    # merely builds a FlowResult -- Home Assistant creates and stores the entry
+    # cleanups (deleting the imported secrets.json copies), because
+    # `ConfigFlow.async_create_entry` merely builds a FlowResult -- Home Assistant creates and stores the entry
     # afterwards in `ConfigEntriesFlowManager.async_finish_flow`. Deliberately
     # behind the whole setup core: every `ConfigEntryNotReady` above must leave
     # the credentials on disk for the next attempt.
@@ -7834,8 +7832,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
     #
     # Best effort in both directions: the runner isolates each job, and this
     # guard makes sure a cleanup failure can never turn a successful setup into
-    # a failed one (the container falls back to its TTL delete, and the secrets
-    # watcher re-imports a surviving file on its next scan).
+    # a failed one (the secrets watcher re-imports a surviving file on its next
+    # scan).
     try:
         from .config_flow import (  # noqa: PLC0415 - lazy, avoids an import cycle
             async_schedule_pending_container_cleanup,
@@ -8750,13 +8748,11 @@ async def async_remove_entry(hass: HomeAssistant, entry: MyConfigEntry) -> None:
     # account's entry is still using.
     await _async_refresh_discovery_watch_paths(hass, exclude_entry_id=entry.entry_id)
 
-    # A staged container-login cleanup addressed to THIS entry can never be
-    # claimed again once the entry is gone, so it would sit in hass.data for the
-    # rest of the process lifetime holding a pairing nonce and a delete token.
-    # Discard it instead of running it: dropping keeps the fail-safe direction
-    # (credential files stay on disk, the un-acked container falls back to its
-    # own TTL), whereas executing would delete credentials for an entry the user
-    # just removed.
+    # A staged cleanup addressed to THIS entry can never be claimed again once
+    # the entry is gone, so it would sit in hass.data for the rest of the
+    # process lifetime. Discard it instead of running it: dropping keeps the
+    # fail-safe direction (credential files stay on disk), whereas executing
+    # would delete credentials for an entry the user just removed.
     try:
         from .config_flow import (  # noqa: PLC0415 - lazy, avoids an import cycle
             async_discard_pending_container_cleanup,
@@ -8778,14 +8774,14 @@ async def async_remove_entry(hass: HomeAssistant, entry: MyConfigEntry) -> None:
         # the removal for the rest of the process lifetime, and rule 2 of
         # ``_async_claim_container_cleanup_ticket`` (uncorrelated ticket whose
         # unique_id matches) hands it to the *next* entry the user creates for
-        # the same account, which then acks a container and deletes credential
-        # copies that belong to the removed one.
+        # the same account, which then deletes credential copies that belong to
+        # the removed one.
         #
         # It costs the account fallback of the claim helper: a concurrent,
         # still-running same-account flow could have its ticket taken instead.
         # That direction is the fail-safe one (the credential files stay on
-        # disk, the un-acked container falls back to its own TTL), whereas
-        # leaving the ticket is the direction that deletes foreign material.
+        # disk), whereas leaving the ticket is the direction that deletes
+        # foreign material.
         discarded = async_discard_pending_container_cleanup_for_entry(
             hass, entry_id=entry.entry_id
         )

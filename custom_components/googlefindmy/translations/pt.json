@@ -8,7 +8,7 @@
     "step": {
       "user": {
         "title": "Autenticação Encontre Meu Dispositivo do Google",
-        "description": "Escolha como quer iniciar sessão. O início de sessão por contentor num clique arranca por si um contentor de navegador já preparado e precisa de uma máquina com Docker. GoogleFindMyTools secrets.json é a escolha certa se já tiver esse ficheiro ou se puder executar o GoogleFindMyTools com o Chrome num computador.",
+        "description": "Escolha como quer iniciar sessão. GoogleFindMyTools secrets.json é a escolha certa se já tiver esse ficheiro ou se puder executar o GoogleFindMyTools com o Chrome num computador.",
         "data": {
           "auth_method": "Método de autenticação"
         }
@@ -28,28 +28,6 @@
         "description": "Execute GoogleFindMyTools (Chrome) para gerar tokens de autenticação e cole todo o conteúdo do arquivo Auth/secrets.json abaixo.",
         "data": {
           "secrets_json": "Conteúdo do arquivo secrets.json"
-        }
-      },
-      "container_login": {
-        "title": "Início de sessão por contentor num clique",
-        "description": "Inicie sessão através do contentor de início de sessão incluído. Execute-o no próprio anfitrião Docker; o contentor do Home Assistant não tem socket do Docker.\n\n1. Abra uma shell no anfitrião Docker e vá para a pasta `custom_components/googlefindmy/docker-login/` desta integração.\n2. Inicie-o com `GFMY_ONECLICK=1 bash login.sh` (Windows: `set GFMY_ONECLICK=1 && login.cmd`).\n3. Conclua o início de sessão da Google na janela noVNC.\n4. O contentor imprime depois um código de emparelhamento nesse mesmo terminal. O passo seguinte pede-o.\n\nVisualizador noVNC (palavra-passe: `secret`): {novnc_access}\n\nO visualizador é aberto pelo seu navegador, que muitas vezes corre numa máquina diferente do anfitrião Docker, por isso só é ligado quando o anfitrião acima é um endereço IP fora do loopback. Com uma ligação de loopback, abra-o no próprio anfitrião Docker, faça um túnel com `ssh -L 7900:127.0.0.1:7900 DOCKER-HOST` ou execute novamente o lançador com `--ip ENDERECO` e use o endereço apresentado.\n\nInstruções completas: {docs_url} (pasta `custom_components/googlefindmy/docker-login/`).",
-        "data": {
-          "host": "Anfitrião do contentor",
-          "port": "Porta do contentor"
-        },
-        "data_description": {
-          "host": "Nome de anfitrião ou endereço IP do contentor de início de sessão. O valor predefinido `127.0.0.1` é o loopback do anfitrião Docker, pelo que só funciona se o Home Assistant partilhar o espaço de rede desse anfitrião; um Home Assistant em modo bridge não lhe chega. Duas saídas: colocar ambos os contentores na mesma rede Docker, iniciar o lançador de modo a que `docker compose run` receba `--use-aliases` (sem essa opção o nome de serviço não é resolvido, ver o README) e indicar aqui o nome de serviço do contentor, ou dispensar a rede e deixar o contentor entregar o ficheiro através de `docker-login/data/secrets.json`, que esta integração importa sozinha. A porta das credenciais é publicada em `127.0.0.1`, a menos que tenha indicado outra coisa ao iniciador através de `GFMY_ONECLICK_BIND`; introduza aqui o endereço que o iniciador apresentou. Uma ligação alargada transmite as credenciais sem cifra, pelo que deve ser usada apenas numa rede local de confiança e apenas durante o momento da entrega.",
-          "port": "Porta em que o contentor de início de sessão fornece as credenciais. Só é publicada quando o lançador corre com a sobreposição `docker-compose.oneclick.yml`; o ficheiro compose simples não a publica."
-        }
-      },
-      "container_pairing": {
-        "title": "Introduza o código de emparelhamento",
-        "description": "Conclua primeiro o início de sessão da Google na janela noVNC. O contentor imprime depois o código de emparelhamento no terminal onde o lançador corre (ou em `docker logs`, se o tiver iniciado em segundo plano).",
-        "data": {
-          "pairing_code": "Código de emparelhamento"
-        },
-        "data_description": {
-          "pairing_code": "O código que o contentor imprime no terminal do lançador assim que o início de sessão termina. É gerado de novo em cada execução, é válido durante 5 minutos e bloqueia após 5 tentativas erradas; nesse caso, pare o contentor e volte a iniciar o lançador."
         }
       },
       "device_selection": {
@@ -77,18 +55,11 @@
       },
       "reauth_confirm": {
         "title": "Reautenticar",
-        "description": "As suas credenciais para **{email}** parecem ser inválidas ou ter expirado. Forneça novas credenciais abaixo.\n\nCole todo o conteúdo de um novo **secrets.json** (gerado ao executar o GoogleFindMyTools), ou inicie sessão novamente através do contentor de início de sessão, introduzindo um código de emparelhamento.\n\nNota: O e-mail da conta está fixado para esta reautenticação; para usar uma conta diferente, remova e volte a adicionar a integração.",
+        "description": "As suas credenciais para **{email}** parecem ser inválidas ou ter expirado. Forneça novas credenciais abaixo.\n\nCole todo o conteúdo de um novo **secrets.json** (gerado ao executar o GoogleFindMyTools).\n\nNota: O e-mail da conta está fixado para esta reautenticação; para usar uma conta diferente, remova e volte a adicionar a integração.",
         "data": {
-          "secrets_json": "Novo secrets.json (conteúdo completo)",
-          "container_host": "Anfitrião do contentor",
-          "container_port": "Porta do contentor",
-          "pairing_code": "Código de emparelhamento"
+          "secrets_json": "Novo secrets.json (conteúdo completo)"
         },
-        "data_description": {
-          "container_host": "Nome de anfitrião ou endereço IP do contentor de início de sessão. Mantenha o valor predefinido, exceto se executar o contentor noutro local.",
-          "container_port": "Porta em que o contentor de início de sessão fornece as credenciais. Mantenha o valor predefinido, exceto se a tiver alterado.",
-          "pairing_code": "Introduza um código de emparelhamento para reautenticar através do contentor de início de sessão em vez de colar o secrets.json."
-        }
+        "data_description": {}
       },
       "migrate_complete": {
         "title": "Migração concluída",
@@ -108,13 +79,7 @@
       "choose_one": "Forneça exatamente um método de credencial.",
       "required": "Este campo é obrigatório.",
       "unknown": "Ocorreu um erro inesperado.",
-      "email_mismatch": "As credenciais fornecidas pertencem a uma conta Google diferente. ",
-      "container_unreachable": "Não foi possível contactar o contentor de início de sessão. Certifique-se de que está em execução e de que o anfitrião e a porta estão corretos.",
-      "container_timeout": "O contentor de início de sessão não respondeu a tempo. Tente novamente.",
-      "container_auth_failed": "A autenticação com o contentor de início de sessão falhou. Verifique o código de emparelhamento e tente novamente.",
-      "container_code_used": "Este código de emparelhamento já foi utilizado ou expirou. Reinicie o contentor de início de sessão e utilize o novo código.",
-      "container_code_too_short": "O código de emparelhamento é demasiado curto. Copie o código completo a partir do contentor de início de sessão.",
-      "container_login_failed": "Não foi possível concluir o início de sessão do contentor. Tente novamente."
+      "email_mismatch": "As credenciais fornecidas pertencem a uma conta Google diferente. "
     },
     "abort": {
       "already_configured": "O Encontre Meu Dispositivo do Google já está configurado.",
@@ -278,18 +243,12 @@
       },
       "credentials": {
         "title": "Atualizar credenciais (opcional)",
-        "description": "Atualize as suas credenciais. Os valores existentes não são mostrados por motivos de segurança.\n\nCole todo o conteúdo de um novo **secrets.json** (gerado ao executar o GoogleFindMyTools), ou inicie sessão novamente através do contentor de início de sessão, introduzindo um código de emparelhamento.\n\nApós o envio, as credenciais são validadas e armazenadas; a integração é recarregada sem alterar os nomes das suas entidades.",
+        "description": "Atualize as suas credenciais. Os valores existentes não são mostrados por motivos de segurança.\n\nCole todo o conteúdo de um novo **secrets.json** (gerado ao executar o GoogleFindMyTools).\n\nApós o envio, as credenciais são validadas e armazenadas; a integração é recarregada sem alterar os nomes das suas entidades.",
         "data": {
           "new_secrets_json": "Novo secrets.json (conteúdo completo)",
-          "container_host": "Anfitrião do contentor",
-          "container_port": "Porta do contentor",
-          "pairing_code": "Código de emparelhamento",
           "subentry": "Grupo de recursos"
         },
         "data_description": {
-          "container_host": "Nome de anfitrião ou endereço IP do contentor de início de sessão. Mantenha o valor predefinido, exceto se executar o contentor noutro local.",
-          "container_port": "Porta em que o contentor de início de sessão fornece as credenciais. Mantenha o valor predefinido, exceto se a tiver alterado.",
-          "pairing_code": "Introduza um código de emparelhamento para atualizar as credenciais através do contentor de início de sessão em vez de colar o secrets.json.",
           "subentry": "Aplique as atualizações de credenciais ao grupo de recursos selecionado. Consulte o guia [Subentradas e grupos de recursos]({subentries_docs_url}) para detalhes do fluxo de trabalho."
         }
       },
@@ -373,13 +332,7 @@
       "duplicate_name": "O nome semântico já existe. Escolha um nome diferente.",
       "duplicate_semantic_location": "O nome semântico já existe. Escolha um nome diferente.",
       "unknown": "Ocorreu um erro inesperado.",
-      "invalid_subentry": "Escolha um grupo de recursos válido.",
-      "container_unreachable": "Não foi possível contactar o contentor de início de sessão. Certifique-se de que está em execução e de que o anfitrião e a porta estão corretos.",
-      "container_timeout": "O contentor de início de sessão não respondeu a tempo. Tente novamente.",
-      "container_auth_failed": "A autenticação com o contentor de início de sessão falhou. Verifique o código de emparelhamento e tente novamente.",
-      "container_code_used": "Este código de emparelhamento já foi utilizado ou expirou. Reinicie o contentor de início de sessão e utilize o novo código.",
-      "container_code_too_short": "O código de emparelhamento é demasiado curto. Copie o código completo a partir do contentor de início de sessão.",
-      "container_login_failed": "Não foi possível concluir o início de sessão do contentor. Tente novamente."
+      "invalid_subentry": "Escolha um grupo de recursos válido."
     },
     "abort": {
       "reconfigure_successful": "Reconfiguração bem-sucedida.",
@@ -861,7 +814,6 @@
     },
     "auth_method": {
       "options": {
-        "container_login": "Início de sessão por contentor num clique",
         "secrets_json": "GoogleFindMyTools secrets.json"
       }
     }

@@ -8,7 +8,7 @@
     "step": {
       "user": {
         "title": "Uwierzytelnianie Google Find My Device",
-        "description": "Wybierz sposób logowania. Logowanie przez kontener jednym kliknięciem uruchamia za ciebie przygotowany kontener z przeglądarką i wymaga maszyny z Dockerem. GoogleFindMyTools secrets.json sprawdzi się, jeśli masz już ten plik albo możesz sam uruchomić GoogleFindMyTools z przeglądarką Chrome na komputerze.",
+        "description": "Wybierz sposób logowania. GoogleFindMyTools secrets.json sprawdzi się, jeśli masz już ten plik albo możesz sam uruchomić GoogleFindMyTools z przeglądarką Chrome na komputerze.",
         "data": {
           "auth_method": "Metoda uwierzytelniania"
         }
@@ -28,28 +28,6 @@
         "description": "Uruchom GoogleFindMyTools (Chrome), aby wygenerować tokeny uwierzytelniające, a następnie wklej poniżej pełną zawartość pliku Auth/secrets.json.",
         "data": {
           "secrets_json": "Zawartość pliku secrets.json"
-        }
-      },
-      "container_login": {
-        "title": "Logowanie przez kontener jednym kliknięciem",
-        "description": "Zaloguj się przez dołączony kontener logowania. Uruchom go na samym hoście Dockera; kontener Home Assistant nie ma gniazda Dockera.\n\n1. Otwórz powłokę na hoście Dockera i przejdź do katalogu `custom_components/googlefindmy/docker-login/` tej integracji.\n2. Uruchom go poleceniem `GFMY_ONECLICK=1 bash login.sh` (Windows: `set GFMY_ONECLICK=1 && login.cmd`).\n3. Dokończ logowanie Google w oknie noVNC.\n4. Kontener wypisze następnie kod parowania w tym samym terminalu. Następny krok o niego poprosi.\n\nPodgląd noVNC (hasło: `secret`): {novnc_access}\n\nPodgląd otwiera twoja przeglądarka, która często działa na innej maszynie niż host Dockera, dlatego link pojawia się tylko wtedy, gdy host powyżej jest adresem IP spoza pętli zwrotnej. Przy powiązaniu z pętlą zwrotną otwórz go na samym hoście Dockera, przetuneluj poleceniem `ssh -L 7900:127.0.0.1:7900 DOCKER-HOST` albo uruchom launcher ponownie z `--ip ADRES` i użyj wypisanego adresu.\n\nPełna instrukcja: {docs_url} (katalog `custom_components/googlefindmy/docker-login/`).",
-        "data": {
-          "host": "Host kontenera",
-          "port": "Port kontenera"
-        },
-        "data_description": {
-          "host": "Nazwa hosta lub adres IP kontenera logowania. Domyślna wartość `127.0.0.1` to pętla zwrotna hosta Dockera, więc działa tylko wtedy, gdy Home Assistant współdzieli przestrzeń sieciową tego hosta; Home Assistant w trybie bridge go nie osiągnie. Dwa wyjścia: umieścić oba kontenery w jednej sieci Dockera, uruchomić launcher tak, aby `docker compose run` dostał `--use-aliases` (bez tej opcji nazwa usługi się nie rozwiązuje, zobacz README), i wpisać tu nazwę usługi kontenera albo całkiem pominąć sieć i pozwolić kontenerowi przekazać plik przez `docker-login/data/secrets.json`, który ta integracja importuje sama. Port poświadczeń jest publikowany na `127.0.0.1`, chyba że wskażesz launcherowi inaczej przez `GFMY_ONECLICK_BIND`; wpisz tutaj adres, który launcher wypisał. Poszerzone powiązanie przesyła poświadczenia bez szyfrowania, więc używaj go tylko w zaufanej sieci lokalnej i tylko na czas przekazania.",
-          "port": "Port, na którym kontener logowania udostępnia poświadczenia. Jest publikowany tylko wtedy, gdy launcher działa z nakładką `docker-compose.oneclick.yml`; zwykły plik compose go nie publikuje."
-        }
-      },
-      "container_pairing": {
-        "title": "Wprowadź kod parowania",
-        "description": "Najpierw dokończ logowanie Google w oknie noVNC. Kontener wypisze potem kod parowania w terminalu, w którym działa launcher (albo w `docker logs`, jeśli uruchomiono go w tle).",
-        "data": {
-          "pairing_code": "Kod parowania"
-        },
-        "data_description": {
-          "pairing_code": "Kod, który kontener wypisuje w terminalu launchera po zakończeniu logowania. Jest generowany od nowa przy każdym uruchomieniu, zachowuje ważność 5 minut i blokuje się po 5 błędnych próbach; w takim wypadku zatrzymaj kontener i uruchom launcher ponownie."
         }
       },
       "device_selection": {
@@ -77,18 +55,11 @@
       },
       "reauth_confirm": {
         "title": "Ponowne uwierzytelnienie",
-        "description": "Twoje poświadczenia dla **{email}** wydają się nieprawidłowe lub wygasłe. Podaj nowe poświadczenia poniżej.\n\nWklej pełną zawartość nowego pliku **secrets.json** (wygenerowanego przez uruchomienie GoogleFindMyTools) albo zaloguj się ponownie przez kontener logowania, wpisując kod parowania.\n\nUwaga: adres e-mail konta jest ustalony dla tego ponownego uwierzytelnienia; aby użyć innego konta, usuń integrację i dodaj ją ponownie.",
+        "description": "Twoje poświadczenia dla **{email}** wydają się nieprawidłowe lub wygasłe. Podaj nowe poświadczenia poniżej.\n\nWklej pełną zawartość nowego pliku **secrets.json** (wygenerowanego przez uruchomienie GoogleFindMyTools).\n\nUwaga: adres e-mail konta jest ustalony dla tego ponownego uwierzytelnienia; aby użyć innego konta, usuń integrację i dodaj ją ponownie.",
         "data": {
-          "secrets_json": "Nowy plik secrets.json (pełna zawartość)",
-          "container_host": "Host kontenera",
-          "container_port": "Port kontenera",
-          "pairing_code": "Kod parowania"
+          "secrets_json": "Nowy plik secrets.json (pełna zawartość)"
         },
-        "data_description": {
-          "container_host": "Nazwa hosta lub adres IP kontenera logowania. Zostaw wartość domyślną, chyba że uruchamiasz kontener w innym miejscu.",
-          "container_port": "Port, na którym kontener logowania udostępnia poświadczenia. Zostaw wartość domyślną, chyba że go zmieniłeś.",
-          "pairing_code": "Wpisz kod parowania, aby ponownie uwierzytelnić się przez kontener logowania zamiast wklejać plik secrets.json."
-        }
+        "data_description": {}
       },
       "migrate_complete": {
         "title": "Migracja zakończona",
@@ -108,13 +79,7 @@
       "choose_one": "Podaj dokładnie jedną metodę poświadczeń.",
       "required": "To pole jest wymagane.",
       "unknown": "Wystąpił nieoczekiwany błąd.",
-      "email_mismatch": "Podane dane logowania należą do innego konta Google. Aby dodać to konto, utwórz nową integrację; ponowne uwierzytelnienie nie może zmienić konta dla tego wpisu.",
-      "container_unreachable": "Nie udało się połączyć z kontenerem logowania. Upewnij się, że działa oraz że host i port są poprawne.",
-      "container_timeout": "Kontener logowania nie odpowiedział na czas. Spróbuj ponownie.",
-      "container_auth_failed": "Uwierzytelnianie w kontenerze logowania nie powiodło się. Sprawdź kod parowania i spróbuj ponownie.",
-      "container_code_used": "Ten kod parowania został już użyty lub wygasł. Uruchom ponownie kontener logowania i użyj nowego kodu.",
-      "container_code_too_short": "Kod parowania jest za krótki. Skopiuj pełny kod z kontenera logowania.",
-      "container_login_failed": "Nie udało się dokończyć logowania przez kontener. Spróbuj ponownie."
+      "email_mismatch": "Podane dane logowania należą do innego konta Google. Aby dodać to konto, utwórz nową integrację; ponowne uwierzytelnienie nie może zmienić konta dla tego wpisu."
     },
     "abort": {
       "already_configured": "Google Find My Device jest już skonfigurowane.",
@@ -278,18 +243,12 @@
       },
       "credentials": {
         "title": "Aktualizuj poświadczenia (opcjonalnie)",
-        "description": "Zaktualizuj swoje poświadczenia. Istniejące wartości nie są wyświetlane ze względów bezpieczeństwa.\n\nWklej pełną zawartość nowego pliku **secrets.json** (wygenerowanego przez uruchomienie GoogleFindMyTools) albo zaloguj się ponownie przez kontener logowania, wpisując kod parowania.\n\nPo wysłaniu poświadczenia są weryfikowane i zapisywane; integracja przeładowuje się bez zmiany nazw twoich encji.",
+        "description": "Zaktualizuj swoje poświadczenia. Istniejące wartości nie są wyświetlane ze względów bezpieczeństwa.\n\nWklej pełną zawartość nowego pliku **secrets.json** (wygenerowanego przez uruchomienie GoogleFindMyTools).\n\nPo wysłaniu poświadczenia są weryfikowane i zapisywane; integracja przeładowuje się bez zmiany nazw twoich encji.",
         "data": {
           "new_secrets_json": "Nowy plik secrets.json (pełna zawartość)",
-          "container_host": "Host kontenera",
-          "container_port": "Port kontenera",
-          "pairing_code": "Kod parowania",
           "subentry": "Grupa funkcji"
         },
         "data_description": {
-          "container_host": "Nazwa hosta lub adres IP kontenera logowania. Zostaw wartość domyślną, chyba że uruchamiasz kontener w innym miejscu.",
-          "container_port": "Port, na którym kontener logowania udostępnia poświadczenia. Zostaw wartość domyślną, chyba że go zmieniłeś.",
-          "pairing_code": "Wpisz kod parowania, aby zaktualizować poświadczenia przez kontener logowania zamiast wklejać plik secrets.json.",
           "subentry": "Zastosuj aktualizacje poświadczeń do wybranej grupy funkcji. Szczegóły procesu znajdziesz w przewodniku [Podpozycje i grupy funkcji]({subentries_docs_url})."
         }
       },
@@ -373,13 +332,7 @@
       "duplicate_name": "Nazwa semantyczna już istnieje. Wybierz inną nazwę.",
       "duplicate_semantic_location": "Nazwa semantyczna już istnieje. Wybierz inną nazwę.",
       "unknown": "Wystąpił nieoczekiwany błąd.",
-      "invalid_subentry": "Wybierz prawidłową grupę funkcji.",
-      "container_unreachable": "Nie udało się połączyć z kontenerem logowania. Upewnij się, że działa oraz że host i port są poprawne.",
-      "container_timeout": "Kontener logowania nie odpowiedział na czas. Spróbuj ponownie.",
-      "container_auth_failed": "Uwierzytelnianie w kontenerze logowania nie powiodło się. Sprawdź kod parowania i spróbuj ponownie.",
-      "container_code_used": "Ten kod parowania został już użyty lub wygasł. Uruchom ponownie kontener logowania i użyj nowego kodu.",
-      "container_code_too_short": "Kod parowania jest za krótki. Skopiuj pełny kod z kontenera logowania.",
-      "container_login_failed": "Nie udało się dokończyć logowania przez kontener. Spróbuj ponownie."
+      "invalid_subentry": "Wybierz prawidłową grupę funkcji."
     },
     "abort": {
       "reconfigure_successful": "Ponowna konfiguracja zakończona pomyślnie.",
@@ -861,7 +814,6 @@
     },
     "auth_method": {
       "options": {
-        "container_login": "Logowanie przez kontener jednym kliknięciem",
         "secrets_json": "GoogleFindMyTools secrets.json"
       }
     }

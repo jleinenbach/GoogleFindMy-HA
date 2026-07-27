@@ -77,51 +77,6 @@ if [ "${GFMY_NOVNC_HARDEN:-}" != "1" ]; then
   unset _gfmy_bind _gfmy_bind_bare
 fi
 
-# --- Token-endpoint wildcard refusal (the direct-Compose analogue) ------------
-# Both launchers refuse a wildcard GFMY_ONECLICK_BIND, because 7901 carries the
-# credential bundle in clear text and a wildcard offers it on every interface,
-# including ones the operator never meant to expose. That refusal used to be the
-# only gate, and it sits on a path a user can bypass: this banner itself prints
-# the manual `docker compose -f ... -f docker-compose.oneclick.yml run` command,
-# and a `.env` next to the compose files feeds GFMY_ONECLICK_BIND straight into
-# the overlay without either launcher ever running. The same reasoning that makes
-# the noVNC block above derive its verdict INSIDE the container applies here, so
-# the refusal is repeated at the one place every entry path passes through.
-#
-# A function, not an inline block, so the regression test can RUN it against
-# several bind values instead of grepping for hopeful substrings. It classifies
-# only; the caller decides, which keeps `exit` out of the tested unit.
-function oneclick_bind_is_wildcard {
-  local bare
-  # Strip one enclosing IPv6 bracket pair, mirroring the noVNC derivation above.
-  bare="${1#[}"
-  bare="${bare%]}"
-  case "${bare}" in
-    0.0.0.0 | :: | "*") return 0 ;;
-    *) return 1 ;;
-  esac
-}
-
-# Gated on GFMY_ONECLICK: with the endpoint switched off nothing is published on
-# 7901 at all, so a stray GFMY_ONECLICK_BIND in the environment must not stop a
-# plain file-handoff login. Refuse BEFORE the sign-in rather than after it: there
-# is no credential to protect yet, and the user does not spend a full Google
-# login on a run that would be rejected at the handoff.
-if [ "${GFMY_ONECLICK:-}" = "1" ] \
-  && oneclick_bind_is_wildcard "${GFMY_ONECLICK_BIND:-}"; then
-  echo "[entrypoint] FATAL: GFMY_ONECLICK_BIND='${GFMY_ONECLICK_BIND}' is a wildcard." >&2
-  echo "[entrypoint] Port 7901 serves your Google credentials in clear text, so it" >&2
-  echo "[entrypoint] must be published on ONE address you chose, not on every" >&2
-  echo "[entrypoint] interface. Use a concrete address of this host (or leave the" >&2
-  echo "[entrypoint] variable unset for the loopback default):" >&2
-  echo "[entrypoint]   GFMY_ONECLICK_BIND=192.0.2.10 GFMY_ONECLICK=1 bash login.sh" >&2
-  echo "[entrypoint] Reaching a Home Assistant CONTAINER on this host does not need" >&2
-  echo "[entrypoint] a wildcard either: publish on the gateway address of the Docker" >&2
-  echo "[entrypoint] network HA is on, which that network reaches and the LAN does" >&2
-  echo "[entrypoint] not." >&2
-  exit 2
-fi
-
 # --- Per-run noVNC password for a LAN-bound viewer (AP-7) ---------------------
 # Only when the launcher raised the LAN-hardening verdict (GFMY_NOVNC_HARDEN=1,
 # set for a non-loopback/wildcard bind); the loopback/tunnel default never sets
@@ -270,8 +225,8 @@ _cleaned=0
 # child this entrypoint WAITS ON goes through this single slot (supervisord is
 # backgrounded separately and torn down in cleanup, see
 # wait_for_tracked_child below), so on_signal has exactly one place to check. In
-# the gaps between children (waiting for the X display, between main.py and the
-# token server) the slot is empty on purpose and on_signal exits directly.
+# the gaps around the child (waiting for the X display, before main.py starts)
+# the slot is empty on purpose and on_signal exits directly.
 CHILD_PID=""
 # Set to the conventional 128+signal code once a terminating signal has been
 # relayed to a child. Needed because a child may absorb the signal and still exit
@@ -364,84 +319,6 @@ function exit_if_terminating {
   if [ "${rc}" -gt 128 ]; then
     exit "${rc}"
   fi
-}
-
-# --- One-click handoff banner (track B) --------------------------------------
-# A function, not an inline block, so the regression test can RUN it against
-# several bind values instead of grepping the script for hopeful substrings.
-#
-# The address printed here must be the one the endpoint is actually published on.
-# That address is decided on the HOST (`ports:` in docker-compose.oneclick.yml,
-# from GFMY_ONECLICK_BIND), so the overlay forwards the variable into the
-# container and this function follows it -- never the other way round, exactly
-# like the noVNC URL follows GFMY_NOVNC_BIND at the top of this file. Printing a
-# fixed 127.0.0.1 next to a widened publish is not a cosmetic mismatch: it is the
-# one field the operator types into Home Assistant.
-function print_oneclick_banner {
-  local bind bare loopback
-  bind="${GFMY_ONECLICK_BIND:-127.0.0.1}"
-  # An empty value means "nobody set it": Compose interpolates its own
-  # `:-127.0.0.1` default in that case, so loopback is what actually gets bound.
-  [ -n "${bind}" ] || bind="127.0.0.1"
-  # Strip one enclosing IPv6 bracket pair ("[::1]" -> "::1") before classifying,
-  # mirroring the noVNC derivation above; the brackets stay in what we print,
-  # because that is the form a URL/host field needs.
-  bare="${bind#[}"
-  bare="${bare%]}"
-  case "${bare}" in
-    127.* | ::1 | localhost) loopback=1 ;;
-    *) loopback=0 ;;
-  esac
-
-  echo ""
-  echo "=================================================================="
-  echo "[entrypoint] ONE-CLICK login ready. In Home Assistant choose the"
-  echo "[entrypoint] 'Container login' auth method and enter:"
-  echo "[entrypoint]     host: ${bind}   port: 7901"
-  echo "[entrypoint]     pairing code: ${GFMY_PAIRING_CODE}"
-  echo "[entrypoint]"
-  if [ "${loopback}" -eq 1 ]; then
-    echo "[entrypoint] That address is the loopback of the DOCKER HOST, not of Home"
-    echo "[entrypoint] Assistant. It works when Home Assistant shares this host's"
-    echo "[entrypoint] network namespace (HAOS, HA Core, network_mode: host). A Home"
-    echo "[entrypoint] Assistant in its own BRIDGED container cannot reach it: there,"
-    echo "[entrypoint] 127.0.0.1 is the HA container itself. Three ways out:"
-    echo "[entrypoint]   * put both containers on one Docker network (the launcher"
-    echo "[entrypoint]     needs --use-aliases for the name to resolve) and enter this"
-    echo "[entrypoint]     container's service name here instead;"
-    echo "[entrypoint]   * skip the port and let Home Assistant import the file"
-    echo "[entrypoint]     docker-login/data/secrets.json, which it does on its own;"
-    echo "[entrypoint]   * publish on an address of this host that Home Assistant"
-    echo "[entrypoint]     reaches, and enter that address there:"
-    echo "[entrypoint]     GFMY_ONECLICK_BIND=<ADDRESS> GFMY_ONECLICK=1 bash login.sh"
-    echo "[entrypoint]     For an HA container ON this host the narrowest <ADDRESS>"
-    echo "[entrypoint]     is the GATEWAY of the Docker network HA is on: it is an"
-    echo "[entrypoint]     address of this host, reachable from that network, and"
-    echo "[entrypoint]     not routed to the LAN. Read it on the host with"
-    echo "[entrypoint]     docker network inspect <net> -f '{{range .IPAM.Config}}{{.Gateway}}{{end}}'"
-    echo "[entrypoint]     A LAN address is for an HA on a DIFFERENT machine."
-    echo "[entrypoint] From another machine you can also tunnel:"
-    echo "[entrypoint]   ssh -L 7901:127.0.0.1:7901 <host>"
-    echo "[entrypoint] but only if the tunnel's local end sits inside the network"
-    echo "[entrypoint] namespace Home Assistant itself uses."
-  else
-    echo "[entrypoint] That address is reachable beyond this host, and this endpoint"
-    echo "[entrypoint] serves your Google credentials UNENCRYPTED (plain http). Use it"
-    echo "[entrypoint] inside a trusted LAN or on this host only, and only for the few"
-    echo "[entrypoint] seconds the handoff takes -- never across the internet. What"
-    echo "[entrypoint] guards it meanwhile: the one-time pairing code above, a"
-    echo "[entrypoint] 300-second expiry, a single successful fetch, and a lockout"
-    echo "[entrypoint] after five wrong codes."
-  fi
-  echo "[entrypoint]"
-  echo "[entrypoint] If Home Assistant cannot reach the port, the host publish is"
-  echo "[entrypoint] missing: 7901 is an OPT-IN overlay so that a busy port never"
-  echo "[entrypoint] blocks the file/cleartext tracks. The launcher adds it for you"
-  echo "[entrypoint] (GFMY_ONECLICK=1 bash login.sh); a manual run needs it spelled out:"
-  echo "[entrypoint]   docker compose -f docker-compose.yml -f docker-compose.oneclick.yml \\"
-  echo "[entrypoint]     run --build --service-ports --rm googlefindmy-login"
-  echo "=================================================================="
-  echo ""
 }
 
 trap cleanup EXIT
@@ -537,83 +414,18 @@ wait_for_tracked_child || _rc=$?
 exit_if_terminating "${_rc}"
 
 # --------------------------------------------------------------------------
-# Post-login handoff tracks (only after a successful main.py run; unset -> the
+# Post-login terminal handoff (only after a successful main.py run; unset -> the
 # historical behaviour is completely unchanged).
 #
-# GFMY_ONECLICK and GFMY_CLEARTEXT are INDEPENDENT switches (as documented in
-# docker-compose.yml and README.md), so the two blocks below are two separate
-# `if`s evaluated in sequence, never an if/elif chain: with both set, Track C
-# has to stay reachable after the token server returned. Each block re-tests
-# `-f "${_secrets_path}"`, which is what keeps the sequence honest -- the server
-# consumes (deletes) the file on ack and on TTL, so Track C only ever prints a
-# bundle that is still there -- chiefly the lockout case, and likewise anything
-# else that leaves the file behind (a failed delete, for instance) -- never an
-# empty block.
-#
-# These run BLOCKING (the children themselves are backgrounded and tracked, see
-# below) *before* the final `exit`, so the EXIT trap's
-# cleanup (ownership handoff of /data + supervisor shutdown) fires strictly
-# AFTER the handoff is done. That is the BLOCKING-1 lifecycle fix: a One-Click
-# token server that must outlive main.py cannot hang off the EXIT trap, so it
-# runs here, and cleanup's /data ownership handoff is naturally deferred until
-# it returns (ack-delete or TTL). The `secrets.json` the server reads still
-# exists at this point (main.py wrote it; cleanup has not run yet).
+# This runs BLOCKING *before* the final `exit`, so the EXIT trap's cleanup
+# (ownership handoff of /data + supervisor shutdown) fires strictly AFTER the
+# handoff is done. The secrets.json it reads still exists at this point (main.py
+# wrote it; cleanup has not run yet).
 # --------------------------------------------------------------------------
 _secrets_path="${GOOGLEFINDMY_SECRETS_PATH:-/data/secrets.json}"
 
-if [ "${_rc}" -eq 0 ] && [ "${GFMY_ONECLICK:-}" = "1" ] && [ -f "${_secrets_path}" ]; then
-  # Track B: hand the freshly minted bundle to Home Assistant over a one-shot,
-  # nonce-authenticated, loopback-only endpoint (see token_server.py). The
-  # pairing code is generated at RUNTIME (never a compose default) and printed
-  # prominently; only the code is shown, never the token/bundle.
-  GFMY_PAIRING_CODE="$(python3 -c 'import secrets;print(secrets.token_urlsafe(16))')"
-  export GFMY_PAIRING_CODE GOOGLEFINDMY_SECRETS_PATH="${_secrets_path}"
-  print_oneclick_banner
-  # Backgrounded and tracked, for the SAME reason main.py is (see the launch
-  # comment above): with a FOREGROUND server bash would defer its TERM/INT traps
-  # for up to the full TTL, so a `docker stop` during the wait would hit SIGKILL
-  # after the (default 10 s) grace period and the EXIT cleanup would never run --
-  # leaving the 0600 bundle owned by the container UID and supervisor unstopped.
-  # `trap - INT QUIT` restores Python's default SIGINT disposition in the async
-  # child so token_server.py's KeyboardInterrupt path stays reachable; no `<&0`
-  # here, the server never reads stdin.
-  #
-  # This blocks until one of four things happens. In the first three we fall
-  # through to the final exit -> EXIT trap cleanup (ownership handoff +
-  # supervisor stop):
-  #   - Home Assistant acks the handoff  -> secrets.json is deleted (consumed),
-  #   - the TTL elapses without an ack   -> secrets.json is deleted (fallback),
-  #   - the pairing code is locked out   -> the endpoint closes but secrets.json
-  #     is KEPT on purpose, so no login has to be repeated: the file handoff
-  #     (Track A) still works, and if GFMY_CLEARTEXT is also set the next block
-  #     prints the bundle. Note that the two are alternatives, not cumulative:
-  #     Track C is ephemeral by contract and removes the file after printing it,
-  #     so with both switches the clear-text output REPLACES the file handoff.
-  # The fourth is a terminating signal, and it does NOT fall through: see the
-  # check right after the wait. secrets.json is then left on disk unless the
-  # server had already consumed it, which is the safe
-  # direction -- no login has to be repeated, and the EXIT trap still hands the
-  # file's ownership back to the host user.
-  ( trap - INT QUIT; exec python3 /app/gfmy/docker-login/token_server.py ) &
-  CHILD_PID=$!
-  _srv_rc=0
-  wait_for_tracked_child || _srv_rc=$?
-  # The server dying because we are shutting down is NOT "the server finished":
-  # without this the clear-text track below would dump the whole bundle into the
-  # container log on a `docker stop`. token_server.py installs no SIGTERM handler,
-  # so the file it would otherwise have consumed is still there and that `-f` test
-  # would pass.
-  exit_if_terminating "${_srv_rc}"
-fi
-
-# Deliberately a fresh `if`, not an `elif` on the block above: the switches are
-# independent, so with GFMY_ONECLICK=1 *and* GFMY_CLEARTEXT=1 this is the
-# promised fallback for the lockout case, where the server left secrets.json in
-# place on purpose. The `-f` test is re-evaluated AFTER the server returned, so
-# an acked or TTL-expired (i.e. deleted) bundle prints nothing at all. The
-# clear-text block exists exactly once and serves both entry paths.
 if [ "${_rc}" -eq 0 ] && [ "${GFMY_CLEARTEXT:-}" = "1" ] && [ -f "${_secrets_path}" ]; then
-  # Track C: no port is opened. Print the full secrets.json in a clearly
+  # Track B: no port is opened. Print the full secrets.json in a clearly
   # delimited block on THIS script's stdout, i.e. in the terminal that runs the
   # launcher (or in `docker logs`). That is a different sink from the noVNC
   # viewer, which renders the X display served by supervisord and never sees
@@ -632,7 +444,7 @@ if [ "${_rc}" -eq 0 ] && [ "${GFMY_CLEARTEXT:-}" = "1" ] && [ -f "${_secrets_pat
   # Report the real outcome instead of asserting it. A silenced `rm` claimed the
   # bundle was gone even when it was not (a readable file under a directory that
   # is no longer writable), leaving the full credentials on disk with no warning
-  # -- the opposite of what Track C promises.
+  # -- the opposite of what Track B promises.
   if rm -f "${_secrets_path}" 2>/dev/null; then
     echo "[entrypoint] The file has been removed."
   else
