@@ -3231,3 +3231,89 @@ def test_oneclick_banner_is_wired_into_the_track_b_block() -> None:
         "the banner must stay inside the track B gate: printing a handoff address "
         "for a port that was never published would send the operator nowhere"
     )
+
+
+# --- Token-endpoint wildcard refusal inside the container ---------------------
+# Both launchers refuse a wildcard GFMY_ONECLICK_BIND, but neither runs on the
+# direct-Compose path that the handoff banner itself prints, and a `.env` beside
+# the compose files reaches the overlay without them. These tests pin the
+# in-container repetition of that refusal: the one place every entry path passes.
+
+
+def _run_wildcard_classifier(bind: str) -> int:
+    """Run the REAL ``oneclick_bind_is_wildcard`` from entrypoint.sh on one value."""
+
+    fn = _extract_shell_function(_read("entrypoint.sh"), "oneclick_bind_is_wildcard")
+    proc = subprocess.run(  # noqa: S603 - fixed argv, no shell
+        ["bash", "-c", f'{fn}\noneclick_bind_is_wildcard "$1"\n', "_", bind],
+        capture_output=True,
+        text=True,
+        env={"PATH": os.environ.get("PATH", "/usr/bin:/bin")},
+        timeout=30,
+        check=False,
+    )
+    return proc.returncode
+
+
+@pytest.mark.parametrize("bind", ["0.0.0.0", "::", "*", "[::]"])
+def test_entrypoint_classifies_every_wildcard_spelling(bind: str) -> None:
+    """All four wildcard spellings the launchers reject must be caught here too.
+
+    The bracketed IPv6 form matters: Compose accepts ``[::]`` in a ``ports:``
+    entry, so a classifier that only knows the bare ``::`` would wave through the
+    exact spelling a docker-compose user is most likely to write.
+    """
+
+    assert _run_wildcard_classifier(bind) == 0, (
+        f"{bind!r} must be classified as a wildcard; the launchers refuse it, and "
+        "an endpoint serving clear-text credentials on every interface is the one "
+        "outcome this bind knob exists to prevent"
+    )
+
+
+@pytest.mark.parametrize(
+    "bind", ["", "127.0.0.1", "::1", "[::1]", "localhost", "192.0.2.10"]
+)
+def test_entrypoint_lets_every_legitimate_bind_through(bind: str) -> None:
+    """The refusal must not overshoot: concrete and loopback binds stay allowed.
+
+    ``192.0.2.10`` is the documented LAN opt-in and the whole point of the knob;
+    the empty value is "nobody set it", where Compose interpolates its own
+    loopback default. A classifier that swallowed either would break the feature
+    it is meant to protect.
+    """
+
+    assert _run_wildcard_classifier(bind) != 0, (
+        f"{bind!r} is a legitimate bind and must pass; refusing it would disable "
+        "the documented LAN handoff (or the loopback default) outright"
+    )
+
+
+def test_entrypoint_refuses_a_wildcard_before_the_login_and_only_for_track_b() -> None:
+    """The refusal must be gated on GFMY_ONECLICK and sit before the sign-in.
+
+    Two properties, both load-bearing. Gated: with the endpoint switched off
+    nothing is published on 7901, so a stray GFMY_ONECLICK_BIND in the operator's
+    environment must not block a plain file-handoff login. Early: refusing after
+    the sign-in would cost the user a full Google login for a run that cannot
+    hand anything over, and would leave a fresh bundle on disk to protect.
+    """
+
+    entrypoint = _read("entrypoint.sh")
+
+    guard = 'if [ "${GFMY_ONECLICK:-}" = "1" ] \\\n  && oneclick_bind_is_wildcard'
+    assert guard in entrypoint, (
+        "the wildcard refusal must be gated on GFMY_ONECLICK=1: a stray bind "
+        "variable must not stop a file-only login that publishes no port at all"
+    )
+
+    guard_at = entrypoint.index(guard)
+    # The LAUNCH of main.py, not the first mention of it: the file's header
+    # comment names main.py in its second paragraph, so a plain `.index("main.py")`
+    # would compare against a comment and pass no matter where the guard sits.
+    login_at = entrypoint.index("exec python3 main.py")
+    assert guard_at < login_at, (
+        "the wildcard refusal must run BEFORE main.py: rejecting the handoff only "
+        "after the sign-in wastes the login and creates the very bundle it then "
+        "refuses to hand over"
+    )

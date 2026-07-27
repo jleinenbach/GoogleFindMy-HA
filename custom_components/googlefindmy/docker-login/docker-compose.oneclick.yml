@@ -43,9 +43,10 @@
 #   a Home Assistant in its own bridge container, or on another machine, cannot
 #   use it at all. Rules that stay in force:
 #     * the DEFAULT is loopback -- an unset variable must never widen anything,
-#     * a wildcard host part (0.0.0.0, ::, *) is refused by the launchers: a
-#       concrete address can always replace it, and this port hands out
-#       credentials rather than guarding them behind a password like noVNC,
+#     * a wildcard host part (0.0.0.0, ::, *) is refused, by the launchers AND
+#       by the entrypoint itself, so the direct-Compose path below cannot slip
+#       past it: a concrete address can always replace it, and this port hands
+#       out credentials rather than guarding them behind a password like noVNC,
 #     * a widened bind is plain http on the wire, so it is for a trusted LAN or
 #       the host itself, for the seconds the handoff takes -- never the internet,
 #     * never add `network_mode: host` (that removes the bridge and the publish
@@ -73,11 +74,13 @@ services:
       # security boundary, the two equal port numbers are just host and container
       # side of the same service. The host side DEFAULTS to loopback and is only
       # widened by an explicit GFMY_ONECLICK_BIND, exactly like noVNC's
-      # GFMY_NOVNC_BIND on 7900 -- with two differences that matter, both enforced
-      # in login.sh/login.cmd rather than here (Compose cannot validate a value):
-      # a wildcard is REFUSED for this port instead of merely warned about, and a
-      # non-loopback value triggers a clear-text warning before the container
-      # starts. Keep the `:-127.0.0.1` default: without it a stray empty variable
+      # GFMY_NOVNC_BIND on 7900 -- with two differences that matter, enforced
+      # outside this file because Compose cannot validate a value: a wildcard is
+      # REFUSED for this port instead of merely warned about (in login.sh and
+      # login.cmd, and again in the entrypoint, which is the only place a direct
+      # `docker compose run` with a .env also passes), and a non-loopback value
+      # triggers a clear-text warning before the container starts.
+      # Keep the `:-127.0.0.1` default: without it a stray empty variable
       # in a shell, .env file or compose wrapper would publish on every interface.
       # Where both containers already share a network, no host publish is needed
       # at all -- see the shared-network route in README.md.

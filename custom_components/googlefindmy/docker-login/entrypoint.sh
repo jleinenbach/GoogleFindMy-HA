@@ -77,6 +77,47 @@ if [ "${GFMY_NOVNC_HARDEN:-}" != "1" ]; then
   unset _gfmy_bind _gfmy_bind_bare
 fi
 
+# --- Token-endpoint wildcard refusal (the direct-Compose analogue) ------------
+# Both launchers refuse a wildcard GFMY_ONECLICK_BIND, because 7901 carries the
+# credential bundle in clear text and a wildcard offers it on every interface,
+# including ones the operator never meant to expose. That refusal used to be the
+# only gate, and it sits on a path a user can bypass: this banner itself prints
+# the manual `docker compose -f ... -f docker-compose.oneclick.yml run` command,
+# and a `.env` next to the compose files feeds GFMY_ONECLICK_BIND straight into
+# the overlay without either launcher ever running. The same reasoning that makes
+# the noVNC block above derive its verdict INSIDE the container applies here, so
+# the refusal is repeated at the one place every entry path passes through.
+#
+# A function, not an inline block, so the regression test can RUN it against
+# several bind values instead of grepping for hopeful substrings. It classifies
+# only; the caller decides, which keeps `exit` out of the tested unit.
+function oneclick_bind_is_wildcard {
+  local bare
+  # Strip one enclosing IPv6 bracket pair, mirroring the noVNC derivation above.
+  bare="${1#[}"
+  bare="${bare%]}"
+  case "${bare}" in
+    0.0.0.0 | :: | "*") return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# Gated on GFMY_ONECLICK: with the endpoint switched off nothing is published on
+# 7901 at all, so a stray GFMY_ONECLICK_BIND in the environment must not stop a
+# plain file-handoff login. Refuse BEFORE the sign-in rather than after it: there
+# is no credential to protect yet, and the user does not spend a full Google
+# login on a run that would be rejected at the handoff.
+if [ "${GFMY_ONECLICK:-}" = "1" ] \
+  && oneclick_bind_is_wildcard "${GFMY_ONECLICK_BIND:-}"; then
+  echo "[entrypoint] FATAL: GFMY_ONECLICK_BIND='${GFMY_ONECLICK_BIND}' is a wildcard." >&2
+  echo "[entrypoint] Port 7901 serves your Google credentials in clear text, so it" >&2
+  echo "[entrypoint] must be published on ONE address you chose, not on every" >&2
+  echo "[entrypoint] interface. Use a concrete address of this host (or leave the" >&2
+  echo "[entrypoint] variable unset for the loopback default):" >&2
+  echo "[entrypoint]   GFMY_ONECLICK_BIND=192.0.2.10 GFMY_ONECLICK=1 bash login.sh" >&2
+  exit 2
+fi
+
 # --- Per-run noVNC password for a LAN-bound viewer (AP-7) ---------------------
 # Only when the launcher raised the LAN-hardening verdict (GFMY_NOVNC_HARDEN=1,
 # set for a non-loopback/wildcard bind); the loopback/tunnel default never sets

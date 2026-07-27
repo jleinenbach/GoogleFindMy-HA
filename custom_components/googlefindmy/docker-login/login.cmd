@@ -159,9 +159,16 @@ rem options, same A default, same precedence (an explicit --track or a preset
 rem GFMY_ONECLICK/GFMY_CLEARTEXT skips the question entirely).
 rem
 rem Two deliberate differences from the bash version. There is no `[ -t 0 ]`
-rem equivalent in batch, so the question is simply asked: with stdin redirected,
-rem `set /p` leaves the variable untouched and execution continues, which lands on
-rem the A default -- i.e. exactly the historical behaviour. And an unrecognised
+rem equivalent in batch, so the question is simply asked. At EOF (no redirect, or
+rem an exhausted one) `set /p` leaves the variable untouched and execution
+rem continues on the A default -- the historical behaviour. Be precise about the
+rem remaining case, because it is a real cost and not a no-op: if stdin IS
+rem redirected and still has content, `set /p` CONSUMES its first line. So
+rem `login.cmd < answers.txt` feeds that first line to this prompt instead of to
+rem the container's e-mail question, and a line beginning with b or c silently
+rem selects that track. Non-interactive Windows runs should therefore pass the
+rem track explicitly (`--track a`, or a preset GFMY_ONECLICK/GFMY_CLEARTEXT),
+rem which skips this block entirely via the guards below. And an unrecognised
 rem answer falls back to A instead of re-asking, because a re-ask loop would spin
 rem forever against a redirected stdin that can never satisfy it.
 if defined TRACK_FROM_CLI goto :track_done

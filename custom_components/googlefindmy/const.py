@@ -718,7 +718,9 @@ def map_token_hex_digest(seed: str) -> str:
 # Two distinct container ports keep the human-facing noVNC console and the
 # machine-facing token endpoint separated. ``CONTAINER_NOVNC_PORT`` is only ever
 # rendered as a clickable link/hint, while ``CONTAINER_TOKEN_PORT`` is the default
-# for the loopback fetch that pulls the freshly minted ``secrets.json``.
+# for the fetch that pulls the freshly minted ``secrets.json``. That fetch is
+# loopback in the default setup; the container's ``GFMY_ONECLICK_BIND`` opt-in can
+# publish the same port on a LAN address for a Home Assistant on another machine.
 CONTAINER_NOVNC_PORT: int = 7900
 CONTAINER_TOKEN_PORT: int = 7901
 
