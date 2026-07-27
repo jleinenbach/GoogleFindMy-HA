@@ -3096,10 +3096,13 @@ def claim_pending_entry_reload(hass: HomeAssistant, entry_id: str) -> bool:
     The duplicate is not hypothetical. Every path that writes credentials into an
     entry goes through ``async_update_entry``, which notifies the update listener
     in :func:`async_setup_entry`, and that listener reloads the entry so the new
-    credentials take effect. A flow that also reloads the entry itself -- the
-    discovery fallback writer, the non-interactive discovery update, reconfigure,
-    the options credential refresher -- therefore produces two reloads unless the
-    two sides agree on one owner. This latch is that agreement, and it works
+    credentials take effect -- as long as it is there. An entry that is not loaded
+    has no listener any more (Home Assistant removes it on unload), so a writing
+    path cannot leave the reload to it and schedules its own: the discovery
+    fallback writer, the branch where the core's unique-id guard did the write,
+    the non-interactive discovery update, reconfigure, the options credential
+    refresher. Two of them therefore produce two reloads unless the sides agree
+    on one owner. This latch is that agreement, and it works
     regardless of which side runs first, which no ordering rule between a
     synchronous flow step and a listener task could guarantee.
 
@@ -7522,6 +7525,31 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
             _LOGGER.debug(
                 "Credentials changed but async_schedule_reload is unavailable; "
                 "they take effect on the next restart"
+            )
+            return
+
+        # A reload that is already under way is not visible in the latch for the
+        # whole of its duration: ``async_unload_entry`` releases the latch as its
+        # first act (a reload has arrived at that point), while Home Assistant
+        # removes this listener only *after* ``async_unload_entry`` returns, in
+        # ``_async_process_on_unload``. Between the two lies the entire platform
+        # unload with its awaits, so an invocation queued before the reload can
+        # wake up in that window, pass the identity check above and find the
+        # latch free again: a second teardown of an entry that is already being
+        # torn down. The core closes this for us because it sets
+        # ``UNLOAD_IN_PROGRESS`` *before* calling ``async_unload_entry`` (checked
+        # in dev and in the declared floor 2025.9.1), so the state is never
+        # ``LOADED`` inside that window. An unknown state means fail-open, as
+        # everywhere else here: a missing reload is worse than one too many, and
+        # the test stubs do not populate the field (contract in
+        # ``agents/config_flow/AGENTS.md``).
+        entry_state = getattr(updated_entry, "state", None)
+        if entry_state is not None and entry_state is not ConfigEntryState.LOADED:
+            _LOGGER.debug(
+                "Credentials changed for entry %s, but it is not loaded (%s); the "
+                "reload under way will pick them up",
+                updated_entry.entry_id,
+                entry_state,
             )
             return
 

@@ -796,6 +796,67 @@ async def test_a_listener_invocation_from_a_bygone_setup_does_nothing(
 
 
 @pytest.mark.asyncio
+async def test_the_listener_stays_out_of_an_unload_that_is_under_way(
+    monkeypatch: pytest.MonkeyPatch,
+    stub_coordinator_factory: Callable[..., type[Any]],
+) -> None:
+    """The latch is free for a while inside a reload; the state is not.
+
+    ``async_unload_entry`` releases the latch as its first act, but Home
+    Assistant removes the listener only *after* ``async_unload_entry`` returns
+    (``_async_process_on_unload``). The whole platform unload lies between the
+    two, with its awaits, so an invocation queued before the reload can wake up
+    there, pass the identity check and find the latch free: a second teardown of
+    an entry that is already being torn down. What separates the window from a
+    genuine change is the entry state, which the core sets to
+    ``UNLOAD_IN_PROGRESS`` *before* calling ``async_unload_entry`` (verified in
+    dev and in the declared floor 2025.9.1).
+    """
+
+    loop = asyncio.get_running_loop()
+    harness = _prepare_async_setup_entry_harness(
+        monkeypatch, stub_coordinator_factory, loop
+    )
+    integration = harness.integration
+    entry = harness.entry
+    hass = harness.hass
+
+    entry.data[DATA_AAS_TOKEN] = "aas_et/OLD_TOKEN_VALUE"
+    harness.cache.values = {integration.username_string: "user@example.com"}
+
+    assert await integration.async_setup(hass, {}) is True
+    assert await integration.async_setup_entry(hass, entry) is True
+
+    notify = entry._update_listeners[0]
+    # The core exposes the registered listeners here; the stub does not, so the
+    # attribute is supplied the way the core would, which keeps the identity
+    # check from being the reason this test passes.
+    entry.update_listeners = [notify]
+
+    # Inside the window: the reload released the latch at the start of the
+    # unload, the listener is still registered, and the entry is being torn down.
+    integration.discard_pending_entry_reload(hass, entry.entry_id)
+    entry.state = ConfigEntryState.UNLOAD_IN_PROGRESS
+    entry.data = {**entry.data, DATA_AAS_TOKEN: "aas_et/NEW_TOKEN_VALUE"}
+    await notify(hass, entry)
+
+    assert hass.config_entries.scheduled_reloads == [], (
+        "an unload that is already under way must not be answered with a second "
+        "reload of the same entry"
+    )
+
+    # Counter-direction: once the entry is loaded again, a changed credential is
+    # the listener's business as before.
+    entry.state = ConfigEntryState.LOADED
+    entry.data = {**entry.data, DATA_AAS_TOKEN: "aas_et/THIRD_TOKEN_VALUE"}
+    await notify(hass, entry)
+
+    assert hass.config_entries.scheduled_reloads == [entry.entry_id], (
+        "a loaded entry with changed credentials still has to be reloaded"
+    )
+
+
+@pytest.mark.asyncio
 async def test_a_core_without_schedule_reload_stays_quiet_about_it(
     monkeypatch: pytest.MonkeyPatch,
     stub_coordinator_factory: Callable[..., type[Any]],

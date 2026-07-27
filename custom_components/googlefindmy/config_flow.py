@@ -2973,9 +2973,12 @@ def _claim_entry_reload(hass: HomeAssistant, entry_id: str) -> bool:
 
     Every path here that writes credentials also goes through
     ``async_update_entry``, which notifies the integration's update listener, and
-    that listener reloads the entry so the new credentials take effect. Without an
-    agreement on one owner, a flow that reloads the entry as well produces two
-    consecutive unload/setup cycles -- ``async_schedule_reload`` does not coalesce.
+    that listener reloads the entry so the new credentials take effect *where it
+    exists*: an entry that is not loaded has no listener any more, Home Assistant
+    removes it on unload, which is why every writing path schedules its own reload
+    rather than relying on it. Without an agreement on one owner, two of them
+    produce two consecutive unload/setup cycles -- ``async_schedule_reload`` does
+    not coalesce.
     The latch in the integration package is that agreement; see
     ``claim_pending_entry_reload``.
 
@@ -3731,10 +3734,14 @@ class ConfigFlow(
             # (see __init__.py), and Home Assistant deprecates that combination
             # with a reloading config-flow method (warning from 2026.6, error
             # from 2026.12) because both would reload. The reload the changed
-            # credentials still need comes from that listener, which fires on
-            # the merge this call performs. The core's elif branch for a
-            # SETUP_RETRY entry from a discovery source is untouched by this and
-            # keeps working: it carries no report_usage.
+            # credentials still need normally comes from that listener, which
+            # fires on the merge this call performs. That listener is not a
+            # guarantee, though: an entry that is not loaded has none, Home
+            # Assistant removes it on unload. Callers that pass ``updates`` here
+            # therefore have to schedule the reload themselves once they have
+            # established that the write landed (both do). The core's elif branch
+            # for a SETUP_RETRY entry from a discovery source is untouched by
+            # this and keeps working: it carries no report_usage.
             self._abort_if_unique_id_configured(updates=updates, reload_on_update=False)
         except data_entry_flow.AbortFlow:
             if coalesce:
@@ -4457,9 +4464,38 @@ class ConfigFlow(
                     existing_entry = _find_entry_by_email(
                         cast(HomeAssistant, hass_obj), payload.email
                     )
-                written = existing_entry is not None and _entry_carries_credentials(
+                if existing_entry is not None and _entry_carries_credentials(
                     existing_entry, updates
-                )
+                ):
+                    written = True
+                    # The entry now holds exactly these credentials, which is
+                    # what the caller below reports and what makes the wholesale
+                    # write unnecessary. Note the difference: this reads the
+                    # *state*, it does not prove that this flow's guard call
+                    # performed the write. It is also true when the merge was a
+                    # no-op because the entry already held them, which happens
+                    # after a restart, where the watcher rediscovers an unchanged
+                    # bundle (``_settled_signatures`` is process-local). The
+                    # reload is scheduled for that case too, deliberately: it is
+                    # what redeems the cleanup ticket staged below, and without
+                    # it the same bundle is offered again after every restart.
+                    #
+                    # The reload has to be scheduled here because the guard was
+                    # asked not to (``reload_on_update=False``), on the grounds
+                    # that the entry's update listener carries it. An entry that
+                    # is not loaded has no listener left, Home Assistant removes
+                    # it on unload, and that is the state expired credentials
+                    # produce (``SETUP_ERROR`` after ``ConfigEntryAuthFailed``):
+                    # precisely the entry an overwrite is meant to rescue. There
+                    # the write would stay ineffective and the durability gate in
+                    # ``async_setup_entry`` would never run, so the staged bundle
+                    # would never be consumed. Claiming the latch keeps this from
+                    # becoming a second unload/setup cycle where a listener does
+                    # exist. ``hass_obj`` cannot be ``None`` here: resolving the
+                    # entry a few lines above is what required it.
+                    _schedule_claimed_reload(
+                        cast(HomeAssistant, hass_obj), existing_entry.entry_id
+                    )
 
             if not written:
                 # The entry does not hold these credentials: the guard returned

@@ -855,6 +855,109 @@ async def test_discovery_overwrite_does_not_write_twice_after_the_guard_wrote(
 
 
 @pytest.mark.asyncio
+async def test_discovery_overwrite_reloads_after_a_guard_write_on_an_unloaded_entry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A guard write on an entry without a listener still has to take effect.
+
+    The guard is asked not to reload (``reload_on_update=False``) because the
+    entry's update listener carries that. An entry that is not loaded has none
+    left: Home Assistant removes the listener on unload, which is the state
+    expired credentials produce, and precisely the entry a discovery overwrite
+    is meant to rescue. Leaving the reload to that absent listener reported
+    ``credentials_updated`` while the account kept running on the old
+    credentials until a restart, and the bundle staged for deletion was never
+    consumed either, because the durability gate lives in ``async_setup_entry``.
+
+    The state below names the scenario, it does not drive it: the step schedules
+    the reload state-blind, on purpose. Deciding by state would break the case
+    where the merge is a no-op (an unchanged bundle after a restart), because
+    there no listener fires either and the cleanup ticket would stay unredeemed.
+    Whether one reload or two arrive is settled by the shared latch, not here.
+    """
+
+    entry, flow = await _prepare_configured_account_flow(monkeypatch)
+    # No listener: the core removed it when the entry was unloaded after
+    # ``ConfigEntryAuthFailed``. Nothing but this flow can reload it.
+    entry.state = ConfigEntryState.SETUP_ERROR
+
+    payload = _discovery_payload_for_configured_account()
+
+    form = await flow.async_step_discovery(payload)
+    if inspect.isawaitable(form):
+        form = await form
+    assert form["type"] == "form"
+
+    question = await flow.async_step_discovery_confirm({})
+    if inspect.isawaitable(question):
+        question = await question
+    assert question.get("step_id") == "discovery_overwrite"
+
+    result = await flow.async_step_discovery_overwrite(
+        {config_flow._FIELD_OVERWRITE_CREDENTIALS: True}
+    )
+    if inspect.isawaitable(result):
+        result = await result
+
+    assert result["type"] == "abort"
+    assert result["reason"] == "credentials_updated"
+    assert entry.data[CONF_OAUTH_TOKEN] == "aas_et/NEW_TOKEN_VALUE"
+    assert flow.hass.config_entries.scheduled_reloads == [entry.entry_id], (
+        "the guard wrote but does not reload; without a listener nobody else "
+        "makes those credentials effective"
+    )
+
+
+@pytest.mark.asyncio
+async def test_discovery_overwrite_stands_down_when_the_guard_write_is_claimed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The counter-direction: a claimed reload must not be scheduled twice.
+
+    Where the entry is loaded, its update listener reloads on the same write.
+    Both go through the shared latch, so whoever claims first reloads and the
+    other stands down; ``async_schedule_reload`` does not coalesce.
+    """
+
+    entry, flow = await _prepare_configured_account_flow(monkeypatch)
+
+    integration = config_flow.import_integration_package()
+    assert integration.claim_pending_entry_reload(flow.hass, entry.entry_id) is True
+
+    payload = _discovery_payload_for_configured_account()
+
+    form = await flow.async_step_discovery(payload)
+    if inspect.isawaitable(form):
+        form = await form
+    assert form["type"] == "form"
+
+    question = await flow.async_step_discovery_confirm({})
+    if inspect.isawaitable(question):
+        question = await question
+    assert question.get("step_id") == "discovery_overwrite"
+
+    result = await flow.async_step_discovery_overwrite(
+        {config_flow._FIELD_OVERWRITE_CREDENTIALS: True}
+    )
+    if inspect.isawaitable(result):
+        result = await result
+
+    assert result["type"] == "abort"
+    assert result["reason"] == "credentials_updated"
+    assert entry.data[CONF_OAUTH_TOKEN] == "aas_et/NEW_TOKEN_VALUE", (
+        "standing down concerns the reload only; the credentials are written either way"
+    )
+    assert flow.hass.config_entries.scheduled_reloads == [], (
+        "a reload is already on its way; a second one only tears the entry "
+        "down twice in a row"
+    )
+    assert _staged_cleanup_tickets(flow), (
+        "the bundle has to be staged for deletion regardless of who reloads; "
+        "tying the staging to the claim would leave it rediscovered forever"
+    )
+
+
+@pytest.mark.asyncio
 async def test_discovery_overwrite_drops_credentials_the_guard_cannot_remove(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
