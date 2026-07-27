@@ -100,7 +100,6 @@ except ImportError:  # Pre-2025.5 HA builds do not expose the helper.
     OperationNotAllowed = type("OperationNotAllowed", (HomeAssistantError,), {})
 
 from .const import (
-    CLOUD_SCANNER_DISCOVERY_SOURCE,
     CONF_GOOGLE_EMAIL,
     CONF_OAUTH_TOKEN,
     CONFIG_ENTRY_VERSION,
@@ -1111,10 +1110,11 @@ class _ConfigFlowMixin:
         description_placeholders: Mapping[str, Any] | None = None,
     ) -> FlowResult: ...
 
-    def async_update_reload_and_abort(self, **kwargs: Any) -> FlowResult: ...
-
     def _abort_if_unique_id_configured(
-        self, *, updates: Mapping[str, Any] | None = None
+        self,
+        *,
+        updates: Mapping[str, Any] | None = None,
+        reload_on_update: bool = True,
     ) -> None: ...
 
     def _set_confirm_only(self) -> None: ...
@@ -2159,9 +2159,9 @@ def _async_discard_cleanup_ticket_for_flow(
 
     Tickets that carry an ``entry_id`` are deliberately **kept**. Those come
     from the update paths, which finish by aborting the flow on purpose
-    (``async_update_reload_and_abort`` and friends): their entry exists, the
-    update has been applied and a reload is already scheduled, so the flow going
-    away says nothing about the pending cleanup. Discarding them here would
+    (``_async_update_entry_and_abort`` and friends): their entry exists, the
+    update has been applied and the update listener reloads on it, so the flow
+    going away says nothing about the pending cleanup. Discarding them here would
     silently disable the cleanup on every update path.
 
     Tickets marked ``entry_promised`` are kept for the same reason, one step
@@ -3063,28 +3063,6 @@ class CloudDiscoveryData:
     source: str | None = None
 
 
-def _is_credential_import_discovery(discovery: CloudDiscoveryData) -> bool:
-    """Return True when the payload represents credentials someone supplied.
-
-    Only such a payload may raise the overwrite question, because only there is
-    a human waiting who meant to replace something. The tracker rescan in
-    ``device_tracker.py`` re-submits the credentials the entry already stores;
-    asking whether to replace them with themselves would be a dialog about
-    nothing.
-
-    The flow context cannot answer this: ``discovery.py`` downgrades every source
-    that is not a Home Assistant ``SOURCE_*`` constant to plain ``discovery``,
-    and the file watcher's own ``discovery_update_info`` is downgraded the same
-    way, so both producers arrive under an identical context source. Hence the
-    check reads the payload marker.
-
-    An unmarked payload counts as an import: replacing working credentials
-    unasked is the worse failure, so an unknown producer gets the question.
-    """
-
-    return discovery.source != CLOUD_SCANNER_DISCOVERY_SOURCE
-
-
 def _normalize_and_validate_discovery_payload(
     payload: Mapping[str, Any] | None,
 ) -> CloudDiscoveryData:
@@ -3403,6 +3381,37 @@ class ConfigFlow(
     domain: ClassVar[str] = DOMAIN
     VERSION = CONFIG_ENTRY_VERSION
 
+    def _async_update_entry_and_abort(
+        self,
+        *,
+        entry: ConfigEntry,
+        data: Mapping[str, Any],
+        reason: str,
+    ) -> FlowResult:
+        """Persist ``data`` on ``entry`` and abort, without reloading from here.
+
+        Replaces ``async_update_reload_and_abort``. Home Assistant deprecates
+        the combination of an update listener on the entry with a reloading
+        config-flow method (warning from 2026.6, error from 2026.12): with a
+        listener present, the core's reload duplicates the one the listener
+        causes. This integration keeps its listener, because it adopts changed
+        watch paths at runtime, so the update happens reload-free here.
+
+        The reload that changed credentials still need is not lost, it moves:
+        ``async_update_entry`` notifies the update listener in ``__init__.py``,
+        which reloads exactly when a credential-relevant key changed. Storing
+        credentials without a reload would leave them written but ineffective,
+        because the token cache is seeded in ``async_setup_entry``.
+
+        ``ConfigFlow.async_update_and_abort`` is deliberately not used: it
+        exists only from HA 2025.11.0, while the declared minimum is 2025.9.1
+        (``hacs.json``), where the method lives on ``ConfigSubentryFlow`` alone.
+        Both building blocks used here exist in every supported version.
+        """
+
+        self.hass.config_entries.async_update_entry(entry, data=dict(data))
+        return self.async_abort(reason=reason)
+
     def __init__(self) -> None:
         """Initialize transient flow state."""
         self._auth_data: dict[str, Any] = {}
@@ -3600,7 +3609,15 @@ class ConfigFlow(
         _ensure_optional_entry_attributes(existing_entry)
 
         try:
-            self._abort_if_unique_id_configured(updates=updates)
+            # reload_on_update=False: this flow class carries an update listener
+            # (see __init__.py), and Home Assistant deprecates that combination
+            # with a reloading config-flow method (warning from 2026.6, error
+            # from 2026.12) because both would reload. The reload the changed
+            # credentials still need comes from that listener, which fires on
+            # the merge this call performs. The core's elif branch for a
+            # SETUP_RETRY entry from a discovery source is untouched by this and
+            # keeps working: it carries no report_usage.
+            self._abort_if_unique_id_configured(updates=updates, reload_on_update=False)
         except data_entry_flow.AbortFlow:
             if coalesce:
                 await _async_coalesce_account_entries(hass, existing_entry)
@@ -4080,43 +4097,24 @@ class ConfigFlow(
         self._clear_discovery_confirmation_state()
 
         if entry_exists and pending_auth is not None:
-            if _is_credential_import_discovery(pending_payload):
-                # The account is already configured and a human just supplied
-                # credentials. Do not write yet: ask first, because this
-                # replaces working credentials. The old behaviour wrote
-                # unconditionally and reported "already_configured", which said
-                # nothing about what had happened to the credentials.
-                self._pending_overwrite_payload = pending_payload
-                self._pending_overwrite_auth = pending_auth
-                return await self.async_step_discovery_overwrite()
-
-            # A tracker rescan re-submits the credentials the entry already
-            # stores. There is nothing to replace and nobody to ask, so this
-            # keeps the pre-existing behaviour: apply the payload and abort as
-            # already configured.
-            _LOGGER.debug(
-                "Discovery from %s for a configured account: "
-                "applying updates without asking",
-                pending_payload.source,
-            )
-            rebased = self._async_rebase_credential_updates(
-                pending_payload.email, pending_auth
-            )
-            if rebased is None:
-                # The entry went away while the card was open. There is nothing
-                # to update, and this path deliberately does not create
-                # anything: the payload is a rescan of an account the user
-                # configured, not an import they asked for.
-                return self.async_abort(reason="already_configured")
-            try:
-                await self._async_prepare_account_context(
-                    email=pending_payload.email,
-                    preferred_unique_id=pending_payload.unique_id,
-                    updates=rebased[1],
-                )
-            except data_entry_flow.AbortFlow:
-                return self.async_abort(reason="already_configured")
-            return self.async_abort(reason="already_configured")
+            # The account is already configured and someone supplied
+            # credentials. Do not write yet: ask first, because this replaces
+            # working credentials. The old behaviour wrote unconditionally and
+            # reported "already_configured", which said nothing about what had
+            # happened to the credentials.
+            #
+            # Every payload reaching this point gets the question, including an
+            # unmarked one. That direction is deliberate: replacing working
+            # credentials unasked is the worse failure, so an unknown producer
+            # is asked about rather than trusted. The former silent branch
+            # existed for the tracker rescan, which no longer produces discovery
+            # payloads at all (see device_tracker.py); a positive list of
+            # trusted sources would invert the direction and break the
+            # credential import itself the moment Home Assistant renames or adds
+            # a source constant.
+            self._pending_overwrite_payload = pending_payload
+            self._pending_overwrite_auth = pending_auth
+            return await self.async_step_discovery_overwrite()
 
         return await self._async_import_discovered_account(pending_payload)
 
@@ -5761,7 +5759,7 @@ class ConfigFlow(
                                     "reauth_success_reason_override",
                                     "reauth_successful",
                                 )
-                                return self.async_update_reload_and_abort(
+                                return self._async_update_entry_and_abort(
                                     entry=entry,
                                     data=updated_data,
                                     reason=success_reason,
@@ -5864,7 +5862,7 @@ class ConfigFlow(
                                             "reauth_success_reason_override",
                                             "reauth_successful",
                                         )
-                                        return self.async_update_reload_and_abort(
+                                        return self._async_update_entry_and_abort(
                                             entry=entry,
                                             data=updated_data,
                                             reason=success_reason,
@@ -5885,7 +5883,7 @@ class ConfigFlow(
                                 updated_data.pop(DATA_AAS_TOKEN, None)
                             updated_data.pop(DATA_SECRET_BUNDLE, None)
                             await self._async_clear_cached_aas_token(entry)
-                            return self.async_update_reload_and_abort(
+                            return self._async_update_entry_and_abort(
                                 entry=entry,
                                 data=updated_data,
                                 reason="reauth_successful",
@@ -5911,7 +5909,7 @@ class ConfigFlow(
                                 ):
                                     updated_data.pop(DATA_AAS_TOKEN, None)
                                 await self._async_clear_cached_aas_token(entry)
-                                return self.async_update_reload_and_abort(
+                                return self._async_update_entry_and_abort(
                                     entry=entry,
                                     data=updated_data,
                                     reason="reauth_successful",

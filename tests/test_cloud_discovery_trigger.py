@@ -133,7 +133,7 @@ async def test_trigger_cloud_discovery_sanitizes_context_source(
             email="User@Example.com",
             token="aas_et/TOKEN",
             secrets_bundle={"aas_token": "aas_et/TOKEN"},
-            source="cloud_scanner",
+            source="custom_producer",
         )
 
     assert await _exercise() is CloudDiscoveryOutcome.ACCEPTED
@@ -144,7 +144,7 @@ async def test_trigger_cloud_discovery_sanitizes_context_source(
     data = kwargs.get("data", {})
 
     assert context["source"] == config_flow.SOURCE_DISCOVERY
-    assert data["discovery_source"] == "cloud_scanner"
+    assert data["discovery_source"] == "custom_producer"
 
 
 async def test_trigger_cloud_discovery_falls_back(

@@ -197,6 +197,7 @@ class _StubConfigEntries:
         self.updated_subentries: list[tuple[_StubConfigEntry, ConfigSubentry]] = []
         self.removed_subentries: list[tuple[_StubConfigEntry, str]] = []
         self.entry_update_calls: list[tuple[_StubConfigEntry, dict[str, Any]]] = []
+        self.scheduled_reloads: list[str] = []
         self.unload_calls: list[str] = []
         self.set_disabled_by_calls: list[tuple[str, object | None]] = []
         self.setup_calls: list[str] = []
@@ -316,6 +317,11 @@ class _StubConfigEntries:
             raise LookupError(f"Config entry '{entry_id}' not registered")
         self.setup_calls.append(entry_id)
         return True
+
+    def async_schedule_reload(self, entry_id: str) -> None:
+        """Record a scheduled reload instead of performing one."""
+
+        self.scheduled_reloads.append(entry_id)
 
     def async_update_entry(self, entry: _StubConfigEntry, **kwargs: Any) -> None:
         self.entry_update_calls.append((entry, dict(kwargs)))
@@ -592,6 +598,117 @@ async def test_async_setup_entry_leaves_modern_entries_intact(
     assert (
         harness.cache.values.get(integration.username_string)
         == entry.data[CONF_GOOGLE_EMAIL]
+    )
+
+
+@pytest.mark.asyncio
+async def test_changed_credentials_reload_the_entry_exactly_once(
+    monkeypatch: pytest.MonkeyPatch,
+    stub_coordinator_factory: Callable[..., type[Any]],
+) -> None:
+    """The update listener carries the reload the config flow no longer does.
+
+    Home Assistant turns "update listener plus reloading config-flow method"
+    into an error in 2026.12, so the flow stores credentials without reloading.
+    Storing alone would leave them ineffective: the token cache is seeded in
+    ``async_setup_entry``, and a running coordinator does not pick up new
+    tokens. The listener therefore has to reload on a credential change, once,
+    and stay quiet for everything else.
+    """
+
+    loop = asyncio.get_running_loop()
+    harness = _prepare_async_setup_entry_harness(
+        monkeypatch, stub_coordinator_factory, loop
+    )
+    integration = harness.integration
+    entry = harness.entry
+    hass = harness.hass
+
+    entry.data[DATA_AAS_TOKEN] = "aas_et/OLD_TOKEN_VALUE"
+    harness.cache.values = {integration.username_string: "user@example.com"}
+
+    assert await integration.async_setup(hass, {}) is True
+    assert await integration.async_setup_entry(hass, entry) is True
+
+    assert len(entry._update_listeners) == 1
+    notify = entry._update_listeners[0]
+
+    # Anything that leaves the credentials alone must not reload.
+    entry.options = {"tracked_devices": ["existing"]}
+    await notify(hass, entry)
+    assert hass.config_entries.scheduled_reloads == []
+
+    # New credentials: one reload, and only one even if the notification
+    # arrives twice before it takes effect.
+    entry.data = {**entry.data, DATA_AAS_TOKEN: "aas_et/NEW_TOKEN_VALUE"}
+    await notify(hass, entry)
+    await notify(hass, entry)
+
+    assert hass.config_entries.scheduled_reloads == [entry.entry_id], (
+        "changed credentials have to become effective, and a second "
+        "notification must not schedule a second reload"
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_core_without_schedule_reload_stays_quiet_about_it(
+    monkeypatch: pytest.MonkeyPatch,
+    stub_coordinator_factory: Callable[..., type[Any]],
+) -> None:
+    """An older core simply applies the credentials on the next restart.
+
+    ``async_schedule_reload`` is resolved defensively because the declared
+    minimum version is 2025.9.1; missing it must not raise out of an update
+    listener, where an exception would surface as an unrelated error.
+    """
+
+    loop = asyncio.get_running_loop()
+    harness = _prepare_async_setup_entry_harness(
+        monkeypatch, stub_coordinator_factory, loop
+    )
+    integration = harness.integration
+    entry = harness.entry
+    hass = harness.hass
+
+    entry.data[DATA_AAS_TOKEN] = "aas_et/OLD_TOKEN_VALUE"
+    harness.cache.values = {integration.username_string: "user@example.com"}
+
+    assert await integration.async_setup(hass, {}) is True
+    assert await integration.async_setup_entry(hass, entry) is True
+
+    monkeypatch.setattr(
+        hass.config_entries, "async_schedule_reload", None, raising=False
+    )
+    entry.data = {**entry.data, DATA_AAS_TOKEN: "aas_et/NEW_TOKEN_VALUE"}
+
+    await entry._update_listeners[0](hass, entry)
+
+    assert hass.config_entries.scheduled_reloads == []
+
+
+def test_the_credential_fingerprint_keeps_no_plaintext() -> None:
+    """The value held for the entry's lifetime must not carry the tokens."""
+
+    integration = importlib.import_module("custom_components.googlefindmy")
+
+    secret = "aas_et/VERY_SECRET_TOKEN"
+    data = {
+        CONF_GOOGLE_EMAIL: "user@example.com",
+        DATA_AAS_TOKEN: secret,
+        DATA_SECRET_BUNDLE: {"aas_token": secret, "username": "user@example.com"},
+    }
+
+    fingerprint = integration._credential_fingerprint(data)
+
+    assert secret not in fingerprint
+    assert "user@example.com" not in fingerprint
+    assert fingerprint == integration._credential_fingerprint(dict(data))
+    assert fingerprint != integration._credential_fingerprint(
+        {**data, DATA_AAS_TOKEN: "aas_et/OTHER"}
+    )
+    # A missing container must not raise on the setup path.
+    assert integration._credential_fingerprint(None) == (
+        integration._credential_fingerprint({})
     )
 
 

@@ -606,23 +606,26 @@ async def test_discovery_overwrite_declined_keeps_stored_credentials(
 
 
 @pytest.mark.asyncio
-async def test_discovery_from_tracker_rescan_does_not_ask_to_overwrite(
+async def test_an_unmarked_payload_still_raises_the_overwrite_question(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A tracker rescan must not raise the overwrite question.
+    """A payload without a source marker must be treated as a credential import.
 
-    ``device_tracker.py`` re-submits the credentials the entry already stores
-    whenever it spots new trackers. Asking whether to replace them with
-    themselves would be a dialog about nothing, and its text would claim a
-    credentials file had been found when none was. The context source cannot
-    tell the producers apart (``discovery.py`` downgrades every non-Home-
-    Assistant source to plain ``discovery``), so the payload marker decides.
+    This pins the failure direction, and it is the direction that matters: an
+    unknown producer gets asked about rather than trusted, because replacing
+    working credentials unasked is the worse failure. A future rebuild onto a
+    positive list of trusted sources would invert exactly this and silently
+    kill the credential import, so it has to fail here.
+
+    The former counterpart of this test covered the tracker rescan, which no
+    longer produces discovery payloads at all; the flow context cannot tell
+    producers apart anyway (``discovery.py`` downgrades every non-Home-
+    Assistant source to plain ``discovery``).
     """
 
     entry, flow = await _prepare_configured_account_flow(monkeypatch)
-    payload = _discovery_payload_for_configured_account(
-        config_flow.CLOUD_SCANNER_DISCOVERY_SOURCE
-    )
+    payload = _discovery_payload_for_configured_account()
+    assert "discovery_source" not in payload
 
     form = await flow.async_step_discovery(payload)
     if inspect.isawaitable(form):
@@ -634,17 +637,12 @@ async def test_discovery_from_tracker_rescan_does_not_ask_to_overwrite(
     if inspect.isawaitable(result):
         result = await result
 
-    assert result["type"] == "abort", (
-        "a rescan of an already configured account must not open a dialog"
+    assert result.get("step_id") == "discovery_overwrite", (
+        "an unmarked payload must be asked about, never applied silently"
     )
-    assert result.get("step_id") != "discovery_overwrite"
-    assert result["reason"] == "already_configured", (
-        "the rescan keeps the abort behaviour it had before the dialog existed"
+    assert entry.data[CONF_OAUTH_TOKEN] == "aas_et/OLD_TOKEN_VALUE", (
+        "nothing may be written while the question is still on screen"
     )
-    assert entry.data[CONF_OAUTH_TOKEN] == "aas_et/NEW_TOKEN_VALUE", (
-        "the rescan still applies its payload, exactly as it did before"
-    )
-    assert "data" not in entry.data
 
 
 @pytest.mark.asyncio
@@ -987,49 +985,6 @@ async def test_rebased_updates_drop_credentials_the_new_ones_replaced(
     assert config_flow.DATA_SECRET_BUNDLE not in updates, (
         "credentials without a bundle must clear the stored one"
     )
-
-
-@pytest.mark.asyncio
-async def test_discovery_rescan_aborts_when_the_entry_vanished_while_confirming(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A rescan whose account disappeared must abort, not import.
-
-    The rescan path resolves the entry when the answer arrives rather than
-    trusting the one it saw earlier. With no entry left there is nothing to
-    update, and creating one is not what a rescan of a configured account
-    means -- that would turn a background scan into an unrequested import.
-    """
-
-    _entry, flow = await _prepare_configured_account_flow(monkeypatch)
-    payload = _discovery_payload_for_configured_account(
-        discovery_source="cloud_scanner"
-    )
-
-    form = await flow.async_step_discovery(payload)
-    if inspect.isawaitable(form):
-        form = await form
-    assert form["type"] == "form"
-
-    imported = False
-
-    async def _never_imports() -> Any:
-        nonlocal imported
-        imported = True
-        return {"type": config_flow.data_entry_flow.FlowResultType.CREATE_ENTRY}
-
-    flow.async_step_device_selection = _never_imports  # type: ignore[assignment]
-    monkeypatch.setattr(
-        flow.hass.config_entries, "async_entries", lambda domain: [], raising=False
-    )
-
-    result = await flow.async_step_discovery_confirm({})
-    if inspect.isawaitable(result):
-        result = await result
-
-    assert result["type"] == "abort"
-    assert result["reason"] == "already_configured"
-    assert not imported, "a rescan must never create an entry on its own"
 
 
 @pytest.mark.asyncio

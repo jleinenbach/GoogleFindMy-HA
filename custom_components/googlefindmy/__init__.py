@@ -33,6 +33,7 @@ This module aims to be self-documenting. All public functions include precise do
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import inspect
 import json
 import logging
@@ -57,6 +58,7 @@ from types import MappingProxyType, ModuleType, SimpleNamespace
 from typing import (
     TYPE_CHECKING,
     Any,
+    Final,
     Literal,
     Protocol,
     TypedDict,
@@ -4776,6 +4778,35 @@ def _primary_active_entry(entries: list[ConfigEntry]) -> ConfigEntry | None:
 # ------------------------------ Data/Options ---------------------------------
 
 
+# Keys whose change makes a reload necessary, taken from the token-cache seeding
+# in async_setup_entry: that seeding runs once per setup, so a change to any of
+# these is written but ineffective until the entry is set up again.
+_CREDENTIAL_KEYS: Final[tuple[str, ...]] = (
+    DATA_AUTH_METHOD,
+    CONF_OAUTH_TOKEN,
+    DATA_AAS_TOKEN,
+    CONF_GOOGLE_EMAIL,
+    DATA_SECRET_BUNDLE,
+)
+
+
+def _credential_fingerprint(data: Mapping[str, Any] | None) -> str:
+    """Return a non-reversible fingerprint of the credential-relevant keys.
+
+    Deliberately a digest, not the values: this is held for the lifetime of the
+    entry and would otherwise put a second copy of the tokens into memory (and
+    one bad log line away from disk). Equality is all the caller needs.
+    """
+
+    container: Mapping[str, Any] = data if isinstance(data, Mapping) else {}
+    material = json.dumps(
+        {key: container.get(key) for key in _CREDENTIAL_KEYS},
+        sort_keys=True,
+        default=repr,
+    )
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+
 def _opt(entry: ConfigEntry, key: str, default: Any) -> Any:
     """Read a configuration value, preferring options over data.
 
@@ -7346,10 +7377,53 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
     # that just changed is exactly the one whose new path must be adopted. This
     # closure is only the listener adapter for Home Assistant's (hass, entry)
     # signature; the refresh itself lives in the shared helper.
+    #
+    # Since the config flow no longer reloads (Home Assistant deprecates a
+    # reloading config-flow method on an entry that has an update listener:
+    # warning from 2026.6, error from 2026.12), this listener is also the place
+    # where changed credentials become effective. It compares a fingerprint of
+    # the credential-relevant keys, because a listener is handed the new entry
+    # and no previous state. Writing credentials without a reload would leave
+    # them stored but ineffective: the token cache is seeded below, in
+    # async_setup_entry, and a running coordinator does not pick up new tokens.
+    # Taken here on purpose: after the legacy migration above has rewritten
+    # entry.data, and before the listener is registered. Taking it earlier would
+    # make the migration itself look like a credential change and reload the
+    # entry on every setup.
+    credential_fingerprint = _credential_fingerprint(entry.data)
+
     async def _async_refresh_watch_paths(
         hass_arg: HomeAssistant, updated_entry: MyConfigEntry
     ) -> None:
+        nonlocal credential_fingerprint
+
         await _async_refresh_discovery_watch_paths(hass_arg)
+
+        updated_fingerprint = _credential_fingerprint(updated_entry.data)
+        if updated_fingerprint == credential_fingerprint:
+            # Options, subentry maintenance, coalescing: everything that leaves
+            # the credentials alone must not reload the entry.
+            return
+
+        # Advance the fingerprint BEFORE scheduling, so a second notification
+        # arriving before the reload takes effect cannot schedule a second one.
+        credential_fingerprint = updated_fingerprint
+
+        schedule_reload = getattr(
+            getattr(hass_arg, "config_entries", None), "async_schedule_reload", None
+        )
+        if not callable(schedule_reload):
+            _LOGGER.debug(
+                "Credentials changed but async_schedule_reload is unavailable; "
+                "they take effect on the next restart"
+            )
+            return
+
+        _LOGGER.info(
+            "Credentials changed for this account; reloading the entry so they "
+            "take effect"
+        )
+        schedule_reload(updated_entry.entry_id)
 
     entry.async_on_unload(entry.add_update_listener(_async_refresh_watch_paths))
 

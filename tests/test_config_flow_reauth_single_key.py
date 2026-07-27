@@ -9,7 +9,7 @@ logged a warning and persisted anyway, bypassing the gate.
 
 These tests pin the gate at *both* reauth persist sub-paths:
 
-* the happy persist path (``async_update_reload_and_abort`` after token
+* the happy persist path (``_async_update_entry_and_abort`` after token
   validation), and
 * the multi-entry-guard *deferral* path (persist after an entry-scope guard
   error short-circuits validation).
@@ -65,7 +65,7 @@ def _build_reauth_flow(
     making token validation raise an entry-scope guard error.
     ``pick_returns_none`` simulates a dead/expired token so the probe (if it is
     reached at all) fails. ``captured`` records any
-    ``async_update_reload_and_abort`` persistence so tests can assert a blocked
+    ``_async_update_entry_and_abort`` persistence so tests can assert a blocked
     bundle never persists, and records every ``async_pick_working_token`` call
     so tests can assert the gate dominates the probe.
     """
@@ -113,7 +113,7 @@ def _build_reauth_flow(
     flow.hass = hass  # type: ignore[assignment]
     flow.context = {"entry_id": entry.entry_id}
 
-    def _update_reload_and_abort(
+    def _update_entry_and_abort(
         *, entry: Any, data: dict[str, Any], reason: str
     ) -> dict[str, Any]:
         captured["persist"] = {"entry": entry, "data": data, "reason": reason}
@@ -126,7 +126,7 @@ def _build_reauth_flow(
     async def _clear_cached_aas_token(_entry: Any) -> None:
         return None
 
-    flow.async_update_reload_and_abort = _update_reload_and_abort  # type: ignore[assignment]
+    flow._async_update_entry_and_abort = _update_entry_and_abort  # type: ignore[assignment]
     flow.async_abort = _abort  # type: ignore[assignment]
     flow._async_clear_cached_aas_token = _clear_cached_aas_token  # type: ignore[attr-defined]
     return flow, entry, captured
@@ -314,3 +314,41 @@ async def test_reauth_persists_whitespace_free_owner_key(
     assert "persist" in captured
     persisted = captured["persist"]["data"]
     assert persisted[DATA_SECRET_BUNDLE]["owner_key"] == "AABBCC"
+
+
+@pytest.mark.asyncio
+async def test_the_persist_helper_writes_the_entry_and_aborts_without_reloading(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The replacement for ``async_update_reload_and_abort`` does both halves.
+
+    The persist tests above stub this helper out to observe what would be
+    written, so its own body needs a test of its own: it must hand the data to
+    ``async_update_entry`` (which is what notifies the update listener, and thus
+    what triggers the reload the flow no longer performs itself) and abort with
+    the caller's reason.
+    """
+
+    flow, entry, _captured = _build_reauth_flow(monkeypatch)
+    del flow._async_update_entry_and_abort  # type: ignore[attr-defined]
+
+    updates: list[tuple[Any, dict[str, Any]]] = []
+
+    def _async_update_entry(target: Any, **kwargs: Any) -> None:
+        updates.append((target, dict(kwargs)))
+
+    monkeypatch.setattr(
+        flow.hass.config_entries,
+        "async_update_entry",
+        _async_update_entry,
+        raising=False,
+    )
+
+    result = flow._async_update_entry_and_abort(
+        entry=entry,
+        data={CONF_OAUTH_TOKEN: "aas_et/NEW_TOKEN_VALUE"},
+        reason="reauth_successful",
+    )
+
+    assert updates == [(entry, {"data": {CONF_OAUTH_TOKEN: "aas_et/NEW_TOKEN_VALUE"}})]
+    assert result["reason"] == "reauth_successful"
