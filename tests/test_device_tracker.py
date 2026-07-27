@@ -23,7 +23,6 @@ from custom_components.googlefindmy.const import (
 )
 from custom_components.googlefindmy.coordinator import GoogleFindMyCoordinator
 from custom_components.googlefindmy.coordinator import registry as coordinator_registry
-from custom_components.googlefindmy.discovery import CloudDiscoveryOutcome
 from tests.helpers.config_entries_stub import make_config_entry
 
 
@@ -101,7 +100,6 @@ def test_find_tracker_entity_entry_uses_fallback(
 
 
 async def test_scanner_instantiates_tracker_for_known_registry_entry(
-    monkeypatch: pytest.MonkeyPatch,
     deterministic_config_subentry_id: Callable[[Any, str, str | None], str],
 ) -> None:
     """The device tracker platform should hydrate a tracker even if the registry already has it."""
@@ -112,20 +110,6 @@ async def test_scanner_instantiates_tracker_for_known_registry_entry(
 
     device_tracker = importlib.import_module(
         "custom_components.googlefindmy.device_tracker"
-    )
-
-    async def _fake_trigger_cloud_discovery(
-        *args: Any, **kwargs: Any
-    ) -> CloudDiscoveryOutcome:
-        # ACCEPTED is the three-state successor of the former ``True``: the
-        # trigger reached a flow. This test does not assert on the outcome, so
-        # only the type changes, not the statement.
-        return CloudDiscoveryOutcome.ACCEPTED
-
-    monkeypatch.setattr(
-        device_tracker,
-        "_trigger_cloud_discovery",
-        _fake_trigger_cloud_discovery,
     )
 
     scheduled: list[asyncio.Task[Any]] = []
@@ -204,8 +188,11 @@ async def test_scanner_instantiates_tracker_for_known_registry_entry(
 
     await _exercise()
 
-    # Both main tracker and last location call find_tracker_entity_entry
-    assert coordinator.lookup_calls == ["tracker-1", "tracker-1"]
+    # The registry is deliberately NOT probed in the run that adds the
+    # entities: Home Assistant creates them in its own task, so an immediate
+    # probe would be negative for every new tracker. The probe happens on a
+    # later listener run (see tests/test_device_tracker_scanner.py).
+    assert coordinator.lookup_calls == []
     # Should have 2 entities per device: main tracker + last location
     assert added and len(added[-1]) == 2
     # First entity is the main tracker
@@ -303,8 +290,8 @@ async def test_initial_snapshot_hydrates_registry_tracker(
         last_location_entity.unique_id
         == "entry-1:tracker-subentry:tracker-1:last_location"
     )
-    # Both main tracker and last location call find_tracker_entity_entry
-    assert coordinator.lookup_calls == ["tracker-1", "tracker-1"]
+    # Deferred registry probe: nothing is looked up in the adding run.
+    assert coordinator.lookup_calls == []
 
 
 def test_device_tracker_avoids_duplicate_accuracy_logs(

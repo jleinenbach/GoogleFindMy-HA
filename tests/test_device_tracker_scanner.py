@@ -1,12 +1,18 @@
 # tests/test_device_tracker_scanner.py
-"""Tests for the device tracker cloud scanner integration hooks."""
+"""Tests for the silent tracker scanner and its registry self-heal path.
+
+A newly available tracker is an entity, not an account: it must appear without
+a discovery card, without a dialog and without a user click. These tests pin
+both halves of that -- the absence of any discovery flow, and the narrow
+exception in which the platform still asks for one single entry reload because
+the entities it created never reached the entity registry.
+"""
 
 from __future__ import annotations
 
-import asyncio
 import importlib
 import logging
-from collections.abc import Callable, Coroutine, Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from types import SimpleNamespace
 from typing import Any
 
@@ -16,74 +22,58 @@ from custom_components.googlefindmy.const import (
     CONF_GOOGLE_EMAIL,
     CONF_OAUTH_TOKEN,
     DATA_SECRET_BUNDLE,
+    DOMAIN,
     SERVICE_SUBENTRY_KEY,
     TRACKER_SUBENTRY_KEY,
 )
-from custom_components.googlefindmy.discovery import (
-    CLOUD_DISCOVERY_NAMESPACE,
-    CloudDiscoveryOutcome,
-    _cloud_discovery_stable_key,
-)
+from tests.helpers.config_entries_stub import make_config_entry
+
+_ENTRY_ID = "entry-123"
 
 
-def test_scanner_triggers_cloud_discovery(
-    monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
-    deterministic_config_subentry_id: Callable[[Any, str, str | None], str],
-) -> None:
-    """The tracker scanner should invoke cloud discovery for new trackers."""
+def _device_tracker_module() -> Any:
+    return importlib.import_module("custom_components.googlefindmy.device_tracker")
 
-    del (
-        deterministic_config_subentry_id
-    )  # fixture side effects patch ensure_config_subentry_id
 
-    device_tracker = importlib.import_module(
-        "custom_components.googlefindmy.device_tracker"
-    )
-    triggered_calls: list[Mapping[str, Any]] = []
-    scheduled: list[asyncio.Task[Any]] = []
+class _HassStub:
+    """Minimal hass surface used by the device_tracker platform."""
 
-    async def _fake_trigger(  # noqa: PLR0913
-        hass,
-        *,
-        email,
-        token,
-        secrets_bundle,
-        discovery_ns,
-        discovery_stable_key,
-        source,
-        entry=None,
-    ) -> bool:  # type: ignore[no-untyped-def]
-        triggered_calls.append(
-            {
-                "email": email,
-                "token": token,
-                "secrets_bundle": secrets_bundle,
-                "discovery_ns": discovery_ns,
-                "discovery_stable_key": discovery_stable_key,
-                "source": source,
-                "entry": entry,
-            }
+    def __init__(self) -> None:
+        self.data: dict[Any, Any] = {}
+        self.reloaded: list[str] = []
+        self.created_tasks: list[Any] = []
+        self.config_entries: Any = SimpleNamespace(
+            async_schedule_reload=self.reloaded.append
         )
-        return True
 
-    monkeypatch.setattr(device_tracker, "_trigger_cloud_discovery", _fake_trigger)
+    def async_create_task(self, coro: Any, *, name: str | None = None) -> Any:
+        """Record and close background work instead of running it.
 
-    def _async_create_task(
-        coro: Coroutine[Any, Any, Any],
-        *,
-        name: str | None = None,
-    ) -> asyncio.Task[Any]:
-        task = asyncio.create_task(coro)
-        scheduled.append(task)
-        return task
+        The platform must not schedule background work for a new tracker any
+        more; recording it here makes a regression visible instead of leaking a
+        never-awaited coroutine warning.
+        """
 
-    hass = SimpleNamespace(async_create_task=_async_create_task)
+        self.created_tasks.append(coro)
+        close = getattr(coro, "close", None)
+        if callable(close):
+            close()
+        return None
+
+
+def _make_coordinator(
+    device_tracker: Any,
+    hass: _HassStub,
+    devices: Iterable[Mapping[str, Any]],
+    *,
+    registry_hit: bool,
+) -> Any:
+    """Build a coordinator stub whose registry probe answers deterministically."""
 
     class _StubCoordinator(device_tracker.GoogleFindMyCoordinator):
-        def __init__(self, devices: Iterable[dict[str, Any]]) -> None:
-            self._devices = list(devices)
-            self._listeners: list[Callable[[], None]] = []
+        def __init__(self) -> None:
+            self._devices = [dict(device) for device in devices]
+            self.listeners: list[Callable[[], None]] = []
             self.hass = hass
             self.config_entry = None
             self._bootstrap_consumed = False
@@ -91,11 +81,13 @@ def test_scanner_triggers_cloud_discovery(
             self._device_location_data: dict[str, Any] = {}
             self._device_caps: dict[str, Any] = {}
             self._present_last_seen: dict[str, float] = {}
+            self.registry_hit = registry_hit
+            self.registry_lookups: list[str] = []
 
         def async_add_listener(
             self, listener: Callable[[], None]
         ) -> Callable[[], None]:
-            self._listeners.append(listener)
+            self.listeners.append(listener)
             return lambda: None
 
         def stable_subentry_identifier(
@@ -116,7 +108,7 @@ def test_scanner_triggers_cloud_discovery(
             if not self._bootstrap_consumed:
                 self._bootstrap_consumed = True
                 return []
-            return list(self._devices)
+            return [dict(device) for device in self._devices]
 
         def get_subentry_metadata(
             self,
@@ -126,125 +118,320 @@ def test_scanner_triggers_cloud_discovery(
         ) -> Any:
             if key is not None:
                 resolved = key
-            elif feature in {"button", "device_tracker", "sensor"}:
-                resolved = TRACKER_SUBENTRY_KEY
             elif feature == "binary_sensor":
                 resolved = SERVICE_SUBENTRY_KEY
             else:
                 resolved = TRACKER_SUBENTRY_KEY
             return SimpleNamespace(key=resolved)
 
-    class _StubConfigEntry:
-        def __init__(self, coordinator: _StubCoordinator) -> None:
-            self.runtime_data = coordinator
-            self.entry_id = "entry-123"
-            self.data: dict[str, Any] = {
-                CONF_GOOGLE_EMAIL: "Owner@Example.Com",
-                CONF_OAUTH_TOKEN: "aas_et/ACCOUNT",
-                DATA_SECRET_BUNDLE: {"Email": "Owner@Example.Com"},
-            }
-            self.options: dict[str, Any] = {}
-            self._callbacks: list[Callable[[], None]] = []
+        def find_tracker_entity_entry(self, device_id: str) -> Any:
+            self.registry_lookups.append(device_id)
+            if not self.registry_hit:
+                return None
+            return SimpleNamespace(entity_id="device_tracker.stub")
 
-        def async_on_unload(self, callback: Callable[[], None]) -> None:
-            self._callbacks.append(callback)
+    return _StubCoordinator()
 
-    coordinator = _StubCoordinator(
-        [
-            {"id": "tracker-1", "name": "Tracker"},
-        ]
+
+def _make_entry(coordinator: Any) -> SimpleNamespace:
+    entry = make_config_entry(
+        entry_id=_ENTRY_ID,
+        data={
+            CONF_GOOGLE_EMAIL: "Owner@Example.Com",
+            CONF_OAUTH_TOKEN: "aas_et/ACCOUNT",
+            DATA_SECRET_BUNDLE: {"Email": "Owner@Example.Com"},
+        },
+        runtime_data=coordinator,
     )
-    entry = _StubConfigEntry(coordinator)
-    coordinator.config_entry = entry
+    entry.unload_callbacks = []
+    entry.async_on_unload = entry.unload_callbacks.append
+    return entry
 
-    added: list[list[Any]] = []
+
+async def _set_up_platform(
+    device_tracker: Any,
+    hass: _HassStub,
+    *,
+    registry_hit: bool,
+    added: list[list[Any]],
+) -> tuple[Any, SimpleNamespace]:
+    """Run one full platform setup and return its coordinator and entry."""
+
+    coordinator = _make_coordinator(
+        device_tracker,
+        hass,
+        [{"id": "tracker-1", "name": "Tracker"}],
+        registry_hit=registry_hit,
+    )
+    entry = _make_entry(coordinator)
+    coordinator.config_entry = entry
 
     def _capture_entities(
         entities: Iterable[Any], update_before_add: bool = False
     ) -> None:
         added.append(list(entities))
-        assert update_before_add is True
 
-    caplog.set_level(logging.INFO, "custom_components.googlefindmy.device_tracker")
+    await device_tracker.async_setup_entry(hass, entry, _capture_entities)
+    return coordinator, entry
 
-    async def _exercise() -> None:
-        await device_tracker.async_setup_entry(hass, entry, _capture_entities)
 
-        # Should have 2 entities per device: main tracker + last location
-        assert added and len(added[0]) == 2
+@pytest.mark.asyncio
+async def test_a_new_tracker_becomes_an_entity_without_any_discovery_flow(
+    monkeypatch: pytest.MonkeyPatch,
+    deterministic_config_subentry_id: Callable[[Any, str, str | None], str],
+) -> None:
+    """A newly available tracker is added silently: entities yes, discovery no.
 
-        for task in scheduled:
-            await task
+    The assertion runs through the real listener, not over the module source:
+    the trigger is spied on in ``discovery`` (its remaining home, used by the
+    secrets file watcher), so re-adding a call from the platform under any
+    alias would still be caught.
+    """
 
-    asyncio.run(_exercise())
+    del deterministic_config_subentry_id  # fixture patches ensure_config_subentry_id
 
+    device_tracker = _device_tracker_module()
+    discovery = importlib.import_module("custom_components.googlefindmy.discovery")
+
+    triggered: list[Mapping[str, Any]] = []
+
+    async def _spy_trigger(*args: Any, **kwargs: Any) -> Any:
+        triggered.append(kwargs)
+        return None
+
+    monkeypatch.setattr(discovery, "_trigger_cloud_discovery", _spy_trigger)
+
+    hass = _HassStub()
+    added: list[list[Any]] = []
+    coordinator, entry = await _set_up_platform(
+        device_tracker, hass, registry_hit=True, added=added
+    )
+
+    # The entities are created: main tracker plus last-location tracker.
+    assert added and len(added[0]) == 2
     identifier = coordinator.stable_subentry_identifier(key=TRACKER_SUBENTRY_KEY)
-    # First entity is the main tracker
-    tracker_entity = added[0][0]
+    tracker_entity, last_location_entity = added[0]
     assert tracker_entity.subentry_key == TRACKER_SUBENTRY_KEY
     assert identifier in tracker_entity.unique_id
     assert not tracker_entity.unique_id.endswith(":last_location")
-    # Second entity is the last location tracker
-    last_location_entity = added[0][1]
-    assert last_location_entity.subentry_key == TRACKER_SUBENTRY_KEY
     assert last_location_entity.unique_id.endswith(":last_location")
 
-    assert triggered_calls, "scanner should schedule cloud discovery"
-    call = triggered_calls[0]
-    assert call["email"] == "owner@example.com"
-    assert call["token"] == "aas_et/ACCOUNT"
-    assert call["secrets_bundle"] == {"Email": "Owner@Example.Com"}
-    assert call["discovery_ns"] == f"{CLOUD_DISCOVERY_NAMESPACE}.entry-123"
-    expected_key = _cloud_discovery_stable_key(
-        "owner@example.com",
-        "aas_et/ACCOUNT",
-        {"Email": "Owner@Example.Com"},
-    )
-    assert call["discovery_stable_key"] == expected_key
-    assert call["source"] == "cloud_scanner"
-
-    assert any(
-        "own***@example.com" in record.getMessage()
-        for record in caplog.records
-        if record.levelno == logging.INFO
-    ), "scanner should log redacted identifiers"
-
-    assert any(callback for callback in entry._callbacks)
+    # ... and nothing at all is asked of the user.
+    assert triggered == []
+    assert hass.created_tasks == []
+    assert hass.reloaded == []
+    assert entry.unload_callbacks
 
 
-@pytest.mark.parametrize(
-    ("outcome", "level", "fragment"),
-    [
-        (CloudDiscoveryOutcome.ACCEPTED, logging.INFO, "queued discovery"),
-        (CloudDiscoveryOutcome.SKIPPED, logging.DEBUG, "deduplicated discovery"),
-        (CloudDiscoveryOutcome.RETRY, logging.DEBUG, "aborted transiently"),
-    ],
-)
-def test_scanner_reports_the_flow_outcome_not_the_absence_of_an_exception(
-    caplog: pytest.LogCaptureFixture,
-    outcome: CloudDiscoveryOutcome,
-    level: int,
-    fragment: str,
+@pytest.mark.asyncio
+async def test_the_run_that_adds_a_tracker_never_schedules_a_reload(
+    deterministic_config_subentry_id: Callable[[Any, str, str | None], str],
 ) -> None:
-    """A transiently aborted flow must not be reported as a queued discovery.
+    """The registry probe must not run in the callback that adds the entities.
 
-    ``_trigger_cloud_discovery`` returns normally for an aborted config flow --
-    the flow handled its error and answered with ``FlowResultType.ABORT`` -- so
-    the scanner has to read the returned outcome. Judging by "the await did not
-    raise" would announce an import that never happened.
+    Home Assistant schedules the actual entity addition as its own task, so a
+    probe in the same callback is negative for *every* new tracker. Evaluating
+    it there would replace the discovery card with a reload on each new device,
+    the exact opposite of what this change is for.
     """
 
-    device_tracker = importlib.import_module(
-        "custom_components.googlefindmy.device_tracker"
+    del deterministic_config_subentry_id
+
+    device_tracker = _device_tracker_module()
+    hass = _HassStub()
+    added: list[list[Any]] = []
+    coordinator, _entry = await _set_up_platform(
+        device_tracker, hass, registry_hit=False, added=added
     )
+
+    assert added and len(added[0]) == 2
+    assert hass.reloaded == []
+    # Not even asked: the ids are only remembered for a later run.
+    assert coordinator.registry_lookups == []
+
+
+@pytest.mark.asyncio
+async def test_a_later_run_reloads_once_when_the_entities_never_registered(
+    deterministic_config_subentry_id: Callable[[Any, str, str | None], str],
+) -> None:
+    """The self-heal path fires on a later run, and only then."""
+
+    del deterministic_config_subentry_id
+
+    device_tracker = _device_tracker_module()
+    hass = _HassStub()
+    added: list[list[Any]] = []
+    coordinator, entry = await _set_up_platform(
+        device_tracker, hass, registry_hit=False, added=added
+    )
+    assert hass.reloaded == []
+
+    # A later coordinator update: same ids, still missing from the registry.
+    coordinator.listeners[0]()
+
+    assert coordinator.registry_lookups == ["tracker-1"]
+    assert hass.reloaded == [entry.entry_id]
+
+
+@pytest.mark.asyncio
+async def test_no_reload_when_the_registry_confirms_the_trackers(
+    deterministic_config_subentry_id: Callable[[Any, str, str | None], str],
+) -> None:
+    """The ordinary case stays silent: confirmed entities, no reload."""
+
+    del deterministic_config_subentry_id
+
+    device_tracker = _device_tracker_module()
+    hass = _HassStub()
+    added: list[list[Any]] = []
+    coordinator, _entry = await _set_up_platform(
+        device_tracker, hass, registry_hit=True, added=added
+    )
+
+    coordinator.listeners[0]()
+
+    assert coordinator.registry_lookups == ["tracker-1"]
+    assert hass.reloaded == []
+
+
+@pytest.mark.asyncio
+async def test_the_selfheal_reload_does_not_repeat_across_the_reload_it_causes(
+    deterministic_config_subentry_id: Callable[[Any, str, str | None], str],
+) -> None:
+    """The one-shot latch has to survive the reload it schedules.
+
+    A reload tears the device_tracker platform down and ``async_unload_entry``
+    pops the entry's bucket under ``hass.data[DOMAIN]["entries"]``. A marker in
+    either place would be fresh again by the time the rebuilt platform probes,
+    and a permanently empty registry would reload in a loop. This test walks
+    that exact transition.
+    """
+
+    del deterministic_config_subentry_id
+
+    device_tracker = _device_tracker_module()
+    hass = _HassStub()
+    added: list[list[Any]] = []
+
+    coordinator, entry = await _set_up_platform(
+        device_tracker, hass, registry_hit=False, added=added
+    )
+    coordinator.listeners[0]()
+    assert hass.reloaded == [entry.entry_id]
+
+    # Reload: the entry bucket is dropped and the platform is set up afresh,
+    # so every piece of platform-local state starts over.
+    entries_bucket = hass.data.setdefault(DOMAIN, {}).setdefault("entries", {})
+    entries_bucket[entry.entry_id] = object()
+    entries_bucket.pop(entry.entry_id, None)
+
+    coordinator_after, entry_after = await _set_up_platform(
+        device_tracker, hass, registry_hit=False, added=added
+    )
+    assert entry_after.entry_id == entry.entry_id
+    coordinator_after.listeners[0]()
+
+    assert hass.reloaded == [entry.entry_id], "a second reload would be a loop"
+
+
+@pytest.mark.asyncio
+async def test_the_latch_is_not_burned_when_the_core_cannot_reload(
+    deterministic_config_subentry_id: Callable[[Any, str, str | None], str],
+) -> None:
+    """An older core without ``async_schedule_reload`` keeps the attempt open.
+
+    Claiming the latch before resolving the lever would consume the entry's
+    only self-heal attempt without ever reloading anything.
+    """
+
+    del deterministic_config_subentry_id
+
+    device_tracker = _device_tracker_module()
+    hass = _HassStub()
+    hass.config_entries = SimpleNamespace()
+    added: list[list[Any]] = []
+    coordinator, entry = await _set_up_platform(
+        device_tracker, hass, registry_hit=False, added=added
+    )
+
+    coordinator.listeners[0]()
+
+    assert hass.reloaded == []
+    claimed = hass.data.get(DOMAIN, {}).get("registry_selfheal_reloads", set())
+    assert entry.entry_id not in claimed
+
+
+@pytest.mark.asyncio
+async def test_a_missing_registry_helper_neither_reloads_nor_burns_the_latch(
+    caplog: pytest.LogCaptureFixture,
+    deterministic_config_subentry_id: Callable[[Any, str, str | None], str],
+) -> None:
+    """Without a registry helper the platform cannot judge, so it does nothing."""
+
+    del deterministic_config_subentry_id
+
+    device_tracker = _device_tracker_module()
+    hass = _HassStub()
+    added: list[list[Any]] = []
+    coordinator, entry = await _set_up_platform(
+        device_tracker, hass, registry_hit=False, added=added
+    )
+
+    coordinator.find_tracker_entity_entry = None
     caplog.set_level(logging.DEBUG, "custom_components.googlefindmy.device_tracker")
 
-    device_tracker._log_cloud_scan_outcome(outcome, "own***@example.com", 3)
+    coordinator.listeners[0]()
 
-    matching = [
-        record
+    assert hass.reloaded == []
+    claimed = hass.data.get(DOMAIN, {}).get("registry_selfheal_reloads", set())
+    assert entry.entry_id not in claimed
+    assert any(
+        "registry helper unavailable" in record.getMessage()
         for record in caplog.records
-        if fragment in record.getMessage() and record.levelno == level
-    ]
-    assert matching, f"expected a {logging.getLevelName(level)} log for {outcome}"
-    assert all("own***@example.com" in record.getMessage() for record in matching)
+    )
+
+
+def test_the_selfheal_helpers_ignore_an_empty_entry_id() -> None:
+    """An entry without an id must not be claimable, and not clearable either.
+
+    A falsy id would otherwise land in the latch set as ``""`` and swallow the
+    self-heal attempt of the next entry that reads it back.
+    """
+
+    integration = importlib.import_module("custom_components.googlefindmy")
+    hass = _HassStub()
+
+    assert integration.claim_registry_selfheal_reload(hass, "") is False
+    integration.discard_registry_selfheal_reload(hass, "")
+    assert hass.data.get(DOMAIN, {}).get("registry_selfheal_reloads", set()) == set()
+
+
+@pytest.mark.asyncio
+async def test_a_failing_registry_probe_counts_as_missing(
+    caplog: pytest.LogCaptureFixture,
+    deterministic_config_subentry_id: Callable[[Any, str, str | None], str],
+) -> None:
+    """A raising lookup must not silently pass the tracker off as registered."""
+
+    del deterministic_config_subentry_id
+
+    device_tracker = _device_tracker_module()
+    hass = _HassStub()
+    added: list[list[Any]] = []
+    coordinator, entry = await _set_up_platform(
+        device_tracker, hass, registry_hit=False, added=added
+    )
+
+    def _boom(device_id: str) -> Any:
+        raise RuntimeError("registry unavailable")
+
+    coordinator.find_tracker_entity_entry = _boom  # type: ignore[method-assign]
+    caplog.set_level(logging.DEBUG, "custom_components.googlefindmy.device_tracker")
+
+    coordinator.listeners[0]()
+
+    assert hass.reloaded == [entry.entry_id]
+    assert any(
+        "Registry lookup failed for tracker tracker-1" in record.getMessage()
+        for record in caplog.records
+    )

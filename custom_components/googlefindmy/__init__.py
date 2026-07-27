@@ -2399,6 +2399,13 @@ class GoogleFindMyDomainData(TypedDict, total=False):
     _subentry_setup_history: dict[str, set[str]]
     pending_reconfigure_device_list_refresh: set[str]
     recent_reconfigure_markers: dict[str, float]
+    # One-shot latch per entry for the device_tracker registry self-heal reload.
+    # Deliberately kept at DOMAIN level and NOT inside ``entries``: the reload it
+    # guards tears the platform down and ``async_unload_entry`` pops the entry's
+    # ``entries`` bucket, so a marker living in either place would be gone by the
+    # time the rebuilt platform probes again -- and a permanently empty registry
+    # would then reload in a loop. Cleared only when the entry is removed.
+    registry_selfheal_reloads: set[str]
     # In-memory only, NEVER persisted: irreversible cleanup jobs staged by a
     # config or options flow (watched-secrets delete, login-container ack). A
     # FIFO list of per-flow tickets, NOT a mapping keyed by account: two
@@ -2996,6 +3003,55 @@ def _ensure_recent_reconfigure_markers(
         markers = {}
         bucket["recent_reconfigure_markers"] = markers
     return markers
+
+
+def _ensure_registry_selfheal_reloads(
+    bucket: GoogleFindMyDomainData,
+) -> set[str]:
+    """Return the set of entry_ids that already used their self-heal reload."""
+
+    claimed = bucket.get("registry_selfheal_reloads")
+    if not isinstance(claimed, set):
+        claimed = set()
+        bucket["registry_selfheal_reloads"] = claimed
+    return claimed
+
+
+@callback
+def claim_registry_selfheal_reload(hass: HomeAssistant, entry_id: str) -> bool:
+    """Claim the one and only self-heal reload for ``entry_id``.
+
+    Returns ``True`` for the first caller of an entry and ``False`` for every
+    later one, including callers that run *after* the reload this claim caused.
+    That is the whole point: the reload rebuilds the device_tracker platform, so
+    any marker the platform itself held would be fresh again and a config entry
+    whose entities never reach the entity registry would reload forever.
+    """
+
+    if not entry_id:
+        return False
+    claimed = _ensure_registry_selfheal_reloads(_domain_data(hass))
+    if entry_id in claimed:
+        return False
+    claimed.add(entry_id)
+    return True
+
+
+@callback
+def discard_registry_selfheal_reload(hass: HomeAssistant, entry_id: str) -> None:
+    """Drop the self-heal latch of a removed entry.
+
+    Without this the entry_id would sit in ``hass.data`` for the rest of the
+    process lifetime, the same housekeeping rule the staged-cleanup discard in
+    ``async_remove_entry`` follows.
+    """
+
+    if not entry_id:
+        return
+    bucket = _domain_data(hass)
+    claimed = bucket.get("registry_selfheal_reloads")
+    if isinstance(claimed, set):
+        claimed.discard(entry_id)
 
 
 def _ensure_device_owner_index(bucket: GoogleFindMyDomainData) -> dict[str, str]:
@@ -8862,6 +8918,10 @@ async def async_remove_entry(hass: HomeAssistant, entry: MyConfigEntry) -> None:
     """Handle removal of a config entry and purge persisted caches if requested."""
 
     _ensure_runtime_imports()
+
+    # The device_tracker self-heal latch is keyed by entry_id and survives
+    # reloads by design; once the entry is gone nothing would ever clear it.
+    discard_registry_selfheal_reload(hass, entry.entry_id)
 
     # Drop this entry's SECRETS_EXTRA_WATCH_PATHS from the running watcher. The
     # update listener that normally recomputes them was unregistered by the

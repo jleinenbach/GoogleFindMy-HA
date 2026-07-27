@@ -20,7 +20,6 @@ Entry-scope guarantees (C2):
 
 from __future__ import annotations
 
-import asyncio
 import inspect
 import logging
 import time
@@ -38,11 +37,13 @@ from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity import DeviceInfo, EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from . import EntityRecoveryManager, _extract_email_from_entry, _opt
+from . import (
+    EntityRecoveryManager,
+    _extract_email_from_entry,
+    _opt,
+    claim_registry_selfheal_reload,
+)
 from .const import (
-    CLOUD_SCANNER_DISCOVERY_SOURCE,
-    CONF_OAUTH_TOKEN,
-    DATA_SECRET_BUNDLE,
     DEFAULT_SHOW_LOCATION_AGE,
     DOMAIN,
     OPT_SHOW_LOCATION_AGE,
@@ -59,13 +60,6 @@ from .coordinator import (
     resolve_seeded_accuracy,
     resolve_stale_threshold,
     select_display_row,
-)
-from .discovery import (
-    CLOUD_DISCOVERY_NAMESPACE,
-    CloudDiscoveryOutcome,
-    _cloud_discovery_stable_key,
-    _redact_account_for_log,
-    _trigger_cloud_discovery,
 )
 from .entity import (
     GoogleFindMyDeviceEntity,
@@ -97,39 +91,6 @@ class _TrackerScope:
     subentry_key: str
     config_subentry_id: str | None
     identifier: str | None
-
-
-def _log_cloud_scan_outcome(
-    outcome: CloudDiscoveryOutcome, account_ref: str, new_count: int
-) -> None:
-    """Report what the scanner's discovery trigger actually achieved.
-
-    Reads the returned :class:`CloudDiscoveryOutcome` instead of "the await did
-    not raise": a config flow reports a refused import through its FlowResult,
-    so an aborted flow would otherwise be logged as a queued discovery. Kept at
-    module level (rather than inline in the scheduling closure) so the three
-    outcomes are reachable from a test without standing up a whole platform
-    setup.
-    """
-
-    if outcome is CloudDiscoveryOutcome.SKIPPED:
-        _LOGGER.debug(
-            "Cloud tracker scanner deduplicated discovery for %s",
-            account_ref,
-        )
-    elif outcome is CloudDiscoveryOutcome.RETRY:
-        _LOGGER.debug(
-            "Cloud tracker scanner discovery for %s aborted transiently; "
-            "the next scan retries",
-            account_ref,
-        )
-    else:
-        _LOGGER.info(
-            "Cloud tracker scanner queued discovery for %s after %d newly "
-            "available tracker(s)",
-            account_ref,
-            new_count,
-        )
 
 
 def _subentry_type(subentry: Any | None) -> str | None:
@@ -466,8 +427,83 @@ async def async_setup_entry(
                         to_add.append(last_location_entity)
             return to_add
 
+        # Device ids added by an EARLIER listener run and not yet confirmed in
+        # the entity registry. Never evaluated in the run that adds them: the
+        # core schedules the actual entity addition as its own task, so a probe
+        # in the same callback is negative for every new tracker and would turn
+        # the self-heal path into "reload on every new device".
+        pending_registry_ids: set[str] = set()
+
+        @callback
+        def _verify_pending_registry_entries() -> None:
+            """Confirm earlier additions, or reload the entry once to fix them.
+
+            The reload is the only lever that helps here. Re-polling the device
+            list does not: ``known_ids`` already holds those ids, so
+            ``_build_entities`` returns nothing and no entity is created again.
+            """
+
+            if not pending_registry_ids:
+                return
+
+            probe_ids = sorted(pending_registry_ids)
+            pending_registry_ids.clear()
+
+            registry_lookup = getattr(coordinator, "find_tracker_entity_entry", None)
+            if not callable(registry_lookup):
+                _LOGGER.debug(
+                    "Device tracker setup: registry helper unavailable; cannot "
+                    "verify %d recently added tracker(s)",
+                    len(probe_ids),
+                )
+                return
+
+            missing: list[str] = []
+            for dev_id in probe_ids:
+                try:
+                    if registry_lookup(dev_id) is None:
+                        missing.append(dev_id)
+                except Exception:  # pragma: no cover - best effort registry probe
+                    _LOGGER.debug("Registry lookup failed for tracker %s", dev_id)
+                    missing.append(dev_id)
+
+            if not missing:
+                return
+
+            # Resolve the lever BEFORE claiming the one-shot latch, so an older
+            # core without the method does not burn the entry's only attempt.
+            schedule_reload = getattr(
+                getattr(hass, "config_entries", None), "async_schedule_reload", None
+            )
+            if not callable(schedule_reload):
+                _LOGGER.debug(
+                    "Device tracker setup: async_schedule_reload unavailable; "
+                    "leaving %d unregistered tracker(s) as they are",
+                    len(missing),
+                )
+                return
+
+            if not claim_registry_selfheal_reload(hass, config_entry.entry_id):
+                _LOGGER.debug(
+                    "Device tracker setup: %d tracker(s) still missing from the "
+                    "entity registry, but this entry already used its one-shot "
+                    "reload; not scheduling another",
+                    len(missing),
+                )
+                return
+
+            _LOGGER.info(
+                "Reloading the Find My entry once: %d newly added tracker(s) did "
+                "not reach the entity registry",
+                len(missing),
+            )
+            schedule_reload(config_entry.entry_id)
+
         @callback
         def _scan_available_trackers_from_coordinator() -> None:
+            # Runs first, and therefore always on ids from a previous run.
+            _verify_pending_registry_entries()
+
             snapshot = coordinator.get_subentry_snapshot(tracker_subentry_key)
             if not snapshot:
                 meta = coordinator.get_subentry_metadata(key=tracker_subentry_key)
@@ -506,86 +542,13 @@ async def async_setup_entry(
                 )
                 _schedule_tracker_entities(to_add, True)
 
-                registry_lookup = getattr(
-                    coordinator, "find_tracker_entity_entry", None
-                )
-                if callable(registry_lookup):
-                    all_registered = True
-
-                    for entity in to_add:
-                        dev_id = getattr(entity, "device_id", None)
-
-                        try:
-                            if not dev_id or registry_lookup(dev_id) is None:
-                                all_registered = False
-                                break
-                        except (
-                            Exception
-                        ):  # pragma: no cover - best effort registry probe
-                            _LOGGER.debug(
-                                "Registry lookup failed for tracker %s", dev_id
-                            )
-                            all_registered = False
-                            break
-
-                    if all_registered:
-                        _LOGGER.debug(
-                            "Device tracker setup: all %d tracker(s) already registered; skipping discovery",
-                            len(to_add),
-                        )
-                        return
-                else:
-                    _LOGGER.debug(
-                        "Device tracker setup: registry helper unavailable; treating trackers as new"
-                    )
-
-                email = _extract_email_from_entry(config_entry) or None
-                token = config_entry.data.get(CONF_OAUTH_TOKEN)
-                token_value = token if isinstance(token, str) and token else None
-                secrets_raw = config_entry.data.get(DATA_SECRET_BUNDLE)
-                secrets_bundle: Mapping[str, Any] | None
-                if isinstance(secrets_raw, Mapping):
-                    secrets_bundle = secrets_raw
-                else:
-                    secrets_bundle = None
-
-                discovery_ns = (
-                    f"{CLOUD_DISCOVERY_NAMESPACE}.{config_entry.entry_id}"
-                    if config_entry.entry_id
-                    else CLOUD_DISCOVERY_NAMESPACE
-                )
-                stable_key = _cloud_discovery_stable_key(
-                    email,
-                    token_value,
-                    secrets_bundle,
-                )
-
-                async def _async_trigger_cloud_scan(new_count: int) -> None:
-                    outcome = await _trigger_cloud_discovery(
-                        hass,
-                        email=email,
-                        token=token_value,
-                        secrets_bundle=secrets_bundle,
-                        discovery_ns=discovery_ns,
-                        discovery_stable_key=stable_key,
-                        source=CLOUD_SCANNER_DISCOVERY_SOURCE,
-                        entry=config_entry,
-                    )
-                    _log_cloud_scan_outcome(
-                        outcome, _redact_account_for_log(email, stable_key), new_count
-                    )
-
-                hass_async_create_task = getattr(hass, "async_create_task", None)
-                if callable(hass_async_create_task):
-                    pending = hass_async_create_task(
-                        _async_trigger_cloud_scan(len(to_add))
-                    )
-                    if asyncio.iscoroutine(pending):
-                        asyncio.create_task(pending)
-                else:
-                    _LOGGER.debug(
-                        "Device tracker setup: hass missing async_create_task; skipping cloud discovery trigger"
-                    )
+                # No discovery flow, no card, no user click: a new tracker is an
+                # entity, not an account. Only remember the ids so a LATER run
+                # can tell whether the addition actually reached the registry.
+                for entity in to_add:
+                    dev_id = getattr(entity, "device_id", None)
+                    if isinstance(dev_id, str) and dev_id:
+                        pending_registry_ids.add(dev_id)
 
         unsub = coordinator.async_add_listener(
             _scan_available_trackers_from_coordinator
