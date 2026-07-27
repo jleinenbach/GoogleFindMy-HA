@@ -242,6 +242,48 @@ async def test_reconfigure_reload_logs_false(caplog: pytest.LogCaptureFixture) -
 
 
 @pytest.mark.asyncio
+async def test_reconfigure_stands_down_when_a_reload_is_already_on_its_way() -> None:
+    """A reconfigure rewrites the credential keys the update listener watches.
+
+    That listener reloads the entry so they take effect, and Home Assistant's
+    ``async_schedule_reload`` does not coalesce. Whichever side claims the latch
+    first reloads; the other must not add a second unload/setup cycle.
+    """
+
+    entry = make_config_entry(
+        entry_id="entry-latch",
+        title="Find My",
+        subentries={},
+        runtime_data=SimpleNamespace(),
+    )
+    entry.data[CONF_GOOGLE_EMAIL] = "existing@example.com"
+
+    flow = config_flow.ConfigFlow()
+
+    reloaded: list[str] = []
+    scheduled: list[str] = []
+
+    class _ConfigEntries:
+        def async_reload(self, entry_id: str) -> bool:
+            reloaded.append(entry_id)
+            return True
+
+        def async_schedule_reload(self, entry_id: str) -> None:
+            scheduled.append(entry_id)
+
+    hass = SimpleNamespace(config_entries=_ConfigEntries(), data={})
+    flow.hass = hass  # type: ignore[assignment]
+
+    integration = config_flow.import_integration_package()
+    assert integration.claim_pending_entry_reload(hass, entry.entry_id) is True
+
+    await flow._async_reload_entry_after_reconfigure(entry)  # type: ignore[attr-defined]
+
+    assert reloaded == [], "a reload is already on its way"
+    assert scheduled == [], "and no deferred one may be scheduled either"
+
+
+@pytest.mark.asyncio
 async def test_reconfigure_forces_device_list_refresh() -> None:
     """Mark forced device list refresh on reconfigure and call coordinator hook."""
 

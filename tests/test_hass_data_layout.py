@@ -651,6 +651,107 @@ async def test_changed_credentials_reload_the_entry_exactly_once(
 
 
 @pytest.mark.asyncio
+async def test_the_listener_stands_down_when_a_flow_already_reloads(
+    monkeypatch: pytest.MonkeyPatch,
+    stub_coordinator_factory: Callable[..., type[Any]],
+) -> None:
+    """Two schedulers, one reload.
+
+    A flow that writes credentials and reloads the entry itself also notifies
+    this listener, which reloads for the very same change. Home Assistant's
+    ``async_schedule_reload`` does not coalesce, so without an agreement on one
+    owner the entry would be unloaded and set up twice in a row.
+    """
+
+    loop = asyncio.get_running_loop()
+    harness = _prepare_async_setup_entry_harness(
+        monkeypatch, stub_coordinator_factory, loop
+    )
+    integration = harness.integration
+    entry = harness.entry
+    hass = harness.hass
+
+    entry.data[DATA_AAS_TOKEN] = "aas_et/OLD_TOKEN_VALUE"
+    harness.cache.values = {integration.username_string: "user@example.com"}
+
+    assert await integration.async_setup(hass, {}) is True
+    assert await integration.async_setup_entry(hass, entry) is True
+
+    notify = entry._update_listeners[0]
+
+    # The writing flow got there first and reloads on its own behalf.
+    assert integration.claim_pending_entry_reload(hass, entry.entry_id) is True
+
+    entry.data = {**entry.data, DATA_AAS_TOKEN: "aas_et/NEW_TOKEN_VALUE"}
+    await notify(hass, entry)
+
+    assert hass.config_entries.scheduled_reloads == [], (
+        "a reload is already on its way; the listener must not add a second one"
+    )
+
+    # The reload arrives: its setup releases the latch, so the next credential
+    # change reloads again instead of being swallowed forever.
+    assert await integration.async_setup_entry(hass, entry) is True
+    notify = entry._update_listeners[-1]
+    entry.data = {**entry.data, DATA_AAS_TOKEN: "aas_et/THIRD_TOKEN_VALUE"}
+    await notify(hass, entry)
+
+    assert hass.config_entries.scheduled_reloads == [entry.entry_id], (
+        "the released latch has to let a later change reload again"
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_listener_invocation_from_a_bygone_setup_does_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+    stub_coordinator_factory: Callable[..., type[Any]],
+) -> None:
+    """An invocation queued before the unload must not reload the rebuilt entry.
+
+    ``async_update_entry`` creates the listener task right away, while
+    ``async_on_unload`` only takes the listener out of the entry. Such a call
+    still runs afterwards, carrying the fingerprint of a setup that is over.
+    """
+
+    loop = asyncio.get_running_loop()
+    harness = _prepare_async_setup_entry_harness(
+        monkeypatch, stub_coordinator_factory, loop
+    )
+    integration = harness.integration
+    entry = harness.entry
+    hass = harness.hass
+
+    entry.data[DATA_AAS_TOKEN] = "aas_et/OLD_TOKEN_VALUE"
+    harness.cache.values = {integration.username_string: "user@example.com"}
+
+    assert await integration.async_setup(hass, {}) is True
+    assert await integration.async_setup_entry(hass, entry) is True
+
+    notify = entry._update_listeners[0]
+
+    # Home Assistant keeps the registered listeners here; the stub does not, so
+    # the attribute is supplied for this test the way the core would expose it.
+    entry.update_listeners = [notify]
+    entry.data = {**entry.data, DATA_AAS_TOKEN: "aas_et/NEW_TOKEN_VALUE"}
+    await notify(hass, entry)
+    assert hass.config_entries.scheduled_reloads == [entry.entry_id]
+
+    # The reload has run: its unload released the latch, so nothing but the
+    # staleness itself keeps this invocation from scheduling another one.
+    integration.discard_pending_entry_reload(hass, entry.entry_id)
+
+    # After the unload the listener is gone from the entry, but the queued task
+    # still runs with the credentials of the entry it no longer belongs to.
+    entry.update_listeners = []
+    entry.data = {**entry.data, DATA_AAS_TOKEN: "aas_et/FOURTH_TOKEN_VALUE"}
+    await notify(hass, entry)
+
+    assert hass.config_entries.scheduled_reloads == [entry.entry_id], (
+        "an invocation from a bygone setup must not reload the rebuilt entry"
+    )
+
+
+@pytest.mark.asyncio
 async def test_a_core_without_schedule_reload_stays_quiet_about_it(
     monkeypatch: pytest.MonkeyPatch,
     stub_coordinator_factory: Callable[..., type[Any]],
@@ -684,6 +785,26 @@ async def test_a_core_without_schedule_reload_stays_quiet_about_it(
     await entry._update_listeners[0](hass, entry)
 
     assert hass.config_entries.scheduled_reloads == []
+
+
+def test_the_reload_latch_is_a_no_op_without_an_entry_id() -> None:
+    """No entry, no claim, and nothing to release.
+
+    Both helpers are called from lifecycle hooks that read ``entry.entry_id``
+    from partially initialised entries, so an empty id must neither claim a latch
+    under the empty key nor create the domain bucket on the way out.
+    """
+
+    integration = importlib.import_module("custom_components.googlefindmy")
+
+    hass = SimpleNamespace(data={})
+
+    assert integration.claim_pending_entry_reload(hass, "") is False
+    integration.discard_pending_entry_reload(hass, "")
+    assert hass.data == {}, "neither helper may create the domain bucket here"
+
+    # A release without a bucket is equally quiet.
+    integration.discard_pending_entry_reload(SimpleNamespace(data={}), "entry-1")
 
 
 def test_the_credential_fingerprint_keeps_no_plaintext() -> None:

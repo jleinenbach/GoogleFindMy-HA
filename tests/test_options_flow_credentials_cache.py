@@ -254,6 +254,24 @@ def test_options_flow_rotating_token_clears_cached_aas(
         await hass.drain_tasks()
         assert hass.config_entries.reloaded == [entry.entry_id]
 
+        # The reload is still on its way, and the entry update notifies the
+        # credential update listener as well. ``async_schedule_reload`` does not
+        # coalesce, so a second rotation must not add another unload/setup cycle.
+        second = await flow.async_step_credentials(
+            {
+                "new_oauth_token": "oauth-token-rotate-654321",
+                "subentry": TRACKER_SUBENTRY_KEY,
+            }
+        )
+        if inspect.isawaitable(second):
+            second = await second
+
+        await hass.drain_tasks()
+        assert hass.config_entries.reloaded == [entry.entry_id], (
+            "a reload is already on its way; a second one only tears the entry "
+            "down twice"
+        )
+
     asyncio.run(_exercise())
 
 

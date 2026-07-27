@@ -2408,6 +2408,15 @@ class GoogleFindMyDomainData(TypedDict, total=False):
     # time the rebuilt platform probes again -- and a permanently empty registry
     # would then reload in a loop. Cleared only when the entry is removed.
     registry_selfheal_reloads: set[str]
+    # Entry ids whose reload is already on its way. Home Assistant's
+    # ``async_schedule_reload`` does not coalesce -- every call adds another
+    # unload/setup cycle -- and since the credential update listener reloads the
+    # entry as well, a flow that writes credentials AND reloads the entry itself
+    # would tear it down twice in a row. Every integration-owned reload therefore
+    # claims this latch first and the second claimant stands down. Released as
+    # soon as the reload arrives (unload, and setup for an entry that was not
+    # loaded), so a genuinely later change reloads again.
+    pending_entry_reloads: set[str]
     # In-memory only, NEVER persisted: irreversible cleanup jobs staged by a
     # config or options flow (watched-secrets delete, login-container ack). A
     # FIFO list of per-flow tickets, NOT a mapping keyed by account: two
@@ -3054,6 +3063,79 @@ def discard_registry_selfheal_reload(hass: HomeAssistant, entry_id: str) -> None
     claimed = bucket.get("registry_selfheal_reloads")
     if isinstance(claimed, set):
         claimed.discard(entry_id)
+
+
+def _ensure_pending_entry_reloads(
+    bucket: GoogleFindMyDomainData,
+) -> set[str]:
+    """Return the set of entry_ids whose reload is already on its way."""
+
+    pending = bucket.get("pending_entry_reloads")
+    if not isinstance(pending, set):
+        pending = set()
+        bucket["pending_entry_reloads"] = pending
+    return pending
+
+
+@callback
+def claim_pending_entry_reload(hass: HomeAssistant, entry_id: str) -> bool:
+    """Claim the pending reload of ``entry_id`` for the caller.
+
+    Returns ``True`` when the caller is the one that has to schedule the reload
+    and ``False`` when a reload is already on its way and a second one would only
+    tear the entry down twice: ``async_schedule_reload`` does not coalesce, and
+    ``async_reload`` is an unload plus a setup either way.
+
+    The duplicate is not hypothetical. Every path that writes credentials into an
+    entry goes through ``async_update_entry``, which notifies the update listener
+    in :func:`async_setup_entry`, and that listener reloads the entry so the new
+    credentials take effect. A flow that also reloads the entry itself -- the
+    discovery fallback writer, the non-interactive discovery update, reconfigure,
+    the options credential refresher -- therefore produces two reloads unless the
+    two sides agree on one owner. This latch is that agreement, and it works
+    regardless of which side runs first, which no ordering rule between a
+    synchronous flow step and a listener task could guarantee.
+
+    Call this **last**, immediately before scheduling: a claim that is followed by
+    a caller-side abort leaves the latch set until the entry is next set up or
+    unloaded, and during that window a real change would not reload.
+    """
+
+    if not entry_id:
+        return False
+    pending = _ensure_pending_entry_reloads(_domain_data(hass))
+    if entry_id in pending:
+        return False
+    pending.add(entry_id)
+    return True
+
+
+@callback
+def discard_pending_entry_reload(hass: HomeAssistant, entry_id: str) -> None:
+    """Release the reload latch of ``entry_id``.
+
+    Called where the scheduled reload actually arrives: at unload, and at setup
+    for an entry that was not loaded (Home Assistant's ``async_reload`` skips the
+    unload half in that case, so setup is the only point both paths share). A
+    latch that is never released would swallow every later reload of that entry,
+    which is why both ends clear it and removal clears it too.
+    """
+
+    if not entry_id:
+        return
+    # Read-only on purpose, no ``_domain_data``: releasing a latch that was never
+    # claimed must not create the domain bucket. This runs at the very top of
+    # ``async_setup_entry``, before the entry policy has had its say, and a bucket
+    # created there would exist for entries that never got set up at all.
+    hass_data = getattr(hass, "data", None)
+    if not isinstance(hass_data, dict):
+        return
+    bucket = hass_data.get(DATA_DOMAIN)
+    if not isinstance(bucket, dict):
+        return
+    pending = bucket.get("pending_entry_reloads")
+    if isinstance(pending, set):
+        pending.discard(entry_id)
 
 
 def _ensure_device_owner_index(bucket: GoogleFindMyDomainData) -> dict[str, str]:
@@ -7118,6 +7200,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
       5) Build coordinator, register views, and synchronize subentries.
       6) Schedule initial refresh after HA is fully started.
     """
+    # A reload that was claimed has arrived: release the latch. Deliberately here
+    # and not only in the unload half, because ``async_reload`` skips the unload
+    # for an entry that was not loaded, and a latch nobody releases would swallow
+    # every later reload of this entry.
+    discard_pending_entry_reload(hass, entry.entry_id)
+
     parent_entry_id = getattr(entry, "parent_entry_id", None)
     if parent_entry_id:
         return await _async_setup_subentry(hass, entry)
@@ -7399,6 +7487,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
 
         await _async_refresh_discovery_watch_paths(hass_arg)
 
+        # An invocation Home Assistant queued before the entry was unloaded still
+        # runs afterwards: ``async_update_entry`` creates the task immediately,
+        # while ``async_on_unload`` only takes the listener out of the entry. Such
+        # a call carries the fingerprint of a setup that is over and would compare
+        # it against data the rebuilt entry has long since adopted -- and reload an
+        # entry that was just set up. Identity in ``update_listeners`` is what
+        # separates the current invocation from the bygone one.
+        listeners = getattr(updated_entry, "update_listeners", None)
+        if isinstance(listeners, list) and _async_refresh_watch_paths not in listeners:
+            return
+
         updated_fingerprint = _credential_fingerprint(updated_entry.data)
         if updated_fingerprint == credential_fingerprint:
             # Options, subentry maintenance, coalescing: everything that leaves
@@ -7416,6 +7515,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
             _LOGGER.debug(
                 "Credentials changed but async_schedule_reload is unavailable; "
                 "they take effect on the next restart"
+            )
+            return
+
+        # Last check before scheduling: a flow that writes credentials and reloads
+        # the entry itself has already covered this change.
+        if not claim_pending_entry_reload(hass_arg, updated_entry.entry_id):
+            _LOGGER.debug(
+                "Credentials changed for entry %s, but a reload is already on its "
+                "way; not scheduling a second one",
+                updated_entry.entry_id,
             )
             return
 
@@ -8939,6 +9048,10 @@ async def async_unload_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
 
     parent_entry_id = getattr(entry, "parent_entry_id", None)
 
+    # The claimed reload has arrived at its unload half; release the latch so a
+    # change made after this point can schedule the next one.
+    discard_pending_entry_reload(hass, entry.entry_id)
+
     # Re-arm the decoder's canonicless-device warning for this scope. That guard is
     # process-wide and survives a config-entry reload (the module stays imported), so
     # without this an unchanged affected-device count would stay suppressed across a
@@ -8996,6 +9109,10 @@ async def async_remove_entry(hass: HomeAssistant, entry: MyConfigEntry) -> None:
     # The device_tracker self-heal latch is keyed by entry_id and survives
     # reloads by design; once the entry is gone nothing would ever clear it.
     discard_registry_selfheal_reload(hass, entry.entry_id)
+
+    # Same housekeeping for the reload latch: an entry that is gone will never
+    # reach the setup or unload that would otherwise release it.
+    discard_pending_entry_reload(hass, entry.entry_id)
 
     # Drop this entry's SECRETS_EXTRA_WATCH_PATHS from the running watcher. The
     # update listener that normally recomputes them was unregistered by the

@@ -907,6 +907,54 @@ async def test_discovery_overwrite_drops_credentials_the_guard_cannot_remove(
 
 
 @pytest.mark.asyncio
+async def test_discovery_overwrite_leaves_the_reload_to_a_claim_already_held(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The writer stands down when a reload of that entry is already on its way.
+
+    Writing credentials notifies the integration's update listener, which reloads
+    the entry so they take effect. ``async_schedule_reload`` does not coalesce, so
+    the write and the listener would unload and set the entry up twice in a row
+    unless both go through the same latch.
+    """
+
+    entry, flow = await _prepare_configured_account_flow(monkeypatch)
+    # A superseded bundle is what the core's flat merge cannot drop, which is
+    # exactly the case the fallback writer exists for.
+    entry.data[DATA_SECRET_BUNDLE] = {"owner_key": "STALE_OWNER_KEY"}
+    entry.data[DATA_AAS_TOKEN] = "aas_et/OLD_TOKEN_VALUE"
+
+    integration = config_flow.import_integration_package()
+    assert integration.claim_pending_entry_reload(flow.hass, entry.entry_id) is True
+
+    payload = _discovery_payload_for_configured_account()
+
+    form = await flow.async_step_discovery(payload)
+    if inspect.isawaitable(form):
+        form = await form
+    assert form["type"] == "form"
+
+    question = await flow.async_step_discovery_confirm({})
+    if inspect.isawaitable(question):
+        question = await question
+    assert question.get("step_id") == "discovery_overwrite"
+
+    result = await flow.async_step_discovery_overwrite(
+        {config_flow._FIELD_OVERWRITE_CREDENTIALS: True}
+    )
+    if inspect.isawaitable(result):
+        result = await result
+
+    assert result["type"] == "abort"
+    assert entry.data[DATA_AAS_TOKEN] == "aas_et/NEW_TOKEN_VALUE", (
+        "the credentials still have to be written; only the reload is deferred"
+    )
+    assert flow.hass.config_entries.scheduled_reloads == [], (
+        "a reload is already on its way; a second one only tears the entry down twice"
+    )
+
+
+@pytest.mark.asyncio
 async def test_discovery_overwrite_rebases_onto_data_written_while_asking(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1099,6 +1147,7 @@ def test_async_step_discovery_update_info_existing_entry(
         def __init__(self) -> None:
             self.updated: list[tuple[Any, dict[str, Any]]] = []
             self.reloaded: list[str] = []
+            self.reload_calls: list[str] = []
             self.lookups: list[str] = []
             self.setup_calls: list[str] = []
             attach_config_entries_flow_manager(self)
@@ -1113,6 +1162,10 @@ def test_async_step_discovery_update_info_existing_entry(
 
         def async_reload(self, entry_id: str) -> None:
             self.reloaded.append(entry_id)
+            # ``reloaded`` is de-duplicated by the flow's own bookkeeping, so it
+            # cannot show a second reload of the same entry. This list is not,
+            # and that is what a coalescing claim has to be measured against.
+            self.reload_calls.append(entry_id)
 
         def async_get_entry(self, entry_id: str) -> Any | None:
             if entry_id == entry.entry_id:
@@ -1139,6 +1192,10 @@ def test_async_step_discovery_update_info_existing_entry(
                 _ConfigEntries,
                 frame_module=frame,
             )
+            # The reload latch lives in ``hass.data``; without the bucket the
+            # claim helper falls back to "reload anyway" and the second run
+            # below could not observe the coalescing.
+            self.data: dict[str, Any] = {}
 
     called_ingest: list[tuple[config_flow.ConfigFlow, Any]] = []
 
@@ -1223,6 +1280,14 @@ def test_async_step_discovery_update_info_existing_entry(
         if inspect.isawaitable(result):
             result = await result
 
+        # A second payload while the first reload is still on its way must not
+        # add another unload/setup cycle: ``async_schedule_reload`` does not
+        # coalesce, and the entry update notifies the credential update listener
+        # as well.
+        repeat = await flow.async_step_discovery_update_info(payload)
+        if inspect.isawaitable(repeat):
+            repeat = await repeat
+
         return (
             result,
             bool(called_ingest),
@@ -1230,9 +1295,12 @@ def test_async_step_discovery_update_info_existing_entry(
             hass.config_entries.lookups,
             hass.config_entries.updated,
             hass.config_entries.reloaded,
+            hass.config_entries.reload_calls,
         )
 
-    result, ingest_called, calls, lookups, updates, reloaded = asyncio.run(_exercise())
+    result, ingest_called, calls, lookups, updates, reloaded, reload_calls = (
+        asyncio.run(_exercise())
+    )
     assert ingest_called, (
         f"discovery ingestion helper was not invoked: lookups={lookups!r}, result={result!r}"
     )
@@ -1241,6 +1309,10 @@ def test_async_step_discovery_update_info_existing_entry(
     assert calls, "abort helper did not inspect current entries"
     assert updates == [(entry, {"data": {CONF_OAUTH_TOKEN: "aas_et/UPDATED"}})]
     assert reloaded == [entry.entry_id]
+    assert reload_calls == [entry.entry_id], (
+        "the second payload arrived while the first reload was still on its way; "
+        "a second one only unloads and sets the entry up twice"
+    )
 
 
 def test_async_step_discovery_update_info_invalid_payload() -> None:
@@ -1778,3 +1850,36 @@ async def test_rejected_payload_does_not_leave_the_old_card_confirmable(
     assert confirmed["type"] == "abort", (
         "confirming after a rejected payload must abort, not apply the old one"
     )
+
+
+def test_the_reload_latch_helper_fails_open() -> None:
+    """Bookkeeping must never be the reason a written credential stays inert.
+
+    ``_claim_entry_reload`` answers "you reload" whenever it cannot get a
+    trustworthy answer: without an entry id, against an integration package that
+    does not carry the latch, and when consulting it raises. One reload too many
+    is a nuisance; a missing one leaves the new credentials stored but
+    ineffective until the next restart.
+    """
+
+    hass = types.SimpleNamespace(data={})
+
+    assert config_flow._claim_entry_reload(hass, "") is True
+
+    original = config_flow.import_integration_package
+
+    try:
+
+        def _without_latch() -> Any:
+            return types.SimpleNamespace()
+
+        config_flow.import_integration_package = _without_latch  # type: ignore[assignment]
+        assert config_flow._claim_entry_reload(hass, "entry-1") is True
+
+        def _raise() -> Any:
+            raise RuntimeError("integration package unavailable")
+
+        config_flow.import_integration_package = _raise  # type: ignore[assignment]
+        assert config_flow._claim_entry_reload(hass, "entry-1") is True
+    finally:
+        config_flow.import_integration_package = original  # type: ignore[assignment]

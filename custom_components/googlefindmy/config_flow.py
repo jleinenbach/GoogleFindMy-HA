@@ -2968,6 +2968,42 @@ def _entry_carries_credentials(entry: ConfigEntry, updates: Mapping[str, Any]) -
     )
 
 
+def _claim_entry_reload(hass: HomeAssistant, entry_id: str) -> bool:
+    """Return whether this flow has to schedule the reload of ``entry_id`` itself.
+
+    Every path here that writes credentials also goes through
+    ``async_update_entry``, which notifies the integration's update listener, and
+    that listener reloads the entry so the new credentials take effect. Without an
+    agreement on one owner, a flow that reloads the entry as well produces two
+    consecutive unload/setup cycles -- ``async_schedule_reload`` does not coalesce.
+    The latch in the integration package is that agreement; see
+    ``claim_pending_entry_reload``.
+
+    Fails **open**: without an entry id, against an integration package that does
+    not carry the latch, and when consulting it raises, this returns ``True`` and
+    the caller reloads as before. One reload too many is a nuisance, a missing one
+    leaves written credentials ineffective. That is deliberately the opposite
+    answer to ``claim_pending_entry_reload``, which reports "no latch for you" for
+    an empty id; the question differs (may I reload versus did I get the latch).
+    """
+
+    if not entry_id:
+        return True
+    try:
+        integration = import_integration_package()
+        claim = getattr(integration, "claim_pending_entry_reload", None)
+        if not callable(claim):
+            return True
+        return bool(claim(hass, entry_id))
+    except Exception:  # noqa: BLE001 - never let bookkeeping block a reload
+        _LOGGER.debug(
+            "Could not consult the reload latch for entry %s; reloading anyway",
+            entry_id,
+            exc_info=True,
+        )
+        return True
+
+
 async def _async_coalesce_account_entries(
     hass: HomeAssistant,
     entry: ConfigEntry,
@@ -4239,9 +4275,13 @@ class ConfigFlow(
 
         # ``async_update_entry`` only mutates the in-memory entry and schedules
         # the debounced store save; the running integration keeps the old
-        # credentials until it is reloaded.
+        # credentials until it is reloaded. That write also notifies the update
+        # listener, which reloads for exactly this reason, so the reload below is
+        # the fallback for an entry that has no listener -- one that is not set up,
+        # for instance because these very credentials had expired. Claiming the
+        # latch keeps the two from unloading the entry twice in a row.
         schedule_reload = getattr(hass.config_entries, "async_schedule_reload", None)
-        if callable(schedule_reload):
+        if callable(schedule_reload) and _claim_entry_reload(hass, entry.entry_id):
             try:
                 schedule_reload(entry.entry_id)
             except Exception:  # noqa: BLE001 - the write itself already landed
@@ -4603,7 +4643,13 @@ class ConfigFlow(
 
             _normalize_tracking_lists()
 
-            reload_task = hass.config_entries.async_reload(existing_entry.entry_id)
+            # The write above already notified the update listener, which reloads
+            # for the changed credentials. Whichever side gets the latch reloads;
+            # the other stands down instead of unloading the entry twice in a row.
+            reload_task: Any = None
+            if _claim_entry_reload(hass, existing_entry.entry_id):
+                reload_task = hass.config_entries.async_reload(existing_entry.entry_id)
+
             if inspect.isawaitable(reload_task):
                 reload_coro = reload_task
 
@@ -5516,6 +5562,18 @@ class ConfigFlow(
                 reload_result = await reload_result
 
             return reload_result
+
+        # One owner for the reload: the entry update this helper follows notifies
+        # the credential update listener, and a reconfigure rewrites exactly the
+        # keys that listener watches. Whoever claims the latch first reloads; the
+        # other side stands down instead of tearing the entry down twice.
+        if not _claim_entry_reload(self.hass, entry_for_update.entry_id):
+            _LOGGER.debug(
+                "Reload after reconfigure for entry %s not scheduled; a reload is "
+                "already on its way",
+                entry_for_update.entry_id,
+            )
+            return
 
         try:
             reload_result = await _async_call_reload()
@@ -8096,9 +8154,15 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin, _ContainerLoginMixi
                                 await self._async_refresh_subentry_entry_title(
                                     entry, selected_option
                                 )
-                            self.hass.async_create_task(
-                                self.hass.config_entries.async_reload(entry.entry_id)
-                            )
+                            # The write above notifies the credential update
+                            # listener, which reloads for exactly this change.
+                            # Whichever side claims the latch first reloads.
+                            if _claim_entry_reload(self.hass, entry.entry_id):
+                                self.hass.async_create_task(
+                                    self.hass.config_entries.async_reload(
+                                        entry.entry_id
+                                    )
+                                )
                             return self.async_abort(reason="reconfigure_successful")
 
                         if has_token:
