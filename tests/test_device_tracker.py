@@ -190,8 +190,9 @@ async def test_scanner_instantiates_tracker_for_known_registry_entry(
 
     # The registry is deliberately NOT probed in the run that adds the
     # entities: Home Assistant creates them in its own task, so an immediate
-    # probe would be negative for every new tracker. The probe happens on a
-    # later listener run (see tests/test_device_tracker_scanner.py).
+    # probe would be negative for every new tracker. The probe waits out a
+    # wall-clock grace period instead, because no listener run is a barrier for
+    # that task either (see tests/test_device_tracker_scanner.py).
     assert coordinator.lookup_calls == []
     # Should have 2 entities per device: main tracker + last location
     assert added and len(added[-1]) == 2

@@ -35,6 +35,58 @@ def _device_tracker_module() -> Any:
     return importlib.import_module("custom_components.googlefindmy.device_tracker")
 
 
+class _ProbeTimer:
+    """Stands in for the grace timer so a test can end it on purpose.
+
+    The platform must not judge a fresh addition before the core had a chance
+    to register it, and no callback announces that moment. It therefore waits
+    out a wall-clock grace period. Capturing that timer here keeps the tests
+    deterministic and, more importantly, keeps them honest: firing it is an
+    explicit act, so a probe that runs at any other moment shows up as a
+    surprise instead of hiding in a passing assertion.
+    """
+
+    def __init__(self) -> None:
+        self.armed: list[tuple[float, Callable[[Any], None]]] = []
+        self.cancelled = 0
+
+    def install(self, monkeypatch: pytest.MonkeyPatch, device_tracker: Any) -> None:
+        def _fake_call_later(
+            hass: Any, delay: float, action: Callable[[Any], None]
+        ) -> Callable[[], None]:
+            del hass
+            self.armed.append((delay, action))
+
+            def _cancel() -> None:
+                self.cancelled += 1
+
+            return _cancel
+
+        monkeypatch.setattr(device_tracker, "async_call_later", _fake_call_later)
+
+    @property
+    def live(self) -> int:
+        """Number of armed timers that were not cancelled again."""
+
+        return len(self.armed) - self.cancelled
+
+    def fire(self) -> None:
+        """Run the most recently armed timer, as the event loop would."""
+
+        assert self.armed, "no registry probe was armed"
+        _delay, action = self.armed[-1]
+        action(None)
+
+
+@pytest.fixture(autouse=True)
+def probe_timer(monkeypatch: pytest.MonkeyPatch) -> _ProbeTimer:
+    """Replace the platform's grace timer in every test of this module."""
+
+    timer = _ProbeTimer()
+    timer.install(monkeypatch, _device_tracker_module())
+    return timer
+
+
 class _HassStub:
     """Minimal hass surface used by the device_tracker platform."""
 
@@ -251,30 +303,65 @@ async def test_the_run_that_adds_a_tracker_never_schedules_a_reload(
 
 
 @pytest.mark.asyncio
-async def test_a_later_run_reloads_once_when_the_entities_never_registered(
+async def test_a_later_listener_run_is_not_treated_as_a_barrier(
+    probe_timer: _ProbeTimer,
     deterministic_config_subentry_id: Callable[[Any, str, str | None], str],
 ) -> None:
-    """The self-heal path fires on a later run, and only then."""
+    """No number of listener runs may stand in for the grace period.
+
+    A poll cycle publishes a per-device push and its closing snapshot back to
+    back, and neither notification waits for the add task the core scheduled.
+    Judging the addition on "the next listener run" therefore reloads an entry
+    whose entities were perfectly on their way (Codex, PR #1222).
+    """
 
     del deterministic_config_subentry_id
 
     device_tracker = _device_tracker_module()
     hass = _HassStub()
     added: list[list[Any]] = []
-    coordinator, entry = await _set_up_platform(
+    coordinator, _entry = await _set_up_platform(
+        device_tracker, hass, registry_hit=False, added=added
+    )
+
+    # Two further notifications in immediate succession, exactly as a poll
+    # cycle produces them.
+    coordinator.listeners[0]()
+    coordinator.listeners[0]()
+
+    assert coordinator.registry_lookups == []
+    assert hass.reloaded == []
+
+
+@pytest.mark.asyncio
+async def test_the_probe_reloads_once_when_the_entities_never_registered(
+    probe_timer: _ProbeTimer,
+    deterministic_config_subentry_id: Callable[[Any, str, str | None], str],
+) -> None:
+    """The self-heal path fires once the grace period is over, and only then."""
+
+    del deterministic_config_subentry_id
+
+    device_tracker = _device_tracker_module()
+    hass = _HassStub()
+    added: list[list[Any]] = []
+    _coordinator, entry = await _set_up_platform(
         device_tracker, hass, registry_hit=False, added=added
     )
     assert hass.reloaded == []
+    assert probe_timer.armed and probe_timer.armed[-1][0] == pytest.approx(
+        device_tracker._REGISTRY_PROBE_DELAY
+    )
 
-    # A later coordinator update: same ids, still missing from the registry.
-    coordinator.listeners[0]()
+    probe_timer.fire()
 
-    assert coordinator.registry_lookups == ["tracker-1"]
+    assert _coordinator.registry_lookups == ["tracker-1"]
     assert hass.reloaded == [entry.entry_id]
 
 
 @pytest.mark.asyncio
 async def test_no_reload_when_the_registry_confirms_the_trackers(
+    probe_timer: _ProbeTimer,
     deterministic_config_subentry_id: Callable[[Any, str, str | None], str],
 ) -> None:
     """The ordinary case stays silent: confirmed entities, no reload."""
@@ -288,14 +375,101 @@ async def test_no_reload_when_the_registry_confirms_the_trackers(
         device_tracker, hass, registry_hit=True, added=added
     )
 
-    coordinator.listeners[0]()
+    probe_timer.fire()
 
     assert coordinator.registry_lookups == ["tracker-1"]
     assert hass.reloaded == []
 
 
 @pytest.mark.asyncio
+async def test_the_grace_period_is_cancelled_when_the_entry_unloads(
+    probe_timer: _ProbeTimer,
+    deterministic_config_subentry_id: Callable[[Any, str, str | None], str],
+) -> None:
+    """An armed timer must not outlive the platform that armed it."""
+
+    del deterministic_config_subentry_id
+
+    device_tracker = _device_tracker_module()
+    hass = _HassStub()
+    added: list[list[Any]] = []
+    _coordinator, entry = await _set_up_platform(
+        device_tracker, hass, registry_hit=False, added=added
+    )
+    assert probe_timer.live == 1
+
+    for unload_callback in entry.unload_callbacks:
+        unload_callback()
+
+    assert probe_timer.live == 0
+    assert hass.reloaded == []
+
+
+@pytest.mark.asyncio
+async def test_an_awaitable_timer_stub_is_scheduled_instead_of_kept(
+    monkeypatch: pytest.MonkeyPatch,
+    deterministic_config_subentry_id: Callable[[Any, str, str | None], str],
+) -> None:
+    """A stub returning an awaitable must not be stored as an unsub handle.
+
+    Mirrors the guard the integration already uses elsewhere for
+    ``async_call_later``: awaiting is scheduled, and unloading stays harmless
+    because there is nothing to cancel.
+    """
+
+    del deterministic_config_subentry_id
+
+    device_tracker = _device_tracker_module()
+
+    async def _later_coro() -> None:
+        return None
+
+    def _awaitable_call_later(hass: Any, delay: float, action: Any) -> Any:
+        del hass, delay, action
+        return _later_coro()
+
+    monkeypatch.setattr(device_tracker, "async_call_later", _awaitable_call_later)
+
+    hass = _HassStub()
+    added: list[list[Any]] = []
+    _coordinator, entry = await _set_up_platform(
+        device_tracker, hass, registry_hit=False, added=added
+    )
+
+    assert len(hass.created_tasks) == 1
+    for unload_callback in entry.unload_callbacks:
+        unload_callback()
+    assert hass.reloaded == []
+
+
+@pytest.mark.asyncio
+async def test_a_further_addition_restarts_the_grace_period(
+    probe_timer: _ProbeTimer,
+    deterministic_config_subentry_id: Callable[[Any, str, str | None], str],
+) -> None:
+    """A tracker added later gets the full grace period, not the remainder."""
+
+    del deterministic_config_subentry_id
+
+    device_tracker = _device_tracker_module()
+    hass = _HassStub()
+    added: list[list[Any]] = []
+    coordinator, _entry = await _set_up_platform(
+        device_tracker, hass, registry_hit=False, added=added
+    )
+    assert len(probe_timer.armed) == 1
+
+    coordinator._devices.append({"id": "tracker-2", "name": "Second"})
+    coordinator.listeners[0]()
+
+    assert len(probe_timer.armed) == 2
+    assert probe_timer.cancelled == 1, "the first timer has to be dropped"
+    assert probe_timer.live == 1
+
+
+@pytest.mark.asyncio
 async def test_the_selfheal_reload_does_not_repeat_across_the_reload_it_causes(
+    probe_timer: _ProbeTimer,
     deterministic_config_subentry_id: Callable[[Any, str, str | None], str],
 ) -> None:
     """The one-shot latch has to survive the reload it schedules.
@@ -313,10 +487,10 @@ async def test_the_selfheal_reload_does_not_repeat_across_the_reload_it_causes(
     hass = _HassStub()
     added: list[list[Any]] = []
 
-    coordinator, entry = await _set_up_platform(
+    _coordinator, entry = await _set_up_platform(
         device_tracker, hass, registry_hit=False, added=added
     )
-    coordinator.listeners[0]()
+    probe_timer.fire()
     assert hass.reloaded == [entry.entry_id]
 
     # Reload: the entry bucket is dropped and the platform is set up afresh,
@@ -325,17 +499,18 @@ async def test_the_selfheal_reload_does_not_repeat_across_the_reload_it_causes(
     entries_bucket[entry.entry_id] = object()
     entries_bucket.pop(entry.entry_id, None)
 
-    coordinator_after, entry_after = await _set_up_platform(
+    _coordinator_after, entry_after = await _set_up_platform(
         device_tracker, hass, registry_hit=False, added=added
     )
     assert entry_after.entry_id == entry.entry_id
-    coordinator_after.listeners[0]()
+    probe_timer.fire()
 
     assert hass.reloaded == [entry.entry_id], "a second reload would be a loop"
 
 
 @pytest.mark.asyncio
 async def test_the_latch_is_not_burned_when_the_core_cannot_reload(
+    probe_timer: _ProbeTimer,
     deterministic_config_subentry_id: Callable[[Any, str, str | None], str],
 ) -> None:
     """An older core without ``async_schedule_reload`` keeps the attempt open.
@@ -350,11 +525,11 @@ async def test_the_latch_is_not_burned_when_the_core_cannot_reload(
     hass = _HassStub()
     hass.config_entries = SimpleNamespace()
     added: list[list[Any]] = []
-    coordinator, entry = await _set_up_platform(
+    _coordinator, entry = await _set_up_platform(
         device_tracker, hass, registry_hit=False, added=added
     )
 
-    coordinator.listeners[0]()
+    probe_timer.fire()
 
     assert hass.reloaded == []
     claimed = hass.data.get(DOMAIN, {}).get("registry_selfheal_reloads", set())
@@ -364,6 +539,7 @@ async def test_the_latch_is_not_burned_when_the_core_cannot_reload(
 @pytest.mark.asyncio
 async def test_a_missing_registry_helper_neither_reloads_nor_burns_the_latch(
     caplog: pytest.LogCaptureFixture,
+    probe_timer: _ProbeTimer,
     deterministic_config_subentry_id: Callable[[Any, str, str | None], str],
 ) -> None:
     """Without a registry helper the platform cannot judge, so it does nothing."""
@@ -380,7 +556,7 @@ async def test_a_missing_registry_helper_neither_reloads_nor_burns_the_latch(
     coordinator.find_tracker_entity_entry = None
     caplog.set_level(logging.DEBUG, "custom_components.googlefindmy.device_tracker")
 
-    coordinator.listeners[0]()
+    probe_timer.fire()
 
     assert hass.reloaded == []
     claimed = hass.data.get(DOMAIN, {}).get("registry_selfheal_reloads", set())
@@ -409,6 +585,7 @@ def test_the_selfheal_helpers_ignore_an_empty_entry_id() -> None:
 @pytest.mark.asyncio
 async def test_a_failing_registry_probe_counts_as_missing(
     caplog: pytest.LogCaptureFixture,
+    probe_timer: _ProbeTimer,
     deterministic_config_subentry_id: Callable[[Any, str, str | None], str],
 ) -> None:
     """A raising lookup must not silently pass the tracker off as registered."""
@@ -428,7 +605,7 @@ async def test_a_failing_registry_probe_counts_as_missing(
     coordinator.find_tracker_entity_entry = _boom  # type: ignore[method-assign]
     caplog.set_level(logging.DEBUG, "custom_components.googlefindmy.device_tracker")
 
-    coordinator.listeners[0]()
+    probe_timer.fire()
 
     assert hass.reloaded == [entry.entry_id]
     assert any(

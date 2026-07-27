@@ -23,9 +23,9 @@ from __future__ import annotations
 import inspect
 import logging
 import time
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Coroutine, Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import (
@@ -36,6 +36,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity import DeviceInfo, EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.event import async_call_later
 
 from . import (
     EntityRecoveryManager,
@@ -82,6 +83,22 @@ _ROW_UNSET: Any = object()
 
 # Read-only mirror of coordinator state; no I/O performed per-entity.
 PARALLEL_UPDATES = 0
+
+# Wall-clock grace before a fresh entity addition is judged against the entity
+# registry.
+#
+# Nothing in the callback world announces "the entity is registered now": the
+# core schedules the addition as its own task, ``update_before_add=True`` runs
+# each entity's update first, and the registry entry is only written after that.
+# A later coordinator listener run is no barrier either -- one poll cycle can
+# publish a per-device push and its closing snapshot back to back without ever
+# yielding, so the very next run may still see nothing (Codex, PR #1222).
+# Deferring by wall clock is the only signal that outlives both.
+#
+# Generous on purpose. Reloading an entry that was fine is worse than healing a
+# genuinely broken addition a minute late, and the value stays far below the
+# device-list cadence (DEVICE_LIST_POLL_INTERVAL, 300 s).
+_REGISTRY_PROBE_DELAY = 60.0
 
 
 @dataclass
@@ -427,12 +444,24 @@ async def async_setup_entry(
                         to_add.append(last_location_entity)
             return to_add
 
-        # Device ids added by an EARLIER listener run and not yet confirmed in
-        # the entity registry. Never evaluated in the run that adds them: the
-        # core schedules the actual entity addition as its own task, so a probe
-        # in the same callback is negative for every new tracker and would turn
-        # the self-heal path into "reload on every new device".
+        # Device ids added but not yet confirmed in the entity registry. They are
+        # judged once ``_REGISTRY_PROBE_DELAY`` has passed, never in the run that
+        # adds them and never merely on "some later listener run": neither is a
+        # barrier for the add task (see the constant's comment).
         pending_registry_ids: set[str] = set()
+        registry_probe_unsub: Callable[[], None] | None = None
+
+        @callback
+        def _cancel_registry_probe() -> None:
+            """Drop a pending grace timer so it cannot fire after unload."""
+
+            nonlocal registry_probe_unsub
+
+            if registry_probe_unsub is not None:
+                registry_probe_unsub()
+                registry_probe_unsub = None
+
+        config_entry.async_on_unload(_cancel_registry_probe)
 
         @callback
         def _verify_pending_registry_entries() -> None:
@@ -500,10 +529,43 @@ async def async_setup_entry(
             schedule_reload(config_entry.entry_id)
 
         @callback
-        def _scan_available_trackers_from_coordinator() -> None:
-            # Runs first, and therefore always on ids from a previous run.
+        def _registry_probe_due(_now: Any) -> None:
+            """Grace period is over: judge what was added before it started."""
+
+            nonlocal registry_probe_unsub
+
+            registry_probe_unsub = None
             _verify_pending_registry_entries()
 
+        @callback
+        def _arm_registry_probe() -> None:
+            """(Re-)start the grace period so the newest addition gets it whole.
+
+            Re-arming means a device appearing every few seconds would keep
+            pushing the probe out. That is the harmless direction: the probe
+            only ever schedules a repair, and a device stream that dense is a
+            different problem than the one this path exists for.
+            """
+
+            nonlocal registry_probe_unsub
+
+            _cancel_registry_probe()
+            handle = async_call_later(
+                coordinator.hass, _REGISTRY_PROBE_DELAY, _registry_probe_due
+            )
+            if inspect.isawaitable(handle):
+                # Mirrors the awaitable guard the integration already uses for
+                # async_call_later elsewhere; such a stub leaves no unsub to keep.
+                coordinator.hass.async_create_task(
+                    cast(Coroutine[Any, Any, Any], handle),
+                    name=f"{DOMAIN}.device_tracker_registry_probe",
+                )
+                return
+            if callable(handle):
+                registry_probe_unsub = handle
+
+        @callback
+        def _scan_available_trackers_from_coordinator() -> None:
             snapshot = coordinator.get_subentry_snapshot(tracker_subentry_key)
             if not snapshot:
                 meta = coordinator.get_subentry_metadata(key=tracker_subentry_key)
@@ -543,12 +605,16 @@ async def async_setup_entry(
                 _schedule_tracker_entities(to_add, True)
 
                 # No discovery flow, no card, no user click: a new tracker is an
-                # entity, not an account. Only remember the ids so a LATER run
-                # can tell whether the addition actually reached the registry.
+                # entity, not an account. Only remember the ids and start the
+                # grace period after which the addition is judged.
+                armed = False
                 for entity in to_add:
                     dev_id = getattr(entity, "device_id", None)
                     if isinstance(dev_id, str) and dev_id:
                         pending_registry_ids.add(dev_id)
+                        armed = True
+                if armed:
+                    _arm_registry_probe()
 
         unsub = coordinator.async_add_listener(
             _scan_available_trackers_from_coordinator
