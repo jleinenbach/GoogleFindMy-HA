@@ -19,6 +19,10 @@ rem                        the host publish is the boundary: a wildcard is
 rem                        refused, and a LAN value is warned about before the
 rem                        container starts (trusted LAN or this host, for the
 rem                        seconds of the handoff, never an untrusted network).
+rem                        For a Home Assistant CONTAINER on this host, the
+rem                        gateway address of the Docker network HA is on is the
+rem                        narrowest choice: an address of this host, reachable
+rem                        from that network, not routed to the LAN.
 rem   GFMY_NOVNC_BIND      host bind for the noVNC viewer (7900). Default 127.0.0.1.
 rem   GFMY_NOVNC_URL_HOST  address PRINTED for you to open in a browser.
 rem                        Defaults to the noVNC bind.
@@ -207,7 +211,15 @@ echo.
 echo [login] Which address of this host will Home Assistant use to fetch the
 echo [login] credentials from port 7901?
 echo [login]   Enter = %ONECLICK_BIND%
-echo [login]   or type a LAN address of this host, e.g. 192.168.1.21
+echo [login]   127.0.0.1 only works for a Home Assistant that SHARES this host's
+echo [login]   network namespace, or for an SSH tunnel. A bridged HA container on
+echo [login]   this very host has its own loopback and cannot reach it.
+echo [login]   or type an address of this host:
+echo [login]     * HA in a Docker container here: the GATEWAY address of the
+echo [login]       network HA is on, e.g. 172.18.0.1 - an address of this host,
+echo [login]       reachable from that network, not routed to the LAN. Read it
+echo [login]       with: docker network inspect NETWORK -f "{{range .IPAM.Config}}{{.Gateway}}{{end}}"
+echo [login]     * HA on another machine: a LAN address, e.g. 192.168.1.21
 set "BIND_CHOICE="
 set /p "BIND_CHOICE=[login] Address [Enter = %ONECLICK_BIND%]: "
 if "%BIND_CHOICE%"=="" goto :oneclick_bind_done
@@ -376,8 +388,11 @@ exit /b 2
 :oneclick_bind_wildcard
 echo [login] A wildcard is refused for the token endpoint: port 7901 serves the 1>&2
 echo [login] Google credentials in clear text, so it must not listen on every 1>&2
-echo [login] interface. Name the one address Home Assistant uses, e.g. 1>&2
-echo [login] set GFMY_ONECLICK_BIND=192.168.1.21, or leave it unset for 127.0.0.1. 1>&2
+echo [login] interface. Name the one address Home Assistant uses: for HA in a 1>&2
+echo [login] Docker container on this host that is the gateway address of the 1>&2
+echo [login] network HA is on (set GFMY_ONECLICK_BIND=172.18.0.1), which the LAN 1>&2
+echo [login] does not reach; for HA on another machine a LAN address (e.g. 1>&2
+echo [login] set GFMY_ONECLICK_BIND=192.168.1.21). Unset keeps 127.0.0.1. 1>&2
 popd
 endlocal
 exit /b 2

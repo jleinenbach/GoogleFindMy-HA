@@ -110,7 +110,7 @@ have separate settings. Never collapse them into one value.
 
 | Setting | Port | Consumer | Default | Why |
 |---|---|---|---|---|
-| `GFMY_ONECLICK_BIND` | 7901 | Home Assistant, machine-to-machine | `127.0.0.1` | **Security boundary.** The endpoint serves Google credentials in cleartext, so the host publish is what limits who can fetch them. Unset means loopback; widen it only for a Home Assistant that can neither see `./data` nor share this host's network namespace. A wildcard (`0.0.0.0`, `::`, `*`) is **refused** by both launchers and, for the direct `docker compose` path that runs neither, by the container's entrypoint; a non-loopback value makes them warn that the transport is plain http: trusted LAN or this host, for the seconds the handoff takes. |
+| `GFMY_ONECLICK_BIND` | 7901 | Home Assistant, machine-to-machine | `127.0.0.1` | **Security boundary.** The endpoint serves Google credentials in cleartext, so the host publish is what limits who can fetch them. Unset means loopback; widen it only for a Home Assistant that can neither see `./data` nor share this host's network namespace. Pick the **narrowest address that HA reaches**: for an HA container on this host that is the **gateway address of the Docker network HA is on** (an address of this host, reachable from that network, not routed to the LAN); a LAN address is for an HA on a different machine. A wildcard (`0.0.0.0`, `::`, `*`) is **refused** by both launchers and, for the direct `docker compose` path that runs neither, by the container's entrypoint; a non-loopback value makes them warn that the transport is plain http: trusted LAN or this host, for the seconds the handoff takes. |
 | `GFMY_NOVNC_BIND` | 7900 | the browser, via the host's network stack | `127.0.0.1` | Where the viewer actually listens. Everything the launchers print about reachability is derived from **this** value, never from the printed one. |
 | `GFMY_NOVNC_URL_HOST` | 7900 | printed text only | the noVNC bind | The address you are told to open. A wildcard bind is never printed as a URL: `login.sh` substitutes the first detected address, `login.cmd` (which does not auto-detect) falls back to `127.0.0.1` and asks you to pass `--ip`. |
 
@@ -124,8 +124,19 @@ entered is a non-loopback IP address; otherwise it shows the guidance above.
 > Yes when HA shares the host's network namespace (Home Assistant OS, HA Core,
 > or a container started with `network_mode: host`), because then HA's
 > `127.0.0.1` *is* the host loopback. A HA container in a bridge network has its **own**
-> loopback and cannot reach it; use the shared-network route below or the file
-> handoff instead. Check the mode without guessing the container name:
+> loopback and cannot reach it. Three ways out, narrowest first: the
+> shared-network route below (no host publish at all), the file handoff, or a
+> publish on the **gateway address of the Docker network HA is on** — that
+> address belongs to this host, the containers of that network reach it, and the
+> LAN does not (a private bridge subnet is not routed off the host unless you
+> deliberately route it there):
+> ```bash
+> docker network inspect <network> -f '{{range .IPAM.Config}}{{.Gateway}}{{end}}'
+> # then, on the Docker host:
+> GFMY_ONECLICK_BIND=<gateway> GFMY_ONECLICK=1 bash login.sh
+> ```
+> A LAN address is the right answer only when Home Assistant runs on a
+> **different machine**. Check the mode without guessing the container name:
 > ```bash
 > docker ps --format '{{.Names}}' | while read n; do \
 >   printf '%-28s %s\n' "$n" "$(docker inspect -f '{{.HostConfig.NetworkMode}}' "$n")"; done
@@ -475,16 +486,23 @@ you have two ways. Either keep the loopback default and tunnel:
 ssh -L 7901:127.0.0.1:7901 <docker-host>
 ```
 
-or publish it on a LAN address of this host, which the launcher offers when you
+or publish it on another address of this host, which the launcher offers when you
 pick track B and which you can also state up front:
 
 ```bash
+# Home Assistant is a container on THIS host: the gateway of its Docker network,
+# an address of this host that the LAN does not reach.
+GFMY_ONECLICK_BIND=172.18.0.1 GFMY_ONECLICK=1 bash login.sh
+# Home Assistant runs on ANOTHER machine: a LAN address of this host.
 GFMY_ONECLICK_BIND=192.168.1.21 GFMY_ONECLICK=1 bash login.sh
 ```
 
-The second way carries the tokens **unencrypted** over that LAN for the few
-seconds of the handoff, so use it on a network you trust, and never on an
-untrusted one. A wildcard bind is refused.
+Every publish beyond loopback carries the tokens **unencrypted** for the few
+seconds of the handoff, so use it on a network you trust and never on an
+untrusted one. That is why the two examples are not interchangeable: the gateway
+address keeps the bundle on a host-internal bridge, the LAN address puts it on
+your LAN. Take the LAN address only when Home Assistant really is on another
+machine. A wildcard bind is refused.
 
 > **If Home Assistant itself runs in a bridged Docker container** (the *HA
 > Container* install method), `127.0.0.1` inside Home Assistant points at the
@@ -533,13 +551,23 @@ untrusted one. A wildcard bind is refused.
 > 2. **File handoff instead (Track A, no network at all).** Point the integration
 >    at `docker-login/data/secrets.json` via the options and let the secrets
 >    watcher pick it up — this needs no reachable port.
-> 3. **Publish 7901 on a LAN address of this host.** Pick track B in the launcher
->    menu and accept or type the address, or state it up front with
->    `GFMY_ONECLICK_BIND=192.168.1.21 GFMY_ONECLICK=1 bash login.sh`, then enter
->    that same address in Home Assistant. This is the route for a Home Assistant
->    on **another machine**, and the only one of the three that puts the bundle on
->    the wire: it is **unencrypted**, so keep it inside a LAN you trust and only
->    for the seconds the handoff takes. A wildcard bind is refused.
+> 3. **Publish 7901 on another address of this host.** Pick track B in the
+>    launcher menu and accept or type the address, or state it up front, then
+>    enter that same address in Home Assistant. Which address depends on where HA
+>    runs, and the difference is the whole security margin:
+>    - HA is a **container on this host**: the **gateway address of the Docker
+>      network HA is on**
+>      (`docker network inspect <network> -f '{{range .IPAM.Config}}{{.Gateway}}{{end}}'`,
+>      then `GFMY_ONECLICK_BIND=<gateway> GFMY_ONECLICK=1 bash login.sh`). That
+>      address belongs to this host, the containers of that network reach it, and
+>      the LAN does not.
+>    - HA is on **another machine**: a LAN address
+>      (`GFMY_ONECLICK_BIND=192.168.1.21 GFMY_ONECLICK=1 bash login.sh`). This is
+>      the only variant that puts the bundle on your LAN: it is **unencrypted**,
+>      so keep it inside a LAN you trust and only for the seconds the handoff
+>      takes.
+>
+>    A wildcard bind is refused in both cases.
 >
 > For **HA OS, HA Core, or host-networked HA on the same machine**, the plain
 > `127.0.0.1:7901` above is correct and needs none of this.

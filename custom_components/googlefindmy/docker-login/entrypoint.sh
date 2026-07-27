@@ -115,6 +115,10 @@ if [ "${GFMY_ONECLICK:-}" = "1" ] \
   echo "[entrypoint] interface. Use a concrete address of this host (or leave the" >&2
   echo "[entrypoint] variable unset for the loopback default):" >&2
   echo "[entrypoint]   GFMY_ONECLICK_BIND=192.0.2.10 GFMY_ONECLICK=1 bash login.sh" >&2
+  echo "[entrypoint] Reaching a Home Assistant CONTAINER on this host does not need" >&2
+  echo "[entrypoint] a wildcard either: publish on the gateway address of the Docker" >&2
+  echo "[entrypoint] network HA is on, which that network reaches and the LAN does" >&2
+  echo "[entrypoint] not." >&2
   exit 2
 fi
 
@@ -407,8 +411,15 @@ function print_oneclick_banner {
     echo "[entrypoint]     container's service name here instead;"
     echo "[entrypoint]   * skip the port and let Home Assistant import the file"
     echo "[entrypoint]     docker-login/data/secrets.json, which it does on its own;"
-    echo "[entrypoint]   * publish on a LAN address of this host and enter that:"
+    echo "[entrypoint]   * publish on an address of this host that Home Assistant"
+    echo "[entrypoint]     reaches, and enter that address there:"
     echo "[entrypoint]     GFMY_ONECLICK_BIND=<ADDRESS> GFMY_ONECLICK=1 bash login.sh"
+    echo "[entrypoint]     For an HA container ON this host the narrowest <ADDRESS>"
+    echo "[entrypoint]     is the GATEWAY of the Docker network HA is on: it is an"
+    echo "[entrypoint]     address of this host, reachable from that network, and"
+    echo "[entrypoint]     not routed to the LAN. Read it on the host with"
+    echo "[entrypoint]     docker network inspect <net> -f '{{range .IPAM.Config}}{{.Gateway}}{{end}}'"
+    echo "[entrypoint]     A LAN address is for an HA on a DIFFERENT machine."
     echo "[entrypoint] From another machine you can also tunnel:"
     echo "[entrypoint]   ssh -L 7901:127.0.0.1:7901 <host>"
     echo "[entrypoint] but only if the tunnel's local end sits inside the network"

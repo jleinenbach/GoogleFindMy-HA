@@ -30,10 +30,13 @@
 #                          when it shares this host's network namespace (HAOS,
 #                          HA Core, `network_mode: host`). HA in a bridge network
 #                          has its OWN loopback and cannot, so for that case name
-#                          a LAN address of this host here (the track menu offers
-#                          it), or use the shared-network route in README.md,
-#                          which publishes no host port at all, or the file
-#                          handoff. That endpoint serves Google credentials in
+#                          an address of this host that HA reaches: the GATEWAY
+#                          address of the Docker network HA is on when HA is a
+#                          container here (host-internal, not routed to the LAN),
+#                          a LAN address when HA is on another machine. The track
+#                          menu offers both. Alternatives without any host
+#                          publish: the shared-network route in README.md, or the
+#                          file handoff. That endpoint serves Google credentials in
 #                          CLEARTEXT, so the host publish is the boundary: the
 #                          default never widens by itself, a wildcard is refused
 #                          outright, and a LAN value is warned about before the
@@ -546,8 +549,11 @@ reject_wildcard_bind() {
   echo "[login] GFMY_ONECLICK_BIND='$1' is a wildcard, which is refused for the" >&2
   echo "[login] token endpoint: port 7901 serves the Google credentials in clear" >&2
   echo "[login] text, so it must not listen on every interface. Name the one" >&2
-  echo "[login] address Home Assistant uses, e.g. GFMY_ONECLICK_BIND=192.168.1.21," >&2
-  echo "[login] or leave it unset for 127.0.0.1." >&2
+  echo "[login] address Home Assistant uses: for HA in a Docker container on this" >&2
+  echo "[login] host that is the GATEWAY address of the network HA is on (e.g." >&2
+  echo "[login] GFMY_ONECLICK_BIND=172.18.0.1, host-internal, not on the LAN), for" >&2
+  echo "[login] HA on another machine a LAN address (e.g. 192.168.1.21). Leaving" >&2
+  echo "[login] the variable unset keeps 127.0.0.1." >&2
   exit 2
 }
 
@@ -559,8 +565,17 @@ prompt_for_oneclick_bind() {
       echo "[login] Which address of this host will Home Assistant use to fetch the"
       echo "[login] credentials from port 7901?"
       echo "[login]   Enter = ${oneclick_bind}"
-      echo "[login]   L) 127.0.0.1  (only Home Assistant ON this host, or an SSH tunnel)"
-      echo "[login]   or type a LAN address of this host, e.g. 192.168.1.21"
+      echo "[login]   L) 127.0.0.1  -- only for a Home Assistant that SHARES this"
+      echo "[login]      host's network namespace (HAOS, HA Core, network_mode:"
+      echo "[login]      host), or for an SSH tunnel. A BRIDGED HA container on"
+      echo "[login]      this very host has its own loopback and cannot reach it."
+      echo "[login]   or type an address of this host:"
+      echo "[login]     * HA in a Docker container here: the GATEWAY address of the"
+      echo "[login]       network HA is on (e.g. 172.18.0.1). It is an address of"
+      echo "[login]       this host, reachable from that network but NOT from the"
+      echo "[login]       LAN, so it is the narrowest widening. Read it with:"
+      echo "[login]       docker network inspect <net> -f '{{range .IPAM.Config}}{{.Gateway}}{{end}}'"
+      echo "[login]     * HA on another machine: a LAN address, e.g. 192.168.1.21"
       printf '[login] Address [Enter = %s]: ' "$oneclick_bind"
     } >&2
     read -r choice || choice=""

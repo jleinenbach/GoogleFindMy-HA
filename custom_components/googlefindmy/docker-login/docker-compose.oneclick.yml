@@ -41,7 +41,11 @@
 #   The widening exists because a loopback-only endpoint is reachable exactly
 #   where the file handoff already works (same host, shared network namespace);
 #   a Home Assistant in its own bridge container, or on another machine, cannot
-#   use it at all. Rules that stay in force:
+#   use it at all. Pick the NARROWEST address that reaches HA: for an HA
+#   container on this host that is the gateway address of the Docker network HA
+#   is on (`docker network inspect <net> -f '{{range .IPAM.Config}}{{.Gateway}}{{end}}'`)
+#   -- an address of this host that its containers reach and the LAN does not; a
+#   LAN address is for an HA on a different machine. Rules that stay in force:
 #     * the DEFAULT is loopback -- an unset variable must never widen anything,
 #     * a wildcard host part (0.0.0.0, ::, *) is refused, by the launchers AND
 #       by the entrypoint itself, so the direct-Compose path below cannot slip

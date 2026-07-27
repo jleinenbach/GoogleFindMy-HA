@@ -720,7 +720,9 @@ def map_token_hex_digest(seed: str) -> str:
 # rendered as a clickable link/hint, while ``CONTAINER_TOKEN_PORT`` is the default
 # for the fetch that pulls the freshly minted ``secrets.json``. That fetch is
 # loopback in the default setup; the container's ``GFMY_ONECLICK_BIND`` opt-in can
-# publish the same port on a LAN address for a Home Assistant on another machine.
+# publish the same port on another address of the Docker host: the gateway address
+# of the Docker network Home Assistant runs on when HA is a container there, or a
+# LAN address when Home Assistant runs on another machine.
 CONTAINER_NOVNC_PORT: int = 7900
 CONTAINER_TOKEN_PORT: int = 7901
 
