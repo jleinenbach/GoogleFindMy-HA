@@ -1254,6 +1254,7 @@ def _discovery_path_reason_literals() -> set[str]:
         # produced by _map_api_exc_to_error_key are enumerated).
         if isinstance(node, ast.AsyncFunctionDef) and node.name in {
             "async_step_discovery",
+            "async_step_discovery_confirm",
             "async_step_discovery_update_info",
         }:
             for child in ast.walk(node):

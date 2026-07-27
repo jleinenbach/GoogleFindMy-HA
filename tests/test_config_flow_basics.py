@@ -1027,62 +1027,6 @@ class TestDiscoveryFlowError:
         assert "invalid_discovery_info" in str(err)
 
 
-class TestDiscoveryPayloadEquivalent:
-    """Empiricism: lines 1632-1646 — three layered equality checks."""
-
-    def _make(
-        self,
-        *,
-        email: str = "user@example.com",
-        uid: str = "acct:user@example.com",
-        cands: tuple[tuple[str, str], ...] = (("aas_token", "x" * 16),),
-        bundle: Any | None = None,
-        title: str | None = None,
-    ) -> cf.CloudDiscoveryData:
-        return cf.CloudDiscoveryData(
-            email=email,
-            unique_id=uid,
-            candidates=cands,
-            secrets_bundle=bundle,
-            title=title,
-        )
-
-    def test_equal_when_all_fields_match(self) -> None:
-        a = self._make()
-        b = self._make()
-        assert cf._discovery_payload_equivalent(a, b) is True
-
-    def test_differing_unique_id(self) -> None:
-        a = self._make(uid="acct:a")
-        b = self._make(uid="acct:b")
-        assert cf._discovery_payload_equivalent(a, b) is False
-
-    def test_differing_email(self) -> None:
-        a = self._make(email="a@x.com")
-        b = self._make(email="b@x.com")
-        assert cf._discovery_payload_equivalent(a, b) is False
-
-    def test_differing_candidates(self) -> None:
-        a = self._make(cands=(("x", "y" * 16),))
-        b = self._make(cands=(("x", "z" * 16),))
-        assert cf._discovery_payload_equivalent(a, b) is False
-
-    def test_both_bundles_none_remains_equal(self) -> None:
-        a = self._make(bundle=None)
-        b = self._make(bundle=None)
-        assert cf._discovery_payload_equivalent(a, b) is True
-
-    def test_one_bundle_none_is_not_equivalent(self) -> None:
-        a = self._make(bundle=None)
-        b = self._make(bundle={"k": "v"})
-        assert cf._discovery_payload_equivalent(a, b) is False
-
-    def test_equal_bundles_match(self) -> None:
-        a = self._make(bundle={"k": "v"})
-        b = self._make(bundle={"k": "v"})
-        assert cf._discovery_payload_equivalent(a, b) is True
-
-
 class TestNormalizeAndValidateDiscoveryPayload:
     """Empiricism: lines 1649-1740 — multi-branch normalizer for discovery info."""
 

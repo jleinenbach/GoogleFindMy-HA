@@ -81,6 +81,17 @@ class _StubCache:
         return self.values.get(key)
 
     async def async_set_cached_value(self, key: str, value: Any) -> None:
+        """Store ``value``, or remove ``key`` when it is ``None``.
+
+        ``TokenCache.set`` treats ``None`` as a removal (``self._data.pop(name)``),
+        so a stub that stored the ``None`` instead would let a test pass on a
+        key that is still readable through ``all()`` -- exactly the kind of
+        difference that lets a resurrected credential through unnoticed.
+        """
+
+        if value is None:
+            self.values.pop(key, None)
+            return
         self.values[key] = value
 
     async def all(self) -> dict[str, Any]:

@@ -73,6 +73,7 @@ from typing import (
     TYPE_CHECKING,
     Any,
     ClassVar,
+    Final,
     Protocol,
     TypeAlias,
     TypeVar,
@@ -99,6 +100,7 @@ except ImportError:  # Pre-2025.5 HA builds do not expose the helper.
     OperationNotAllowed = type("OperationNotAllowed", (HomeAssistantError,), {})
 
 from .const import (
+    CLOUD_SCANNER_DISCOVERY_SOURCE,
     CONF_GOOGLE_EMAIL,
     CONF_OAUTH_TOKEN,
     CONFIG_ENTRY_VERSION,
@@ -138,6 +140,7 @@ from .const import (
     OPT_SPEED_GATE_ENABLED,
     OPT_STALE_THRESHOLD,
     OPTION_KEYS,
+    OPTIONAL_CREDENTIAL_KEYS,
     SECRETS_EXTRA_WATCH_PATHS,
     SERVICE_FEATURE_PLATFORMS,
     SERVICE_SUBENTRY_KEY,
@@ -1221,6 +1224,12 @@ _FIELD_REPAIR_DEVICES = "device_ids"
 # form.
 _FIELD_USE_FOUND_BUNDLE = "use_found_bundle"
 
+# Discovery for an account that is already configured: "replace the stored
+# credentials with the ones just discovered?". Unset means "no", which leaves the
+# entry untouched. Defaults to yes, because a discovery for a configured account
+# follows a login the user just performed on purpose.
+_FIELD_OVERWRITE_CREDENTIALS = "overwrite_credentials"
+
 _SUBENTRIES_DOCS_URL = (
     "https://github.com/BSkando/GoogleFindMy-HA/blob/main/README.md"
     "#subentries-and-feature-groups"
@@ -2201,7 +2210,7 @@ def _async_mark_cleanup_ticket_entry_promised(
     later staging on the same flow can be followed by another call.
 
     No claim of "the last thing this flow does" is made here, and none would
-    hold: ``async_step_discovery`` inspects the ``CREATE_ENTRY`` FlowResult of
+    hold: ``async_step_discovery_confirm`` inspects the ``CREATE_ENTRY`` FlowResult of
     ``async_step_device_selection`` and stages a further job *afterwards*,
     inside the very same flow. Each site that can produce or follow a
     ``CREATE_ENTRY`` therefore marks for itself; what makes that safe is the
@@ -2910,6 +2919,55 @@ def _find_entry_by_email(hass: HomeAssistant, email: str) -> ConfigEntry | None:
     return None
 
 
+#: Credential keys an account may or may not carry. They are removed from the
+#: entry when the freshly discovered credentials do not carry them, which a flat
+#: merge cannot do on its own -- hence the full-data payload built by
+#: :func:`_merge_credential_updates`, and hence the absence check in
+#: :func:`_entry_carries_credentials`.
+#:
+#: The removal has a second, deferred half: the entry-scoped token cache mirrors
+#: these keys, and ``async_setup_entry`` would seed a removed one straight back
+#: from that mirror. It therefore reads the same constant from ``const.py``,
+#: which is the single source of truth for both halves -- a local copy here and
+#: a local copy there is precisely how the two could drift apart.
+_OPTIONAL_CREDENTIAL_KEYS: Final = OPTIONAL_CREDENTIAL_KEYS
+
+
+def _entry_carries_credentials(entry: ConfigEntry, updates: Mapping[str, Any]) -> bool:
+    """Whether ``entry`` holds exactly the credentials ``updates`` describes.
+
+    The evidence that Home Assistant's unique-id guard performed the write, read
+    off the entry instead of inferred from the exception that followed. The
+    guard writes ``{**entry.data, **updates}``, so a landed write means every
+    pair in ``updates`` is present verbatim; a guard that returned early leaves
+    the entry untouched and fails this test.
+
+    Presence alone is not enough, though. ``updates`` is the intended entry data
+    in full, and :func:`_merge_credential_updates` expresses a *removal* by
+    leaving an optional credential key out of it. A flat merge cannot act on
+    that: the guard leaves the superseded ``secrets_data`` or ``aas_token``
+    behind, where the reload would seed it into the entry-scoped token cache
+    next to the new credentials. So every optional key missing from ``updates``
+    must also be missing from the entry; where it is not, the caller's wholesale
+    write is still owed.
+
+    Callers must not treat ``AbortFlow`` alone as proof: the guard returns
+    silently when the flow has no unique id or when no entry claims it (a legacy
+    entry without ``unique_id``, or one whose account identity has moved), and
+    :meth:`_async_prepare_account_context` then raises its own ``AbortFlow``
+    without anything having been written.
+    """
+
+    data = getattr(entry, "data", None)
+    if not isinstance(data, Mapping):
+        return False
+    if not all(key in data and data[key] == value for key, value in updates.items()):
+        return False
+    return all(
+        key not in data for key in _OPTIONAL_CREDENTIAL_KEYS if key not in updates
+    )
+
+
 async def _async_coalesce_account_entries(
     hass: HomeAssistant,
     entry: ConfigEntry,
@@ -2995,23 +3053,36 @@ class CloudDiscoveryData:
     candidates: tuple[tuple[str, str], ...]
     secrets_bundle: Mapping[str, Any] | None
     title: str | None = None
+    # Which producer assembled the payload (``discovery_source``). Kept because
+    # the flow context does not survive as a discriminator: discovery.py
+    # downgrades every non-Home-Assistant source to plain ``discovery``, so the
+    # tracker rescan and a genuine credential import arrive indistinguishable
+    # unless the payload itself says who sent it. ``None`` means the payload
+    # carried no marker, which is treated as a credential import: asking one
+    # question too many beats replacing working credentials unasked.
+    source: str | None = None
 
 
-def _discovery_payload_equivalent(
-    first: CloudDiscoveryData, second: CloudDiscoveryData
-) -> bool:
-    """Return True when two normalized discovery payloads are equivalent."""
+def _is_credential_import_discovery(discovery: CloudDiscoveryData) -> bool:
+    """Return True when the payload represents credentials someone supplied.
 
-    if first.unique_id != second.unique_id or first.email != second.email:
-        return False
+    Only such a payload may raise the overwrite question, because only there is
+    a human waiting who meant to replace something. The tracker rescan in
+    ``device_tracker.py`` re-submits the credentials the entry already stores;
+    asking whether to replace them with themselves would be a dialog about
+    nothing.
 
-    if first.candidates != second.candidates:
-        return False
+    The flow context cannot answer this: ``discovery.py`` downgrades every source
+    that is not a Home Assistant ``SOURCE_*`` constant to plain ``discovery``,
+    and the file watcher's own ``discovery_update_info`` is downgraded the same
+    way, so both producers arrive under an identical context source. Hence the
+    check reads the payload marker.
 
-    if first.secrets_bundle is None or second.secrets_bundle is None:
-        return first.secrets_bundle is None and second.secrets_bundle is None
+    An unmarked payload counts as an import: replacing working credentials
+    unasked is the worse failure, so an unknown producer gets the question.
+    """
 
-    return dict(first.secrets_bundle) == dict(second.secrets_bundle)
+    return discovery.source != CLOUD_SCANNER_DISCOVERY_SOURCE
 
 
 def _normalize_and_validate_discovery_payload(
@@ -3110,13 +3181,43 @@ def _normalize_and_validate_discovery_payload(
     if unique_id is None:
         raise DiscoveryFlowError("invalid_discovery_info")
 
+    source = payload_dict.get("discovery_source")
     return CloudDiscoveryData(
         email=email_candidate,
         unique_id=unique_id,
         candidates=tuple(candidates),
         secrets_bundle=secrets_bundle,
         title=str(title) if isinstance(title, str) else None,
+        source=source if isinstance(source, str) and source else None,
     )
+
+
+def _merge_credential_updates(
+    entry_data: Mapping[str, Any], auth_data: Mapping[str, Any]
+) -> dict[str, Any]:
+    """Merge the discovered credential delta onto ``entry_data``.
+
+    The result is the *entry data itself*, flat: that is what
+    ``_abort_if_unique_id_configured(updates=...)`` merges into the entry
+    (``data={**entry.data, **updates}``) and what
+    :meth:`_async_write_entry_credentials` writes verbatim. A full payload is
+    required rather than the bare delta because a flat merge can only add or
+    replace keys, never drop them, and credentials that no longer include a
+    secrets bundle or an ``aas_et/`` token must not leave the old ones behind.
+
+    Callers must apply this as late as possible -- against the entry data as it
+    is when the write happens, not as it was when a form was shown. A payload
+    built before a confirmation dialog is a snapshot, and writing a snapshot
+    rolls back whatever else touched the entry meanwhile (the options flow
+    refreshes credentials through ``_async_options_container_persist``, for
+    one).
+    """
+
+    merged = {**entry_data, **auth_data}
+    for key in _OPTIONAL_CREDENTIAL_KEYS:
+        if key not in auth_data:
+            merged.pop(key, None)
+    return merged
 
 
 async def _ingest_discovery_credentials(
@@ -3125,7 +3226,21 @@ async def _ingest_discovery_credentials(
     *,
     existing_entry: ConfigEntry | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any] | None]:
-    """Validate discovery credentials and prepare flow + entry payloads."""
+    """Validate discovery credentials and prepare flow + entry payloads.
+
+    The second element is the ``updates`` payload for
+    ``_abort_if_unique_id_configured``. Home Assistant merges it *flat* into the
+    entry (``data={**entry.data, **updates}``, ``config_entries.py``), so it must
+    be the entry data itself, not ``{"data": ...}``: a nested payload would leave
+    every credential on its old value and add a stray ``data`` key inside
+    ``entry.data`` instead.
+
+    That second element is only good for an immediate write. It is merged from
+    ``existing_entry`` as it is *now*; a caller that shows a form before writing
+    must carry the first element (the delta) across it and merge again through
+    :func:`_merge_credential_updates`, or it will roll back whatever touched the
+    entry meanwhile.
+    """
 
     candidates = list(discovery.candidates)
     secrets_bundle = (
@@ -3187,14 +3302,9 @@ async def _ingest_discovery_credentials(
         auth_data.pop(DATA_AAS_TOKEN, None)
 
     if existing_entry is not None:
-        updated = {**existing_entry.data, **auth_data}
-        if not secrets_bundle:
-            updated.pop(DATA_SECRET_BUNDLE, None)
-        if not (isinstance(to_persist, str) and to_persist.startswith("aas_et/")):
-            updated.pop(DATA_AAS_TOKEN, None)
-        if fcm_credentials is not None:
-            updated["fcm_credentials"] = fcm_credentials
-        updates: dict[str, Any] | None = {"data": updated}
+        updates: dict[str, Any] | None = _merge_credential_updates(
+            existing_entry.data, auth_data
+        )
     else:
         updates = None
 
@@ -3300,9 +3410,16 @@ class ConfigFlow(
         self._subentry_key_core_tracking = TRACKER_SUBENTRY_KEY
         self._subentry_key_service = SERVICE_SUBENTRY_KEY
         self._pending_discovery_payload: CloudDiscoveryData | None = None
-        self._pending_discovery_updates: dict[str, Any] | None = None
-        self._pending_discovery_existing_entry: ConfigEntry | None = None
-        self._discovery_confirm_pending = False
+        # The credential *delta*, not a merged entry payload: what a form
+        # carries across a user's think time must not be a snapshot of another
+        # object's state (see _merge_credential_updates).
+        self._pending_discovery_auth: dict[str, Any] | None = None
+        self._pending_discovery_entry_exists = False
+        # Survives _clear_discovery_confirmation_state on purpose: the overwrite
+        # question is asked *after* the discovery card has been confirmed and
+        # that state torn down.
+        self._pending_overwrite_payload: CloudDiscoveryData | None = None
+        self._pending_overwrite_auth: dict[str, Any] | None = None
         # One-shot marker for the local-bundle preflight scan in
         # ``async_step_user``; see _async_preflight_local_bundle. Lives here and
         # not on _ContainerLoginMixin because the preflight is a *setup* step
@@ -3811,10 +3928,9 @@ class ConfigFlow(
         prompt to keep the state machine in sync with subsequent submissions.
         """
 
-        self._discovery_confirm_pending = False
         self._pending_discovery_payload = None
-        self._pending_discovery_updates = None
-        self._pending_discovery_existing_entry = None
+        self._pending_discovery_auth = None
+        self._pending_discovery_entry_exists = False
         context = getattr(self, "context", None)
         if isinstance(context, dict):
             context.pop("confirm_only", None)
@@ -3847,7 +3963,15 @@ class ConfigFlow(
     async def async_step_discovery(
         self, discovery_info: Mapping[str, Any] | None
     ) -> FlowResult:
-        """Handle cloud-triggered discovery payloads."""
+        """Handle cloud-triggered discovery payloads.
+
+        Entry point only. Home Assistant calls this with the payload; the
+        confirmation the form asks for comes back in
+        :meth:`async_step_discovery_confirm`, because the form carries its own
+        ``step_id``. A step that showed its form under ``step_id="discovery"``
+        would be re-entered *here* on submit and would have to tell a submit
+        apart from a fresh payload by itself.
+        """
 
         context_obj = getattr(self, "context", None)
         context_source: str | None = None
@@ -3864,9 +3988,8 @@ class ConfigFlow(
             payload_keys,
         )
         _LOGGER.debug(
-            "discovery: context_source=%s, pending_confirm=%s, payload_keys=%s",
+            "discovery: context_source=%s, payload_keys=%s",
             context_source,
-            getattr(self, "_discovery_confirm_pending", False),
             payload_keys,
         )
 
@@ -3878,82 +4001,11 @@ class ConfigFlow(
             )
             return await self.async_step_discovery_update_info(discovery_info)
 
-        if self._discovery_confirm_pending:
-            pending_payload = self._pending_discovery_payload
-            is_submission = not discovery_info
-            if (
-                not is_submission
-                and isinstance(discovery_info, Mapping)
-                and pending_payload is not None
-            ):
-                try:
-                    normalized_candidate = _normalize_and_validate_discovery_payload(
-                        discovery_info
-                    )
-                except Exception:  # noqa: BLE001
-                    is_submission = False
-                else:
-                    is_submission = _discovery_payload_equivalent(
-                        normalized_candidate, pending_payload
-                    )
-
-            if not is_submission:
-                self._clear_discovery_confirmation_state()
-            else:
-                updates = self._pending_discovery_updates
-                existing_entry = self._pending_discovery_existing_entry
-                self._clear_discovery_confirmation_state()
-
-                if updates is not None and pending_payload is not None:
-                    try:
-                        await self._async_prepare_account_context(
-                            email=pending_payload.email,
-                            preferred_unique_id=pending_payload.unique_id,
-                            updates=updates,
-                        )
-                    except data_entry_flow.AbortFlow:
-                        return self.async_abort(reason="already_configured")
-                    return self.async_abort(reason="already_configured")
-
-                result = await self.async_step_device_selection()
-                # Delete-after-import: STAGED here, executed in
-                # async_setup_entry. A CREATE_ENTRY FlowResult is only a
-                # promise: Home Assistant adds the entry afterwards in
-                # ConfigEntriesFlowManager.async_finish_flow, so deleting the
-                # on-disk copies here would drop the credentials before they
-                # are persisted. Aborted device selection stages nothing and
-                # leaves the watched bundles in place so the flow can be
-                # retried. Only the copies the import actually consumed are
-                # removed (see the hook docstring): a co-located bundle of a
-                # different account and a same-account bundle that got fresher
-                # while the user was confirming both survive.
-                if (
-                    isinstance(result, Mapping)
-                    and result.get("type")
-                    == data_entry_flow.FlowResultType.CREATE_ENTRY
-                ):
-                    _async_stage_container_cleanup(
-                        getattr(self, "hass", None),
-                        flow_id=self._async_cleanup_ticket_id(),
-                        unique_id=self.unique_id,
-                        job=PendingContainerCleanup(
-                            imported_stable_key=_stable_key_for_discovery_payload(
-                                pending_payload
-                            ),
-                            imported_digest=_digest_for_discovery_payload(
-                                pending_payload
-                            ),
-                        ),
-                    )
-                    # This staging happens AFTER the CREATE_ENTRY result, so
-                    # the mark the create path set in async_step_device_selection
-                    # predates the ticket this call may just have created. Mark
-                    # again here, at the site that staged last: without it the
-                    # flow removal Home Assistant performs right after
-                    # async_finish_flow drops a ticket that belongs to an entry
-                    # which exists and whose setup may still be retrying.
-                    self._async_mark_own_cleanup_ticket_entry_promised()
-                return result
+        # A fresh payload supersedes a confirmation that is still pending: the
+        # user has not answered the old card, and the new payload is the more
+        # recent truth. Clearing here also drops ``confirm_only`` from the
+        # context, which _set_confirm_only re-arms below for the new card.
+        self._clear_discovery_confirmation_state()
 
         try:
             normalized = _normalize_and_validate_discovery_payload(discovery_info or {})
@@ -3995,13 +4047,387 @@ class ConfigFlow(
         placeholders.setdefault("email", normalized.email)
         self.context["title_placeholders"] = placeholders
         self._pending_discovery_payload = normalized
-        self._pending_discovery_updates = updates
-        self._pending_discovery_existing_entry = existing_entry
-        self._discovery_confirm_pending = True
+        self._pending_discovery_auth = dict(auth_data)
+        self._pending_discovery_entry_exists = updates is not None
         self._set_confirm_only()
         return self.async_show_form(
-            step_id="discovery",
+            step_id="discovery_confirm",
             description_placeholders=placeholders,
+        )
+
+    async def async_step_discovery_confirm(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Handle the confirmation of the discovery card.
+
+        Home Assistant routes here because :meth:`async_step_discovery` showed
+        its form under ``step_id="discovery_confirm"``. That is the whole reason
+        this method exists as a step of its own: ``discovery_confirm`` is the
+        name Home Assistant reserves for a discovery confirmation form (and the
+        only one of the two that may carry a translated text), so the submit no
+        longer re-enters the entry point and no longer has to be told apart from
+        an incoming payload.
+        """
+
+        pending_payload = self._pending_discovery_payload
+        pending_auth = self._pending_discovery_auth
+        entry_exists = self._pending_discovery_entry_exists
+        if pending_payload is None:
+            # No card is pending: the flow was resumed without one, or the
+            # state was cleared by a newer payload. Nothing to confirm.
+            return self.async_abort(reason="invalid_discovery_info")
+
+        self._clear_discovery_confirmation_state()
+
+        if entry_exists and pending_auth is not None:
+            if _is_credential_import_discovery(pending_payload):
+                # The account is already configured and a human just supplied
+                # credentials. Do not write yet: ask first, because this
+                # replaces working credentials. The old behaviour wrote
+                # unconditionally and reported "already_configured", which said
+                # nothing about what had happened to the credentials.
+                self._pending_overwrite_payload = pending_payload
+                self._pending_overwrite_auth = pending_auth
+                return await self.async_step_discovery_overwrite()
+
+            # A tracker rescan re-submits the credentials the entry already
+            # stores. There is nothing to replace and nobody to ask, so this
+            # keeps the pre-existing behaviour: apply the payload and abort as
+            # already configured.
+            _LOGGER.debug(
+                "Discovery from %s for a configured account: "
+                "applying updates without asking",
+                pending_payload.source,
+            )
+            rebased = self._async_rebase_credential_updates(
+                pending_payload.email, pending_auth
+            )
+            if rebased is None:
+                # The entry went away while the card was open. There is nothing
+                # to update, and this path deliberately does not create
+                # anything: the payload is a rescan of an account the user
+                # configured, not an import they asked for.
+                return self.async_abort(reason="already_configured")
+            try:
+                await self._async_prepare_account_context(
+                    email=pending_payload.email,
+                    preferred_unique_id=pending_payload.unique_id,
+                    updates=rebased[1],
+                )
+            except data_entry_flow.AbortFlow:
+                return self.async_abort(reason="already_configured")
+            return self.async_abort(reason="already_configured")
+
+        return await self._async_import_discovered_account(pending_payload)
+
+    async def _async_import_discovered_account(
+        self, payload: CloudDiscoveryData | None
+    ) -> FlowResult:
+        """Import ``payload`` as a new account and stage the bundle cleanup.
+
+        Split out of :meth:`async_step_discovery` because a second caller needs
+        exactly this behaviour: :meth:`async_step_discovery_overwrite` lands
+        here when the entry it was going to overwrite has disappeared while its
+        form was open, which turns the overwrite into a plain first import.
+
+        ``payload`` stays optional because the confirmation path reaches the
+        import with nothing staged as well; the cleanup helpers below resolve
+        that to "stage no key", which is what the absent payload means.
+        """
+
+        result = await self.async_step_device_selection()
+        # Delete-after-import: STAGED here, executed in
+        # async_setup_entry. A CREATE_ENTRY FlowResult is only a
+        # promise: Home Assistant adds the entry afterwards in
+        # ConfigEntriesFlowManager.async_finish_flow, so deleting the
+        # on-disk copies here would drop the credentials before they
+        # are persisted. Aborted device selection stages nothing and
+        # leaves the watched bundles in place so the flow can be
+        # retried. Only the copies the import actually consumed are
+        # removed (see the hook docstring): a co-located bundle of a
+        # different account and a same-account bundle that got fresher
+        # while the user was confirming both survive.
+        if (
+            isinstance(result, Mapping)
+            and result.get("type") == data_entry_flow.FlowResultType.CREATE_ENTRY
+        ):
+            _async_stage_container_cleanup(
+                getattr(self, "hass", None),
+                flow_id=self._async_cleanup_ticket_id(),
+                unique_id=self.unique_id,
+                job=PendingContainerCleanup(
+                    imported_stable_key=_stable_key_for_discovery_payload(payload),
+                    imported_digest=_digest_for_discovery_payload(payload),
+                ),
+            )
+            # This staging happens AFTER the CREATE_ENTRY result, so
+            # the mark the create path set in async_step_device_selection
+            # predates the ticket this call may just have created. Mark
+            # again here, at the site that staged last: without it the
+            # flow removal Home Assistant performs right after
+            # async_finish_flow drops a ticket that belongs to an entry
+            # which exists and whose setup may still be retrying.
+            self._async_mark_own_cleanup_ticket_entry_promised()
+        return result
+
+    def _async_rebase_credential_updates(
+        self, email: str, auth_data: Mapping[str, Any]
+    ) -> tuple[ConfigEntry, dict[str, Any]] | None:
+        """Resolve the configured entry *now* and merge the delta onto it.
+
+        Both discovery forms (the card, then the overwrite question) sit between
+        the moment the credentials are validated and the moment they are
+        written. Anything merged before them is a snapshot: writing it back
+        would undo whatever else changed the entry meanwhile, and the options
+        flow does exactly that when it refreshes credentials through the login
+        container. So the merge happens here, against the entry as it is, and
+        only the delta travels across the forms.
+
+        Returns ``None`` when no entry can be resolved -- no ``hass``, or the
+        account is no longer configured -- which leaves the decision about that
+        case to the caller, where it differs (import versus abort).
+
+        This closes the window a form holds open, not the one between this call
+        and the write a few statements later; that one is bounded by the event
+        loop rather than by user think time.
+        """
+
+        hass_obj = getattr(self, "hass", None)
+        if hass_obj is None or not hasattr(hass_obj, "config_entries"):
+            return None
+
+        entry = _find_entry_by_email(cast(HomeAssistant, hass_obj), email)
+        if entry is None:
+            return None
+
+        entry_data = getattr(entry, "data", None)
+        if not isinstance(entry_data, Mapping):
+            entry_data = {}
+        return entry, _merge_credential_updates(entry_data, auth_data)
+
+    def _async_write_entry_credentials(
+        self, entry: ConfigEntry, updates: Mapping[str, Any]
+    ) -> bool:
+        """Apply ``updates`` to ``entry`` and schedule its reload.
+
+        For the cases Home Assistant's unique-id guard, which normally performs
+        this write, does not cover: ``_async_prepare_account_context`` returned
+        the entry instead of aborting through the guard; the guard returned
+        before its write because no entry claimed the flow's unique id and the
+        helper then aborted on its own; or the guard did write, but flat, which
+        leaves behind the credential keys the payload means to drop.
+        ``updates`` is the entry data itself, flat and already merged (see
+        :func:`_ingest_discovery_credentials`), so it is written as-is: a
+        second merge would resurrect the keys the ingest deliberately dropped,
+        which is precisely the third case above.
+
+        Returns whether the write happened, so the caller can report the
+        outcome it actually produced instead of assuming one.
+        """
+
+        hass_obj = getattr(self, "hass", None)
+        if hass_obj is None or not hasattr(hass_obj, "config_entries"):
+            return False
+        hass = cast(HomeAssistant, hass_obj)
+
+        try:
+            hass.config_entries.async_update_entry(entry, data=dict(updates))
+        except Exception:  # noqa: BLE001 - surface, but do not claim success
+            _LOGGER.exception(
+                "Failed to write discovered credentials to entry %s",
+                entry.entry_id,
+            )
+            return False
+
+        # ``async_update_entry`` only mutates the in-memory entry and schedules
+        # the debounced store save; the running integration keeps the old
+        # credentials until it is reloaded.
+        schedule_reload = getattr(hass.config_entries, "async_schedule_reload", None)
+        if callable(schedule_reload):
+            try:
+                schedule_reload(entry.entry_id)
+            except Exception:  # noqa: BLE001 - the write itself already landed
+                _LOGGER.exception(
+                    "Failed to schedule reload after writing credentials to entry %s",
+                    entry.entry_id,
+                )
+        return True
+
+    async def async_step_discovery_overwrite(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Ask before replacing the credentials of an already configured account.
+
+        Reached from :meth:`async_step_discovery` once the discovery card has
+        been confirmed and the account turns out to have an entry already. The
+        answer decides between two aborts, both of which say what happened:
+        ``credentials_updated`` or ``credentials_kept``. Neither is
+        ``already_configured``, which used to end both outcomes and told the user
+        nothing about their credentials.
+
+        Declining writes nothing at all: the entry keeps the credentials it has,
+        and nothing is staged for cleanup, so the discovered bundle stays on
+        disk.
+
+        Accepting reports ``credentials_updated`` only where credentials were
+        actually written, and that is read off the entry rather than inferred
+        from the abort that ended the guard: the guard also aborts without
+        writing when no entry claims the flow's unique id, and where it does
+        write it merges flat, which cannot drop a superseded bundle or token.
+        Whatever the reason, an entry that does not hold exactly these
+        credentials afterwards is written here explicitly. The entry can also disappear while this form is open; that
+        case continues as a first import of the same credentials.
+
+        Accepting also stages the delete-after-import cleanup of the bundle,
+        exactly as the non-interactive update path does, so an accepted file is
+        eventually consumed instead of being rediscovered on every restart.
+
+        What crosses this form is the credential delta alone. The payload that
+        is written is merged from the entry's *current* data once the answer is
+        in (:meth:`_async_rebase_credential_updates`), because a payload merged
+        before the question would carry an entry state that may be minutes old
+        and would roll back, say, a credential refresh the options flow ran in
+        the meantime.
+        """
+
+        payload = self._pending_overwrite_payload
+        auth_data = self._pending_overwrite_auth
+        if payload is None or auth_data is None:  # pragma: no cover - defensive
+            return self.async_abort(reason="already_configured")
+
+        if user_input is not None:
+            self._pending_overwrite_payload = None
+            self._pending_overwrite_auth = None
+
+            if not user_input.get(_FIELD_OVERWRITE_CREDENTIALS, False):
+                _LOGGER.info(
+                    "Discovery for %s declined: stored credentials kept",
+                    _mask_email_for_logs(payload.email),
+                )
+                return self.async_abort(reason="credentials_kept")
+
+            rebased = self._async_rebase_credential_updates(payload.email, auth_data)
+            if rebased is None:
+                # No entry to overwrite any more: it was removed, or its account
+                # identity changed, while this form was open. The credentials
+                # are still in hand, so import them as a new account rather than
+                # dropping them.
+                _LOGGER.info(
+                    "Discovery for %s confirmed, but the configured entry "
+                    "is gone; importing the credentials as a new account",
+                    _mask_email_for_logs(payload.email),
+                )
+                return await self._async_import_discovered_account(payload)
+
+            updates = rebased[1]
+            existing_entry: ConfigEntry | None = None
+            written = False
+            try:
+                existing_entry = await self._async_prepare_account_context(
+                    email=payload.email,
+                    preferred_unique_id=payload.unique_id,
+                    updates=updates,
+                )
+            except data_entry_flow.AbortFlow:
+                # Two different aborts arrive here and only one of them wrote:
+                # the core's unique-id guard applies ``updates`` and then aborts
+                # to signal "this account is already configured", but it also
+                # returns silently when no entry claims this unique id (a legacy
+                # entry without one, or an account identity that moved), and
+                # ``_async_prepare_account_context`` then raises its own abort
+                # having written nothing. So the entry is resolved again -- the
+                # exception skipped the assignment above -- and asked what it
+                # actually holds. Resolving happens deliberately *after* the
+                # write, because the cleanup ticket below needs the entry's
+                # fresh ``modified_at`` as its durability watermark.
+                hass_obj = getattr(self, "hass", None)
+                if hass_obj is not None and hasattr(hass_obj, "config_entries"):
+                    existing_entry = _find_entry_by_email(
+                        cast(HomeAssistant, hass_obj), payload.email
+                    )
+                written = existing_entry is not None and _entry_carries_credentials(
+                    existing_entry, updates
+                )
+
+            if not written:
+                # The entry does not hold these credentials: the guard returned
+                # the entry instead of aborting through it, or it aborted
+                # without ever reaching its write, or it wrote flat and left a
+                # superseded ``secrets_data``/``aas_token`` behind. Reporting
+                # success here would name an event that did not happen, so the
+                # remaining cases are resolved on their own terms.
+                if existing_entry is None:
+                    # The entry the rebase above resolved is gone again, removed
+                    # between that resolution and this write. Same answer as for
+                    # the wider window before the rebase: the credentials are
+                    # still in hand, so import them as a new account rather than
+                    # dropping them.
+                    _LOGGER.info(
+                        "Discovery for %s confirmed, but the configured entry "
+                        "is gone; importing the credentials as a new account",
+                        _mask_email_for_logs(payload.email),
+                    )
+                    return await self._async_import_discovered_account(payload)
+
+                # The entry exists but does not hold the credentials: the flow
+                # is bound to that very entry (``context["entry_id"]`` or an
+                # attached ``config_entry``), which makes the guard return it
+                # instead of aborting through it; or no entry claimed the
+                # flow's unique id and the guard returned before its write; or
+                # the guard's flat merge could not drop what the payload drops.
+                # Write the payload wholesale here, which covers all three, so
+                # the reported outcome is the one that happened.
+                if not self._async_write_entry_credentials(existing_entry, updates):
+                    _LOGGER.warning(
+                        "Discovery for %s confirmed, but the credentials could "
+                        "not be written to the configured entry",
+                        _mask_email_for_logs(payload.email),
+                    )
+                    return self.async_abort(reason="already_configured")
+
+            # Delete-after-import (update case), the same staging the
+            # non-interactive update path performs: STAGED here, executed from
+            # the durability gate in async_setup_entry, which the reload
+            # scheduled above arms. Without it an accepted bundle is never
+            # consumed -- the watcher only remembers it in the process-local
+            # ``_settled_signatures``, so the next Home Assistant restart
+            # rediscovers the unchanged file and asks this very question again,
+            # for good. A declined bundle is deliberately left alone (see the
+            # decline branch above), which is what keeps it available.
+            #
+            # No entry means no watermark, and ``entry=None`` would stage a
+            # *create-path* ticket, i.e. authorise the irreversible delete on
+            # "the file exists" alone. Staging nothing is the fail-safe answer:
+            # the bundle stays on disk and the login container's TTL delete
+            # takes over.
+            if existing_entry is not None:
+                _async_stage_container_cleanup_for(
+                    getattr(self, "hass", None),
+                    flow_id=self._async_cleanup_ticket_id(),
+                    unique_id=getattr(existing_entry, "unique_id", None),
+                    job=PendingContainerCleanup(
+                        imported_stable_key=_stable_key_for_discovery_payload(payload),
+                        imported_digest=_digest_for_discovery_payload(payload),
+                    ),
+                    entry=existing_entry,
+                )
+
+            _LOGGER.info(
+                "Discovery for %s confirmed: stored credentials replaced",
+                _mask_email_for_logs(payload.email),
+            )
+            return self.async_abort(reason="credentials_updated")
+
+        return self.async_show_form(
+            step_id="discovery_overwrite",
+            data_schema=vol.Schema(
+                {vol.Required(_FIELD_OVERWRITE_CREDENTIALS, default=True): bool}
+            ),
+            description_placeholders={
+                # The account is the user's own and is shown to them in their own
+                # UI, so it is spelled out here; only the *log* is redacted.
+                "email": payload.email,
+            },
         )
 
     async def async_step_discovery_update_info(
@@ -4101,7 +4527,7 @@ class ConfigFlow(
         self._auth_data = auth_data
 
         if updates is None:
-            updates = {"data": dict(existing_entry.data)}
+            updates = dict(existing_entry.data)
 
         _LOGGER.info(
             "Handling discovery-update-info flow for %s",  # noqa: G004 - logging mask helper
@@ -4127,19 +4553,14 @@ class ConfigFlow(
             hass = None
 
         if hass is not None:
-            update_payload: dict[str, Any] = {}
-            if "data" in updates_to_apply:
-                update_payload["data"] = updates_to_apply["data"]
-            if "options" in updates_to_apply:
-                update_payload["options"] = updates_to_apply["options"]
-
-            try:
-                hass.config_entries.async_update_entry(existing_entry, **update_payload)
-            except TypeError:  # Legacy cores without options support
-                hass.config_entries.async_update_entry(
-                    existing_entry,
-                    data=update_payload.get("data", existing_entry.data),
-                )
+            # ``updates_to_apply`` *is* the entry data, flat, the same payload
+            # ``_abort_if_unique_id_configured`` merged above. It is applied
+            # again here because that call only reaches the entry when the core
+            # aborts; unpacking a nested ``data`` key would be wrong now and was
+            # what hid the nesting defect before.
+            hass.config_entries.async_update_entry(
+                existing_entry, data=updates_to_apply
+            )
 
             # Delete-after-import (update case): STAGED here, executed from the
             # durability gate in async_setup_entry. `async_update_entry` only

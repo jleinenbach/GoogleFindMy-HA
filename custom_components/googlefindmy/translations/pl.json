@@ -23,6 +23,20 @@
           "use_found_bundle": "Zostaw tę opcję włączoną, aby zaimportować pokazany wyżej plik. Wyłącz ją, aby samodzielnie wybrać metodę uwierzytelniania."
         }
       },
+      "discovery_confirm": {
+        "title": "Znaleziono poświadczenia Google Find My Device",
+        "description": "Znaleziono poświadczenia dla {email}.\n\nKontynuuj, aby użyć ich w Home Assistant. Jeśli konto jest już skonfigurowane, zostaniesz najpierw zapytany, zanim cokolwiek zostanie zastąpione."
+      },
+      "discovery_overwrite": {
+        "title": "Zastąpić zapisane poświadczenia?",
+        "description": "{email} jest już skonfigurowane w Home Assistant, a właśnie znaleziono nowy plik poświadczeń.\n\nZastąpienie zapisuje nowe poświadczenia we wpisie i przeładowuje go. Jeśli odmówisz, wpis pozostanie bez zmian.",
+        "data": {
+          "overwrite_credentials": "Zastąp zapisane poświadczenia"
+        },
+        "data_description": {
+          "overwrite_credentials": "Zostaw tę opcję włączoną, jeśli właśnie zalogowano się ponownie. Wyłącz ją, aby zachować poświadczenia, których Home Assistant używa obecnie."
+        }
+      },
       "secrets_json": {
         "title": "GoogleFindMyTools secrets.json",
         "description": "Uruchom GoogleFindMyTools (Chrome), aby wygenerować tokeny uwierzytelniające, a następnie wklej poniżej pełną zawartość pliku Auth/secrets.json.",
@@ -83,6 +97,8 @@
     },
     "abort": {
       "already_configured": "Google Find My Device jest już skonfigurowane.",
+      "credentials_updated": "Zapisane poświadczenia tego konta zostały zastąpione znalezionymi.",
+      "credentials_kept": "Zapisane poświadczenia zostały zachowane. Nic nie zmieniono.",
       "cannot_connect": "Nie udało się połączyć z Google Find My Device.",
       "dependency_not_ready": "Zależności Google Find My Device nie są zainstalowane. Zainstaluj wymagane pakiety i spróbuj ponownie.",
       "invalid_discovery_info": "Ładunek wykrywania jest nieprawidłowy. Sprawdź dane logowania i spróbuj ponownie.",

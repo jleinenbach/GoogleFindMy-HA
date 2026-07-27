@@ -543,6 +543,7 @@ For any work that migrates entity-registry records during reload/startup flows, 
   * No background refreshes that can race with requests.
   * On refresh failure, raise `ConfigEntryAuthFailed` to trigger reauth (avoid infinite loops).
 * **Auditability:** All cache writes go through one adapter with structured debug logs (never secrets).
+* **Removals are one-directional:** `entry.data` is the source of truth for credentials and the cache mirrors it, so a credential key that is **absent** from `entry.data` must be **dropped** from the cache, never recovered from it. Replacing credentials expresses "this account has no bundle / no AAS token any more" by leaving the key out (`const.OPTIONAL_CREDENTIAL_KEYS`, written by `config_flow._merge_credential_updates`), because Home Assistant's unique-id guard merges flat and cannot remove anything. A cache-first fallback that recovers such a key hands the integration back the credentials the user just replaced. The single exception is the migration gap the credential seed exists for: an entry that carries **no** credentials of its own, where the cache is read back in full. Applies to every writing surface (discovery overwrite, watched-file import, reauth, options login) and is enforced centrally in the credential seed of `__init__.async_setup_entry`, not per flow step.
 * **Tests:** Include regressions for stale tokens, cross-account bleed, and refresh races.
 
 ---

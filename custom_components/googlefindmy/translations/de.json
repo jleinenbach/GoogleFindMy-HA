@@ -23,6 +23,20 @@
           "use_found_bundle": "Lass die Option aktiviert, um die oben angezeigte Datei zu importieren. Schalte sie aus, um stattdessen selbst eine Anmeldemethode zu wählen."
         }
       },
+      "discovery_confirm": {
+        "title": "Zugangsdaten für Google Find My Device gefunden",
+        "description": "Für {email} wurden Zugangsdaten gefunden.\n\nFahre fort, um sie in Home Assistant zu verwenden. Ist das Konto bereits eingerichtet, wirst du vorher gefragt, bevor etwas ersetzt wird."
+      },
+      "discovery_overwrite": {
+        "title": "Gespeicherte Zugangsdaten ersetzen?",
+        "description": "{email} ist in Home Assistant bereits eingerichtet, und soeben wurde eine neue Zugangsdaten-Datei gefunden.\n\nBeim Ersetzen werden die neuen Zugangsdaten in den vorhandenen Eintrag geschrieben und der Eintrag wird neu geladen. Lehnst du ab, bleibt der Eintrag unverändert.",
+        "data": {
+          "overwrite_credentials": "Gespeicherte Zugangsdaten ersetzen"
+        },
+        "data_description": {
+          "overwrite_credentials": "Lass die Option aktiviert, wenn du dich gerade neu angemeldet hast. Schalte sie aus, um die Zugangsdaten zu behalten, die Home Assistant derzeit verwendet."
+        }
+      },
       "secrets_json": {
         "title": "GoogleFindMyTools secrets.json",
         "description": "Führe GoogleFindMyTools (Chrome) aus, um Authentifizierungs-Tokens zu erzeugen, und füge unten den vollständigen Inhalt der Datei Auth/secrets.json ein.",
@@ -83,6 +97,8 @@
     },
     "abort": {
       "already_configured": "Google Find My Device ist bereits konfiguriert.",
+      "credentials_updated": "Die gespeicherten Zugangsdaten für dieses Konto wurden durch die gefundenen ersetzt.",
+      "credentials_kept": "Die gespeicherten Zugangsdaten wurden behalten. Es wurde nichts geändert.",
       "cannot_connect": "Verbindung zu Google Find My Device fehlgeschlagen.",
       "dependency_not_ready": "Google Find My Device-Abhängigkeiten sind nicht installiert. Installiere die Anforderungen und versuche es erneut.",
       "invalid_discovery_info": "Die Discovery-Nutzlast war ungültig. Überprüfe die Anmeldedaten und versuche es erneut.",

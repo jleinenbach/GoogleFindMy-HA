@@ -177,7 +177,16 @@ def install_config_entries_stubs(target: ModuleType) -> None:
                         None,
                     )
                     if callable(update_callable):
-                        update_callable(entry, **updates)
+                        # Home Assistant merges ``updates`` FLAT into the entry
+                        # data (``data={**entry.data, **updates}``, see
+                        # ``config_entries.ConfigFlow._abort_if_unique_id_configured``).
+                        # Splatting ``updates`` as keyword arguments instead
+                        # would accept a nested ``{"data": ...}`` payload that
+                        # the real core silently turns into a stray key, so this
+                        # double must not be more forgiving than the original.
+                        update_callable(
+                            entry, data={**dict(entry.data), **dict(updates)}
+                        )
 
                     if reload:
                         reload_callable = getattr(

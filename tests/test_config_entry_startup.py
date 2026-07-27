@@ -8,7 +8,13 @@ from typing import Any
 
 import pytest
 
-from custom_components.googlefindmy.const import TRACKER_SUBENTRY_KEY
+from custom_components.googlefindmy.const import (
+    CONF_GOOGLE_EMAIL,
+    CONF_OAUTH_TOKEN,
+    DATA_AAS_TOKEN,
+    DATA_SECRET_BUNDLE,
+    TRACKER_SUBENTRY_KEY,
+)
 from tests.helpers.config_entries_stub import make_config_entry
 from tests.test_hass_data_layout import _prepare_async_setup_entry_harness
 
@@ -126,3 +132,138 @@ async def test_coordinator_first_refresh_fallback(
     await harness.async_config_entry_first_refresh()
 
     assert called, "Fallback should invoke async_refresh when helper is absent"
+
+
+async def _run_credential_seed(
+    monkeypatch: pytest.MonkeyPatch,
+    stub_coordinator_factory: Callable[..., type[Any]],
+    *,
+    entry_data: dict[str, Any],
+    cached: dict[str, Any],
+) -> Any:
+    """Run ``async_setup_entry`` over a prepared entry/cache pair.
+
+    Returns the harness so callers can read the cache the integration actually
+    seeded and the seed helpers it actually called.
+    """
+
+    loop = asyncio.get_running_loop()
+    factory = functools.partial(stub_coordinator_factory, data=[])
+    harness = _prepare_async_setup_entry_harness(monkeypatch, factory, loop)
+    harness.entry.data = dict(entry_data)
+    harness.cache.values.update(cached)
+
+    assert await harness.integration.async_setup(harness.hass, {}) is True
+    assert await harness.integration.async_setup_entry(harness.hass, harness.entry)
+    if harness.hass._tasks:
+        await asyncio.gather(*harness.hass._tasks)
+    return harness
+
+
+@pytest.mark.asyncio
+async def test_setup_drops_cached_credentials_the_entry_no_longer_carries(
+    monkeypatch: pytest.MonkeyPatch,
+    stub_coordinator_factory: Callable[..., type[Any]],
+) -> None:
+    """A replaced secrets bundle must not come back out of the token cache.
+
+    Credentials that replace older ones express "this account has no bundle any
+    more" by leaving ``secrets_data`` out of ``entry.data``; a flat merge cannot
+    say it any other way. The cache still mirrored the old value, and the seed
+    recovered it from there, chose the bundle branch and let the integration keep
+    running on exactly the credentials the user had just replaced (AGENTS.md § 4
+    requires a regression for stale tokens).
+    """
+
+    harness = await _run_credential_seed(
+        monkeypatch,
+        stub_coordinator_factory,
+        entry_data={
+            CONF_GOOGLE_EMAIL: "user@example.com",
+            CONF_OAUTH_TOKEN: "aas_et/NEW_TOKEN_VALUE",
+        },
+        cached={
+            DATA_SECRET_BUNDLE: {"owner_key": "STALE_OWNER_KEY"},
+            DATA_AAS_TOKEN: "aas_et/OLD_TOKEN_VALUE",
+        },
+    )
+    integration = harness.integration
+
+    integration._async_save_secrets_data.assert_not_awaited()
+    integration._async_seed_manual_credentials.assert_awaited_once()
+    assert integration._async_seed_manual_credentials.await_args.args[1] == (
+        "aas_et/NEW_TOKEN_VALUE"
+    ), "the entry's own credentials are what the seed must use"
+    assert DATA_SECRET_BUNDLE not in harness.cache.values, (
+        "a superseded bundle left in the cache is found again by every "
+        "cache-first fallback, not only by this seed"
+    )
+    assert DATA_AAS_TOKEN not in harness.cache.values
+
+
+@pytest.mark.asyncio
+async def test_setup_still_recovers_credentials_for_an_entry_that_has_none(
+    monkeypatch: pytest.MonkeyPatch,
+    stub_coordinator_factory: Callable[..., type[Any]],
+) -> None:
+    """The counter-direction: the cold-start gap must still be filled.
+
+    The recovery exists for a migrated installation whose credentials never
+    reached ``entry.data`` (Issue #152): without it the FCM receiver starts with
+    empty ``fcm_credentials`` and locations stay unknown. An entry that carries
+    nothing of its own has no removal to respect, so nothing may be dropped.
+    """
+
+    harness = await _run_credential_seed(
+        monkeypatch,
+        stub_coordinator_factory,
+        entry_data={CONF_GOOGLE_EMAIL: "user@example.com"},
+        cached={
+            DATA_SECRET_BUNDLE: {"owner_key": "MIGRATED_OWNER_KEY"},
+            DATA_AAS_TOKEN: "aas_et/MIGRATED_TOKEN_VALUE",
+        },
+    )
+    integration = harness.integration
+
+    integration._async_save_secrets_data.assert_awaited_once()
+    assert integration._async_save_secrets_data.await_args.args[1] == {
+        "owner_key": "MIGRATED_OWNER_KEY"
+    }
+    assert harness.cache.values[DATA_SECRET_BUNDLE] == {
+        "owner_key": "MIGRATED_OWNER_KEY"
+    }, "dropping the only copy of the credentials would break the cold start"
+    assert harness.cache.values[DATA_AAS_TOKEN] == "aas_et/MIGRATED_TOKEN_VALUE"
+
+
+@pytest.mark.asyncio
+async def test_setup_keeps_cached_credentials_the_entry_still_carries(
+    monkeypatch: pytest.MonkeyPatch,
+    stub_coordinator_factory: Callable[..., type[Any]],
+) -> None:
+    """The other counter-direction: only *absent* keys are superseded.
+
+    An entry that carries a bundle and an AAS token of its own says nothing
+    about removals, and a drop here would delete live credentials from the cache
+    on every single startup.
+    """
+
+    harness = await _run_credential_seed(
+        monkeypatch,
+        stub_coordinator_factory,
+        entry_data={
+            CONF_GOOGLE_EMAIL: "user@example.com",
+            DATA_SECRET_BUNDLE: {"owner_key": "CURRENT_OWNER_KEY"},
+            DATA_AAS_TOKEN: "aas_et/CURRENT_TOKEN_VALUE",
+        },
+        cached={
+            DATA_SECRET_BUNDLE: {"owner_key": "CURRENT_OWNER_KEY"},
+            DATA_AAS_TOKEN: "aas_et/CURRENT_TOKEN_VALUE",
+        },
+    )
+    integration = harness.integration
+
+    integration._async_save_secrets_data.assert_awaited_once()
+    assert harness.cache.values[DATA_SECRET_BUNDLE] == {
+        "owner_key": "CURRENT_OWNER_KEY"
+    }
+    assert harness.cache.values[DATA_AAS_TOKEN] == "aas_et/CURRENT_TOKEN_VALUE"

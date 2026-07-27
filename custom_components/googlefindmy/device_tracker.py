@@ -40,6 +40,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from . import EntityRecoveryManager, _extract_email_from_entry, _opt
 from .const import (
+    CLOUD_SCANNER_DISCOVERY_SOURCE,
     CONF_OAUTH_TOKEN,
     DATA_SECRET_BUNDLE,
     DEFAULT_SHOW_LOCATION_AGE,
@@ -567,7 +568,7 @@ async def async_setup_entry(
                         secrets_bundle=secrets_bundle,
                         discovery_ns=discovery_ns,
                         discovery_stable_key=stable_key,
-                        source="cloud_scanner",
+                        source=CLOUD_SCANNER_DISCOVERY_SOURCE,
                         entry=config_entry,
                     )
                     _log_cloud_scan_outcome(

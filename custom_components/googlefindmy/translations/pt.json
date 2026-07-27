@@ -23,6 +23,20 @@
           "use_found_bundle": "Mantenha esta opção ativada para importar o ficheiro mostrado acima. Desative-a para escolher por si mesmo um método de autenticação."
         }
       },
+      "discovery_confirm": {
+        "title": "Credenciais do Google Find My Device encontradas",
+        "description": "Foram encontradas credenciais para {email}.\n\nContinue para as utilizar no Home Assistant. Se a conta já estiver configurada, ser-lhe-á perguntado antes de algo ser substituído."
+      },
+      "discovery_overwrite": {
+        "title": "Substituir as credenciais guardadas?",
+        "description": "{email} já está configurado no Home Assistant e acabou de ser encontrado um novo ficheiro de credenciais.\n\nA substituição escreve as novas credenciais na entrada existente e volta a carregá-la. Se recusar, a entrada fica exatamente como está.",
+        "data": {
+          "overwrite_credentials": "Substituir as credenciais guardadas"
+        },
+        "data_description": {
+          "overwrite_credentials": "Mantenha esta opção ativada se acabou de iniciar sessão novamente. Desative-a para manter as credenciais que o Home Assistant está a utilizar neste momento."
+        }
+      },
       "secrets_json": {
         "title": "GoogleFindMyTools secrets.json",
         "description": "Execute GoogleFindMyTools (Chrome) para gerar tokens de autenticação e cole todo o conteúdo do arquivo Auth/secrets.json abaixo.",
@@ -83,6 +97,8 @@
     },
     "abort": {
       "already_configured": "O Encontre Meu Dispositivo do Google já está configurado.",
+      "credentials_updated": "As credenciais guardadas desta conta foram substituídas pelas que foram encontradas.",
+      "credentials_kept": "As credenciais guardadas foram mantidas. Nada foi alterado.",
       "cannot_connect": "Falha ao conectar-se ao Encontre Meu Dispositivo do Google.",
       "dependency_not_ready": "As dependências do Encontre Meu Dispositivo do Google não estão instaladas. ",
       "invalid_discovery_info": "A carga de descoberta era inválida. ",

@@ -93,6 +93,22 @@ def service_device_identifier(entry_id: str) -> tuple[str, str]:
 
 
 # --------------------------------------------------------------------------------------
+# Cloud discovery producers
+# --------------------------------------------------------------------------------------
+# Marker carried in the discovery payload (``discovery_source``) by the tracker
+# rescan in device_tracker.py. That producer re-submits the credentials the entry
+# already stores; it is not a credential import, so the config flow must not ask
+# whether to replace the stored credentials with themselves.
+#
+# The flow context cannot tell the producers apart: discovery.py downgrades every
+# source that is not a Home Assistant ``SOURCE_*`` constant to plain ``discovery``,
+# which is exactly what the file watcher's payloads arrive as too. The payload
+# marker is the only reliable discriminator, so it lives here as the single source
+# shared by producer (device_tracker.py) and consumer (config_flow.py); const.py
+# is the shared home because discovery.py already imports config_flow.
+CLOUD_SCANNER_DISCOVERY_SOURCE: Final[Literal["cloud_scanner"]] = "cloud_scanner"
+
+# --------------------------------------------------------------------------------------
 # Configuration keys (data vs. options separation)
 # NOTE: Keep keys stable to avoid migration churn across releases.
 # --------------------------------------------------------------------------------------
@@ -104,6 +120,13 @@ DATA_AAS_TOKEN: str = "aas_token"  # AAS token (TokenCache key; not in entry.dat
 CONF_GOOGLE_EMAIL: str = "google_email"  # helper key when individual tokens are used
 DATA_SECRET_BUNDLE: str = "secrets_data"  # full GoogleFindMyTools secrets.json content
 DATA_AUTH_METHOD: str = "auth_method"  # "secrets_json" | "individual_tokens"
+# Credential keys an account may or may not carry. Credentials that replace
+# existing ones express "this account has no bundle / no AAS token any more" by
+# leaving the key out, which is why every surface that writes credentials has to
+# be able to *remove* them (config_flow._merge_credential_updates) and why the
+# credential seed in async_setup_entry must not recover them from the cache
+# behind a removal's back.
+OPTIONAL_CREDENTIAL_KEYS: tuple[str, ...] = (DATA_SECRET_BUNDLE, DATA_AAS_TOKEN)
 
 # Options (user-changeable): stored in config_entry.options
 # (tracked_devices removed in Step 2; device inclusion is managed via HA device enable/disable)
@@ -738,6 +761,7 @@ __all__ = [
     "CONF_GOOGLE_EMAIL",
     "DATA_SECRET_BUNDLE",
     "DATA_AUTH_METHOD",
+    "OPTIONAL_CREDENTIAL_KEYS",
     "OPT_IGNORED_DEVICES",
     "OPT_LOCATION_POLL_INTERVAL",
     "OPT_DEVICE_POLL_DELAY",

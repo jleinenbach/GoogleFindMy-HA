@@ -189,6 +189,7 @@ from .const import (
     OPT_MIN_POLL_INTERVAL,
     OPT_OPTIONS_SCHEMA_VERSION,
     OPTION_KEYS,
+    OPTIONAL_CREDENTIAL_KEYS,
     SERVICE_DEVICE_TRANSLATION_KEY,
     SERVICE_FEATURE_PLATFORMS,
     SERVICE_SUBENTRY_KEY,
@@ -4752,6 +4753,81 @@ def _normalize_contributor_mode(value: Any) -> str:
     return DEFAULT_CONTRIBUTOR_MODE
 
 
+# Key of the stray mapping an older discovery import left inside ``entry.data``.
+# It is not a setting: the integration never writes a key called ``data`` into an
+# entry (the only similar constant is ``secrets_data``), and nothing reads one.
+_STRAY_NESTED_DATA_KEY = "data"
+
+
+def _strip_stray_nested_entry_data(
+    data: Mapping[str, Any],
+) -> tuple[dict[str, Any], int]:
+    """Return ``data`` without the stray nested ``data`` key, and how deep it went.
+
+    Discovery used to hand Home Assistant a nested ``{"data": {...}}`` payload,
+    which the core merged verbatim into ``entry.data``. The credentials therefore
+    never reached the level that is read, and the next import wrapped the whole
+    thing again: the nesting grows by one level per run, and a live installation
+    was found at depth 3 with roughly three quarters of its entry data spent on
+    the dead copies.
+
+    Removing the top key removes the whole chain, so the returned depth is a
+    report, not a loop counter. A depth of 0 means nothing was found, and the
+    returned mapping equals the input: callers must skip the write in that case
+    so a healthy entry is never touched.
+
+    Only a *mapping* is stripped. A future setting that happens to be called
+    ``data`` and holds a scalar is left alone rather than silently deleted.
+    """
+
+    cleaned = dict(data)
+    stray = cleaned.get(_STRAY_NESTED_DATA_KEY)
+    if not isinstance(stray, Mapping):
+        return cleaned, 0
+
+    depth = 0
+    while isinstance(stray, Mapping):
+        depth += 1
+        stray = stray.get(_STRAY_NESTED_DATA_KEY)
+
+    del cleaned[_STRAY_NESTED_DATA_KEY]
+    return cleaned, depth
+
+
+def _async_strip_stray_nested_entry_data(
+    hass: HomeAssistant, entry: ConfigEntry
+) -> None:
+    """Drop the discovery leftovers from ``entry.data``; idempotent, log-only.
+
+    Runs on every setup rather than from ``async_migrate_entry``: migration only
+    runs when the stored entry version differs from ``CONFIG_ENTRY_VERSION``, and
+    affected entries are already at the current version, so they would never be
+    reached. Bumping the version purely to trigger a cleanup would also block
+    downgrades, which is a steep price for removing a stray key. The sibling
+    ``_async_soft_migrate_data_to_options`` establishes the idiom: an idempotent
+    setup-time fixup that writes only when it has something to change.
+
+    The discarded copies are not promoted to the top level. They are ordered by
+    age only as long as nothing else wrote to the entry in between; a reauth
+    writes to the top level and inverts that order, so promoting the deeper copy
+    could replace fresh credentials with stale ones. Running the login again is
+    the reliable route, and after the discovery fix it lands correctly.
+    """
+
+    cleaned, depth = _strip_stray_nested_entry_data(entry.data)
+    if depth == 0:
+        return
+
+    _LOGGER.warning(
+        "[%s] Removing %d nested 'data' level(s) an earlier discovery import left "
+        "in the entry. The credentials stored there are discarded; run the login "
+        "again if the credentials in use are outdated.",
+        entry.entry_id,
+        depth,
+    )
+    hass.config_entries.async_update_entry(entry, data=cleaned)
+
+
 async def _async_soft_migrate_data_to_options(
     hass: HomeAssistant, entry: ConfigEntry
 ) -> None:
@@ -6959,6 +7035,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
     if parent_entry_id:
         return await _async_setup_subentry(hass, entry)
 
+    # Before anything reads the entry: drop the leftovers of the discovery import
+    # defect. Deliberately first, not down with the other soft migrations, so the
+    # cleanup does not depend on the rest of the setup succeeding.
+    _async_strip_stray_nested_entry_data(hass, entry)
+
     legacy_cache: TokenCache | None = None
     cached_snapshot: Mapping[str, Any] | None = None
     legacy_secrets_keys = (DATA_SECRET_BUNDLE, "scanned_data", CONF_OAUTH_TOKEN)
@@ -7350,17 +7431,59 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
     aas_token_entry = entry.data.get(DATA_AAS_TOKEN)
     google_email = entry.data.get(CONF_GOOGLE_EMAIL)
 
+    # The entry is the source of truth for credentials; the cache is a mirror of
+    # them. Recovering a value from the cache is therefore only right where the
+    # entry carries no credentials at all, which is the gap this seed was built
+    # for: a migrated installation whose credentials never reached entry.data.
+    #
+    # Where the entry does carry credentials, a *missing* optional key is a
+    # statement rather than a gap. Whoever replaced the credentials -- the
+    # discovery overwrite, the watched-file import, reauth, the options login --
+    # left the key out because the new ones no longer come with a bundle or an
+    # ``aas_et/`` token, and a flat merge cannot express that any other way.
+    # Recovering it here would hand the integration back exactly the credentials
+    # the user just replaced, so it is dropped from the cache instead: not
+    # merely skipped, because the cache-first fallbacks elsewhere (see
+    # _collect_entry_credential_tokens) would otherwise keep finding it. This
+    # mirrors what _async_seed_manual_credentials has long done for a superseded
+    # AAS token; the bundle branch below simply had no counterpart.
+    #
+    # Only the keys the entry mirrors are dropped. Material derived from a
+    # bundle (owner_key, shared_key, fcm_credentials) belongs to the same
+    # account, is refreshed in place, and stays.
+    entry_carries_credentials = bool(secrets_data or oauth_token or aas_token_entry)
+
     cache_snapshot: Mapping[str, Any] | None = None
     try:
         cache_snapshot = await cache.all()
     except Exception as err:  # pragma: no cover - defensive cache read
         _LOGGER.debug("[%s] TokenCache snapshot read failed: %s", entry.entry_id, err)
 
-    if not secrets_data and cache_snapshot:
+    if entry_carries_credentials:
+        for key in OPTIONAL_CREDENTIAL_KEYS:
+            if entry.data.get(key):
+                continue
+            if not cache_snapshot or not cache_snapshot.get(key):
+                continue
+            try:
+                await cache.async_set_cached_value(key, None)
+            except Exception as err:  # pragma: no cover - defensive cache write
+                _LOGGER.debug(
+                    "[%s] Dropping superseded cached credential '%s' failed: %s",
+                    entry.entry_id,
+                    key,
+                    err,
+                )
+            else:
+                _LOGGER.debug(
+                    "[%s] Dropped superseded cached credential '%s'; the entry "
+                    "no longer carries it",
+                    entry.entry_id,
+                    key,
+                )
+    elif cache_snapshot:
         secrets_data = cache_snapshot.get(DATA_SECRET_BUNDLE)
-    if not oauth_token and cache_snapshot:
         oauth_token = cache_snapshot.get(CONF_OAUTH_TOKEN)
-    if not aas_token_entry and cache_snapshot:
         aas_token_entry = cache_snapshot.get(DATA_AAS_TOKEN)
 
     if secrets_data:
@@ -8086,7 +8209,14 @@ async def _async_seed_manual_credentials(
     aas_token_entry: str | None,
     google_email: str,
 ) -> None:
-    """Persist manual credential updates and clear stale AAS tokens when absent."""
+    """Persist manual credential updates and clear stale AAS tokens when absent.
+
+    The clearing below is now the second line of defence: the credential seed in
+    :func:`async_setup_entry` already drops a cached AAS token that the entry no
+    longer carries, for the bundle branch as well as this one. Keeping it here is
+    deliberate -- this helper is also the surface a caller reaches directly, and
+    ``cache.set(key, None)`` on an already absent key is a no-op.
+    """
 
     token_to_save = oauth_token or aas_token_entry
     if isinstance(token_to_save, str) and token_to_save:

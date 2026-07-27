@@ -23,6 +23,20 @@
           "use_found_bundle": "השאר אפשרות זו פעילה כדי לייבא את הקובץ המוצג למעלה. כבה אותה כדי לבחור בעצמך שיטת אימות."
         }
       },
+      "discovery_confirm": {
+        "title": "נמצאו פרטי התחברות ל-Google Find My Device",
+        "description": "נמצאו פרטי התחברות עבור {email}.\n\nהמשך כדי להשתמש בהם ב-Home Assistant. אם החשבון כבר מוגדר, תישאל תחילה לפני שדבר מוחלף."
+      },
+      "discovery_overwrite": {
+        "title": "להחליף את פרטי ההתחברות השמורים?",
+        "description": "{email} כבר מוגדר ב-Home Assistant, וכעת נמצא קובץ פרטי התחברות חדש.\n\nהחלפה כותבת את פרטי ההתחברות החדשים לרשומה הקיימת וטוענת אותה מחדש. אם תסרב, הרשומה תישאר כפי שהיא.",
+        "data": {
+          "overwrite_credentials": "החלפת פרטי ההתחברות השמורים"
+        },
+        "data_description": {
+          "overwrite_credentials": "השאר אפשרות זו פעילה אם התחברת זה עתה מחדש. כבה אותה כדי לשמור על פרטי ההתחברות שבהם Home Assistant משתמש כרגע."
+        }
+      },
       "secrets_json": {
         "title": "קובץ secrets.json של GoogleFindMyTools",
         "description": "יש להריץ את GoogleFindMyTools (ב-Chrome) כדי לייצר טוקנים לאימות, ולאחר מכן להדביק כאן את התוכן המלא של הקובץ Auth/secrets.json.",
@@ -83,6 +97,8 @@
     },
     "abort": {
       "already_configured": "Google Find My Device כבר מוגדר.",
+      "credentials_updated": "פרטי ההתחברות השמורים של חשבון זה הוחלפו בפרטים שנמצאו.",
+      "credentials_kept": "פרטי ההתחברות השמורים נשמרו. דבר לא שונה.",
       "cannot_connect": "נכשל החיבור ל-Google Find My Device.",
       "dependency_not_ready": "תלויות של Google Find My Device לא מותקנות. יש להתקין את הדרישות ולנסות שוב.",
       "invalid_discovery_info": "מטען הגילוי לא היה תקין. יש לבדוק את האישורים ולנסות שוב.",
