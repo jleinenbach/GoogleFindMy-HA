@@ -254,6 +254,80 @@ read it as your host user. Docker Desktop (Windows/macOS) maps ownership for you
 
    Chrome may close and reopen once or twice along the way. That is expected:
    the sign-in and the encryption-key retrieval are separate browser sessions.
+   Shorter flickers on top of those two are possible as well: when a browser
+   cannot be started the usual way, the driver retries with a different strategy
+   (the terminal then logs `Trying headless mode...`). The owner-key step needs
+   no browser at all.
+
+## After the login (the menu, `q`, and the wrap-up)
+
+The tracker list is not the end of the run. The CLI stays in a small loop and
+asks:
+
+```
+Type the number of a tracker to locate it, 'r' to register a new tracker, or 'q' to quit:
+```
+
+Pick a number to locate that tracker, `r` to register a new one, or `q` to
+finish. `q` prints `Goodbye!` and ends the CLI. **Quitting is the normal way to
+end the run** — it is what lets the container do its wrap-up, in this order:
+
+1. **The handoff runs** (only if you asked for one, and only after a successful
+   login): the one-click endpoint and/or the clear-text block, described under
+   [One-click handoff](#one-click-handoff-optional-no-manual-copy). These run
+   *before* the container tears itself down, so an endpoint that has to outlive
+   the CLI still gets its turn.
+2. **`data/` goes back to you**: the bundle is written by the container's own
+   user, and on exit ownership is handed back to the host user that started the
+   launcher, keeping owner-only `0600` on the file and `0700` on the directory.
+   You can read and copy it; no other local account can.
+3. **The container stops**: the supervisor (X server, VNC, noVNC) is shut down
+   and the run exits with the CLI's status.
+
+Steps 2 and 3 also run when you stop the container with Ctrl-C or `docker stop`
+instead of `q`. What you lose by not quitting is step 1 in the middle: a handoff
+cut short that way leaves `data/secrets.json` on disk unless it had already been
+consumed. That is the safe direction — no login has to be repeated — but the
+bundle is then still sitting there for you to import or delete.
+
+### Which handoff did you choose, and what does it cost?
+
+| | Track A — file | Track B — one-click endpoint | Track C — clear-text block |
+|---|---|---|---|
+| How to ask for it | nothing (always on) | `GFMY_ONECLICK=1`, or pick it in the launcher menu | `GFMY_CLEARTEXT=1` |
+| What it hands over | `data/secrets.json` on disk | the bundle over `http://<bind>:7901`, guarded by a pairing code | the bundle printed in the launcher's terminal |
+| What happens to the file | **stays** until you delete it | **deleted** when Home Assistant acks, and also when the token TTL expires; **kept** after a pairing-code lockout | **deleted** right after it is printed |
+| Where it goes in Home Assistant | the integration finds it by itself (see below), or you import the file by hand | enter the address and the pairing code in the *container login* step | paste into the *secrets.json* field |
+| Good for | Home Assistant that shares this filesystem | Home Assistant on another machine or in another container | no shared filesystem and no port |
+
+The two switches are independent, and with both set the clear-text block only
+prints when `secrets.json` is still there — which in practice means the lockout
+case. Then Track C *replaces* the file handoff rather than adding to it, because
+it deletes the file after printing. The security note for that combination is in
+the [clear-text section](#terminal-clear-text-copy-fallback-gfmy_cleartext1);
+the one for a widened Track B bind is in the
+[one-click section](#container-login-over-a-loopback-endpoint-gfmy_oneclick1).
+
+### Track A needs no copying on a shared filesystem
+
+When Home Assistant can see this directory, you do **not** have to move the file
+or paste anything. The integration watches `docker-login/data/secrets.json` as a
+built-in default path — not an option you have to set — and its config flow
+offers the bundle it found, with "import it" preselected. Copying by hand is
+only needed when Home Assistant cannot see this directory (a different machine,
+or a container without this bind mount).
+
+### Two different secrets, don't mix them up
+
+- The **noVNC password** gets you into the desktop *during* the login, on port
+  7900. On the loopback default it is the fixed `secret`; on a LAN bind the
+  container mints a fresh one per run and prints it.
+- The **pairing code** is only for Track B, on port 7901, and only exists
+  *after* the login: it is minted when the one-click endpoint starts and
+  authenticates Home Assistant's single fetch.
+
+Different ports, different purposes, different lifetimes. The pairing code never
+opens the viewer, and the noVNC password never fetches the bundle.
 
 ## Running on QNAP / Container Station
 
@@ -524,11 +598,22 @@ local account can — the file is never made world-readable. Treat
 
 ## Stopping
 
+**If you started it with the launcher** (`login.sh` / `login.cmd`) or with
+`docker compose run --rm`, there is nothing to stop: that is a one-shot
+container which removes itself when the run ends. Quit the CLI with `q` (see
+[After the login](#after-the-login-the-menu-q-and-the-wrap-up)) and it is gone.
+Ctrl-C ends it too and still hands `data/` back, but it cuts a handoff short if
+one is waiting, so prefer `q`.
+
+**Only if you started it with `docker compose up`** does a container stay behind
+for `docker compose down` to remove:
+
 ```bash
 docker compose down
 ```
-`data/secrets.json` survives (it is a host-mounted file, not inside the
-container).
+
+Either way, `data/secrets.json` survives (it is a host-mounted file, not inside
+the container) unless a handoff track consumed it.
 
 ## Keeping in sync with the integration
 
