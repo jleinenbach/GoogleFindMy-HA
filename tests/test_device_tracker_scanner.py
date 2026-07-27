@@ -681,3 +681,108 @@ async def test_a_failing_registry_probe_counts_as_missing(
         "Registry lookup failed for tracker tracker-1" in record.getMessage()
         for record in caplog.records
     )
+
+
+@pytest.mark.asyncio
+async def test_the_selfheal_reload_claims_the_shared_reload_latch(
+    probe_timer: _ProbeTimer,
+    deterministic_config_subentry_id: Callable[[Any, str, str | None], str],
+) -> None:
+    """Scheduling here has to make the other owners stand down.
+
+    Without the claim a credential write that happens right after this reload
+    would schedule a second one, and ``async_schedule_reload`` does not
+    coalesce: the entry would be torn down and set up twice in a row.
+    """
+
+    del deterministic_config_subentry_id
+
+    device_tracker = _device_tracker_module()
+    integration = importlib.import_module("custom_components.googlefindmy")
+    hass = _HassStub()
+    added: list[list[Any]] = []
+    _coordinator, entry = await _set_up_platform(
+        device_tracker, hass, registry_hit=False, added=added
+    )
+
+    probe_timer.fire()
+
+    assert hass.reloaded == [entry.entry_id]
+    pending = hass.data.get(DOMAIN, {}).get("pending_entry_reloads", set())
+    assert entry.entry_id in pending
+    assert integration.claim_pending_entry_reload(hass, entry.entry_id) is False
+
+
+@pytest.mark.asyncio
+async def test_the_probe_stands_down_when_another_reload_is_already_on_its_way(
+    caplog: pytest.LogCaptureFixture,
+    probe_timer: _ProbeTimer,
+    deterministic_config_subentry_id: Callable[[Any, str, str | None], str],
+) -> None:
+    """A foreign reload rebuilds this platform, so a second one is waste.
+
+    The one-shot latch has to survive that stand-down: it is spent on a reload
+    this path caused, never on someone else's.
+    """
+
+    del deterministic_config_subentry_id
+
+    device_tracker = _device_tracker_module()
+    integration = importlib.import_module("custom_components.googlefindmy")
+    hass = _HassStub()
+    added: list[list[Any]] = []
+    _coordinator, entry = await _set_up_platform(
+        device_tracker, hass, registry_hit=False, added=added
+    )
+
+    # A credential write got there first and holds the shared latch.
+    assert integration.claim_pending_entry_reload(hass, entry.entry_id) is True
+    caplog.set_level(logging.DEBUG, "custom_components.googlefindmy.device_tracker")
+
+    probe_timer.fire()
+
+    assert hass.reloaded == []
+    assert any(
+        "a reload of this entry is already on its way" in record.getMessage()
+        for record in caplog.records
+    )
+    claimed = hass.data.get(DOMAIN, {}).get("registry_selfheal_reloads", set())
+    assert entry.entry_id not in claimed, "the one-shot attempt must survive"
+
+
+@pytest.mark.asyncio
+async def test_a_failed_schedule_gives_both_latches_back(
+    caplog: pytest.LogCaptureFixture,
+    probe_timer: _ProbeTimer,
+    deterministic_config_subentry_id: Callable[[Any, str, str | None], str],
+) -> None:
+    """A claim is a promise to reload; a broken promise releases both latches.
+
+    A shared latch kept here would swallow every later reload of the entry, and
+    a kept one-shot would leave the unregistered trackers without a repair.
+    """
+
+    del deterministic_config_subentry_id
+
+    device_tracker = _device_tracker_module()
+    hass = _HassStub()
+
+    def _boom(entry_id: str) -> None:
+        raise RuntimeError("event loop is gone")
+
+    hass.config_entries = SimpleNamespace(async_schedule_reload=_boom)
+    added: list[list[Any]] = []
+    _coordinator, entry = await _set_up_platform(
+        device_tracker, hass, registry_hit=False, added=added
+    )
+    caplog.set_level(logging.DEBUG, "custom_components.googlefindmy.device_tracker")
+
+    probe_timer.fire()
+
+    domain_data = hass.data.get(DOMAIN, {})
+    assert entry.entry_id not in domain_data.get("pending_entry_reloads", set())
+    assert entry.entry_id not in domain_data.get("registry_selfheal_reloads", set())
+    assert any(
+        "Failed to schedule the self-heal reload" in record.getMessage()
+        for record in caplog.records
+    )

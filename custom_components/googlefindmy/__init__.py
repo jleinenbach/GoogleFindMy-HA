@@ -2413,9 +2413,13 @@ class GoogleFindMyDomainData(TypedDict, total=False):
     # unload/setup cycle -- and since the credential update listener reloads the
     # entry as well, a flow that writes credentials AND reloads the entry itself
     # would tear it down twice in a row. Every reload that follows a CREDENTIAL
-    # write therefore claims this latch first and the second claimant stands down;
-    # reloads for other reasons (options, subentries, the tracker registry
-    # self-heal) have their own guards and do not take part. Released as soon as
+    # write therefore claims this latch first and the second claimant stands down.
+    # The device_tracker registry self-heal claims it too -- its own one-shot latch
+    # answers a different question ("has this entry healed itself yet") and knows
+    # nothing about a reload someone else already scheduled -- and hands that
+    # one-shot back when it stands down here. Reloads for other reasons (options,
+    # semantic locations, subentry moves) go through ``async_reload`` as the direct
+    # consequence of a user action and stay out. Released as soon as
     # the reload arrives (unload, and setup for an entry that was not loaded), and
     # given back by a claimant whose scheduling call failed, so a genuinely later
     # change reloads again.

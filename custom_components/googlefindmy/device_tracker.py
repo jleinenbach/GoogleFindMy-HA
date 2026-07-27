@@ -42,7 +42,10 @@ from . import (
     EntityRecoveryManager,
     _extract_email_from_entry,
     _opt,
+    claim_pending_entry_reload,
     claim_registry_selfheal_reload,
+    discard_pending_entry_reload,
+    discard_registry_selfheal_reload,
 )
 from .const import (
     DEFAULT_SHOW_LOCATION_AGE,
@@ -464,6 +467,81 @@ async def async_setup_entry(
         config_entry.async_on_unload(_cancel_registry_probe)
 
         @callback
+        def _schedule_selfheal_reload(missing_count: int) -> None:
+            """Own the whole claim-then-schedule sequence of the self-heal reload.
+
+            Two latches guard this one call and they answer different questions.
+            ``claim_registry_selfheal_reload`` asks whether this entry has ever
+            healed itself, which keeps a permanently empty registry from
+            reloading in a loop. ``claim_pending_entry_reload`` asks whether some
+            other owner already put a reload on its way, which matters because
+            ``async_schedule_reload`` does not coalesce: a credential write and
+            this probe would otherwise tear the entry down twice in a row.
+
+            Order is not cosmetic. The lever is resolved *before* any claim, so
+            an old core without the method does not burn the one-shot attempt,
+            and the shared latch is claimed *last*, immediately before
+            scheduling, as its own contract demands.
+            """
+
+            schedule_reload = getattr(
+                getattr(hass, "config_entries", None), "async_schedule_reload", None
+            )
+            if not callable(schedule_reload):
+                _LOGGER.debug(
+                    "Device tracker setup: async_schedule_reload unavailable; "
+                    "leaving %d unregistered tracker(s) as they are",
+                    missing_count,
+                )
+                return
+
+            if not claim_registry_selfheal_reload(hass, config_entry.entry_id):
+                _LOGGER.debug(
+                    "Device tracker setup: %d tracker(s) still missing from the "
+                    "entity registry, but this entry already used its one-shot "
+                    "reload; not scheduling another",
+                    missing_count,
+                )
+                return
+
+            if not claim_pending_entry_reload(hass, config_entry.entry_id):
+                # Someone else's reload rebuilds this platform exactly like ours
+                # would, so hand the one-shot back instead of spending the
+                # entry's only attempt on a reload we did not cause. A probe
+                # after that reload can then still repair what it left missing.
+                discard_registry_selfheal_reload(hass, config_entry.entry_id)
+                _LOGGER.debug(
+                    "Device tracker setup: %d tracker(s) still missing from the "
+                    "entity registry, but a reload of this entry is already on "
+                    "its way; standing down",
+                    missing_count,
+                )
+                return
+
+            try:
+                schedule_reload(config_entry.entry_id)
+            except Exception:  # noqa: BLE001 - both latches are promises to reload
+                # A latch kept after a failed schedule is worse than the failure
+                # itself: the shared one swallows every later reload of this
+                # entry and the one-shot one would leave the trackers unhealed.
+                _LOGGER.exception(
+                    "Failed to schedule the self-heal reload of entry %s",
+                    config_entry.entry_id,
+                )
+                discard_pending_entry_reload(hass, config_entry.entry_id)
+                discard_registry_selfheal_reload(hass, config_entry.entry_id)
+                return
+
+            # Announced only once it is really on its way: a message that names
+            # a reload which the line above failed to schedule reads like a
+            # cause where there is none.
+            _LOGGER.info(
+                "Reloading the Find My entry once: %d newly added tracker(s) did "
+                "not reach the entity registry",
+                missing_count,
+            )
+
+        @callback
         def _verify_pending_registry_entries() -> None:
             """Confirm earlier additions, or reload the entry once to fix them.
 
@@ -499,34 +577,7 @@ async def async_setup_entry(
             if not missing:
                 return
 
-            # Resolve the lever BEFORE claiming the one-shot latch, so an older
-            # core without the method does not burn the entry's only attempt.
-            schedule_reload = getattr(
-                getattr(hass, "config_entries", None), "async_schedule_reload", None
-            )
-            if not callable(schedule_reload):
-                _LOGGER.debug(
-                    "Device tracker setup: async_schedule_reload unavailable; "
-                    "leaving %d unregistered tracker(s) as they are",
-                    len(missing),
-                )
-                return
-
-            if not claim_registry_selfheal_reload(hass, config_entry.entry_id):
-                _LOGGER.debug(
-                    "Device tracker setup: %d tracker(s) still missing from the "
-                    "entity registry, but this entry already used its one-shot "
-                    "reload; not scheduling another",
-                    len(missing),
-                )
-                return
-
-            _LOGGER.info(
-                "Reloading the Find My entry once: %d newly added tracker(s) did "
-                "not reach the entity registry",
-                len(missing),
-            )
-            schedule_reload(config_entry.entry_id)
+            _schedule_selfheal_reload(len(missing))
 
         @callback
         def _registry_probe_due(_now: Any) -> None:
