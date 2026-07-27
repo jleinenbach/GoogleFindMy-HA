@@ -851,6 +851,83 @@ def test_login_cmd_mirrors_the_track_menu_and_the_bind_guard() -> None:
     )
 
 
+def test_readme_scopes_the_unchanged_non_interactive_claim_to_login_sh() -> None:
+    """The "non-interactive run is unchanged" promise holds for bash only.
+
+    ``login.sh`` gates the handoff menu on ``[ -t 0 ]``, so CI, a pipe and
+    ``< /dev/null`` really do reach the old code path. Batch has no ``[ -t 0 ]``
+    equivalent, so ``login.cmd`` always runs ``set /p``: at EOF that is a no-op
+    (the A default, historical behaviour), but a redirect that still has CONTENT
+    loses its first line to this prompt -- the very line the container's
+    account-e-mail question needed, which can then hit EOF and abort the login,
+    and a ``b``/``c`` line silently switches track. A README that promised the
+    historical behaviour for "a non-interactive run" without naming that
+    exception walked Windows automation straight into it (Codex on PR #1218).
+
+    The guard is a COUPLING, not a spell-check: it holds the README to the code
+    asymmetry that exists today, and fires if either side moves -- if
+    ``login.cmd`` ever gains a real stdin check, this paragraph has to be
+    rewritten rather than quietly left standing.
+    """
+
+    readme = _read("README.md")
+    sh = _read("login.sh")
+    cmd = _read("login.cmd")
+
+    # 1. The asymmetry the README describes must still be the real one.
+    assert '[ -t 0 ] && [ "${track_from_cli}" -eq 0 ]' in sh, (
+        "login.sh must keep gating the handoff menu on a TTY; the README's "
+        "'behaves exactly as it always did' promise rests on exactly this test."
+    )
+    prompt = 'set /p "TRACK_CHOICE=[login] Choice [Enter = A]: "'
+    assert prompt in cmd, "login.cmd must still carry the track prompt."
+    # Comments only: login.cmd EXPLAINS the missing `[ -t 0 ]` at length, so the
+    # absence has to be measured on the executable lines, not on the file text.
+    executable = "\n".join(
+        line
+        for line in cmd.splitlines()
+        if not line.lstrip().lower().startswith("rem ")
+    )
+    assert "-t 0" not in executable, (
+        "batch has no [ -t 0 ]: if login.cmd ever learns to detect a redirected "
+        "stdin, the README paragraph below must be rewritten, not left standing."
+    )
+
+    # 2. The README must therefore scope the promise and name the exception.
+    #    Whitespace-normalised: the wrapped line break must not decide the verdict.
+    paragraph = " ".join(
+        readme.split("asks which handoff you want", 1)[1].split("\n\n## ", 1)[0].split()
+    )
+    assert "`login.sh` gates the question on a real TTY" in paragraph, (
+        "the unchanged-non-interactive promise must be attributed to login.sh, "
+        "not to 'the launcher' as a whole."
+    )
+    for needle in ("`login.cmd` **cannot**", "consumes its first line"):
+        assert needle in paragraph, (
+            f"the README must state the Windows exception verbatim ({needle!r}): "
+            "login.cmd asks unconditionally and eats a redirected first line."
+        )
+
+    # 3. And it must give the way out, which is the only thing a script can do.
+    #    Deliberately NOT a bare "--track a" check: the paragraph opens with
+    #    "Pass `--track a|b|c`", which would satisfy that substring even after the
+    #    Windows instruction had been deleted (this guard caught exactly that).
+    assert "Windows automation must therefore name the track explicitly" in paragraph, (
+        "the README must tell Windows automation to name the track up front "
+        "instead of answering the prompt through redirected stdin."
+    )
+    assert "`login.cmd --track a`" in paragraph, (
+        "the way out must be spelled out as a runnable Windows command, not left "
+        "to the reader to assemble from the bash-flavoured sentence above."
+    )
+
+    # 4. login.cmd already documents this next to the prompt; the two must agree.
+    assert "CONSUMES its first line" in cmd, (
+        "login.cmd's own comment is the second half of this pair; if it goes, "
+        "the README claim loses its in-code anchor."
+    )
+
+
 def _dockerignore_rules() -> list[str]:
     """Return the effective (non-comment, non-blank) .dockerignore patterns, in order."""
 

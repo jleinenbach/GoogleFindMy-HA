@@ -190,9 +190,23 @@ On an interactive terminal the launcher **asks which handoff you want** before i
 starts anything: `A` (the file in `./data`, the default a bare Enter picks), `B`
 (also publish the token endpoint on 7901) or `C` (also print the bundle in this
 terminal). Pass `--track a|b|c`, or set `GFMY_ONECLICK`/`GFMY_CLEARTEXT` yourself,
-and the question is skipped; a non-interactive run (CI, a pipe, `< /dev/null`)
-behaves exactly as it always did. Track A runs in every case — B and C are
+and the question is skipped. Track A runs in every case — B and C are
 additions on top of it, never replacements.
+
+**The two launchers differ here, and it matters for automation.** `login.sh`
+gates the question on a real TTY (`[ -t 0 ]`), so a non-interactive run (CI, a
+pipe, `< /dev/null`) behaves exactly as it always did. `login.cmd` **cannot**:
+batch has no `[ -t 0 ]` equivalent, so it always asks. At EOF (no redirect, or an
+exhausted one) `set /p` leaves the answer untouched and the run continues on the
+A default, which is the historical behaviour. But a redirect that still **has
+content** is a real cost, not a no-op: the prompt **consumes its first line**.
+That line never reaches the container's account-e-mail question, which can then
+hit EOF and abort the login, and a line starting with `b` or `c` silently selects
+that track — track `b` then eats the next line at its address prompt as well.
+**Windows automation must therefore name the track explicitly** — `login.cmd
+--track a` (or a preset `GFMY_ONECLICK`/`GFMY_CLEARTEXT`), which skips the
+question and every prompt behind it — rather than answering it through redirected
+stdin. `login.cmd` carries the same warning in the comment above the prompt.
 
 Only if you ask for the one-click handoff (track B, or `GFMY_ONECLICK=1`) does
 the launcher add a second compose file, `docker-compose.oneclick.yml`, which
