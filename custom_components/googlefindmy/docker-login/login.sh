@@ -676,7 +676,13 @@ else
   track_from_prompt=0
 fi
 
-if [ "${oneclick_bind_env_set}" -eq 1 ]; then
+# Gated on one-click being ON, exactly like the entrypoint's own refusal. With
+# track A or C the overlay is never passed, nothing is published on 7901, and
+# GFMY_ONECLICK_BIND is read by nobody -- so a stray value left over from an
+# earlier track-B run (or exported once in a shell profile) must not abort a
+# file-only login. The `else` normalises to the loopback default, so a wildcard
+# cannot travel on in the environment either.
+if [ "${GFMY_ONECLICK:-}" = "1" ] && [ "${oneclick_bind_env_set}" -eq 1 ]; then
   # An explicit value wins over everything, including the noVNC address. It is
   # also the only route in a non-interactive run, so it gets the full validation
   # that --ip gets: an unusable value must fail HERE, not inside docker.
@@ -701,6 +707,8 @@ elif [ "${GFMY_ONECLICK:-}" = "1" ] && [ "${track_from_prompt}" -eq 1 ]; then
     oneclick_bind="127.0.0.1"
   fi
   prompt_for_oneclick_bind
+else
+  oneclick_bind="127.0.0.1"
 fi
 export GFMY_ONECLICK_BIND="$oneclick_bind"
 

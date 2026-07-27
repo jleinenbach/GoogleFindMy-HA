@@ -688,6 +688,50 @@ def test_explicit_oneclick_bind_reaches_the_publish(tmp_path: Path) -> None:
     )
 
 
+@pytest.mark.parametrize("track", ["a", "c"])
+def test_stray_oneclick_bind_does_not_block_a_login_without_the_port(
+    tmp_path: Path, track: str
+) -> None:
+    """Without one-click, ``GFMY_ONECLICK_BIND`` must not be validated at all.
+
+    ``entrypoint.sh`` gates its own wildcard refusal on ``GFMY_ONECLICK=1``,
+    because with the port switched off there is nothing to protect. The
+    launchers used to validate unconditionally, so a wildcard left over from an
+    earlier track-B run (or exported once in a shell profile) aborted a
+    file-handoff login that never publishes 7901. Fail-closed in direction, but
+    closed on a door that is not there.
+    """
+
+    work, env = _launcher_sandbox(tmp_path)
+    env["GFMY_ONECLICK_BIND"] = "0.0.0.0"
+    bash = shutil.which("bash")
+    assert bash is not None
+    proc = subprocess.run(
+        [bash, str(work / "login.sh"), "--track", track],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+        env=env,
+    )
+    assert proc.returncode == 0, (
+        f"track {track} publishes no 7901, so a stray wildcard bind must not "
+        f"abort it; got {proc.returncode} (stderr={proc.stderr!r})"
+    )
+    argline = next(
+        line for line in proc.stdout.splitlines() if line.startswith("DOCKER_ARGS: ")
+    )
+    assert ONECLICK_COMPOSE not in argline, (
+        f"track {track} must not add the one-click overlay; got {argline!r}"
+    )
+    bindline = next(
+        line for line in proc.stdout.splitlines() if line.startswith("ONECLICK_BIND: ")
+    )
+    assert "0.0.0.0" not in bindline, (
+        f"the wildcard must not travel on to the compose child; got {bindline!r}"
+    )
+
+
 @pytest.mark.parametrize("wildcard", ["0.0.0.0", "::", "*"])
 def test_wildcard_oneclick_bind_is_refused(tmp_path: Path, wildcard: str) -> None:
     """A wildcard bind for 7901 must abort, not merely warn.
@@ -756,6 +800,18 @@ def test_login_cmd_mirrors_the_track_menu_and_the_bind_guard() -> None:
         )
     assert "UNENCRYPTED" in cmd, (
         "login.cmd must warn about the clear-text transport on a LAN bind."
+    )
+    # Order, not mere presence: the explicit-bind jump must sit BEHIND the
+    # one-click gate. Reversed (as it was), a stray GFMY_ONECLICK_BIND aborts a
+    # track A/C login that never publishes 7901 -- the bash counterpart of this
+    # is test_stray_oneclick_bind_does_not_block_a_login_without_the_port.
+    gate = cmd.index('if not "%GFMY_ONECLICK%"=="1" goto :oneclick_bind_done')
+    explicit_jump = cmd.index(
+        "if defined ONECLICK_BIND_ENV_SET goto :oneclick_bind_explicit"
+    )
+    assert gate < explicit_jump, (
+        "login.cmd must check GFMY_ONECLICK before branching to the explicit-bind "
+        "validation, so track A/C ignores a stray token bind like login.sh does."
     )
 
 

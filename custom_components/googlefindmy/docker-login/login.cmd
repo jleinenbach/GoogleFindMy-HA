@@ -201,9 +201,14 @@ rem GFMY_ONECLICK_BIND wins, otherwise track B chosen at the prompt offers the
 rem address noVNC already uses, otherwise loopback. A wildcard is REFUSED here
 rem (not merely warned about, as it is for the noVNC viewer): port 7901 hands out
 rem the credentials themselves, and a concrete address can always replace it.
+rem The one-click gate comes FIRST, mirroring login.sh and the entrypoint: with
+rem track A or C nothing is published on 7901 and GFMY_ONECLICK_BIND is read by
+rem nobody, so a stray value from an earlier track-B run must not abort a
+rem file-only login. Leaving the loopback default in place also keeps a wildcard
+rem from travelling on in the environment.
 set "ONECLICK_BIND=127.0.0.1"
-if defined ONECLICK_BIND_ENV_SET goto :oneclick_bind_explicit
 if not "%GFMY_ONECLICK%"=="1" goto :oneclick_bind_done
+if defined ONECLICK_BIND_ENV_SET goto :oneclick_bind_explicit
 if not defined TRACK_FROM_PROMPT goto :oneclick_bind_done
 set "ONECLICK_BIND=%NOVNC_BIND%"
 call :reject_wildcard "%ONECLICK_BIND%" || set "ONECLICK_BIND=127.0.0.1"
