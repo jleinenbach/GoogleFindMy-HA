@@ -1883,3 +1883,50 @@ def test_the_reload_latch_helper_fails_open() -> None:
         assert config_flow._claim_entry_reload(hass, "entry-1") is True
     finally:
         config_flow.import_integration_package = original  # type: ignore[assignment]
+
+
+def test_the_latch_release_helper_reaches_the_latch_and_stays_quiet() -> None:
+    """Giving the latch back must work, and must never raise into a flow.
+
+    The counterpart of ``_claim_entry_reload``: a claim that cannot be honoured
+    has to be released, or the latch stays set for the lifetime of the process
+    and swallows every later reload of that entry. Because it runs on the error
+    path of an already failing operation, it stays silent on an empty id, on an
+    integration package without the latch, and when consulting it raises.
+    """
+
+    hass = types.SimpleNamespace(data={})
+    released: list[tuple[Any, str]] = []
+
+    original = config_flow.import_integration_package
+
+    try:
+
+        def _with_latch() -> Any:
+            return types.SimpleNamespace(
+                discard_pending_entry_reload=lambda h, entry_id: released.append(
+                    (h, entry_id)
+                )
+            )
+
+        config_flow.import_integration_package = _with_latch  # type: ignore[assignment]
+        config_flow._discard_entry_reload(hass, "entry-1")
+        assert released == [(hass, "entry-1")]
+
+        released.clear()
+        config_flow._discard_entry_reload(hass, "")
+        assert released == [], "an empty id has no latch to give back"
+
+        def _without_latch() -> Any:
+            return types.SimpleNamespace()
+
+        config_flow.import_integration_package = _without_latch  # type: ignore[assignment]
+        config_flow._discard_entry_reload(hass, "entry-1")
+
+        def _raise() -> Any:
+            raise RuntimeError("integration package unavailable")
+
+        config_flow.import_integration_package = _raise  # type: ignore[assignment]
+        config_flow._discard_entry_reload(hass, "entry-1")
+    finally:
+        config_flow.import_integration_package = original  # type: ignore[assignment]

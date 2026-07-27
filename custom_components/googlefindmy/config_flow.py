@@ -3004,6 +3004,76 @@ def _claim_entry_reload(hass: HomeAssistant, entry_id: str) -> bool:
         return True
 
 
+def _discard_entry_reload(hass: HomeAssistant, entry_id: str) -> None:
+    """Release the reload latch of ``entry_id`` after a claim came to nothing.
+
+    A claim is a promise to reload. Where that promise cannot be kept -- the
+    scheduling call is missing or raises -- the latch has to go back, otherwise it
+    stays set for the lifetime of the process and swallows every later reload of
+    that entry: the release points (unload, setup, removal) all presuppose that a
+    reload actually arrived.
+    """
+
+    if not entry_id:
+        return
+    try:
+        integration = import_integration_package()
+        discard = getattr(integration, "discard_pending_entry_reload", None)
+        if callable(discard):
+            discard(hass, entry_id)
+    except Exception:  # noqa: BLE001 - bookkeeping must not raise into a flow
+        _LOGGER.debug(
+            "Could not release the reload latch for entry %s",
+            entry_id,
+            exc_info=True,
+        )
+
+
+def _schedule_claimed_reload(hass: HomeAssistant, entry_id: str) -> bool:
+    """Schedule the one reload of ``entry_id`` and report whether it was ours.
+
+    Single owner of the write-then-reload sequence used by every credential
+    writing path in this flow. Order matters twice: the availability of
+    ``async_schedule_reload`` is checked **before** the claim, so an old core
+    without it does not burn the latch, and the claim happens **last**, so the
+    window between claim and scheduling stays as short as it can be. If the
+    scheduling call still raises, the latch is released again instead of being
+    left behind.
+
+    Returns ``True`` when this call scheduled the reload, ``False`` when another
+    owner already has it or scheduling was not possible.
+    """
+
+    schedule_reload = getattr(
+        getattr(hass, "config_entries", None), "async_schedule_reload", None
+    )
+    if not callable(schedule_reload):
+        _LOGGER.debug(
+            "async_schedule_reload is unavailable; entry %s keeps its old "
+            "credentials until it is reloaded",
+            entry_id,
+        )
+        return False
+
+    if not _claim_entry_reload(hass, entry_id):
+        _LOGGER.debug(
+            "Reload of entry %s not scheduled here; a reload is already on its way",
+            entry_id,
+        )
+        return False
+
+    try:
+        schedule_reload(entry_id)
+    except Exception:  # noqa: BLE001 - the write itself already landed
+        _LOGGER.exception(
+            "Failed to schedule the reload of entry %s after writing credentials",
+            entry_id,
+        )
+        _discard_entry_reload(hass, entry_id)
+        return False
+    return True
+
+
 async def _async_coalesce_account_entries(
     hass: HomeAssistant,
     entry: ConfigEntry,
@@ -3434,10 +3504,21 @@ class ConfigFlow(
         watch paths at runtime, so the update happens reload-free here.
 
         The reload that changed credentials still need is not lost, it moves:
-        ``async_update_entry`` notifies the update listener in ``__init__.py``,
-        which reloads exactly when a credential-relevant key changed. Storing
+        this helper schedules it directly, under the shared latch, so the update
+        listener in ``__init__.py`` stands down for the same change. Storing
         credentials without a reload would leave them written but ineffective,
         because the token cache is seeded in ``async_setup_entry``.
+
+        Scheduling here rather than leaving it to the listener alone is not
+        belt-and-braces, it is the whole point for the case that matters most: an
+        entry whose credentials expired is in ``SETUP_ERROR``, and Home Assistant
+        runs ``_async_process_on_unload`` on a failed setup, which removes that
+        very listener. Relying on it would make a successful reauth report success
+        while the integration stays down until the next restart. ``SETUP_ERROR``
+        has no retry timer either. The unconditional schedule also keeps the
+        behaviour of ``async_update_reload_and_abort``, whose
+        ``reload_even_if_entry_is_unchanged`` defaults to ``True``: re-importing
+        the same credentials still rebuilds the entry.
 
         ``ConfigFlow.async_update_and_abort`` is deliberately not used: it
         exists only from HA 2025.11.0, while the declared minimum is 2025.9.1
@@ -3446,6 +3527,7 @@ class ConfigFlow(
         """
 
         self.hass.config_entries.async_update_entry(entry, data=dict(data))
+        _schedule_claimed_reload(self.hass, entry.entry_id)
         return self.async_abort(reason=reason)
 
     def __init__(self) -> None:
@@ -4277,18 +4359,10 @@ class ConfigFlow(
         # the debounced store save; the running integration keeps the old
         # credentials until it is reloaded. That write also notifies the update
         # listener, which reloads for exactly this reason, so the reload below is
-        # the fallback for an entry that has no listener -- one that is not set up,
-        # for instance because these very credentials had expired. Claiming the
-        # latch keeps the two from unloading the entry twice in a row.
-        schedule_reload = getattr(hass.config_entries, "async_schedule_reload", None)
-        if callable(schedule_reload) and _claim_entry_reload(hass, entry.entry_id):
-            try:
-                schedule_reload(entry.entry_id)
-            except Exception:  # noqa: BLE001 - the write itself already landed
-                _LOGGER.exception(
-                    "Failed to schedule reload after writing credentials to entry %s",
-                    entry.entry_id,
-                )
+        # the one that also covers an entry without a listener -- one that is not
+        # set up, for instance because these very credentials had expired.
+        # Claiming the latch keeps the two from unloading the entry twice in a row.
+        _schedule_claimed_reload(hass, entry.entry_id)
         return True
 
     async def async_step_discovery_overwrite(

@@ -651,6 +651,50 @@ async def test_changed_credentials_reload_the_entry_exactly_once(
 
 
 @pytest.mark.asyncio
+async def test_the_listener_gives_the_latch_back_when_scheduling_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    stub_coordinator_factory: Callable[..., type[Any]],
+) -> None:
+    """A claim is a promise to reload; a broken promise has to be given back.
+
+    The listener claims the shared latch immediately before scheduling. If the
+    scheduling call raises, keeping the claim would be the worse of the two
+    failures: the reload that failed is gone either way, but a latch left behind
+    silently swallows every later reload of that entry as well.
+    """
+
+    loop = asyncio.get_running_loop()
+    harness = _prepare_async_setup_entry_harness(
+        monkeypatch, stub_coordinator_factory, loop
+    )
+    integration = harness.integration
+    entry = harness.entry
+    hass = harness.hass
+
+    entry.data[DATA_AAS_TOKEN] = "aas_et/OLD_TOKEN_VALUE"
+    harness.cache.values = {integration.username_string: "user@example.com"}
+
+    assert await integration.async_setup(hass, {}) is True
+    assert await integration.async_setup_entry(hass, entry) is True
+    notify = entry._update_listeners[0]
+
+    def _boom(_entry_id: str) -> None:
+        raise RuntimeError("no event loop to schedule on")
+
+    monkeypatch.setattr(
+        hass.config_entries, "async_schedule_reload", _boom, raising=False
+    )
+
+    entry.data = {**entry.data, DATA_AAS_TOKEN: "aas_et/NEW_TOKEN_VALUE"}
+    await notify(hass, entry)
+
+    pending = hass.data[integration.DOMAIN]["pending_entry_reloads"]
+    assert entry.entry_id not in pending, (
+        "a latch kept after a failed schedule would block every later reload"
+    )
+
+
+@pytest.mark.asyncio
 async def test_the_listener_stands_down_when_a_flow_already_reloads(
     monkeypatch: pytest.MonkeyPatch,
     stub_coordinator_factory: Callable[..., type[Any]],

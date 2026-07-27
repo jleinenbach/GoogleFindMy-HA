@@ -316,26 +316,26 @@ async def test_reauth_persists_whitespace_free_owner_key(
     assert persisted[DATA_SECRET_BUNDLE]["owner_key"] == "AABBCC"
 
 
-@pytest.mark.asyncio
-async def test_the_persist_helper_writes_the_entry_and_aborts_without_reloading(
+def _arm_persist_helper(
     monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The replacement for ``async_update_reload_and_abort`` does both halves.
+    flow: Any,
+    *,
+    schedule_raises: BaseException | None = None,
+) -> tuple[list[tuple[Any, dict[str, Any]]], list[str]]:
+    """Expose the real persist helper and record its two observable effects."""
 
-    The persist tests above stub this helper out to observe what would be
-    written, so its own body needs a test of its own: it must hand the data to
-    ``async_update_entry`` (which is what notifies the update listener, and thus
-    what triggers the reload the flow no longer performs itself) and abort with
-    the caller's reason.
-    """
-
-    flow, entry, _captured = _build_reauth_flow(monkeypatch)
     del flow._async_update_entry_and_abort  # type: ignore[attr-defined]
 
     updates: list[tuple[Any, dict[str, Any]]] = []
+    scheduled: list[str] = []
 
     def _async_update_entry(target: Any, **kwargs: Any) -> None:
         updates.append((target, dict(kwargs)))
+
+    def _async_schedule_reload(entry_id: str) -> None:
+        if schedule_raises is not None:
+            raise schedule_raises
+        scheduled.append(entry_id)
 
     monkeypatch.setattr(
         flow.hass.config_entries,
@@ -343,6 +343,41 @@ async def test_the_persist_helper_writes_the_entry_and_aborts_without_reloading(
         _async_update_entry,
         raising=False,
     )
+    monkeypatch.setattr(
+        flow.hass.config_entries,
+        "async_schedule_reload",
+        _async_schedule_reload,
+        raising=False,
+    )
+    return updates, scheduled
+
+
+@pytest.mark.asyncio
+async def test_the_persist_helper_writes_the_entry_and_schedules_the_one_reload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The replacement for ``async_update_reload_and_abort`` does all three halves.
+
+    The persist tests above stub this helper out to observe what would be
+    written, so its own body needs a test of its own: it hands the data to
+    ``async_update_entry``, schedules the reload that makes the credentials take
+    effect, and aborts with the caller's reason.
+
+    Leaving the reload to the update listener alone is not enough, and this is
+    the case that matters: an entry whose credentials expired sits in
+    ``SETUP_ERROR``, and Home Assistant runs ``_async_process_on_unload`` on a
+    failed setup, which removes that listener. Nothing here consults a listener,
+    so the reauth works for a dead entry as well as for a live one.
+    """
+
+    flow, entry, _captured = _build_reauth_flow(monkeypatch)
+    claims: list[str] = []
+    monkeypatch.setattr(
+        config_flow,
+        "_claim_entry_reload",
+        lambda _hass, entry_id: not claims.append(entry_id),  # type: ignore[func-returns-value]
+    )
+    updates, scheduled = _arm_persist_helper(monkeypatch, flow)
 
     result = flow._async_update_entry_and_abort(
         entry=entry,
@@ -351,4 +386,103 @@ async def test_the_persist_helper_writes_the_entry_and_aborts_without_reloading(
     )
 
     assert updates == [(entry, {"data": {CONF_OAUTH_TOKEN: "aas_et/NEW_TOKEN_VALUE"}})]
+    assert scheduled == [entry.entry_id], (
+        "credentials written but never reloaded would report success while the "
+        "entry stays on its old, expired tokens"
+    )
+    assert claims == [entry.entry_id], "the reload has to run under the shared latch"
     assert result["reason"] == "reauth_successful"
+
+
+@pytest.mark.asyncio
+async def test_the_persist_helper_stands_down_when_another_owner_has_the_reload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two schedulers, one reload: whoever holds the latch reloads, the other not.
+
+    ``async_schedule_reload`` does not coalesce, so a second scheduler means a
+    second unload/setup cycle.
+    """
+
+    flow, entry, _captured = _build_reauth_flow(monkeypatch)
+    monkeypatch.setattr(config_flow, "_claim_entry_reload", lambda _hass, _id: False)
+    updates, scheduled = _arm_persist_helper(monkeypatch, flow)
+
+    flow._async_update_entry_and_abort(
+        entry=entry,
+        data={CONF_OAUTH_TOKEN: "aas_et/NEW_TOKEN_VALUE"},
+        reason="reauth_successful",
+    )
+
+    assert len(updates) == 1, "the write happens either way"
+    assert scheduled == []
+
+
+@pytest.mark.asyncio
+async def test_a_failed_schedule_gives_the_reload_latch_back(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A claim is a promise to reload; a broken promise must be given back.
+
+    A latch that stays claimed after a failed scheduling call would swallow every
+    later reload of that entry, because the release points (unload, setup,
+    removal) all presuppose that a reload actually arrived.
+    """
+
+    flow, entry, _captured = _build_reauth_flow(monkeypatch)
+    released: list[str] = []
+    monkeypatch.setattr(config_flow, "_claim_entry_reload", lambda _hass, _id: True)
+    monkeypatch.setattr(
+        config_flow,
+        "_discard_entry_reload",
+        lambda _hass, entry_id: released.append(entry_id),
+    )
+    _arm_persist_helper(monkeypatch, flow, schedule_raises=RuntimeError("no loop"))
+
+    result = flow._async_update_entry_and_abort(
+        entry=entry,
+        data={CONF_OAUTH_TOKEN: "aas_et/NEW_TOKEN_VALUE"},
+        reason="reauth_successful",
+    )
+
+    assert released == [entry.entry_id]
+    assert result["reason"] == "reauth_successful", (
+        "a failed reload must not turn a successful reauth into an error"
+    )
+
+
+@pytest.mark.asyncio
+async def test_an_old_core_without_schedule_reload_does_not_burn_the_latch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Availability is checked before the claim, not after.
+
+    Claiming first and then finding no way to schedule would leave the latch set
+    for the lifetime of the process on exactly the cores that need every reload.
+    """
+
+    flow, entry, _captured = _build_reauth_flow(monkeypatch)
+    claims: list[str] = []
+    monkeypatch.setattr(
+        config_flow,
+        "_claim_entry_reload",
+        lambda _hass, entry_id: not claims.append(entry_id),  # type: ignore[func-returns-value]
+    )
+    del flow._async_update_entry_and_abort  # type: ignore[attr-defined]
+    monkeypatch.setattr(
+        flow.hass.config_entries,
+        "async_update_entry",
+        lambda *_a, **_k: None,
+        raising=False,
+    )
+    monkeypatch.delattr(
+        flow.hass.config_entries, "async_schedule_reload", raising=False
+    )
+
+    flow._async_update_entry_and_abort(
+        entry=entry,
+        data={CONF_OAUTH_TOKEN: "aas_et/NEW_TOKEN_VALUE"},
+        reason="reauth_successful",
+    )
+
+    assert claims == []

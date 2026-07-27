@@ -2412,10 +2412,13 @@ class GoogleFindMyDomainData(TypedDict, total=False):
     # ``async_schedule_reload`` does not coalesce -- every call adds another
     # unload/setup cycle -- and since the credential update listener reloads the
     # entry as well, a flow that writes credentials AND reloads the entry itself
-    # would tear it down twice in a row. Every integration-owned reload therefore
-    # claims this latch first and the second claimant stands down. Released as
-    # soon as the reload arrives (unload, and setup for an entry that was not
-    # loaded), so a genuinely later change reloads again.
+    # would tear it down twice in a row. Every reload that follows a CREDENTIAL
+    # write therefore claims this latch first and the second claimant stands down;
+    # reloads for other reasons (options, subentries, the tracker registry
+    # self-heal) have their own guards and do not take part. Released as soon as
+    # the reload arrives (unload, and setup for an entry that was not loaded), and
+    # given back by a claimant whose scheduling call failed, so a genuinely later
+    # change reloads again.
     pending_entry_reloads: set[str]
     # In-memory only, NEVER persisted: irreversible cleanup jobs staged by a
     # config or options flow (watched-secrets delete, login-container ack). A
@@ -7532,7 +7535,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
             "Credentials changed for this account; reloading the entry so they "
             "take effect"
         )
-        schedule_reload(updated_entry.entry_id)
+        try:
+            schedule_reload(updated_entry.entry_id)
+        except Exception:  # noqa: BLE001 - a claim that comes to nothing must be given back
+            _LOGGER.exception(
+                "Failed to schedule the reload of entry %s after a credential change",
+                updated_entry.entry_id,
+            )
+            discard_pending_entry_reload(hass_arg, updated_entry.entry_id)
 
     entry.async_on_unload(entry.add_update_listener(_async_refresh_watch_paths))
 
