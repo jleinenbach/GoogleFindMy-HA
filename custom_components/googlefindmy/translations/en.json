@@ -23,6 +23,10 @@
           "use_found_bundle": "Keep this enabled to import the file shown above. Turn it off to pick an authentication method yourself instead."
         }
       },
+      "discovery_confirm": {
+        "title": "Google Find My Device credentials found",
+        "description": "Credentials for {email} have been found.\n\nContinue to use them in Home Assistant. If this account is already set up, you will be asked first before anything is replaced."
+      },
       "discovery_overwrite": {
         "title": "Replace the stored credentials?",
         "description": "{email} is already set up in Home Assistant, and a new credentials file has just been found.\n\nReplacing writes the new credentials into the existing entry and reloads it. Declining leaves the entry exactly as it is.",

@@ -23,6 +23,10 @@
           "use_found_bundle": "Déjalo activado para importar el archivo mostrado arriba. Desactívalo para elegir tú mismo un método de autenticación."
         }
       },
+      "discovery_confirm": {
+        "title": "Se han encontrado credenciales de Google Find My Device",
+        "description": "Se han encontrado credenciales para {email}.\n\nContinúa para usarlas en Home Assistant. Si la cuenta ya está configurada, se te preguntará antes de reemplazar nada."
+      },
       "discovery_overwrite": {
         "title": "¿Reemplazar las credenciales guardadas?",
         "description": "{email} ya está configurado en Home Assistant y se acaba de encontrar un archivo de credenciales nuevo.\n\nAl reemplazarlas, las nuevas credenciales se escriben en la entrada existente y esta se recarga. Si lo rechazas, la entrada queda tal como está.",

@@ -23,6 +23,10 @@
           "use_found_bundle": "Laat dit aan staan om het bestand hierboven te importeren. Zet het uit om zelf een aanmeldmethode te kiezen."
         }
       },
+      "discovery_confirm": {
+        "title": "Inloggegevens voor Google Find My Device gevonden",
+        "description": "Er zijn inloggegevens gevonden voor {email}.\n\nGa verder om ze in Home Assistant te gebruiken. Is het account al ingesteld, dan wordt het je eerst gevraagd voordat er iets wordt vervangen."
+      },
       "discovery_overwrite": {
         "title": "Opgeslagen inloggegevens vervangen?",
         "description": "{email} is al ingesteld in Home Assistant en er is zojuist een nieuw bestand met inloggegevens gevonden.\n\nBij vervangen worden de nieuwe inloggegevens naar het bestaande item geschreven en wordt het opnieuw geladen. Als je weigert, blijft het item precies zoals het is.",

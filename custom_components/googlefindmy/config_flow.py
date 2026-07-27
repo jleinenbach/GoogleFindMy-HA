@@ -147,6 +147,7 @@ from .const import (
     OPT_SPEED_GATE_ENABLED,
     OPT_STALE_THRESHOLD,
     OPTION_KEYS,
+    OPTIONAL_CREDENTIAL_KEYS,
     SECRETS_EXTRA_WATCH_PATHS,
     SERVICE_FEATURE_PLATFORMS,
     SERVICE_SUBENTRY_KEY,
@@ -2563,7 +2564,7 @@ def _async_mark_cleanup_ticket_entry_promised(
     later staging on the same flow can be followed by another call.
 
     No claim of "the last thing this flow does" is made here, and none would
-    hold: ``async_step_discovery`` inspects the ``CREATE_ENTRY`` FlowResult of
+    hold: ``async_step_discovery_confirm`` inspects the ``CREATE_ENTRY`` FlowResult of
     ``async_step_device_selection`` and stages a further job *afterwards*,
     inside the very same flow. Each site that can produce or follow a
     ``CREATE_ENTRY`` therefore marks for itself; what makes that safe is the
@@ -3289,7 +3290,13 @@ def _find_entry_by_email(hass: HomeAssistant, email: str) -> ConfigEntry | None:
 #: merge cannot do on its own -- hence the full-data payload built by
 #: :func:`_merge_credential_updates`, and hence the absence check in
 #: :func:`_entry_carries_credentials`.
-_OPTIONAL_CREDENTIAL_KEYS: Final = (DATA_SECRET_BUNDLE, DATA_AAS_TOKEN)
+#:
+#: The removal has a second, deferred half: the entry-scoped token cache mirrors
+#: these keys, and ``async_setup_entry`` would seed a removed one straight back
+#: from that mirror. It therefore reads the same constant from ``const.py``,
+#: which is the single source of truth for both halves -- a local copy here and
+#: a local copy there is precisely how the two could drift apart.
+_OPTIONAL_CREDENTIAL_KEYS: Final = OPTIONAL_CREDENTIAL_KEYS
 
 
 def _entry_carries_credentials(entry: ConfigEntry, updates: Mapping[str, Any]) -> bool:
@@ -3442,23 +3449,6 @@ def _is_credential_import_discovery(discovery: CloudDiscoveryData) -> bool:
     """
 
     return discovery.source != CLOUD_SCANNER_DISCOVERY_SOURCE
-
-
-def _discovery_payload_equivalent(
-    first: CloudDiscoveryData, second: CloudDiscoveryData
-) -> bool:
-    """Return True when two normalized discovery payloads are equivalent."""
-
-    if first.unique_id != second.unique_id or first.email != second.email:
-        return False
-
-    if first.candidates != second.candidates:
-        return False
-
-    if first.secrets_bundle is None or second.secrets_bundle is None:
-        return first.secrets_bundle is None and second.secrets_bundle is None
-
-    return dict(first.secrets_bundle) == dict(second.secrets_bundle)
 
 
 def _normalize_and_validate_discovery_payload(
@@ -3950,7 +3940,6 @@ class ConfigFlow(
         # object's state (see _merge_credential_updates).
         self._pending_discovery_auth: dict[str, Any] | None = None
         self._pending_discovery_entry_exists = False
-        self._discovery_confirm_pending = False
         # Survives _clear_discovery_confirmation_state on purpose: the overwrite
         # question is asked *after* the discovery card has been confirmed and
         # that state torn down.
@@ -4479,7 +4468,6 @@ class ConfigFlow(
         prompt to keep the state machine in sync with subsequent submissions.
         """
 
-        self._discovery_confirm_pending = False
         self._pending_discovery_payload = None
         self._pending_discovery_auth = None
         self._pending_discovery_entry_exists = False
@@ -4515,7 +4503,15 @@ class ConfigFlow(
     async def async_step_discovery(
         self, discovery_info: Mapping[str, Any] | None
     ) -> FlowResult:
-        """Handle cloud-triggered discovery payloads."""
+        """Handle cloud-triggered discovery payloads.
+
+        Entry point only. Home Assistant calls this with the payload; the
+        confirmation the form asks for comes back in
+        :meth:`async_step_discovery_confirm`, because the form carries its own
+        ``step_id``. A step that showed its form under ``step_id="discovery"``
+        would be re-entered *here* on submit and would have to tell a submit
+        apart from a fresh payload by itself.
+        """
 
         context_obj = getattr(self, "context", None)
         context_source: str | None = None
@@ -4532,9 +4528,8 @@ class ConfigFlow(
             payload_keys,
         )
         _LOGGER.debug(
-            "discovery: context_source=%s, pending_confirm=%s, payload_keys=%s",
+            "discovery: context_source=%s, payload_keys=%s",
             context_source,
-            getattr(self, "_discovery_confirm_pending", False),
             payload_keys,
         )
 
@@ -4546,77 +4541,11 @@ class ConfigFlow(
             )
             return await self.async_step_discovery_update_info(discovery_info)
 
-        if self._discovery_confirm_pending:
-            pending_payload = self._pending_discovery_payload
-            is_submission = not discovery_info
-            if (
-                not is_submission
-                and isinstance(discovery_info, Mapping)
-                and pending_payload is not None
-            ):
-                try:
-                    normalized_candidate = _normalize_and_validate_discovery_payload(
-                        discovery_info
-                    )
-                except Exception:  # noqa: BLE001
-                    is_submission = False
-                else:
-                    is_submission = _discovery_payload_equivalent(
-                        normalized_candidate, pending_payload
-                    )
-
-            if not is_submission:
-                self._clear_discovery_confirmation_state()
-            else:
-                pending_auth = self._pending_discovery_auth
-                entry_exists = self._pending_discovery_entry_exists
-                self._clear_discovery_confirmation_state()
-
-                if (
-                    entry_exists
-                    and pending_auth is not None
-                    and pending_payload is not None
-                ):
-                    if _is_credential_import_discovery(pending_payload):
-                        # The account is already configured and a human just
-                        # supplied credentials. Do not write yet: ask first,
-                        # because this replaces working credentials. The old
-                        # behaviour wrote unconditionally and reported
-                        # "already_configured", which said nothing about what
-                        # had happened to the credentials.
-                        self._pending_overwrite_payload = pending_payload
-                        self._pending_overwrite_auth = pending_auth
-                        return await self.async_step_discovery_overwrite()
-
-                    # A tracker rescan re-submits the credentials the entry
-                    # already stores. There is nothing to replace and nobody to
-                    # ask, so this keeps the pre-existing behaviour: apply the
-                    # payload and abort as already configured.
-                    _LOGGER.debug(
-                        "Discovery from %s for a configured account: "
-                        "applying updates without asking",
-                        pending_payload.source,
-                    )
-                    rebased = self._async_rebase_credential_updates(
-                        pending_payload.email, pending_auth
-                    )
-                    if rebased is None:
-                        # The entry went away while the card was open. There is
-                        # nothing to update, and this path deliberately does not
-                        # create anything: the payload is a rescan of an account
-                        # the user configured, not an import they asked for.
-                        return self.async_abort(reason="already_configured")
-                    try:
-                        await self._async_prepare_account_context(
-                            email=pending_payload.email,
-                            preferred_unique_id=pending_payload.unique_id,
-                            updates=rebased[1],
-                        )
-                    except data_entry_flow.AbortFlow:
-                        return self.async_abort(reason="already_configured")
-                    return self.async_abort(reason="already_configured")
-
-                return await self._async_import_discovered_account(pending_payload)
+        # A fresh payload supersedes a confirmation that is still pending: the
+        # user has not answered the old card, and the new payload is the more
+        # recent truth. Clearing here also drops ``confirm_only`` from the
+        # context, which _set_confirm_only re-arms below for the new card.
+        self._clear_discovery_confirmation_state()
 
         try:
             normalized = _normalize_and_validate_discovery_payload(discovery_info or {})
@@ -4660,12 +4589,76 @@ class ConfigFlow(
         self._pending_discovery_payload = normalized
         self._pending_discovery_auth = dict(auth_data)
         self._pending_discovery_entry_exists = updates is not None
-        self._discovery_confirm_pending = True
         self._set_confirm_only()
         return self.async_show_form(
-            step_id="discovery",
+            step_id="discovery_confirm",
             description_placeholders=placeholders,
         )
+
+    async def async_step_discovery_confirm(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Handle the confirmation of the discovery card.
+
+        Home Assistant routes here because :meth:`async_step_discovery` showed
+        its form under ``step_id="discovery_confirm"``. That is the whole reason
+        this method exists as a step of its own: ``discovery_confirm`` is the
+        name Home Assistant reserves for a discovery confirmation form (and the
+        only one of the two that may carry a translated text), so the submit no
+        longer re-enters the entry point and no longer has to be told apart from
+        an incoming payload.
+        """
+
+        pending_payload = self._pending_discovery_payload
+        pending_auth = self._pending_discovery_auth
+        entry_exists = self._pending_discovery_entry_exists
+        if pending_payload is None:
+            # No card is pending: the flow was resumed without one, or the
+            # state was cleared by a newer payload. Nothing to confirm.
+            return self.async_abort(reason="invalid_discovery_info")
+
+        self._clear_discovery_confirmation_state()
+
+        if entry_exists and pending_auth is not None:
+            if _is_credential_import_discovery(pending_payload):
+                # The account is already configured and a human just supplied
+                # credentials. Do not write yet: ask first, because this
+                # replaces working credentials. The old behaviour wrote
+                # unconditionally and reported "already_configured", which said
+                # nothing about what had happened to the credentials.
+                self._pending_overwrite_payload = pending_payload
+                self._pending_overwrite_auth = pending_auth
+                return await self.async_step_discovery_overwrite()
+
+            # A tracker rescan re-submits the credentials the entry already
+            # stores. There is nothing to replace and nobody to ask, so this
+            # keeps the pre-existing behaviour: apply the payload and abort as
+            # already configured.
+            _LOGGER.debug(
+                "Discovery from %s for a configured account: "
+                "applying updates without asking",
+                pending_payload.source,
+            )
+            rebased = self._async_rebase_credential_updates(
+                pending_payload.email, pending_auth
+            )
+            if rebased is None:
+                # The entry went away while the card was open. There is nothing
+                # to update, and this path deliberately does not create
+                # anything: the payload is a rescan of an account the user
+                # configured, not an import they asked for.
+                return self.async_abort(reason="already_configured")
+            try:
+                await self._async_prepare_account_context(
+                    email=pending_payload.email,
+                    preferred_unique_id=pending_payload.unique_id,
+                    updates=rebased[1],
+                )
+            except data_entry_flow.AbortFlow:
+                return self.async_abort(reason="already_configured")
+            return self.async_abort(reason="already_configured")
+
+        return await self._async_import_discovered_account(pending_payload)
 
     async def _async_import_discovered_account(
         self, payload: CloudDiscoveryData | None

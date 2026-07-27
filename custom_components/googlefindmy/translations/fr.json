@@ -23,6 +23,10 @@
           "use_found_bundle": "Laissez cette option activée pour importer le fichier affiché ci-dessus. Désactivez-la pour choisir vous-même une méthode d'authentification."
         }
       },
+      "discovery_confirm": {
+        "title": "Identifiants Google Find My Device trouvés",
+        "description": "Des identifiants ont été trouvés pour {email}.\n\nContinuez pour les utiliser dans Home Assistant. Si le compte est déjà configuré, il vous sera demandé confirmation avant tout remplacement."
+      },
       "discovery_overwrite": {
         "title": "Remplacer les identifiants enregistrés ?",
         "description": "{email} est déjà configuré dans Home Assistant, et un nouveau fichier d'identifiants vient d'être trouvé.\n\nLe remplacement écrit les nouveaux identifiants dans l'entrée existante et la recharge. Si vous refusez, l'entrée reste telle quelle.",
