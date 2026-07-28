@@ -18,6 +18,9 @@ from custom_components.googlefindmy.chrome_driver import create_driver, safe_qui
 if TYPE_CHECKING:  # pragma: no cover - import-time typing block
     from selenium.webdriver.remote.webdriver import WebDriver
 
+# Opt-in for consoles that carry a user but report no tty (IDE run windows).
+_ENV_ASSUME_INTERACTIVE = "GOOGLEFINDMY_ASSUME_INTERACTIVE"
+
 
 def _parse_cli_args(argv: list[str] | None = None) -> argparse.Namespace:
     """Parse command-line arguments for the standalone auth flow helper."""
@@ -43,11 +46,21 @@ def _parse_cli_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 def _stdin_is_attended() -> bool:
-    """Return True when standard input is a terminal a human can answer on.
+    """Return True when a human can answer a prompt on standard input.
+
+    ``isatty`` is the signal, with one escape hatch: an IDE console (PyCharm,
+    VS Code) proxies stdin through a pipe and reports ``isatty() == False``
+    while a user is very much sitting in front of it, and the desktop prompt
+    right below explicitly addresses PyCharm users. Setting
+    ``GOOGLEFINDMY_ASSUME_INTERACTIVE=1`` asserts "there is someone here" for
+    exactly that case; it is a deliberate opt-in, so an unattended process does
+    not get the same treatment by accident.
 
     ``sys.stdin`` can be ``None`` (pythonw, some embeddings) and ``isatty`` can
     raise on a closed stream, so both are treated as "nobody there".
     """
+    if os.environ.get(_ENV_ASSUME_INTERACTIVE) == "1":
+        return True
     stream = sys.stdin
     if stream is None:
         return False
@@ -135,10 +148,11 @@ def request_oauth_account_token_flow(
             if not _stdin_is_attended():
                 msg = (
                     "[AuthFlow] The interactive Chrome login needs an attended "
-                    "terminal (stdin is not a terminal). Run it from a terminal, "
-                    "use the docker-login container "
-                    "(GOOGLEFINDMY_CONTAINER_LOGIN=1), or call the flow with "
-                    "headless=True."
+                    "terminal (stdin is not a terminal). Run it from a terminal; "
+                    f"set {_ENV_ASSUME_INTERACTIVE}=1 if you are sitting at an "
+                    "IDE console that proxies stdin; use the docker-login "
+                    "container (GOOGLEFINDMY_CONTAINER_LOGIN=1); or call the "
+                    "flow with headless=True."
                 )
                 raise RuntimeError(msg)
             try:

@@ -376,7 +376,8 @@ runs them through the `cli_sandbox` fixture. It shims `pkill`/`killall` onto
 one, so a kill attempt is a failed assertion while a legitimate lookup is not; it
 points `GOOGLEFINDMY_SECRETS_PATH` at a throwaway file so the tests stop reading
 and writing the developer's own `Auth/secrets.json`; and it *drops*
-`GOOGLEFINDMY_CONTAINER_LOGIN` and the other branch-steering variables from the
+`GOOGLEFINDMY_CONTAINER_LOGIN`, `GOOGLEFINDMY_ASSUME_INTERACTIVE` and the other
+branch-steering variables from the
 inherited environment. That last part is not cosmetic: with the variable exported
 in the developer's shell, the CLI takes the container branch, skips both the
 desktop gate and the cleanup, and actually launches Chromium — the assertions

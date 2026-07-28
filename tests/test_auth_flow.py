@@ -205,6 +205,52 @@ def test_stdin_is_attended_reads_the_terminal_state(
     assert auth_flow._stdin_is_attended() is False
 
 
+def test_stdin_is_attended_honours_the_ide_console_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An IDE console proxies stdin and reports no tty although a user is there.
+
+    PyCharm and VS Code run windows are exactly that case, and the desktop
+    prompt addresses PyCharm users by name, so refusing every non-tty would
+    lock out a present user. The override is opt-in: an unattended process does
+    not get it by accident.
+    """
+
+    monkeypatch.setattr(sys, "stdin", SimpleNamespace(isatty=lambda: False))
+
+    monkeypatch.setenv("GOOGLEFINDMY_ASSUME_INTERACTIVE", "1")
+    assert auth_flow._stdin_is_attended() is True
+
+    # Only the exact string "1" opts in, mirroring GOOGLEFINDMY_CONTAINER_LOGIN.
+    monkeypatch.setenv("GOOGLEFINDMY_ASSUME_INTERACTIVE", "true")
+    assert auth_flow._stdin_is_attended() is False
+
+    monkeypatch.delenv("GOOGLEFINDMY_ASSUME_INTERACTIVE")
+    assert auth_flow._stdin_is_attended() is False
+
+
+def test_desktop_gate_proceeds_with_the_ide_console_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With the override set, a non-tty console reaches the prompt and continues."""
+
+    prompts: list[str] = []
+    driver = FakeDriver(cookie_after_wait={"value": "tok"})
+    monkeypatch.setattr(sys, "stdin", SimpleNamespace(isatty=lambda: False))
+    monkeypatch.setenv("GOOGLEFINDMY_ASSUME_INTERACTIVE", "1")
+    monkeypatch.setattr(auth_flow, "create_driver", lambda **kwargs: driver)
+    monkeypatch.setattr(auth_flow, "WebDriverWait", ImmediateWaitFactory())
+    monkeypatch.setattr(
+        "builtins.input", lambda prompt="": prompts.append(prompt) or ""
+    )
+    monkeypatch.delenv("GOOGLEFINDMY_CONTAINER_LOGIN", raising=False)
+
+    token, _email = request_oauth_account_token_flow(headless=False)
+
+    assert token == "tok"
+    assert len(prompts) == 1
+
+
 def test_desktop_gate_refuses_a_pipe_without_consuming_it(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
