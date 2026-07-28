@@ -365,10 +365,22 @@ own PID and the whole ancestry before signalling. `taskkill /f /im chrome.exe` i
 `tests/test_guard_process_pattern_kill.py` pins the **literal** forms with an AST
 scan over `custom_components/googlefindmy/**` and `tests/**`: an argv list, a
 `shell=True` string, and `["sh", "-c", "…"]`. Its `LEGACY_ALLOWLIST` is empty
-because both historical call sites were migrated in the same change. The guard
-deliberately does *not* see commands assembled from variables or `os.exec*`
-invocations — that is the price of zero false positives, and it means the guard
-is a ratchet, not a proof.
+because both historical call sites were migrated in the same change.
+
+Two deliberate narrowings keep it free of false positives, because a
+repository-wide guard that cries wolf gets switched off rather than obeyed.
+First, only the `-f`/`--full` form is rejected: `pkill --help` distinguishes
+`-f, --full` ("use full process name to match") from `-x, --exact` ("match
+exactly with the command name"), and the name-matching variants (`pkill -x`,
+`pkill -P`, `killall`, `taskkill /im`) cannot hit a process that merely
+*mentions* the pattern — a different failure class. Second, calls are resolved
+against the module's own imports rather than matched by method name, so an
+unrelated `runner.run([...])` stays invisible while `import subprocess as sp`
+does not. Both narrowings came from Codex review findings on this PR.
+
+The guard deliberately does *not* see commands assembled from variables or
+`os.exec*` invocations — that is the remaining price, and it means the guard is a
+ratchet, not a proof.
 
 CLI subprocess tests carry the second half of the defence: `tests/test_main.py`
 runs them through the `cli_sandbox` fixture. It shims `pkill`/`killall` onto

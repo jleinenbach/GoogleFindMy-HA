@@ -1,10 +1,10 @@
 # tests/test_guard_process_pattern_kill.py
-"""Guard against command-line-pattern process kills (``pkill``/``killall``).
+"""Guard against full-command-line process kills (``pkill -f``).
 
-``pkill -f <pattern>`` and ``killall`` select by matching the *full command line*
-of every process on the machine. That makes them lethal to the caller's own
-process tree: any ancestor whose argv happens to carry the pattern is a valid
-target, and the tool spares only itself, never its caller.
+``pkill -f <pattern>`` selects by matching the *full command line* of every
+process on the machine. That makes it lethal to the caller's own process tree:
+any ancestor whose argv happens to carry the pattern is a valid target, and the
+tool spares only itself, never its caller.
 
 Measured on 2026-07-28 in this repository: ``chrome_driver.py`` ran
 ``subprocess.run(["pkill", "-f", "chrome"])`` during the Chrome auth flow. A
@@ -18,9 +18,12 @@ The correct construction is ``chrome_driver._terminate_matching_processes``: it
 uses ``pgrep`` for the same selection, then filters out the own PID and the whole
 ancestry before signalling. This guard keeps the broad form from coming back.
 
-``taskkill`` is deliberately NOT flagged: ``taskkill /f /im chrome.exe`` matches
-the *image name*, not a command line, so it cannot hit an unrelated process that
-merely mentions the name. Different failure class, Windows-only branch.
+Only the ``-f``/``--full`` form is flagged. ``pkill --help`` distinguishes
+``-f, --full`` ("use full process name to match") from ``-x, --exact`` ("match
+exactly with the command name"), and the name-matching variants -- ``pkill -x``,
+``pkill -P <ppid>``, ``killall``, ``taskkill /im`` -- cannot hit a process that
+merely *mentions* the pattern. They are a different failure class and are let
+through on purpose; flagging them would make this repository-wide guard cry wolf.
 
 Calls are resolved against the module's own imports, not matched by method name.
 This guard runs repository-wide, so a false positive does not annoy one author,
@@ -47,8 +50,11 @@ _SCAN_ROOTS = (
     _REPO_ROOT / "tests",
 )
 
-# Tools that select processes by matching against the command line.
-_PATTERN_KILL_TOOLS = frozenset({"pkill", "killall"})
+# Tools that CAN be told to select by full command line. ``killall`` is
+# deliberately absent: it matches the command *name*, so it is the same class as
+# ``pkill -x`` and ``taskkill /im``, both of which are let through below. Adding
+# it would flag a form that cannot hit an unrelated ancestor.
+_PATTERN_KILL_TOOLS = frozenset({"pkill"})
 
 # Callables that hand their first argument to the OS as a command.
 _SUBPROCESS_RUNNERS = frozenset({"run", "call", "check_call", "check_output", "Popen"})
@@ -169,9 +175,39 @@ def _has_shell_true(node: ast.Call) -> bool:
     )
 
 
+def _selects_by_full_command_line(args: list[str]) -> bool:
+    """True when the arguments ask for matching against the full command line.
+
+    ``pkill --help`` distinguishes ``-f, --full`` ("use full process name to
+    match") from ``-x, --exact`` ("match exactly with the command name"). Only
+    the former can hit a process that merely *mentions* the pattern in its argv,
+    which is the failure class this guard exists for. ``-f`` may be bundled with
+    other short options (``-9f``), so short flags are inspected per character.
+    """
+    for arg in args:
+        if arg == "--full":
+            return True
+        if arg.startswith("--"):
+            continue
+        if arg.startswith("-") and "f" in arg[1:]:
+            return True
+    return False
+
+
 def _shell_string_offends(value: str) -> bool:
-    """True when a shell string invokes one of the pattern-kill tools."""
-    return any(f"{tool} " in value for tool in _PATTERN_KILL_TOOLS)
+    """True when a shell string runs a pattern-kill tool with full-argv matching.
+
+    The tool name alone is not enough: ``pkill -x chrome`` matches the command
+    *name* and cannot hit an unrelated ancestor, so flagging it would be a false
+    positive on a repository-wide guard.
+    """
+    tokens = value.split()
+    for index, token in enumerate(tokens):
+        if Path(token).name in _PATTERN_KILL_TOOLS and _selects_by_full_command_line(
+            tokens[index + 1 :]
+        ):
+            return True
+    return False
 
 
 def _literal_strings(node: ast.expr) -> list[str]:
@@ -200,9 +236,14 @@ def find_violations(source: str, rel_path: str) -> list[str]:
         first_arg = node.args[0]
 
         if _is_subprocess_runner(node.func, bindings):
-            tool = _first_string_element(first_arg)
-            if tool is not None and Path(tool).name in _PATTERN_KILL_TOOLS:
-                violations.append(f"{rel_path}:{node.lineno} {Path(tool).name}")
+            argv = _literal_strings(first_arg)
+            tool = argv[0] if argv else None
+            if (
+                tool is not None
+                and Path(tool).name in _PATTERN_KILL_TOOLS
+                and _selects_by_full_command_line(argv[1:])
+            ):
+                violations.append(f"{rel_path}:{node.lineno} {Path(tool).name} -f")
                 continue
 
             # subprocess.run("pkill -f chrome", shell=True): the command is a
@@ -247,10 +288,10 @@ def test_no_command_line_pattern_kills_in_the_tree() -> None:
         offenders.extend(find_violations(path.read_text(encoding="utf-8"), rel))
 
     assert not offenders, (
-        "Command-line-pattern process kill found:\n"
+        "Full-command-line process kill found:\n"
         + "\n".join(f"  {item}" for item in offenders)
         + "\n\nWHY THIS IS WRONG\n"
-        "  'pkill -f' / 'killall' match the FULL command line of every process,\n"
+        "  'pkill -f' matches the FULL command line of every process,\n"
         "  including the caller's own ancestry. Measured here: a pytest run whose\n"
         "  argv contained 'tests/test_chrome_driver.py' was killed by the CLI\n"
         "  subprocess it had started (exit 143).\n"
@@ -282,14 +323,17 @@ _IMPORTS = "import os\nimport subprocess\n"
 def test_guard_detects_a_synthetic_violation() -> None:
     """The detector must fire on the real form and stay quiet on look-alikes."""
     offending = _IMPORTS + 'subprocess.run(["pkill", "-f", "chrome"], check=False)\n'
-    assert find_violations(offending, "x.py") == ["x.py:3 pkill"]
+    assert find_violations(offending, "x.py") == ["x.py:3 pkill -f"]
 
     quiet = (
         _IMPORTS
         + '"""A docstring that mentions subprocess.run(["pkill", "-f", "x"])."""\n'
-        '# subprocess.run(["killall", "chrome"])\n'
+        '# subprocess.run(["pkill", "-f", "chrome"])\n'
         'subprocess.run(["taskkill", "/f", "/im", "chrome.exe"], check=False)\n'
         'subprocess.run(["pgrep", "-f", "chrome"], check=False)\n'
+        'subprocess.run(["pkill", "-x", "chrome"], check=False)\n'
+        'subprocess.run(["pkill", "-P", "4242"], check=False)\n'
+        'subprocess.run(["killall", "chrome"], check=False)\n'
         "subprocess.run([tool, '-f', pattern], check=False)\n"
     )
     assert find_violations(quiet, "x.py") == []
@@ -305,7 +349,9 @@ def test_guard_sees_the_shell_string_and_sh_c_forms() -> None:
     shell_string = _IMPORTS + 'subprocess.run("pkill -f chrome", shell=True)\n'
     assert find_violations(shell_string, "x.py") == ["x.py:3 shell string"]
 
-    check_output = _IMPORTS + 'subprocess.check_output("killall chrome", shell=True)\n'
+    check_output = (
+        _IMPORTS + 'subprocess.check_output("pkill --full chrome", shell=True)\n'
+    )
     assert find_violations(check_output, "x.py") == ["x.py:3 shell string"]
 
     sh_c = _IMPORTS + 'subprocess.run(["sh", "-c", "pkill -f chrome"])\n'
@@ -338,7 +384,7 @@ def test_guard_ignores_unrelated_objects_with_the_same_method_names() -> None:
     """
 
     unrelated = (
-        _IMPORTS + 'runner.run(["killall", "workers"], check=False)\n'
+        _IMPORTS + 'runner.run(["pkill", "-f", "workers"], check=False)\n'
         'scheduler.Popen(["pkill", "-f", "job"])\n'
         'config.system("pkill -f x")\n'
         'self.check_output(["pkill", "-f", "y"])\n'
@@ -350,9 +396,9 @@ def test_guard_ignores_unrelated_objects_with_the_same_method_names() -> None:
         "import subprocess as sp\n"
         "from subprocess import run as _run\n"
         'sp.run(["pkill", "-f", "chrome"])\n'
-        '_run(["killall", "chrome"])\n'
+        '_run(["pkill", "--full", "chrome"])\n'
     )
-    assert find_violations(aliased, "x.py") == ["x.py:3 pkill", "x.py:4 killall"]
+    assert find_violations(aliased, "x.py") == ["x.py:3 pkill -f", "x.py:4 pkill -f"]
 
 
 def test_guard_reports_an_unparseable_file_instead_of_skipping_it() -> None:
@@ -361,6 +407,33 @@ def test_guard_reports_an_unparseable_file_instead_of_skipping_it() -> None:
 
     assert len(findings) == 1
     assert "unparseable" in findings[0]
+
+
+def test_guard_lets_name_matching_variants_through() -> None:
+    """Only full-argv matching is the failure class; name matching is not.
+
+    ``pkill --help`` distinguishes ``-f, --full`` from ``-x, --exact``. A
+    name-matching call cannot hit a process that merely mentions the pattern in
+    its arguments, so flagging it on a repository-wide guard would be a false
+    positive. Codex flagged the earlier, tool-name-only version for exactly this.
+    """
+
+    for safe in (
+        'subprocess.run(["pkill", "-x", "chrome"])\n',
+        'subprocess.run(["pkill", "-P", "4242"])\n',
+        'subprocess.run(["pkill", "chrome"])\n',
+        'subprocess.run(["killall", "chrome"])\n',
+        'subprocess.run("pkill -x chrome", shell=True)\n',
+        'os.system("pkill -x chrome")\n',
+    ):
+        assert find_violations(_IMPORTS + safe, "x.py") == [], safe
+
+    for hazardous in (
+        'subprocess.run(["pkill", "-f", "chrome"])\n',
+        'subprocess.run(["pkill", "--full", "chrome"])\n',
+        'subprocess.run(["pkill", "-9f", "chrome"])\n',  # bundled short options
+    ):
+        assert find_violations(_IMPORTS + hazardous, "x.py") != [], hazardous
 
 
 def test_shell_string_kills_are_detected() -> None:
