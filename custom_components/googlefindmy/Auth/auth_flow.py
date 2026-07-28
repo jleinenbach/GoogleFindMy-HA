@@ -42,6 +42,21 @@ def _parse_cli_args(argv: list[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+def _stdin_is_attended() -> bool:
+    """Return True when standard input is a terminal a human can answer on.
+
+    ``sys.stdin`` can be ``None`` (pythonw, some embeddings) and ``isatty`` can
+    raise on a closed stream, so both are treated as "nobody there".
+    """
+    stream = sys.stdin
+    if stream is None:
+        return False
+    try:
+        return bool(stream.isatty())
+    except (AttributeError, OSError, ValueError):
+        return False
+
+
 def request_oauth_account_token_flow(
     headless: bool = False,
     *,
@@ -54,17 +69,25 @@ def request_oauth_account_token_flow(
     It may be ``None`` when the DOM selectors fail (e.g. Google changes their
     page layout) — callers should fall back to prompting the user.
     """
-    # In Home Assistant context, skip the interactive prompts
-    is_home_assistant = "homeassistant" in sys.modules
+    # ``headless`` is the interactivity signal: an automated caller passes True,
+    # an attended terminal session passes False. The historical test
+    # ``"homeassistant" in sys.modules`` is NOT usable for this and was removed:
+    # it is true in *every* standalone CLI run, either because Home Assistant is
+    # installed and pulled in by the import graph, or because main.py injects
+    # ``homeassistant.*`` stubs into sys.modules itself when it is not. The CLI
+    # therefore fabricated exactly the signal the heuristic read, which silently
+    # disabled the desktop gate below and let an unattended process open a
+    # browser (measured 2026-07-28). Note that the integration itself never calls
+    # this function: the only production caller is main.py (the standalone CLI).
+    #
     # Inside the docker-login container Chrome runs *in the container* and is
     # driven through the noVNC viewer, not on the user's own desktop. The
-    # entrypoint sets GOOGLEFINDMY_CONTAINER_LOGIN=1 there because the
-    # sys.modules HA heuristic above does not fire in that standalone process,
-    # so without this signal the user would be told to "install Chrome on your
-    # system" -- wrong for the container, where they must open the noVNC URL.
+    # entrypoint sets GOOGLEFINDMY_CONTAINER_LOGIN=1 there, so without this signal
+    # the user would be told to "install Chrome on your system" -- wrong for the
+    # container, where they must open the noVNC URL.
     is_container = os.environ.get("GOOGLEFINDMY_CONTAINER_LOGIN") == "1"
 
-    if not headless and not is_home_assistant:
+    if not headless:
         if is_container:
             novnc_url = (
                 os.environ.get("GOOGLEFINDMY_NOVNC_URL") or "http://localhost:7900"
@@ -98,11 +121,38 @@ def request_oauth_account_token_flow(
         """)
 
             # Press enter to continue: on the desktop path Chrome takes over the
-            # user's own screen, so they get to decide when that happens.
-            input("[AuthFlow] Press Enter to continue...")
+            # user's own screen, so they get to decide when that happens. No
+            # terminal means nobody is there to decide, and launching a browser
+            # (plus its process cleanup) unattended is what let a test subprocess
+            # reach the Chrome flow at all. Abort before create_driver().
+            #
+            # The check is ``isatty``, not "does the read fail": a pipe supplies
+            # bytes without a human, and consuming a line here would eat the
+            # account e-mail that main.py reads from the same stdin afterwards.
+            # A non-tty is therefore refused rather than read. The desktop login
+            # cannot be scripted anyway -- signing in to Google happens by hand in
+            # the browser window -- so nothing usable is lost.
+            if not _stdin_is_attended():
+                msg = (
+                    "[AuthFlow] The interactive Chrome login needs an attended "
+                    "terminal (stdin is not a terminal). Run it from a terminal, "
+                    "use the docker-login container "
+                    "(GOOGLEFINDMY_CONTAINER_LOGIN=1), or call the flow with "
+                    "headless=True."
+                )
+                raise RuntimeError(msg)
+            try:
+                input("[AuthFlow] Press Enter to continue...")
+            except EOFError as err:
+                # The terminal was closed between the check and the read.
+                msg = (
+                    "[AuthFlow] Standard input closed while waiting for "
+                    "confirmation; not starting Chrome."
+                )
+                raise RuntimeError(msg) from err
 
     # Automatically install and set up the Chrome driver
-    if not is_home_assistant:
+    if not headless:
         print("[AuthFlow] Installing ChromeDriver...")
 
     driver: WebDriver = create_driver(
@@ -114,7 +164,7 @@ def request_oauth_account_token_flow(
         driver.get("https://accounts.google.com/EmbeddedSetup")
 
         # Wait until the "oauth_token" cookie is set
-        if not is_home_assistant:
+        if not headless:
             print("[AuthFlow] Waiting for 'oauth_token' cookie to be set...")
         WebDriverWait(driver, 300).until(
             lambda d: d.get_cookie("oauth_token") is not None
@@ -136,7 +186,7 @@ def request_oauth_account_token_flow(
         email: str | None = _extract_email_from_session(driver)
 
         # Print the value of the "oauth_token" cookie
-        if not is_home_assistant:
+        if not headless:
             print("[AuthFlow] Retrieved Account Token successfully.")
             if email:
                 print(f"[AuthFlow] Detected account: {email}")
