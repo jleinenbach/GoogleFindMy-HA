@@ -56,6 +56,7 @@ from custom_components.googlefindmy.const import (
     TRACKER_SUBENTRY_TRANSLATION_KEY,
 )
 from tests.helpers import drain_loop
+from tests.helpers.config_entries_stub import make_config_entry
 from tests.helpers.config_flow import ConfigEntriesDomainUniqueIdLookupMixin
 from tests.helpers.homeassistant import (
     FakeDeviceEntry,
@@ -197,6 +198,7 @@ class _StubConfigEntries:
         self.updated_subentries: list[tuple[_StubConfigEntry, ConfigSubentry]] = []
         self.removed_subentries: list[tuple[_StubConfigEntry, str]] = []
         self.entry_update_calls: list[tuple[_StubConfigEntry, dict[str, Any]]] = []
+        self.scheduled_reloads: list[str] = []
         self.unload_calls: list[str] = []
         self.set_disabled_by_calls: list[tuple[str, object | None]] = []
         self.setup_calls: list[str] = []
@@ -316,6 +318,11 @@ class _StubConfigEntries:
             raise LookupError(f"Config entry '{entry_id}' not registered")
         self.setup_calls.append(entry_id)
         return True
+
+    def async_schedule_reload(self, entry_id: str) -> None:
+        """Record a scheduled reload instead of performing one."""
+
+        self.scheduled_reloads.append(entry_id)
 
     def async_update_entry(self, entry: _StubConfigEntry, **kwargs: Any) -> None:
         self.entry_update_calls.append((entry, dict(kwargs)))
@@ -592,6 +599,343 @@ async def test_async_setup_entry_leaves_modern_entries_intact(
     assert (
         harness.cache.values.get(integration.username_string)
         == entry.data[CONF_GOOGLE_EMAIL]
+    )
+
+
+@pytest.mark.asyncio
+async def test_changed_credentials_reload_the_entry_exactly_once(
+    monkeypatch: pytest.MonkeyPatch,
+    stub_coordinator_factory: Callable[..., type[Any]],
+) -> None:
+    """The update listener carries the reload the config flow no longer does.
+
+    Home Assistant turns "update listener plus reloading config-flow method"
+    into an error in 2026.12, so the flow stores credentials without reloading.
+    Storing alone would leave them ineffective: the token cache is seeded in
+    ``async_setup_entry``, and a running coordinator does not pick up new
+    tokens. The listener therefore has to reload on a credential change, once,
+    and stay quiet for everything else.
+    """
+
+    loop = asyncio.get_running_loop()
+    harness = _prepare_async_setup_entry_harness(
+        monkeypatch, stub_coordinator_factory, loop
+    )
+    integration = harness.integration
+    entry = harness.entry
+    hass = harness.hass
+
+    entry.data[DATA_AAS_TOKEN] = "aas_et/OLD_TOKEN_VALUE"
+    harness.cache.values = {integration.username_string: "user@example.com"}
+
+    assert await integration.async_setup(hass, {}) is True
+    assert await integration.async_setup_entry(hass, entry) is True
+
+    assert len(entry._update_listeners) == 1
+    notify = entry._update_listeners[0]
+
+    # Anything that leaves the credentials alone must not reload.
+    entry.options = {"tracked_devices": ["existing"]}
+    await notify(hass, entry)
+    assert hass.config_entries.scheduled_reloads == []
+
+    # New credentials: one reload, and only one even if the notification
+    # arrives twice before it takes effect.
+    entry.data = {**entry.data, DATA_AAS_TOKEN: "aas_et/NEW_TOKEN_VALUE"}
+    await notify(hass, entry)
+    await notify(hass, entry)
+
+    assert hass.config_entries.scheduled_reloads == [entry.entry_id], (
+        "changed credentials have to become effective, and a second "
+        "notification must not schedule a second reload"
+    )
+
+
+@pytest.mark.asyncio
+async def test_the_listener_gives_the_latch_back_when_scheduling_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    stub_coordinator_factory: Callable[..., type[Any]],
+) -> None:
+    """A claim is a promise to reload; a broken promise has to be given back.
+
+    The listener claims the shared latch immediately before scheduling. If the
+    scheduling call raises, keeping the claim would be the worse of the two
+    failures: the reload that failed is gone either way, but a latch left behind
+    silently swallows every later reload of that entry as well.
+    """
+
+    loop = asyncio.get_running_loop()
+    harness = _prepare_async_setup_entry_harness(
+        monkeypatch, stub_coordinator_factory, loop
+    )
+    integration = harness.integration
+    entry = harness.entry
+    hass = harness.hass
+
+    entry.data[DATA_AAS_TOKEN] = "aas_et/OLD_TOKEN_VALUE"
+    harness.cache.values = {integration.username_string: "user@example.com"}
+
+    assert await integration.async_setup(hass, {}) is True
+    assert await integration.async_setup_entry(hass, entry) is True
+    notify = entry._update_listeners[0]
+
+    def _boom(_entry_id: str) -> None:
+        raise RuntimeError("no event loop to schedule on")
+
+    monkeypatch.setattr(
+        hass.config_entries, "async_schedule_reload", _boom, raising=False
+    )
+
+    entry.data = {**entry.data, DATA_AAS_TOKEN: "aas_et/NEW_TOKEN_VALUE"}
+    await notify(hass, entry)
+
+    pending = hass.data[integration.DOMAIN]["pending_entry_reloads"]
+    assert entry.entry_id not in pending, (
+        "a latch kept after a failed schedule would block every later reload"
+    )
+
+
+@pytest.mark.asyncio
+async def test_the_listener_stands_down_when_a_flow_already_reloads(
+    monkeypatch: pytest.MonkeyPatch,
+    stub_coordinator_factory: Callable[..., type[Any]],
+) -> None:
+    """Two schedulers, one reload.
+
+    A flow that writes credentials and reloads the entry itself also notifies
+    this listener, which reloads for the very same change. Home Assistant's
+    ``async_schedule_reload`` does not coalesce, so without an agreement on one
+    owner the entry would be unloaded and set up twice in a row.
+    """
+
+    loop = asyncio.get_running_loop()
+    harness = _prepare_async_setup_entry_harness(
+        monkeypatch, stub_coordinator_factory, loop
+    )
+    integration = harness.integration
+    entry = harness.entry
+    hass = harness.hass
+
+    entry.data[DATA_AAS_TOKEN] = "aas_et/OLD_TOKEN_VALUE"
+    harness.cache.values = {integration.username_string: "user@example.com"}
+
+    assert await integration.async_setup(hass, {}) is True
+    assert await integration.async_setup_entry(hass, entry) is True
+
+    notify = entry._update_listeners[0]
+
+    # The writing flow got there first and reloads on its own behalf.
+    assert integration.claim_pending_entry_reload(hass, entry.entry_id) is True
+
+    entry.data = {**entry.data, DATA_AAS_TOKEN: "aas_et/NEW_TOKEN_VALUE"}
+    await notify(hass, entry)
+
+    assert hass.config_entries.scheduled_reloads == [], (
+        "a reload is already on its way; the listener must not add a second one"
+    )
+
+    # The reload arrives: its setup releases the latch, so the next credential
+    # change reloads again instead of being swallowed forever.
+    assert await integration.async_setup_entry(hass, entry) is True
+    notify = entry._update_listeners[-1]
+    entry.data = {**entry.data, DATA_AAS_TOKEN: "aas_et/THIRD_TOKEN_VALUE"}
+    await notify(hass, entry)
+
+    assert hass.config_entries.scheduled_reloads == [entry.entry_id], (
+        "the released latch has to let a later change reload again"
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_listener_invocation_from_a_bygone_setup_does_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+    stub_coordinator_factory: Callable[..., type[Any]],
+) -> None:
+    """An invocation queued before the unload must not reload the rebuilt entry.
+
+    ``async_update_entry`` creates the listener task right away, while
+    ``async_on_unload`` only takes the listener out of the entry. Such a call
+    still runs afterwards, carrying the fingerprint of a setup that is over.
+    """
+
+    loop = asyncio.get_running_loop()
+    harness = _prepare_async_setup_entry_harness(
+        monkeypatch, stub_coordinator_factory, loop
+    )
+    integration = harness.integration
+    entry = harness.entry
+    hass = harness.hass
+
+    entry.data[DATA_AAS_TOKEN] = "aas_et/OLD_TOKEN_VALUE"
+    harness.cache.values = {integration.username_string: "user@example.com"}
+
+    assert await integration.async_setup(hass, {}) is True
+    assert await integration.async_setup_entry(hass, entry) is True
+
+    notify = entry._update_listeners[0]
+
+    # Home Assistant keeps the registered listeners here; the stub does not, so
+    # the attribute is supplied for this test the way the core would expose it.
+    entry.update_listeners = [notify]
+    entry.data = {**entry.data, DATA_AAS_TOKEN: "aas_et/NEW_TOKEN_VALUE"}
+    await notify(hass, entry)
+    assert hass.config_entries.scheduled_reloads == [entry.entry_id]
+
+    # The reload has run: its unload released the latch, so nothing but the
+    # staleness itself keeps this invocation from scheduling another one.
+    integration.discard_pending_entry_reload(hass, entry.entry_id)
+
+    # After the unload the listener is gone from the entry, but the queued task
+    # still runs with the credentials of the entry it no longer belongs to.
+    entry.update_listeners = []
+    entry.data = {**entry.data, DATA_AAS_TOKEN: "aas_et/FOURTH_TOKEN_VALUE"}
+    await notify(hass, entry)
+
+    assert hass.config_entries.scheduled_reloads == [entry.entry_id], (
+        "an invocation from a bygone setup must not reload the rebuilt entry"
+    )
+
+
+@pytest.mark.asyncio
+async def test_the_listener_stays_out_of_an_unload_that_is_under_way(
+    monkeypatch: pytest.MonkeyPatch,
+    stub_coordinator_factory: Callable[..., type[Any]],
+) -> None:
+    """The latch is free for a while inside a reload; the state is not.
+
+    ``async_unload_entry`` releases the latch as its first act, but Home
+    Assistant removes the listener only *after* ``async_unload_entry`` returns
+    (``_async_process_on_unload``). The whole platform unload lies between the
+    two, with its awaits, so an invocation queued before the reload can wake up
+    there, pass the identity check and find the latch free: a second teardown of
+    an entry that is already being torn down. What separates the window from a
+    genuine change is the entry state, which the core sets to
+    ``UNLOAD_IN_PROGRESS`` *before* calling ``async_unload_entry`` (verified in
+    dev and in the declared floor 2025.9.1).
+    """
+
+    loop = asyncio.get_running_loop()
+    harness = _prepare_async_setup_entry_harness(
+        monkeypatch, stub_coordinator_factory, loop
+    )
+    integration = harness.integration
+    entry = harness.entry
+    hass = harness.hass
+
+    entry.data[DATA_AAS_TOKEN] = "aas_et/OLD_TOKEN_VALUE"
+    harness.cache.values = {integration.username_string: "user@example.com"}
+
+    assert await integration.async_setup(hass, {}) is True
+    assert await integration.async_setup_entry(hass, entry) is True
+
+    notify = entry._update_listeners[0]
+    # The core exposes the registered listeners here; the stub does not, so the
+    # attribute is supplied the way the core would, which keeps the identity
+    # check from being the reason this test passes.
+    entry.update_listeners = [notify]
+
+    # Inside the window: the reload released the latch at the start of the
+    # unload, the listener is still registered, and the entry is being torn down.
+    integration.discard_pending_entry_reload(hass, entry.entry_id)
+    entry.state = ConfigEntryState.UNLOAD_IN_PROGRESS
+    entry.data = {**entry.data, DATA_AAS_TOKEN: "aas_et/NEW_TOKEN_VALUE"}
+    await notify(hass, entry)
+
+    assert hass.config_entries.scheduled_reloads == [], (
+        "an unload that is already under way must not be answered with a second "
+        "reload of the same entry"
+    )
+
+    # Counter-direction: once the entry is loaded again, a changed credential is
+    # the listener's business as before.
+    entry.state = ConfigEntryState.LOADED
+    entry.data = {**entry.data, DATA_AAS_TOKEN: "aas_et/THIRD_TOKEN_VALUE"}
+    await notify(hass, entry)
+
+    assert hass.config_entries.scheduled_reloads == [entry.entry_id], (
+        "a loaded entry with changed credentials still has to be reloaded"
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_core_without_schedule_reload_stays_quiet_about_it(
+    monkeypatch: pytest.MonkeyPatch,
+    stub_coordinator_factory: Callable[..., type[Any]],
+) -> None:
+    """An older core simply applies the credentials on the next restart.
+
+    ``async_schedule_reload`` is resolved defensively because the declared
+    minimum version is 2025.9.1; missing it must not raise out of an update
+    listener, where an exception would surface as an unrelated error.
+    """
+
+    loop = asyncio.get_running_loop()
+    harness = _prepare_async_setup_entry_harness(
+        monkeypatch, stub_coordinator_factory, loop
+    )
+    integration = harness.integration
+    entry = harness.entry
+    hass = harness.hass
+
+    entry.data[DATA_AAS_TOKEN] = "aas_et/OLD_TOKEN_VALUE"
+    harness.cache.values = {integration.username_string: "user@example.com"}
+
+    assert await integration.async_setup(hass, {}) is True
+    assert await integration.async_setup_entry(hass, entry) is True
+
+    monkeypatch.setattr(
+        hass.config_entries, "async_schedule_reload", None, raising=False
+    )
+    entry.data = {**entry.data, DATA_AAS_TOKEN: "aas_et/NEW_TOKEN_VALUE"}
+
+    await entry._update_listeners[0](hass, entry)
+
+    assert hass.config_entries.scheduled_reloads == []
+
+
+def test_the_reload_latch_is_a_no_op_without_an_entry_id() -> None:
+    """No entry, no claim, and nothing to release.
+
+    Both helpers are called from lifecycle hooks that read ``entry.entry_id``
+    from partially initialised entries, so an empty id must neither claim a latch
+    under the empty key nor create the domain bucket on the way out.
+    """
+
+    integration = importlib.import_module("custom_components.googlefindmy")
+
+    hass = SimpleNamespace(data={})
+
+    assert integration.claim_pending_entry_reload(hass, "") is False
+    integration.discard_pending_entry_reload(hass, "")
+    assert hass.data == {}, "neither helper may create the domain bucket here"
+
+    # A release without a bucket is equally quiet.
+    integration.discard_pending_entry_reload(SimpleNamespace(data={}), "entry-1")
+
+
+def test_the_credential_fingerprint_keeps_no_plaintext() -> None:
+    """The value held for the entry's lifetime must not carry the tokens."""
+
+    integration = importlib.import_module("custom_components.googlefindmy")
+
+    secret = "aas_et/VERY_SECRET_TOKEN"
+    data = {
+        CONF_GOOGLE_EMAIL: "user@example.com",
+        DATA_AAS_TOKEN: secret,
+        DATA_SECRET_BUNDLE: {"aas_token": secret, "username": "user@example.com"},
+    }
+
+    fingerprint = integration._credential_fingerprint(data)
+
+    assert secret not in fingerprint
+    assert "user@example.com" not in fingerprint
+    assert fingerprint == integration._credential_fingerprint(dict(data))
+    assert fingerprint != integration._credential_fingerprint(
+        {**data, DATA_AAS_TOKEN: "aas_et/OTHER"}
+    )
+    # A missing container must not raise on the setup path.
+    assert integration._credential_fingerprint(None) == (
+        integration._credential_fingerprint({})
     )
 
 
@@ -3497,3 +3841,126 @@ def _platform_names(platforms: tuple[object, ...]) -> tuple[str, ...]:
             else:
                 names.append(str(platform))
     return tuple(names)
+
+
+@pytest.mark.asyncio
+async def test_the_reload_latch_survives_the_unload_phase(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The claim must outlive the teardown, not the first line of the router.
+
+    The platform teardown is the longest stretch of a reload. Releasing the latch
+    before it lets the state-blind schedulers -- the credential-writing config
+    flows and the tracker registry probe, neither of which inspects
+    ``entry.state`` the way the update listener does -- claim it again and queue a
+    second reload, even though the replacement setup that is already on its way
+    reads the newest ``entry.data`` anyway. That is the consecutive teardown the
+    latch exists to prevent.
+    """
+
+    integration = importlib.import_module("custom_components.googlefindmy")
+
+    hass = SimpleNamespace(data={})
+    entry = make_config_entry(entry_id="entry-unload", parent_entry_id=None)
+
+    assert integration.claim_pending_entry_reload(hass, entry.entry_id) is True
+
+    seen_during_unload: list[bool] = []
+
+    async def _unload_probe(
+        _hass: object, _entry: object
+    ) -> bool:  # pragma: no cover - trivial stub
+        # A second owner asking for the latch mid-teardown must be told "no".
+        seen_during_unload.append(
+            integration.claim_pending_entry_reload(hass, entry.entry_id)
+        )
+        return True
+
+    monkeypatch.setattr(integration, "_async_unload_parent_entry", _unload_probe)
+
+    assert await integration.async_unload_entry(hass, entry) is True
+
+    assert seen_during_unload == [False], (
+        "the latch must still be held while the platforms are being torn down"
+    )
+    assert integration.claim_pending_entry_reload(hass, entry.entry_id) is True, (
+        "once the unload has run the latch is free again, so a later change can "
+        "schedule the next reload"
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_failed_unload_hands_the_reload_latch_back(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No setup half follows a failed unload, so the release cannot wait for one."""
+
+    integration = importlib.import_module("custom_components.googlefindmy")
+
+    hass = SimpleNamespace(data={})
+    entry = make_config_entry(entry_id="entry-unload-fails", parent_entry_id=None)
+
+    assert integration.claim_pending_entry_reload(hass, entry.entry_id) is True
+
+    async def _boom(_hass: object, _entry: object) -> bool:
+        raise RuntimeError("teardown exploded")
+
+    monkeypatch.setattr(integration, "_async_unload_parent_entry", _boom)
+
+    with pytest.raises(RuntimeError):
+        await integration.async_unload_entry(hass, entry)
+
+    assert integration.claim_pending_entry_reload(hass, entry.entry_id) is True, (
+        "a latch kept by a failed unload would swallow every later reload"
+    )
+
+
+@pytest.mark.asyncio
+async def test_an_unload_that_returns_false_hands_the_reload_latch_back(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A refused unload reports through the return value, not an exception."""
+
+    integration = importlib.import_module("custom_components.googlefindmy")
+
+    hass = SimpleNamespace(data={})
+    entry = make_config_entry(entry_id="entry-unload-refused", parent_entry_id=None)
+
+    assert integration.claim_pending_entry_reload(hass, entry.entry_id) is True
+
+    async def _refuse(_hass: object, _entry: object) -> bool:
+        return False
+
+    monkeypatch.setattr(integration, "_async_unload_parent_entry", _refuse)
+
+    assert await integration.async_unload_entry(hass, entry) is False
+    assert integration.claim_pending_entry_reload(hass, entry.entry_id) is True, (
+        "no setup half follows a refused unload, so the latch has to come back here"
+    )
+
+
+@pytest.mark.asyncio
+async def test_the_subentry_unload_runs_through_the_same_release(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Both router branches share the release, and each frees its own entry id."""
+
+    integration = importlib.import_module("custom_components.googlefindmy")
+
+    hass = SimpleNamespace(data={})
+    entry = make_config_entry(entry_id="sub-entry", parent_entry_id="parent-entry")
+
+    assert integration.claim_pending_entry_reload(hass, "sub-entry") is True
+    assert integration.claim_pending_entry_reload(hass, "parent-entry") is True
+
+    async def _unload_sub(_hass: object, _entry: object) -> bool:
+        return True
+
+    monkeypatch.setattr(integration, "_async_unload_subentry", _unload_sub)
+
+    assert await integration.async_unload_entry(hass, entry) is True
+
+    assert integration.claim_pending_entry_reload(hass, "sub-entry") is True
+    assert integration.claim_pending_entry_reload(hass, "parent-entry") is False, (
+        "a subentry unload must not release the parent entry's latch"
+    )

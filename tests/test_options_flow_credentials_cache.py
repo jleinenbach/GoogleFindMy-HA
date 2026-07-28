@@ -254,6 +254,103 @@ def test_options_flow_rotating_token_clears_cached_aas(
         await hass.drain_tasks()
         assert hass.config_entries.reloaded == [entry.entry_id]
 
+        # The reload is still on its way, and the entry update notifies the
+        # credential update listener as well. ``async_schedule_reload`` does not
+        # coalesce, so a second rotation must not add another unload/setup cycle.
+        second = await flow.async_step_credentials(
+            {
+                "new_oauth_token": "oauth-token-rotate-654321",
+                "subentry": TRACKER_SUBENTRY_KEY,
+            }
+        )
+        if inspect.isawaitable(second):
+            second = await second
+
+        await hass.drain_tasks()
+        assert hass.config_entries.reloaded == [entry.entry_id], (
+            "a reload is already on its way; a second one only tears the entry "
+            "down twice"
+        )
+
+    asyncio.run(_exercise())
+
+
+def test_options_flow_gives_the_latch_back_when_the_reload_dies(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The options refresher reloads directly, so a dead task must free the latch.
+
+    This step claims the shared latch and then reloads in a fire-and-forget
+    task, which keeps the promise open for that task's whole lifetime. Home
+    Assistant rejects an unload for an entry in a lifecycle state that forbids
+    it, and the task dies with that rejection: none of the release points
+    (unload, setup, entry removal) runs, so a latch kept here would be permanent
+    and the *next* credential rotation would stand down with its new token
+    ineffective.
+    """
+
+    async def _exercise() -> None:
+        cache = _MemoryCache()
+        entry = _DummyEntry(
+            entry_id="entry-latch",
+            data={
+                CONF_GOOGLE_EMAIL: "user@example.com",
+                CONF_OAUTH_TOKEN: "oauth-original-token-123456",
+            },
+            cache=cache,
+        )
+        hass = _DummyHass(entry, cache)
+
+        rejected: list[str] = []
+
+        async def _rejecting_reload(entry_id: str) -> None:
+            rejected.append(entry_id)
+            raise config_flow.OperationNotAllowed(entry_id)
+
+        hass.config_entries.async_reload = _rejecting_reload  # type: ignore[assignment]
+
+        flow = config_flow.OptionsFlowHandler()
+        flow.hass = hass  # type: ignore[assignment]
+        flow.config_entry = entry  # type: ignore[attr-defined]
+
+        async def _fake_pick(
+            hass: Any,
+            email: str,
+            candidates: list[tuple[str, str]],
+            *,
+            secrets_bundle: dict[str, Any] | None = None,
+        ) -> str | None:
+            return candidates[0][1] if candidates else None
+
+        monkeypatch.setattr(config_flow, "async_pick_working_token", _fake_pick)
+
+        async def _rotate(token: str) -> None:
+            outcome = await flow.async_step_credentials(
+                {"new_oauth_token": token, "subentry": TRACKER_SUBENTRY_KEY}
+            )
+            if inspect.isawaitable(outcome):
+                await outcome
+            # The reload task raises; gathering it would re-raise here, and the
+            # rejection is the point of this test, not a failure of it.
+            await asyncio.gather(*hass._tasks, return_exceptions=True)
+            # ``gather`` returns as soon as the task is done, which is not the
+            # same instant as "every done-callback has run": the release
+            # callback and gather's own are both queued through
+            # ``loop.call_soon``. One extra turn removes the dependency on
+            # their registration order.
+            await asyncio.sleep(0)
+            hass._tasks.clear()
+
+        await _rotate("oauth-token-rotate-123456")
+        assert rejected == [entry.entry_id]
+
+        await _rotate("oauth-token-rotate-654321")
+        assert rejected == [entry.entry_id] * 2, (
+            "the first reload never arrived, so the latch had to go back; "
+            "without that release this rotation stands down and its token "
+            "stays ineffective until a restart"
+        )
+
     asyncio.run(_exercise())
 
 

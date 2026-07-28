@@ -808,3 +808,28 @@ class TestFindTrackerEntityEntry:
     def test_returns_none_when_inner_returns_none(self, coord: RegistryStub) -> None:
         coord._find_tracker_entity_entry = MagicMock(return_value=None)  # type: ignore[method-assign]
         assert coord.find_tracker_entity_entry("missing") is None
+
+
+# ---------------------------------------------------------------------------
+# M18 ``reindex_poll_targets`` (public wrapper)
+# ---------------------------------------------------------------------------
+
+
+class TestReindexPollTargetsWrapper:
+    """Wraps :meth:`_reindex_poll_targets_from_device_registry`; delegation only.
+
+    The platform needs this door because the enabled-for-polling set is derived
+    from the entity registry but rebuilt only on device registry events: a
+    tracker whose entity is registered afterwards would otherwise stay out of
+    the polling set until the entry is reloaded.
+    """
+
+    def test_delegates_to_the_device_registry_reindex(
+        self, coord: RegistryStub
+    ) -> None:
+        coord._reindex_poll_targets_from_device_registry = MagicMock(  # type: ignore[method-assign]
+            return_value=None
+        )
+
+        assert coord.reindex_poll_targets() is None
+        coord._reindex_poll_targets_from_device_registry.assert_called_once_with()

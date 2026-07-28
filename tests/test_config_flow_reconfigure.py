@@ -242,6 +242,48 @@ async def test_reconfigure_reload_logs_false(caplog: pytest.LogCaptureFixture) -
 
 
 @pytest.mark.asyncio
+async def test_reconfigure_stands_down_when_a_reload_is_already_on_its_way() -> None:
+    """A reconfigure rewrites the credential keys the update listener watches.
+
+    That listener reloads the entry so they take effect, and Home Assistant's
+    ``async_schedule_reload`` does not coalesce. Whichever side claims the latch
+    first reloads; the other must not add a second unload/setup cycle.
+    """
+
+    entry = make_config_entry(
+        entry_id="entry-latch",
+        title="Find My",
+        subentries={},
+        runtime_data=SimpleNamespace(),
+    )
+    entry.data[CONF_GOOGLE_EMAIL] = "existing@example.com"
+
+    flow = config_flow.ConfigFlow()
+
+    reloaded: list[str] = []
+    scheduled: list[str] = []
+
+    class _ConfigEntries:
+        def async_reload(self, entry_id: str) -> bool:
+            reloaded.append(entry_id)
+            return True
+
+        def async_schedule_reload(self, entry_id: str) -> None:
+            scheduled.append(entry_id)
+
+    hass = SimpleNamespace(config_entries=_ConfigEntries(), data={})
+    flow.hass = hass  # type: ignore[assignment]
+
+    integration = config_flow.import_integration_package()
+    assert integration.claim_pending_entry_reload(hass, entry.entry_id) is True
+
+    await flow._async_reload_entry_after_reconfigure(entry)  # type: ignore[attr-defined]
+
+    assert reloaded == [], "a reload is already on its way"
+    assert scheduled == [], "and no deferred one may be scheduled either"
+
+
+@pytest.mark.asyncio
 async def test_reconfigure_forces_device_list_refresh() -> None:
     """Mark forced device list refresh on reconfigure and call coordinator hook."""
 
@@ -416,3 +458,426 @@ async def test_reconfigure_reload_logs_when_scheduler_missing(
     await flow._async_reload_entry_after_reconfigure(entry)  # type: ignore[attr-defined]
 
     assert any("could not be scheduled" in record.message for record in caplog.records)
+
+
+def _latch_is_free(hass: Any, entry_id: str) -> bool:
+    """Whether the shared reload latch of ``entry_id`` can be claimed again."""
+
+    integration = config_flow.import_integration_package()
+    return bool(integration.claim_pending_entry_reload(hass, entry_id))
+
+
+def _reconfigure_flow_with_latch(
+    entry: Any, config_entries_obj: Any
+) -> config_flow.ConfigFlow:
+    """A reconfigure flow whose hass carries a real ``data`` bucket.
+
+    The latch lives in ``hass.data``; without that bucket ``_claim_entry_reload``
+    falls back to "reload anyway" and a release could not be observed at all.
+    """
+
+    flow = config_flow.ConfigFlow()
+    hass = SimpleNamespace()
+    hass.data = {}
+    hass.config_entries = config_entries_obj
+    flow.hass = hass  # type: ignore[assignment]
+    return flow
+
+
+@pytest.mark.asyncio
+async def test_reconfigure_gives_the_latch_back_when_the_scheduler_fails(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Both fallbacks failing means no reload arrives, so the claim must go back.
+
+    A claim is a promise to reload, and the release points (unload, setup, entry
+    removal) only run once a reload actually happened. Keeping the latch here
+    would silence every later credential reload of this entry for the lifetime
+    of the process.
+    """
+
+    entry = make_config_entry(
+        entry_id="entry-1",
+        title="Find My",
+        subentries={},
+        runtime_data=SimpleNamespace(),
+    )
+    entry.data[CONF_GOOGLE_EMAIL] = "existing@example.com"
+
+    class _ConfigEntries:
+        def async_reload(self, entry_id: str) -> Any:
+            raise config_flow.OperationNotAllowed()
+
+        def async_schedule_reload(self, entry_id: str) -> None:
+            raise RuntimeError("scheduler is unhappy")
+
+    flow = _reconfigure_flow_with_latch(entry, _ConfigEntries())
+    monkeypatch.setattr(
+        config_flow,
+        "async_call_later",
+        lambda _hass, _delay, callback: callback(None),
+    )
+
+    with caplog.at_level(logging.WARNING):
+        await flow._async_reload_entry_after_reconfigure(entry)  # type: ignore[attr-defined]
+
+    assert any(
+        "Failed to schedule reload after reconfigure" in record.getMessage()
+        for record in caplog.records
+    )
+    assert any(
+        "was rejected by Home Assistant" in record.getMessage()
+        for record in caplog.records
+    )
+    assert _latch_is_free(flow.hass, entry.entry_id)
+
+
+@pytest.mark.asyncio
+async def test_reconfigure_gives_the_latch_back_when_the_deferred_reload_dies(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The deferred retry is the last chance; its failure ends the promise."""
+
+    entry = make_config_entry(
+        entry_id="entry-2",
+        title="Find My",
+        subentries={},
+        runtime_data=SimpleNamespace(),
+    )
+    entry.data[CONF_GOOGLE_EMAIL] = "existing@example.com"
+
+    class _ConfigEntries:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def async_reload(self, entry_id: str) -> Any:
+            self.calls += 1
+            if self.calls == 1:
+                raise config_flow.OperationNotAllowed()
+            raise RuntimeError("the entry is gone")
+
+    flow = _reconfigure_flow_with_latch(entry, _ConfigEntries())
+    monkeypatch.setattr(
+        config_flow,
+        "async_call_later",
+        lambda _hass, _delay, callback: callback(None),
+    )
+
+    with caplog.at_level(logging.ERROR):
+        await flow._async_reload_entry_after_reconfigure(entry)  # type: ignore[attr-defined]
+
+    assert any(
+        "Deferred reload after reconfigure" in record.getMessage()
+        for record in caplog.records
+    )
+    assert _latch_is_free(flow.hass, entry.entry_id)
+
+
+@pytest.mark.asyncio
+async def test_reconfigure_gives_the_latch_back_when_the_reload_raises_outright(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Anything but the documented rejection kills this path along with the claim."""
+
+    entry = make_config_entry(
+        entry_id="entry-3",
+        title="Find My",
+        subentries={},
+        runtime_data=SimpleNamespace(),
+    )
+    entry.data[CONF_GOOGLE_EMAIL] = "existing@example.com"
+
+    class _ConfigEntries:
+        def async_reload(self, entry_id: str) -> Any:
+            raise RuntimeError("the core is unwell")
+
+    flow = _reconfigure_flow_with_latch(entry, _ConfigEntries())
+    monkeypatch.setattr(
+        config_flow,
+        "async_call_later",
+        lambda _hass, _delay, callback: callback(None),
+    )
+
+    with pytest.raises(RuntimeError, match="the core is unwell"):
+        await flow._async_reload_entry_after_reconfigure(entry)  # type: ignore[attr-defined]
+
+    assert _latch_is_free(flow.hass, entry.entry_id)
+
+
+@pytest.mark.asyncio
+async def test_reconfigure_gives_the_latch_back_when_the_deferred_task_is_cancelled(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A cancelled reload task is a dead end like any other.
+
+    ``Task.result()`` raises ``CancelledError`` for a cancelled task, and that
+    derives from ``BaseException``: a handler catching ``Exception`` would let
+    it sail past and the promise would stay open. The done-callback therefore
+    asks whether the task was cancelled before it takes the result.
+    """
+
+    entry = make_config_entry(
+        entry_id="entry-4",
+        title="Find My",
+        subentries={},
+        runtime_data=SimpleNamespace(),
+    )
+    entry.data[CONF_GOOGLE_EMAIL] = "existing@example.com"
+
+    class _CancelledTask:
+        """Drives the done-callback synchronously with a cancelled outcome."""
+
+        def cancelled(self) -> bool:
+            return True
+
+        def result(self) -> Any:
+            raise asyncio.CancelledError
+
+        def add_done_callback(self, callback: Callable[[Any], None]) -> None:
+            callback(self)
+
+    class _ConfigEntries:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def async_reload(self, entry_id: str) -> Any:
+            self.calls += 1
+            if self.calls == 1:
+                raise config_flow.OperationNotAllowed()
+
+            async def _reload() -> bool:
+                return True
+
+            return _reload()
+
+    flow = _reconfigure_flow_with_latch(entry, _ConfigEntries())
+
+    def _create_task(coro: Any) -> Any:
+        # The reload never runs; close the coroutine so Python does not warn
+        # about it, and hand back a task that has already been cancelled.
+        coro.close()
+        return _CancelledTask()
+
+    flow.hass.async_create_task = _create_task  # type: ignore[attr-defined]
+    monkeypatch.setattr(
+        config_flow,
+        "async_call_later",
+        lambda _hass, _delay, callback: callback(None),
+    )
+
+    with caplog.at_level(logging.DEBUG, logger=config_flow._LOGGER.name):
+        await flow._async_reload_entry_after_reconfigure(entry)  # type: ignore[attr-defined]
+
+    assert any("was cancelled" in record.getMessage() for record in caplog.records)
+    assert _latch_is_free(flow.hass, entry.entry_id)
+
+
+@pytest.mark.asyncio
+async def test_reconfigure_keeps_the_latch_when_the_scheduler_took_the_reload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A successful hand-off to the core scheduler is no dead end.
+
+    ``async_schedule_reload`` puts the reload into a core-owned task, and that
+    task will reach the unload which releases the latch. Releasing here as well
+    would leave the entry unlatched while its reload is still on its way, and
+    the next claimant would queue a second teardown: exactly what the latch
+    exists to prevent. The deferred retry may therefore fail without giving the
+    promise back.
+    """
+
+    entry = make_config_entry(
+        entry_id="entry-5",
+        title="Find My",
+        subentries={},
+        runtime_data=SimpleNamespace(),
+    )
+    entry.data[CONF_GOOGLE_EMAIL] = "existing@example.com"
+
+    class _ConfigEntries:
+        def __init__(self) -> None:
+            self.scheduled: list[str] = []
+
+        def async_reload(self, entry_id: str) -> Any:
+            # Both the first attempt and the deferred retry are rejected.
+            raise config_flow.OperationNotAllowed()
+
+        def async_schedule_reload(self, entry_id: str) -> None:
+            self.scheduled.append(entry_id)
+
+    entries = _ConfigEntries()
+    flow = _reconfigure_flow_with_latch(entry, entries)
+    monkeypatch.setattr(
+        config_flow,
+        "async_call_later",
+        lambda _hass, _delay, callback: callback(None),
+    )
+
+    await flow._async_reload_entry_after_reconfigure(entry)  # type: ignore[attr-defined]
+
+    assert entries.scheduled == [entry.entry_id]
+    assert not _latch_is_free(flow.hass, entry.entry_id), (
+        "the scheduled reload owns the promise; handing the latch back here "
+        "would let a second teardown in behind it"
+    )
+
+
+@pytest.mark.asyncio
+async def test_reconfigure_gives_the_latch_back_when_the_retry_cannot_be_armed(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A failure to arm the retry is not caught by the sibling handler.
+
+    ``async_call_later`` sits inside the ``except OperationNotAllowed`` block,
+    and Python does not consult further ``except`` clauses for an error raised
+    from within a handler. Without its own guard, a hass whose loop is already
+    closed (shutdown during a reconfigure) would leave the claim behind for the
+    life of the process.
+    """
+
+    entry = make_config_entry(
+        entry_id="entry-6",
+        title="Find My",
+        subentries={},
+        runtime_data=SimpleNamespace(),
+    )
+    entry.data[CONF_GOOGLE_EMAIL] = "existing@example.com"
+
+    class _ConfigEntries:
+        def async_reload(self, entry_id: str) -> Any:
+            raise config_flow.OperationNotAllowed()
+
+    flow = _reconfigure_flow_with_latch(entry, _ConfigEntries())
+
+    def _cannot_arm(_hass: Any, _delay: Any, _callback: Any) -> None:
+        raise RuntimeError("event loop is closed")
+
+    monkeypatch.setattr(config_flow, "async_call_later", _cannot_arm)
+
+    with caplog.at_level(logging.ERROR, logger=config_flow._LOGGER.name):
+        await flow._async_reload_entry_after_reconfigure(entry)  # type: ignore[attr-defined]
+
+    assert any("could not be armed" in record.getMessage() for record in caplog.records)
+    assert _latch_is_free(flow.hass, entry.entry_id)
+
+
+@pytest.mark.asyncio
+async def test_reconfigure_skips_a_task_handle_that_cannot_report_its_outcome(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A handle without ``cancelled()`` gets no callback instead of an AttributeError.
+
+    Both call sites take whatever the task runner hands back. Asking only for
+    ``add_done_callback`` would attach a callback whose very first statement
+    raises into the loop, and the latch would stay claimed: the state this path
+    exists to avoid.
+    """
+
+    entry = make_config_entry(
+        entry_id="entry-7",
+        title="Find My",
+        subentries={},
+        runtime_data=SimpleNamespace(),
+    )
+    entry.data[CONF_GOOGLE_EMAIL] = "existing@example.com"
+
+    class _HalfTask:
+        """Carries the callback protocol but cannot report its outcome."""
+
+        def __init__(self) -> None:
+            self.callbacks: list[Any] = []
+
+        def add_done_callback(self, callback: Any) -> None:
+            self.callbacks.append(callback)
+
+    handle = _HalfTask()
+
+    class _ConfigEntries:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def async_reload(self, entry_id: str) -> Any:
+            self.calls += 1
+            if self.calls == 1:
+                raise config_flow.OperationNotAllowed()
+
+            async def _reload() -> bool:
+                return True
+
+            return _reload()
+
+    flow = _reconfigure_flow_with_latch(entry, _ConfigEntries())
+
+    def _create_task(coro: Any) -> Any:
+        coro.close()
+        return handle
+
+    flow.hass.async_create_task = _create_task  # type: ignore[attr-defined]
+    monkeypatch.setattr(
+        config_flow,
+        "async_call_later",
+        lambda _hass, _delay, callback: callback(None),
+    )
+
+    await flow._async_reload_entry_after_reconfigure(entry)  # type: ignore[attr-defined]
+
+    assert handle.callbacks == [], (
+        "a handle that cannot answer must not be given a callback that would "
+        "raise into the loop"
+    )
+
+
+@pytest.mark.asyncio
+async def test_reconfigure_uses_the_loop_when_hass_cannot_create_tasks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The loop fallback has to gate its callback like the primary path does.
+
+    A hass without ``async_create_task`` (a slim stub, or a shutdown-time
+    object) falls through to ``loop.create_task``. That branch attaches the same
+    done-callback and therefore needs the same handle check; a real task passes
+    it, which is what this pins.
+    """
+
+    entry = make_config_entry(
+        entry_id="entry-8",
+        title="Find My",
+        subentries={},
+        runtime_data=SimpleNamespace(),
+    )
+    entry.data[CONF_GOOGLE_EMAIL] = "existing@example.com"
+
+    reloaded: list[str] = []
+
+    class _ConfigEntries:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def async_reload(self, entry_id: str) -> Any:
+            self.calls += 1
+            if self.calls == 1:
+                raise config_flow.OperationNotAllowed()
+
+            async def _reload() -> bool:
+                reloaded.append(entry_id)
+                return True
+
+            return _reload()
+
+    flow = _reconfigure_flow_with_latch(entry, _ConfigEntries())
+    # No ``async_create_task`` on this hass, only a loop.
+    flow.hass.loop = asyncio.get_running_loop()  # type: ignore[attr-defined]
+    monkeypatch.setattr(
+        config_flow,
+        "async_call_later",
+        lambda _hass, _delay, callback: callback(None),
+    )
+
+    await flow._async_reload_entry_after_reconfigure(entry)  # type: ignore[attr-defined]
+    for _ in range(3):
+        await asyncio.sleep(0)
+
+    assert reloaded == [entry.entry_id]
+    assert not _latch_is_free(flow.hass, entry.entry_id), (
+        "the reload arrived; unload and setup release the latch themselves"
+    )

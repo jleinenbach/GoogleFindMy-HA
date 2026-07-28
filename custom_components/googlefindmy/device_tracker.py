@@ -20,13 +20,12 @@ Entry-scope guarantees (C2):
 
 from __future__ import annotations
 
-import asyncio
 import inspect
 import logging
 import time
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Coroutine, Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import (
@@ -37,12 +36,18 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity import DeviceInfo, EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.event import async_call_later
 
-from . import EntityRecoveryManager, _extract_email_from_entry, _opt
+from . import (
+    EntityRecoveryManager,
+    _extract_email_from_entry,
+    _opt,
+    claim_pending_entry_reload,
+    claim_registry_selfheal_reload,
+    discard_pending_entry_reload,
+    discard_registry_selfheal_reload,
+)
 from .const import (
-    CLOUD_SCANNER_DISCOVERY_SOURCE,
-    CONF_OAUTH_TOKEN,
-    DATA_SECRET_BUNDLE,
     DEFAULT_SHOW_LOCATION_AGE,
     DOMAIN,
     OPT_SHOW_LOCATION_AGE,
@@ -59,13 +64,6 @@ from .coordinator import (
     resolve_seeded_accuracy,
     resolve_stale_threshold,
     select_display_row,
-)
-from .discovery import (
-    CLOUD_DISCOVERY_NAMESPACE,
-    CloudDiscoveryOutcome,
-    _cloud_discovery_stable_key,
-    _redact_account_for_log,
-    _trigger_cloud_discovery,
 )
 from .entity import (
     GoogleFindMyDeviceEntity,
@@ -89,6 +87,22 @@ _ROW_UNSET: Any = object()
 # Read-only mirror of coordinator state; no I/O performed per-entity.
 PARALLEL_UPDATES = 0
 
+# Wall-clock grace before a fresh entity addition is judged against the entity
+# registry.
+#
+# Nothing in the callback world announces "the entity is registered now": the
+# core schedules the addition as its own task, ``update_before_add=True`` runs
+# each entity's update first, and the registry entry is only written after that.
+# A later coordinator listener run is no barrier either -- one poll cycle can
+# publish a per-device push and its closing snapshot back to back without ever
+# yielding, so the very next run may still see nothing (Codex, PR #1222).
+# Deferring by wall clock is the only signal that outlives both.
+#
+# Generous on purpose. Reloading an entry that was fine is worse than healing a
+# genuinely broken addition a minute late, and the value stays far below the
+# device-list cadence (DEVICE_LIST_POLL_INTERVAL, 300 s).
+_REGISTRY_PROBE_DELAY = 60.0
+
 
 @dataclass
 class _TrackerScope:
@@ -97,39 +111,6 @@ class _TrackerScope:
     subentry_key: str
     config_subentry_id: str | None
     identifier: str | None
-
-
-def _log_cloud_scan_outcome(
-    outcome: CloudDiscoveryOutcome, account_ref: str, new_count: int
-) -> None:
-    """Report what the scanner's discovery trigger actually achieved.
-
-    Reads the returned :class:`CloudDiscoveryOutcome` instead of "the await did
-    not raise": a config flow reports a refused import through its FlowResult,
-    so an aborted flow would otherwise be logged as a queued discovery. Kept at
-    module level (rather than inline in the scheduling closure) so the three
-    outcomes are reachable from a test without standing up a whole platform
-    setup.
-    """
-
-    if outcome is CloudDiscoveryOutcome.SKIPPED:
-        _LOGGER.debug(
-            "Cloud tracker scanner deduplicated discovery for %s",
-            account_ref,
-        )
-    elif outcome is CloudDiscoveryOutcome.RETRY:
-        _LOGGER.debug(
-            "Cloud tracker scanner discovery for %s aborted transiently; "
-            "the next scan retries",
-            account_ref,
-        )
-    else:
-        _LOGGER.info(
-            "Cloud tracker scanner queued discovery for %s after %d newly "
-            "available tracker(s)",
-            account_ref,
-            new_count,
-        )
 
 
 def _subentry_type(subentry: Any | None) -> str | None:
@@ -466,6 +447,225 @@ async def async_setup_entry(
                         to_add.append(last_location_entity)
             return to_add
 
+        # Device ids added but not yet confirmed in the entity registry. They are
+        # judged once ``_REGISTRY_PROBE_DELAY`` has passed, never in the run that
+        # adds them and never merely on "some later listener run": neither is a
+        # barrier for the add task (see the constant's comment).
+        pending_registry_ids: set[str] = set()
+        registry_probe_unsub: Callable[[], None] | None = None
+
+        @callback
+        def _cancel_registry_probe() -> None:
+            """Drop a pending grace timer so it cannot fire after unload."""
+
+            nonlocal registry_probe_unsub
+
+            if registry_probe_unsub is not None:
+                registry_probe_unsub()
+                registry_probe_unsub = None
+
+        config_entry.async_on_unload(_cancel_registry_probe)
+
+        @callback
+        def _schedule_selfheal_reload(missing_count: int) -> None:
+            """Own the whole claim-then-schedule sequence of the self-heal reload.
+
+            Two latches guard this one call and they answer different questions.
+            ``claim_registry_selfheal_reload`` asks whether this entry has ever
+            healed itself, which keeps a permanently empty registry from
+            reloading in a loop. ``claim_pending_entry_reload`` asks whether some
+            other owner already put a reload on its way, which matters because
+            ``async_schedule_reload`` does not coalesce: a credential write and
+            this probe would otherwise tear the entry down twice in a row.
+
+            Order is not cosmetic. The lever is resolved *before* any claim, so
+            an old core without the method does not burn the one-shot attempt,
+            and the shared latch is claimed *last*, immediately before
+            scheduling, as its own contract demands.
+            """
+
+            schedule_reload = getattr(
+                getattr(hass, "config_entries", None), "async_schedule_reload", None
+            )
+            if not callable(schedule_reload):
+                _LOGGER.debug(
+                    "Device tracker setup: async_schedule_reload unavailable; "
+                    "leaving %d unregistered tracker(s) as they are",
+                    missing_count,
+                )
+                return
+
+            if not claim_registry_selfheal_reload(hass, config_entry.entry_id):
+                _LOGGER.debug(
+                    "Device tracker setup: %d tracker(s) still missing from the "
+                    "entity registry, but this entry already used its one-shot "
+                    "reload; not scheduling another",
+                    missing_count,
+                )
+                return
+
+            if not claim_pending_entry_reload(hass, config_entry.entry_id):
+                # Someone else's reload rebuilds this platform exactly like ours
+                # would, so hand the one-shot back instead of spending the
+                # entry's only attempt on a reload we did not cause. A probe
+                # after that reload can then still repair what it left missing.
+                discard_registry_selfheal_reload(hass, config_entry.entry_id)
+                _LOGGER.debug(
+                    "Device tracker setup: %d tracker(s) still missing from the "
+                    "entity registry, but a reload of this entry is already on "
+                    "its way; standing down",
+                    missing_count,
+                )
+                return
+
+            try:
+                schedule_reload(config_entry.entry_id)
+            except Exception:  # noqa: BLE001 - both latches are promises to reload
+                # A latch kept after a failed schedule is worse than the failure
+                # itself: the shared one swallows every later reload of this
+                # entry and the one-shot one would leave the trackers unhealed.
+                _LOGGER.exception(
+                    "Failed to schedule the self-heal reload of entry %s",
+                    config_entry.entry_id,
+                )
+                discard_pending_entry_reload(hass, config_entry.entry_id)
+                discard_registry_selfheal_reload(hass, config_entry.entry_id)
+                return
+
+            # Announced only once it is really on its way: a message that names
+            # a reload which the line above failed to schedule reads like a
+            # cause where there is none.
+            _LOGGER.info(
+                "Reloading the Find My entry once: %d newly added tracker(s) did "
+                "not reach the entity registry",
+                missing_count,
+            )
+
+        @callback
+        def _promote_registered_trackers(registered_count: int) -> None:
+            """Let trackers that reached the registry into the polling set.
+
+            The coordinator derives ``_enabled_poll_device_ids`` from the
+            *entity* registry but rebuilds it only on *device* registry events,
+            and a brand-new tracker gets its device entry before its entity
+            exists. The rebuild that device entry triggers therefore records the
+            device as present and not enabled, and the polling predicate admits
+            a device only while it is enabled or still absent from the registry:
+            from the next cycle on the silently added tracker would be skipped
+            for good, entity and all.
+
+            This probe is the point where the addition is known to have landed,
+            so it is also the point where that verdict has to be re-derived.
+            """
+
+            reindex = getattr(coordinator, "reindex_poll_targets", None)
+            if not callable(reindex):
+                # Not a detail: without the re-derivation those trackers own an
+                # entity that is never polled again, so this is warned about
+                # rather than whispered into a debug log.
+                _LOGGER.warning(
+                    "Device tracker setup: coordinator cannot reindex poll "
+                    "targets; %d newly registered tracker(s) stay out of the "
+                    "polling set until the next reload",
+                    registered_count,
+                )
+                return
+
+            try:
+                reindex()
+            except Exception:  # noqa: BLE001 - never let this eat the self-heal
+                _LOGGER.warning(
+                    "Device tracker setup: reindexing poll targets after %d "
+                    "registered tracker(s) failed; they stay out of the polling "
+                    "set until the next reload",
+                    registered_count,
+                    exc_info=True,
+                )
+
+        @callback
+        def _verify_pending_registry_entries() -> None:
+            """Confirm earlier additions, or reload the entry once to fix them.
+
+            The reload is the only lever that helps here. Re-polling the device
+            list does not: ``known_ids`` already holds those ids, so
+            ``_build_entities`` returns nothing and no entity is created again.
+            """
+
+            if not pending_registry_ids:
+                return
+
+            probe_ids = sorted(pending_registry_ids)
+            pending_registry_ids.clear()
+
+            registry_lookup = getattr(coordinator, "find_tracker_entity_entry", None)
+            if not callable(registry_lookup):
+                _LOGGER.debug(
+                    "Device tracker setup: registry helper unavailable; cannot "
+                    "verify %d recently added tracker(s)",
+                    len(probe_ids),
+                )
+                return
+
+            missing: list[str] = []
+            for dev_id in probe_ids:
+                try:
+                    if registry_lookup(dev_id) is None:
+                        missing.append(dev_id)
+                except Exception:  # pragma: no cover - best effort registry probe
+                    _LOGGER.debug("Registry lookup failed for tracker %s", dev_id)
+                    missing.append(dev_id)
+
+            registered_count = len(probe_ids) - len(missing)
+            if registered_count:
+                # Independent of the missing-check below, not of the count: with
+                # nothing registered there is nothing to promote. Running it even
+                # when some trackers are still missing is the point -- a self-heal
+                # reload can stand down (no lever, or another owner holds the
+                # latch), and the trackers that did register must not wait for a
+                # reload that may never come.
+                _promote_registered_trackers(registered_count)
+
+            if not missing:
+                return
+
+            _schedule_selfheal_reload(len(missing))
+
+        @callback
+        def _registry_probe_due(_now: Any) -> None:
+            """Grace period is over: judge what was added before it started."""
+
+            nonlocal registry_probe_unsub
+
+            registry_probe_unsub = None
+            _verify_pending_registry_entries()
+
+        @callback
+        def _arm_registry_probe() -> None:
+            """(Re-)start the grace period so the newest addition gets it whole.
+
+            Re-arming means a device appearing every few seconds would keep
+            pushing the probe out. That is the harmless direction: the probe
+            only ever schedules a repair, and a device stream that dense is a
+            different problem than the one this path exists for.
+            """
+
+            nonlocal registry_probe_unsub
+
+            _cancel_registry_probe()
+            handle = async_call_later(
+                coordinator.hass, _REGISTRY_PROBE_DELAY, _registry_probe_due
+            )
+            if inspect.isawaitable(handle):
+                # Mirrors the awaitable guard the integration already uses for
+                # async_call_later elsewhere; such a stub leaves no unsub to keep.
+                coordinator.hass.async_create_task(
+                    cast(Coroutine[Any, Any, Any], handle),
+                    name=f"{DOMAIN}.device_tracker_registry_probe",
+                )
+                return
+            if callable(handle):
+                registry_probe_unsub = handle
+
         @callback
         def _scan_available_trackers_from_coordinator() -> None:
             snapshot = coordinator.get_subentry_snapshot(tracker_subentry_key)
@@ -485,7 +685,7 @@ async def async_setup_entry(
                         "Device tracker setup: no coordinator snapshot for subentry %s "
                         "(config_subentry_id=%s, visible_device_ids=%s, "
                         "enabled_device_ids=%s, snapshot_keys=%s, snapshot_cache_size=%d, "
-                        "initial_discovery_done=%s, post_reconfigure=%s)"
+                        "post_reconfigure=%s)"
                     ),
                     tracker_subentry_key,
                     getattr(meta, "config_subentry_id", None),
@@ -493,7 +693,6 @@ async def async_setup_entry(
                     ", ".join(enabled_ids) or "<empty>",
                     ", ".join(snapshot_keys) or "<empty>",
                     len(snapshot_map) if isinstance(snapshot_map, Mapping) else 0,
-                    getattr(coordinator, "_initial_discovery_done", None),
                     bool(reconfigure_marker),
                 )
                 _schedule_tracker_entities([], True)
@@ -506,86 +705,17 @@ async def async_setup_entry(
                 )
                 _schedule_tracker_entities(to_add, True)
 
-                registry_lookup = getattr(
-                    coordinator, "find_tracker_entity_entry", None
-                )
-                if callable(registry_lookup):
-                    all_registered = True
-
-                    for entity in to_add:
-                        dev_id = getattr(entity, "device_id", None)
-
-                        try:
-                            if not dev_id or registry_lookup(dev_id) is None:
-                                all_registered = False
-                                break
-                        except (
-                            Exception
-                        ):  # pragma: no cover - best effort registry probe
-                            _LOGGER.debug(
-                                "Registry lookup failed for tracker %s", dev_id
-                            )
-                            all_registered = False
-                            break
-
-                    if all_registered:
-                        _LOGGER.debug(
-                            "Device tracker setup: all %d tracker(s) already registered; skipping discovery",
-                            len(to_add),
-                        )
-                        return
-                else:
-                    _LOGGER.debug(
-                        "Device tracker setup: registry helper unavailable; treating trackers as new"
-                    )
-
-                email = _extract_email_from_entry(config_entry) or None
-                token = config_entry.data.get(CONF_OAUTH_TOKEN)
-                token_value = token if isinstance(token, str) and token else None
-                secrets_raw = config_entry.data.get(DATA_SECRET_BUNDLE)
-                secrets_bundle: Mapping[str, Any] | None
-                if isinstance(secrets_raw, Mapping):
-                    secrets_bundle = secrets_raw
-                else:
-                    secrets_bundle = None
-
-                discovery_ns = (
-                    f"{CLOUD_DISCOVERY_NAMESPACE}.{config_entry.entry_id}"
-                    if config_entry.entry_id
-                    else CLOUD_DISCOVERY_NAMESPACE
-                )
-                stable_key = _cloud_discovery_stable_key(
-                    email,
-                    token_value,
-                    secrets_bundle,
-                )
-
-                async def _async_trigger_cloud_scan(new_count: int) -> None:
-                    outcome = await _trigger_cloud_discovery(
-                        hass,
-                        email=email,
-                        token=token_value,
-                        secrets_bundle=secrets_bundle,
-                        discovery_ns=discovery_ns,
-                        discovery_stable_key=stable_key,
-                        source=CLOUD_SCANNER_DISCOVERY_SOURCE,
-                        entry=config_entry,
-                    )
-                    _log_cloud_scan_outcome(
-                        outcome, _redact_account_for_log(email, stable_key), new_count
-                    )
-
-                hass_async_create_task = getattr(hass, "async_create_task", None)
-                if callable(hass_async_create_task):
-                    pending = hass_async_create_task(
-                        _async_trigger_cloud_scan(len(to_add))
-                    )
-                    if asyncio.iscoroutine(pending):
-                        asyncio.create_task(pending)
-                else:
-                    _LOGGER.debug(
-                        "Device tracker setup: hass missing async_create_task; skipping cloud discovery trigger"
-                    )
+                # No discovery flow, no card, no user click: a new tracker is an
+                # entity, not an account. Only remember the ids and start the
+                # grace period after which the addition is judged.
+                armed = False
+                for entity in to_add:
+                    dev_id = getattr(entity, "device_id", None)
+                    if isinstance(dev_id, str) and dev_id:
+                        pending_registry_ids.add(dev_id)
+                        armed = True
+                if armed:
+                    _arm_registry_probe()
 
         unsub = coordinator.async_add_listener(
             _scan_available_trackers_from_coordinator

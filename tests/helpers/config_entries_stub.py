@@ -58,7 +58,14 @@ def install_config_entries_stubs(target: ModuleType) -> None:
         pass
 
     class ConfigEntryState:
-        """Enum-like placeholder matching Home Assistant states."""
+        """Enum-like placeholder matching Home Assistant states.
+
+        The set is complete against ``homeassistant.config_entries`` on purpose:
+        a state the placeholder omits raises ``AttributeError`` in a test that
+        needs it, which reads like a broken test rather than a missing stub. Both
+        unload states were once absent, so a test could not even name the window
+        in which an unload is under way.
+        """
 
         LOADED = "loaded"
         NOT_LOADED = "not_loaded"
@@ -66,6 +73,8 @@ def install_config_entries_stubs(target: ModuleType) -> None:
         SETUP_RETRY = "setup_retry"
         SETUP_IN_PROGRESS = "setup_in_progress"
         MIGRATION_ERROR = "migration_error"
+        UNLOAD_IN_PROGRESS = "unload_in_progress"
+        FAILED_UNLOAD = "failed_unload"
 
     class ConfigEntryAuthFailed(ConfigError):
         """Exception mirroring Home Assistant's auth failure error."""

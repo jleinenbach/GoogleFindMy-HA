@@ -100,7 +100,6 @@ except ImportError:  # Pre-2025.5 HA builds do not expose the helper.
     OperationNotAllowed = type("OperationNotAllowed", (HomeAssistantError,), {})
 
 from .const import (
-    CLOUD_SCANNER_DISCOVERY_SOURCE,
     CONF_GOOGLE_EMAIL,
     CONF_OAUTH_TOKEN,
     CONFIG_ENTRY_VERSION,
@@ -1111,10 +1110,11 @@ class _ConfigFlowMixin:
         description_placeholders: Mapping[str, Any] | None = None,
     ) -> FlowResult: ...
 
-    def async_update_reload_and_abort(self, **kwargs: Any) -> FlowResult: ...
-
     def _abort_if_unique_id_configured(
-        self, *, updates: Mapping[str, Any] | None = None
+        self,
+        *,
+        updates: Mapping[str, Any] | None = None,
+        reload_on_update: bool = True,
     ) -> None: ...
 
     def _set_confirm_only(self) -> None: ...
@@ -2159,9 +2159,9 @@ def _async_discard_cleanup_ticket_for_flow(
 
     Tickets that carry an ``entry_id`` are deliberately **kept**. Those come
     from the update paths, which finish by aborting the flow on purpose
-    (``async_update_reload_and_abort`` and friends): their entry exists, the
-    update has been applied and a reload is already scheduled, so the flow going
-    away says nothing about the pending cleanup. Discarding them here would
+    (``_async_update_entry_and_abort`` and friends): their entry exists, the
+    update has been applied and the update listener reloads on it, so the flow
+    going away says nothing about the pending cleanup. Discarding them here would
     silently disable the cleanup on every update path.
 
     Tickets marked ``entry_promised`` are kept for the same reason, one step
@@ -2968,6 +2968,168 @@ def _entry_carries_credentials(entry: ConfigEntry, updates: Mapping[str, Any]) -
     )
 
 
+def _claim_entry_reload(hass: HomeAssistant, entry_id: str) -> bool:
+    """Return whether this flow has to schedule the reload of ``entry_id`` itself.
+
+    Every path here that writes credentials also goes through
+    ``async_update_entry``, which notifies the integration's update listener, and
+    that listener reloads the entry so the new credentials take effect *where it
+    exists*: an entry that is not loaded has no listener any more, Home Assistant
+    removes it on unload, which is why every writing path schedules its own reload
+    rather than relying on it. Without an agreement on one owner, two of them
+    produce two consecutive unload/setup cycles -- ``async_schedule_reload`` does
+    not coalesce.
+    The latch in the integration package is that agreement; see
+    ``claim_pending_entry_reload``.
+
+    Fails **open**: without an entry id, against an integration package that does
+    not carry the latch, and when consulting it raises, this returns ``True`` and
+    the caller reloads as before. One reload too many is a nuisance, a missing one
+    leaves written credentials ineffective. That is deliberately the opposite
+    answer to ``claim_pending_entry_reload``, which reports "no latch for you" for
+    an empty id; the question differs (may I reload versus did I get the latch).
+    """
+
+    if not entry_id:
+        return True
+    try:
+        integration = import_integration_package()
+        claim = getattr(integration, "claim_pending_entry_reload", None)
+        if not callable(claim):
+            return True
+        return bool(claim(hass, entry_id))
+    except Exception:  # noqa: BLE001 - never let bookkeeping block a reload
+        _LOGGER.debug(
+            "Could not consult the reload latch for entry %s; reloading anyway",
+            entry_id,
+            exc_info=True,
+        )
+        return True
+
+
+def _discard_entry_reload(hass: HomeAssistant, entry_id: str) -> None:
+    """Release the reload latch of ``entry_id`` after a claim came to nothing.
+
+    A claim is a promise to reload. Where that promise cannot be kept -- the
+    scheduling call is missing or raises -- the latch has to go back, otherwise it
+    stays set for the lifetime of the process and swallows every later reload of
+    that entry: the release points (unload, setup, removal) all presuppose that a
+    reload actually arrived.
+    """
+
+    if not entry_id:
+        return
+    try:
+        integration = import_integration_package()
+        discard = getattr(integration, "discard_pending_entry_reload", None)
+        if callable(discard):
+            discard(hass, entry_id)
+    except Exception:  # noqa: BLE001 - bookkeeping must not raise into a flow
+        _LOGGER.debug(
+            "Could not release the reload latch for entry %s",
+            entry_id,
+            exc_info=True,
+        )
+
+
+def _schedule_claimed_reload(hass: HomeAssistant, entry_id: str) -> bool:
+    """Schedule the one reload of ``entry_id`` and report whether it was ours.
+
+    Single owner of the write-then-reload sequence used by every credential
+    writing path in this flow. Order matters twice: the availability of
+    ``async_schedule_reload`` is checked **before** the claim, so an old core
+    without it does not burn the latch, and the claim happens **last**, so the
+    window between claim and scheduling stays as short as it can be. If the
+    scheduling call still raises, the latch is released again instead of being
+    left behind.
+
+    Returns ``True`` when this call scheduled the reload, ``False`` when another
+    owner already has it or scheduling was not possible.
+    """
+
+    schedule_reload = getattr(
+        getattr(hass, "config_entries", None), "async_schedule_reload", None
+    )
+    if not callable(schedule_reload):
+        _LOGGER.debug(
+            "async_schedule_reload is unavailable; entry %s keeps its old "
+            "credentials until it is reloaded",
+            entry_id,
+        )
+        return False
+
+    if not _claim_entry_reload(hass, entry_id):
+        _LOGGER.debug(
+            "Reload of entry %s not scheduled here; a reload is already on its way",
+            entry_id,
+        )
+        return False
+
+    try:
+        schedule_reload(entry_id)
+    except Exception:  # noqa: BLE001 - the write itself already landed
+        _LOGGER.exception(
+            "Failed to schedule the reload of entry %s after writing credentials",
+            entry_id,
+        )
+        _discard_entry_reload(hass, entry_id)
+        return False
+    return True
+
+
+def _release_claim_when_reload_fails(
+    hass: HomeAssistant, entry_id: str, task: Any
+) -> None:
+    """Hand the reload latch back when ``task`` ends without having reloaded.
+
+    ``_schedule_claimed_reload`` only covers the synchronous half of the
+    promise: a scheduling call that raises gives the latch back right there. A
+    path that reloads *directly* keeps the promise open for the whole lifetime
+    of its task, and that task can still end without a reload -- Home
+    Assistant's ``async_unload`` raises ``OperationNotAllowed`` for an entry in
+    a lifecycle state that forbids it, and the flow task dies with it.
+
+    The release points (unload, setup, entry removal) all presuppose that a
+    reload actually arrived, so a latch left behind here is permanent: every
+    later credential write sees the stale claim, stands down, and its newly
+    stored credentials stay ineffective until the entry is restarted or
+    removed. A cancelled task counts as "no reload" for the same reason.
+
+    Releasing once too often only risks one reload too many, which is the
+    direction this latch deliberately fails towards (see
+    ``_claim_entry_reload``).
+    """
+
+    add_done_callback = getattr(task, "add_done_callback", None)
+    if not callable(add_done_callback):
+        return
+
+    def _on_done(finished: Any) -> None:
+        try:
+            failure: Any = True if finished.cancelled() else finished.exception()
+        except Exception:  # noqa: BLE001 - a stub future need not answer at all
+            return
+        if not failure:
+            return
+        # Warned about, not whispered: the flow has already told the user that
+        # the change was applied, and the credentials it wrote stay ineffective
+        # until the entry is reloaded by something else or Home Assistant
+        # restarts. Taking ``exception()`` above also consumes it, so Python's
+        # own "Task exception was never retrieved" no longer fires -- this line
+        # is the only remaining trace.
+        _LOGGER.warning(
+            "Reload of entry %s ended without reloading; its new credentials "
+            "stay ineffective until the entry is reloaded. Releasing the latch "
+            "so a later write can schedule one",
+            entry_id,
+            exc_info=failure if isinstance(failure, BaseException) else None,
+        )
+        _discard_entry_reload(hass, entry_id)
+
+    with suppress(Exception):  # a stub task need not accept a callback
+        add_done_callback(_on_done)
+
+
 async def _async_coalesce_account_entries(
     hass: HomeAssistant,
     entry: ConfigEntry,
@@ -3061,28 +3223,6 @@ class CloudDiscoveryData:
     # carried no marker, which is treated as a credential import: asking one
     # question too many beats replacing working credentials unasked.
     source: str | None = None
-
-
-def _is_credential_import_discovery(discovery: CloudDiscoveryData) -> bool:
-    """Return True when the payload represents credentials someone supplied.
-
-    Only such a payload may raise the overwrite question, because only there is
-    a human waiting who meant to replace something. The tracker rescan in
-    ``device_tracker.py`` re-submits the credentials the entry already stores;
-    asking whether to replace them with themselves would be a dialog about
-    nothing.
-
-    The flow context cannot answer this: ``discovery.py`` downgrades every source
-    that is not a Home Assistant ``SOURCE_*`` constant to plain ``discovery``,
-    and the file watcher's own ``discovery_update_info`` is downgraded the same
-    way, so both producers arrive under an identical context source. Hence the
-    check reads the payload marker.
-
-    An unmarked payload counts as an import: replacing working credentials
-    unasked is the worse failure, so an unknown producer gets the question.
-    """
-
-    return discovery.source != CLOUD_SCANNER_DISCOVERY_SOURCE
 
 
 def _normalize_and_validate_discovery_payload(
@@ -3403,6 +3543,49 @@ class ConfigFlow(
     domain: ClassVar[str] = DOMAIN
     VERSION = CONFIG_ENTRY_VERSION
 
+    def _async_update_entry_and_abort(
+        self,
+        *,
+        entry: ConfigEntry,
+        data: Mapping[str, Any],
+        reason: str,
+    ) -> FlowResult:
+        """Persist ``data`` on ``entry`` and abort, without reloading from here.
+
+        Replaces ``async_update_reload_and_abort``. Home Assistant deprecates
+        the combination of an update listener on the entry with a reloading
+        config-flow method (warning from 2026.6, error from 2026.12): with a
+        listener present, the core's reload duplicates the one the listener
+        causes. This integration keeps its listener, because it adopts changed
+        watch paths at runtime, so the update happens reload-free here.
+
+        The reload that changed credentials still need is not lost, it moves:
+        this helper schedules it directly, under the shared latch, so the update
+        listener in ``__init__.py`` stands down for the same change. Storing
+        credentials without a reload would leave them written but ineffective,
+        because the token cache is seeded in ``async_setup_entry``.
+
+        Scheduling here rather than leaving it to the listener alone is not
+        belt-and-braces, it is the whole point for the case that matters most: an
+        entry whose credentials expired is in ``SETUP_ERROR``, and Home Assistant
+        runs ``_async_process_on_unload`` on a failed setup, which removes that
+        very listener. Relying on it would make a successful reauth report success
+        while the integration stays down until the next restart. ``SETUP_ERROR``
+        has no retry timer either. The unconditional schedule also keeps the
+        behaviour of ``async_update_reload_and_abort``, whose
+        ``reload_even_if_entry_is_unchanged`` defaults to ``True``: re-importing
+        the same credentials still rebuilds the entry.
+
+        ``ConfigFlow.async_update_and_abort`` is deliberately not used: it
+        exists only from HA 2025.11.0, while the declared minimum is 2025.9.1
+        (``hacs.json``), where the method lives on ``ConfigSubentryFlow`` alone.
+        Both building blocks used here exist in every supported version.
+        """
+
+        self.hass.config_entries.async_update_entry(entry, data=dict(data))
+        _schedule_claimed_reload(self.hass, entry.entry_id)
+        return self.async_abort(reason=reason)
+
     def __init__(self) -> None:
         """Initialize transient flow state."""
         self._auth_data: dict[str, Any] = {}
@@ -3600,7 +3783,19 @@ class ConfigFlow(
         _ensure_optional_entry_attributes(existing_entry)
 
         try:
-            self._abort_if_unique_id_configured(updates=updates)
+            # reload_on_update=False: this flow class carries an update listener
+            # (see __init__.py), and Home Assistant deprecates that combination
+            # with a reloading config-flow method (warning from 2026.6, error
+            # from 2026.12) because both would reload. The reload the changed
+            # credentials still need normally comes from that listener, which
+            # fires on the merge this call performs. That listener is not a
+            # guarantee, though: an entry that is not loaded has none, Home
+            # Assistant removes it on unload. Callers that pass ``updates`` here
+            # therefore have to schedule the reload themselves once they have
+            # established that the write landed (both do). The core's elif branch
+            # for a SETUP_RETRY entry from a discovery source is untouched by
+            # this and keeps working: it carries no report_usage.
+            self._abort_if_unique_id_configured(updates=updates, reload_on_update=False)
         except data_entry_flow.AbortFlow:
             if coalesce:
                 await _async_coalesce_account_entries(hass, existing_entry)
@@ -4080,43 +4275,24 @@ class ConfigFlow(
         self._clear_discovery_confirmation_state()
 
         if entry_exists and pending_auth is not None:
-            if _is_credential_import_discovery(pending_payload):
-                # The account is already configured and a human just supplied
-                # credentials. Do not write yet: ask first, because this
-                # replaces working credentials. The old behaviour wrote
-                # unconditionally and reported "already_configured", which said
-                # nothing about what had happened to the credentials.
-                self._pending_overwrite_payload = pending_payload
-                self._pending_overwrite_auth = pending_auth
-                return await self.async_step_discovery_overwrite()
-
-            # A tracker rescan re-submits the credentials the entry already
-            # stores. There is nothing to replace and nobody to ask, so this
-            # keeps the pre-existing behaviour: apply the payload and abort as
-            # already configured.
-            _LOGGER.debug(
-                "Discovery from %s for a configured account: "
-                "applying updates without asking",
-                pending_payload.source,
-            )
-            rebased = self._async_rebase_credential_updates(
-                pending_payload.email, pending_auth
-            )
-            if rebased is None:
-                # The entry went away while the card was open. There is nothing
-                # to update, and this path deliberately does not create
-                # anything: the payload is a rescan of an account the user
-                # configured, not an import they asked for.
-                return self.async_abort(reason="already_configured")
-            try:
-                await self._async_prepare_account_context(
-                    email=pending_payload.email,
-                    preferred_unique_id=pending_payload.unique_id,
-                    updates=rebased[1],
-                )
-            except data_entry_flow.AbortFlow:
-                return self.async_abort(reason="already_configured")
-            return self.async_abort(reason="already_configured")
+            # The account is already configured and someone supplied
+            # credentials. Do not write yet: ask first, because this replaces
+            # working credentials. The old behaviour wrote unconditionally and
+            # reported "already_configured", which said nothing about what had
+            # happened to the credentials.
+            #
+            # Every payload reaching this point gets the question, including an
+            # unmarked one. That direction is deliberate: replacing working
+            # credentials unasked is the worse failure, so an unknown producer
+            # is asked about rather than trusted. The former silent branch
+            # existed for the tracker rescan, which no longer produces discovery
+            # payloads at all (see device_tracker.py); a positive list of
+            # trusted sources would invert the direction and break the
+            # credential import itself the moment Home Assistant renames or adds
+            # a source constant.
+            self._pending_overwrite_payload = pending_payload
+            self._pending_overwrite_auth = pending_auth
+            return await self.async_step_discovery_overwrite()
 
         return await self._async_import_discovered_account(pending_payload)
 
@@ -4241,16 +4417,12 @@ class ConfigFlow(
 
         # ``async_update_entry`` only mutates the in-memory entry and schedules
         # the debounced store save; the running integration keeps the old
-        # credentials until it is reloaded.
-        schedule_reload = getattr(hass.config_entries, "async_schedule_reload", None)
-        if callable(schedule_reload):
-            try:
-                schedule_reload(entry.entry_id)
-            except Exception:  # noqa: BLE001 - the write itself already landed
-                _LOGGER.exception(
-                    "Failed to schedule reload after writing credentials to entry %s",
-                    entry.entry_id,
-                )
+        # credentials until it is reloaded. That write also notifies the update
+        # listener, which reloads for exactly this reason, so the reload below is
+        # the one that also covers an entry without a listener -- one that is not
+        # set up, for instance because these very credentials had expired.
+        # Claiming the latch keeps the two from unloading the entry twice in a row.
+        _schedule_claimed_reload(hass, entry.entry_id)
         return True
 
     async def async_step_discovery_overwrite(
@@ -4345,9 +4517,38 @@ class ConfigFlow(
                     existing_entry = _find_entry_by_email(
                         cast(HomeAssistant, hass_obj), payload.email
                     )
-                written = existing_entry is not None and _entry_carries_credentials(
+                if existing_entry is not None and _entry_carries_credentials(
                     existing_entry, updates
-                )
+                ):
+                    written = True
+                    # The entry now holds exactly these credentials, which is
+                    # what the caller below reports and what makes the wholesale
+                    # write unnecessary. Note the difference: this reads the
+                    # *state*, it does not prove that this flow's guard call
+                    # performed the write. It is also true when the merge was a
+                    # no-op because the entry already held them, which happens
+                    # after a restart, where the watcher rediscovers an unchanged
+                    # bundle (``_settled_signatures`` is process-local). The
+                    # reload is scheduled for that case too, deliberately: it is
+                    # what redeems the cleanup ticket staged below, and without
+                    # it the same bundle is offered again after every restart.
+                    #
+                    # The reload has to be scheduled here because the guard was
+                    # asked not to (``reload_on_update=False``), on the grounds
+                    # that the entry's update listener carries it. An entry that
+                    # is not loaded has no listener left, Home Assistant removes
+                    # it on unload, and that is the state expired credentials
+                    # produce (``SETUP_ERROR`` after ``ConfigEntryAuthFailed``):
+                    # precisely the entry an overwrite is meant to rescue. There
+                    # the write would stay ineffective and the durability gate in
+                    # ``async_setup_entry`` would never run, so the staged bundle
+                    # would never be consumed. Claiming the latch keeps this from
+                    # becoming a second unload/setup cycle where a listener does
+                    # exist. ``hass_obj`` cannot be ``None`` here: resolving the
+                    # entry a few lines above is what required it.
+                    _schedule_claimed_reload(
+                        cast(HomeAssistant, hass_obj), existing_entry.entry_id
+                    )
 
             if not written:
                 # The entry does not hold these credentials: the guard returned
@@ -4605,13 +4806,28 @@ class ConfigFlow(
 
             _normalize_tracking_lists()
 
-            reload_task = hass.config_entries.async_reload(existing_entry.entry_id)
+            # The write above already notified the update listener, which reloads
+            # for the changed credentials. Whichever side gets the latch reloads;
+            # the other stands down instead of unloading the entry twice in a row.
+            reload_task: Any = None
+            if _claim_entry_reload(hass, existing_entry.entry_id):
+                reload_task = hass.config_entries.async_reload(existing_entry.entry_id)
+
             if inspect.isawaitable(reload_task):
                 reload_coro = reload_task
 
                 async def _reload_and_normalize() -> None:
                     try:
                         await reload_coro
+                    except BaseException:
+                        # The claim above is a promise to reload. If the reload
+                        # never lands -- ``OperationNotAllowed`` for an entry in
+                        # a state that forbids unloading, or a cancelled task --
+                        # none of the release points (unload, setup, removal)
+                        # runs, and the latch would swallow every later reload
+                        # of this entry.
+                        _discard_entry_reload(hass, existing_entry.entry_id)
+                        raise
                     finally:
                         _normalize_tracking_lists()
 
@@ -5463,7 +5679,47 @@ class ConfigFlow(
         if callable(request_list_refresh):
             request_list_refresh(reason="reconfigure")
 
-        def _schedule_reload_via_manager(reason: str) -> None:
+        # Set once a hand-off to ``async_schedule_reload`` has been accepted.
+        # From that moment a core-owned task carries the reload, so a later dead
+        # end on *this* path is no longer a dead end for the entry, and giving
+        # the latch back would open the window the latch exists to close.
+        manager_owns_reload = False
+
+        def _give_up_on_reload() -> None:
+            """No further reload is coming from here; hand the latch back.
+
+            This path claims the shared latch and then reloads *directly*, so
+            the promise stays open until a reload actually arrives. Every dead
+            end below therefore releases it: the release points (unload, setup,
+            entry removal) never run without a reload, and a latch left behind
+            would suppress every later reload of this entry.
+
+            Only at *dead ends*, though, and only while this path still owns the
+            promise. A failed hand-off to the reload manager is no dead end: the
+            deferred retry below still follows. A *successful* one is not one
+            either, and it is the sharper case: the core task it created will
+            reach the unload that releases the latch anyway, so releasing here
+            as well would leave the entry unlatched while its reload is still on
+            its way, and the next claimant would queue a second teardown. If
+            that core task dies without reloading, the latch is stuck -- the
+            known residual described in the runtime-patterns contract, not
+            something this release can repair.
+            """
+
+            if manager_owns_reload:
+                _LOGGER.debug(
+                    "Reload of entry %s is already owned by a scheduled reload; "
+                    "keeping the latch",
+                    entry_for_update.entry_id,
+                )
+                return
+            _discard_entry_reload(self.hass, entry_for_update.entry_id)
+
+        def _schedule_reload_via_manager(reason: str) -> bool:
+            """Hand the reload to the core scheduler; report whether it took it."""
+
+            nonlocal manager_owns_reload
+
             schedule_reload = getattr(
                 self.hass.config_entries, "async_schedule_reload", None
             )
@@ -5473,7 +5729,7 @@ class ConfigFlow(
                     reason,
                     entry_for_update.entry_id,
                 )
-                return
+                return False
 
             try:
                 schedule_reload(entry_for_update.entry_id)
@@ -5483,6 +5739,10 @@ class ConfigFlow(
                     reason,
                     entry_for_update.entry_id,
                 )
+                return False
+
+            manager_owns_reload = True
+            return True
 
         def _log_failed_reload(result: Any, *, deferred: bool) -> None:
             if result is False:
@@ -5495,7 +5755,34 @@ class ConfigFlow(
                     entry_for_update.entry_id,
                 )
 
+        def _handle_reports_its_outcome(task: Any) -> bool:
+            """Whether ``task`` implements the part of the future protocol we use.
+
+            The two call sites take whatever ``hass.async_create_task`` (or the
+            loop) hands back. A real ``asyncio.Task`` always answers both, but a
+            handle that carries only ``add_done_callback`` would make the
+            callback raise ``AttributeError`` into the loop and leave the latch
+            claimed -- the very state this path exists to avoid. Ask for both,
+            and stand down together with the callback if either is missing.
+            """
+
+            return callable(getattr(task, "add_done_callback", None)) and callable(
+                getattr(task, "cancelled", None)
+            )
+
         def _log_task_result(task: asyncio.Future[Any]) -> None:
+            if task.cancelled():
+                # A cancelled task is a dead end like any other: ``result()``
+                # would raise ``CancelledError``, which derives from
+                # ``BaseException`` and would sail past the handler below,
+                # leaving the promise open. Ask before taking the result.
+                _LOGGER.debug(
+                    "Deferred reload after reconfigure for entry %s was cancelled",
+                    entry_for_update.entry_id,
+                )
+                _give_up_on_reload()
+                return
+
             try:
                 task_result = task.result()
             except Exception:  # noqa: BLE001 - log unexpected task failures
@@ -5503,6 +5790,7 @@ class ConfigFlow(
                     "Deferred reload after reconfigure for entry %s raised an exception",
                     entry_for_update.entry_id,
                 )
+                _give_up_on_reload()
                 return
 
             _log_failed_reload(task_result, deferred=True)
@@ -5518,6 +5806,18 @@ class ConfigFlow(
                 reload_result = await reload_result
 
             return reload_result
+
+        # One owner for the reload: the entry update this helper follows notifies
+        # the credential update listener, and a reconfigure rewrites exactly the
+        # keys that listener watches. Whoever claims the latch first reloads; the
+        # other side stands down instead of tearing the entry down twice.
+        if not _claim_entry_reload(self.hass, entry_for_update.entry_id):
+            _LOGGER.debug(
+                "Reload after reconfigure for entry %s not scheduled; a reload is "
+                "already on its way",
+                entry_for_update.entry_id,
+            )
+            return
 
         try:
             reload_result = await _async_call_reload()
@@ -5537,19 +5837,21 @@ class ConfigFlow(
                         ),
                         entry_for_update.entry_id,
                     )
+                    _give_up_on_reload()
                     return
                 except Exception:  # noqa: BLE001 - logged for visibility
                     _LOGGER.exception(
                         "Deferred reload after reconfigure for entry %s failed",
                         entry_for_update.entry_id,
                     )
+                    _give_up_on_reload()
                     return
 
                 if inspect.isawaitable(reload_result_inner):
                     create_task = getattr(self.hass, "async_create_task", None)
                     if callable(create_task):
                         task = create_task(reload_result_inner)
-                        if hasattr(task, "add_done_callback"):
+                        if _handle_reports_its_outcome(task):
                             task.add_done_callback(_log_task_result)
                         return
 
@@ -5559,7 +5861,7 @@ class ConfigFlow(
                             reload_result_inner,
                             name=f"{DOMAIN}.deferred_reload_after_reconfigure",
                         )
-                        if hasattr(task, "add_done_callback"):
+                        if _handle_reports_its_outcome(task):
                             task.add_done_callback(_log_task_result)
                         return
 
@@ -5572,6 +5874,7 @@ class ConfigFlow(
                         ),
                         entry_for_update.entry_id,
                     )
+                    _give_up_on_reload()
                     return
 
                 _log_failed_reload(reload_result_inner, deferred=True)
@@ -5579,8 +5882,26 @@ class ConfigFlow(
                 if reload_result_inner is False:
                     _schedule_reload_via_manager("reload_returned_false_deferred")
 
-            async_call_later(self.hass, 0, _schedule_reload)
+            # Inside a handler: an exception raised here is NOT caught by the
+            # sibling ``except BaseException`` below (Python does not consult
+            # further clauses for an error raised from within one). Without this
+            # guard a hass whose loop is already closed -- shutdown during a
+            # reconfigure -- would leave the claim behind for good.
+            try:
+                async_call_later(self.hass, 0, _schedule_reload)
+            except Exception:  # noqa: BLE001 - the retry is the last chance
+                _LOGGER.exception(
+                    "Deferred reload after reconfigure for entry %s could not be armed",
+                    entry_for_update.entry_id,
+                )
+                _give_up_on_reload()
             return
+        except BaseException:
+            # Anything other than the rejection handled above ends this path
+            # without a reload, and the flow task dies with it. Unreachable for
+            # ``OperationNotAllowed``: that clause always returns.
+            _give_up_on_reload()
+            raise
 
         _log_failed_reload(reload_result, deferred=False)
 
@@ -5761,7 +6082,7 @@ class ConfigFlow(
                                     "reauth_success_reason_override",
                                     "reauth_successful",
                                 )
-                                return self.async_update_reload_and_abort(
+                                return self._async_update_entry_and_abort(
                                     entry=entry,
                                     data=updated_data,
                                     reason=success_reason,
@@ -5864,7 +6185,7 @@ class ConfigFlow(
                                             "reauth_success_reason_override",
                                             "reauth_successful",
                                         )
-                                        return self.async_update_reload_and_abort(
+                                        return self._async_update_entry_and_abort(
                                             entry=entry,
                                             data=updated_data,
                                             reason=success_reason,
@@ -5885,7 +6206,7 @@ class ConfigFlow(
                                 updated_data.pop(DATA_AAS_TOKEN, None)
                             updated_data.pop(DATA_SECRET_BUNDLE, None)
                             await self._async_clear_cached_aas_token(entry)
-                            return self.async_update_reload_and_abort(
+                            return self._async_update_entry_and_abort(
                                 entry=entry,
                                 data=updated_data,
                                 reason="reauth_successful",
@@ -5911,7 +6232,7 @@ class ConfigFlow(
                                 ):
                                     updated_data.pop(DATA_AAS_TOKEN, None)
                                 await self._async_clear_cached_aas_token(entry)
-                                return self.async_update_reload_and_abort(
+                                return self._async_update_entry_and_abort(
                                     entry=entry,
                                     data=updated_data,
                                     reason="reauth_successful",
@@ -8098,9 +8419,22 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin, _ContainerLoginMixi
                                 await self._async_refresh_subentry_entry_title(
                                     entry, selected_option
                                 )
-                            self.hass.async_create_task(
-                                self.hass.config_entries.async_reload(entry.entry_id)
-                            )
+                            # The write above notifies the credential update
+                            # listener, which reloads for exactly this change.
+                            # Whichever side claims the latch first reloads.
+                            if _claim_entry_reload(self.hass, entry.entry_id):
+                                reload_task = self.hass.async_create_task(
+                                    self.hass.config_entries.async_reload(
+                                        entry.entry_id
+                                    )
+                                )
+                                # Fire-and-forget keeps the promise open for the
+                                # task's whole lifetime; a task that dies before
+                                # the unload/setup release points would leave
+                                # the latch set for good.
+                                _release_claim_when_reload_fails(
+                                    self.hass, entry.entry_id, reload_task
+                                )
                             return self.async_abort(reason="reconfigure_successful")
 
                         if has_token:

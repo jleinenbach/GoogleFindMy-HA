@@ -1530,13 +1530,6 @@ class PollingOperations(_MixinBase):
             )
             self._store_subentry_snapshots(snapshot)
 
-            # 4.5) Close the initial discovery window once we have a non-empty full list
-            if not self._initial_discovery_done and filtered_devices:
-                self._initial_discovery_done = True
-                _LOGGER.info(
-                    "Initial discovery window closed; newly discovered devices will be created disabled by default."
-                )
-
             _LOGGER.debug(
                 "Returning %d device entries; next poll in ~%ds",
                 len(snapshot),

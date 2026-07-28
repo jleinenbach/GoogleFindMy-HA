@@ -25,6 +25,7 @@ from custom_components.googlefindmy.const import (
     DATA_SUBENTRY_KEY,
 )
 from custom_components.googlefindmy.email_utils import unique_account_id
+from tests.helpers.config_entries_stub import make_config_entry
 from tests.helpers.config_flow import (
     ConfigEntriesDomainUniqueIdLookupMixin,
     attach_config_entries_flow_manager,
@@ -606,23 +607,26 @@ async def test_discovery_overwrite_declined_keeps_stored_credentials(
 
 
 @pytest.mark.asyncio
-async def test_discovery_from_tracker_rescan_does_not_ask_to_overwrite(
+async def test_an_unmarked_payload_still_raises_the_overwrite_question(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A tracker rescan must not raise the overwrite question.
+    """A payload without a source marker must be treated as a credential import.
 
-    ``device_tracker.py`` re-submits the credentials the entry already stores
-    whenever it spots new trackers. Asking whether to replace them with
-    themselves would be a dialog about nothing, and its text would claim a
-    credentials file had been found when none was. The context source cannot
-    tell the producers apart (``discovery.py`` downgrades every non-Home-
-    Assistant source to plain ``discovery``), so the payload marker decides.
+    This pins the failure direction, and it is the direction that matters: an
+    unknown producer gets asked about rather than trusted, because replacing
+    working credentials unasked is the worse failure. A future rebuild onto a
+    positive list of trusted sources would invert exactly this and silently
+    kill the credential import, so it has to fail here.
+
+    The former counterpart of this test covered the tracker rescan, which no
+    longer produces discovery payloads at all; the flow context cannot tell
+    producers apart anyway (``discovery.py`` downgrades every non-Home-
+    Assistant source to plain ``discovery``).
     """
 
     entry, flow = await _prepare_configured_account_flow(monkeypatch)
-    payload = _discovery_payload_for_configured_account(
-        config_flow.CLOUD_SCANNER_DISCOVERY_SOURCE
-    )
+    payload = _discovery_payload_for_configured_account()
+    assert "discovery_source" not in payload
 
     form = await flow.async_step_discovery(payload)
     if inspect.isawaitable(form):
@@ -634,17 +638,12 @@ async def test_discovery_from_tracker_rescan_does_not_ask_to_overwrite(
     if inspect.isawaitable(result):
         result = await result
 
-    assert result["type"] == "abort", (
-        "a rescan of an already configured account must not open a dialog"
+    assert result.get("step_id") == "discovery_overwrite", (
+        "an unmarked payload must be asked about, never applied silently"
     )
-    assert result.get("step_id") != "discovery_overwrite"
-    assert result["reason"] == "already_configured", (
-        "the rescan keeps the abort behaviour it had before the dialog existed"
+    assert entry.data[CONF_OAUTH_TOKEN] == "aas_et/OLD_TOKEN_VALUE", (
+        "nothing may be written while the question is still on screen"
     )
-    assert entry.data[CONF_OAUTH_TOKEN] == "aas_et/NEW_TOKEN_VALUE", (
-        "the rescan still applies its payload, exactly as it did before"
-    )
-    assert "data" not in entry.data
 
 
 @pytest.mark.asyncio
@@ -857,6 +856,109 @@ async def test_discovery_overwrite_does_not_write_twice_after_the_guard_wrote(
 
 
 @pytest.mark.asyncio
+async def test_discovery_overwrite_reloads_after_a_guard_write_on_an_unloaded_entry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A guard write on an entry without a listener still has to take effect.
+
+    The guard is asked not to reload (``reload_on_update=False``) because the
+    entry's update listener carries that. An entry that is not loaded has none
+    left: Home Assistant removes the listener on unload, which is the state
+    expired credentials produce, and precisely the entry a discovery overwrite
+    is meant to rescue. Leaving the reload to that absent listener reported
+    ``credentials_updated`` while the account kept running on the old
+    credentials until a restart, and the bundle staged for deletion was never
+    consumed either, because the durability gate lives in ``async_setup_entry``.
+
+    The state below names the scenario, it does not drive it: the step schedules
+    the reload state-blind, on purpose. Deciding by state would break the case
+    where the merge is a no-op (an unchanged bundle after a restart), because
+    there no listener fires either and the cleanup ticket would stay unredeemed.
+    Whether one reload or two arrive is settled by the shared latch, not here.
+    """
+
+    entry, flow = await _prepare_configured_account_flow(monkeypatch)
+    # No listener: the core removed it when the entry was unloaded after
+    # ``ConfigEntryAuthFailed``. Nothing but this flow can reload it.
+    entry.state = ConfigEntryState.SETUP_ERROR
+
+    payload = _discovery_payload_for_configured_account()
+
+    form = await flow.async_step_discovery(payload)
+    if inspect.isawaitable(form):
+        form = await form
+    assert form["type"] == "form"
+
+    question = await flow.async_step_discovery_confirm({})
+    if inspect.isawaitable(question):
+        question = await question
+    assert question.get("step_id") == "discovery_overwrite"
+
+    result = await flow.async_step_discovery_overwrite(
+        {config_flow._FIELD_OVERWRITE_CREDENTIALS: True}
+    )
+    if inspect.isawaitable(result):
+        result = await result
+
+    assert result["type"] == "abort"
+    assert result["reason"] == "credentials_updated"
+    assert entry.data[CONF_OAUTH_TOKEN] == "aas_et/NEW_TOKEN_VALUE"
+    assert flow.hass.config_entries.scheduled_reloads == [entry.entry_id], (
+        "the guard wrote but does not reload; without a listener nobody else "
+        "makes those credentials effective"
+    )
+
+
+@pytest.mark.asyncio
+async def test_discovery_overwrite_stands_down_when_the_guard_write_is_claimed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The counter-direction: a claimed reload must not be scheduled twice.
+
+    Where the entry is loaded, its update listener reloads on the same write.
+    Both go through the shared latch, so whoever claims first reloads and the
+    other stands down; ``async_schedule_reload`` does not coalesce.
+    """
+
+    entry, flow = await _prepare_configured_account_flow(monkeypatch)
+
+    integration = config_flow.import_integration_package()
+    assert integration.claim_pending_entry_reload(flow.hass, entry.entry_id) is True
+
+    payload = _discovery_payload_for_configured_account()
+
+    form = await flow.async_step_discovery(payload)
+    if inspect.isawaitable(form):
+        form = await form
+    assert form["type"] == "form"
+
+    question = await flow.async_step_discovery_confirm({})
+    if inspect.isawaitable(question):
+        question = await question
+    assert question.get("step_id") == "discovery_overwrite"
+
+    result = await flow.async_step_discovery_overwrite(
+        {config_flow._FIELD_OVERWRITE_CREDENTIALS: True}
+    )
+    if inspect.isawaitable(result):
+        result = await result
+
+    assert result["type"] == "abort"
+    assert result["reason"] == "credentials_updated"
+    assert entry.data[CONF_OAUTH_TOKEN] == "aas_et/NEW_TOKEN_VALUE", (
+        "standing down concerns the reload only; the credentials are written either way"
+    )
+    assert flow.hass.config_entries.scheduled_reloads == [], (
+        "a reload is already on its way; a second one only tears the entry "
+        "down twice in a row"
+    )
+    assert _staged_cleanup_tickets(flow), (
+        "the bundle has to be staged for deletion regardless of who reloads; "
+        "tying the staging to the claim would leave it rediscovered forever"
+    )
+
+
+@pytest.mark.asyncio
 async def test_discovery_overwrite_drops_credentials_the_guard_cannot_remove(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -905,6 +1007,54 @@ async def test_discovery_overwrite_drops_credentials_the_guard_cannot_remove(
     assert entry.data[DATA_AAS_TOKEN] == "aas_et/NEW_TOKEN_VALUE"
     assert flow.hass.config_entries.scheduled_reloads == [entry.entry_id], (
         "the running integration keeps the old credentials until it reloads"
+    )
+
+
+@pytest.mark.asyncio
+async def test_discovery_overwrite_leaves_the_reload_to_a_claim_already_held(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The writer stands down when a reload of that entry is already on its way.
+
+    Writing credentials notifies the integration's update listener, which reloads
+    the entry so they take effect. ``async_schedule_reload`` does not coalesce, so
+    the write and the listener would unload and set the entry up twice in a row
+    unless both go through the same latch.
+    """
+
+    entry, flow = await _prepare_configured_account_flow(monkeypatch)
+    # A superseded bundle is what the core's flat merge cannot drop, which is
+    # exactly the case the fallback writer exists for.
+    entry.data[DATA_SECRET_BUNDLE] = {"owner_key": "STALE_OWNER_KEY"}
+    entry.data[DATA_AAS_TOKEN] = "aas_et/OLD_TOKEN_VALUE"
+
+    integration = config_flow.import_integration_package()
+    assert integration.claim_pending_entry_reload(flow.hass, entry.entry_id) is True
+
+    payload = _discovery_payload_for_configured_account()
+
+    form = await flow.async_step_discovery(payload)
+    if inspect.isawaitable(form):
+        form = await form
+    assert form["type"] == "form"
+
+    question = await flow.async_step_discovery_confirm({})
+    if inspect.isawaitable(question):
+        question = await question
+    assert question.get("step_id") == "discovery_overwrite"
+
+    result = await flow.async_step_discovery_overwrite(
+        {config_flow._FIELD_OVERWRITE_CREDENTIALS: True}
+    )
+    if inspect.isawaitable(result):
+        result = await result
+
+    assert result["type"] == "abort"
+    assert entry.data[DATA_AAS_TOKEN] == "aas_et/NEW_TOKEN_VALUE", (
+        "the credentials still have to be written; only the reload is deferred"
+    )
+    assert flow.hass.config_entries.scheduled_reloads == [], (
+        "a reload is already on its way; a second one only tears the entry down twice"
     )
 
 
@@ -987,49 +1137,6 @@ async def test_rebased_updates_drop_credentials_the_new_ones_replaced(
     assert config_flow.DATA_SECRET_BUNDLE not in updates, (
         "credentials without a bundle must clear the stored one"
     )
-
-
-@pytest.mark.asyncio
-async def test_discovery_rescan_aborts_when_the_entry_vanished_while_confirming(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A rescan whose account disappeared must abort, not import.
-
-    The rescan path resolves the entry when the answer arrives rather than
-    trusting the one it saw earlier. With no entry left there is nothing to
-    update, and creating one is not what a rescan of a configured account
-    means -- that would turn a background scan into an unrequested import.
-    """
-
-    _entry, flow = await _prepare_configured_account_flow(monkeypatch)
-    payload = _discovery_payload_for_configured_account(
-        discovery_source="cloud_scanner"
-    )
-
-    form = await flow.async_step_discovery(payload)
-    if inspect.isawaitable(form):
-        form = await form
-    assert form["type"] == "form"
-
-    imported = False
-
-    async def _never_imports() -> Any:
-        nonlocal imported
-        imported = True
-        return {"type": config_flow.data_entry_flow.FlowResultType.CREATE_ENTRY}
-
-    flow.async_step_device_selection = _never_imports  # type: ignore[assignment]
-    monkeypatch.setattr(
-        flow.hass.config_entries, "async_entries", lambda domain: [], raising=False
-    )
-
-    result = await flow.async_step_discovery_confirm({})
-    if inspect.isawaitable(result):
-        result = await result
-
-    assert result["type"] == "abort"
-    assert result["reason"] == "already_configured"
-    assert not imported, "a rescan must never create an entry on its own"
 
 
 @pytest.mark.asyncio
@@ -1144,6 +1251,7 @@ def test_async_step_discovery_update_info_existing_entry(
         def __init__(self) -> None:
             self.updated: list[tuple[Any, dict[str, Any]]] = []
             self.reloaded: list[str] = []
+            self.reload_calls: list[str] = []
             self.lookups: list[str] = []
             self.setup_calls: list[str] = []
             attach_config_entries_flow_manager(self)
@@ -1158,6 +1266,10 @@ def test_async_step_discovery_update_info_existing_entry(
 
         def async_reload(self, entry_id: str) -> None:
             self.reloaded.append(entry_id)
+            # ``reloaded`` is de-duplicated by the flow's own bookkeeping, so it
+            # cannot show a second reload of the same entry. This list is not,
+            # and that is what a coalescing claim has to be measured against.
+            self.reload_calls.append(entry_id)
 
         def async_get_entry(self, entry_id: str) -> Any | None:
             if entry_id == entry.entry_id:
@@ -1184,6 +1296,10 @@ def test_async_step_discovery_update_info_existing_entry(
                 _ConfigEntries,
                 frame_module=frame,
             )
+            # The reload latch lives in ``hass.data``; without the bucket the
+            # claim helper falls back to "reload anyway" and the second run
+            # below could not observe the coalescing.
+            self.data: dict[str, Any] = {}
 
     called_ingest: list[tuple[config_flow.ConfigFlow, Any]] = []
 
@@ -1268,6 +1384,14 @@ def test_async_step_discovery_update_info_existing_entry(
         if inspect.isawaitable(result):
             result = await result
 
+        # A second payload while the first reload is still on its way must not
+        # add another unload/setup cycle: ``async_schedule_reload`` does not
+        # coalesce, and the entry update notifies the credential update listener
+        # as well.
+        repeat = await flow.async_step_discovery_update_info(payload)
+        if inspect.isawaitable(repeat):
+            repeat = await repeat
+
         return (
             result,
             bool(called_ingest),
@@ -1275,9 +1399,12 @@ def test_async_step_discovery_update_info_existing_entry(
             hass.config_entries.lookups,
             hass.config_entries.updated,
             hass.config_entries.reloaded,
+            hass.config_entries.reload_calls,
         )
 
-    result, ingest_called, calls, lookups, updates, reloaded = asyncio.run(_exercise())
+    result, ingest_called, calls, lookups, updates, reloaded, reload_calls = (
+        asyncio.run(_exercise())
+    )
     assert ingest_called, (
         f"discovery ingestion helper was not invoked: lookups={lookups!r}, result={result!r}"
     )
@@ -1286,6 +1413,10 @@ def test_async_step_discovery_update_info_existing_entry(
     assert calls, "abort helper did not inspect current entries"
     assert updates == [(entry, {"data": {CONF_OAUTH_TOKEN: "aas_et/UPDATED"}})]
     assert reloaded == [entry.entry_id]
+    assert reload_calls == [entry.entry_id], (
+        "the second payload arrived while the first reload was still on its way; "
+        "a second one only unloads and sets the entry up twice"
+    )
 
 
 def test_async_step_discovery_update_info_invalid_payload() -> None:
@@ -1822,4 +1953,361 @@ async def test_rejected_payload_does_not_leave_the_old_card_confirmable(
         confirmed = await confirmed
     assert confirmed["type"] == "abort", (
         "confirming after a rejected payload must abort, not apply the old one"
+    )
+
+
+def test_the_reload_latch_helper_fails_open() -> None:
+    """Bookkeeping must never be the reason a written credential stays inert.
+
+    ``_claim_entry_reload`` answers "you reload" whenever it cannot get a
+    trustworthy answer: without an entry id, against an integration package that
+    does not carry the latch, and when consulting it raises. One reload too many
+    is a nuisance; a missing one leaves the new credentials stored but
+    ineffective until the next restart.
+    """
+
+    hass = types.SimpleNamespace(data={})
+
+    assert config_flow._claim_entry_reload(hass, "") is True
+
+    original = config_flow.import_integration_package
+
+    try:
+
+        def _without_latch() -> Any:
+            return types.SimpleNamespace()
+
+        config_flow.import_integration_package = _without_latch  # type: ignore[assignment]
+        assert config_flow._claim_entry_reload(hass, "entry-1") is True
+
+        def _raise() -> Any:
+            raise RuntimeError("integration package unavailable")
+
+        config_flow.import_integration_package = _raise  # type: ignore[assignment]
+        assert config_flow._claim_entry_reload(hass, "entry-1") is True
+    finally:
+        config_flow.import_integration_package = original  # type: ignore[assignment]
+
+
+def test_the_latch_release_helper_reaches_the_latch_and_stays_quiet() -> None:
+    """Giving the latch back must work, and must never raise into a flow.
+
+    The counterpart of ``_claim_entry_reload``: a claim that cannot be honoured
+    has to be released, or the latch stays set for the lifetime of the process
+    and swallows every later reload of that entry. Because it runs on the error
+    path of an already failing operation, it stays silent on an empty id, on an
+    integration package without the latch, and when consulting it raises.
+    """
+
+    hass = types.SimpleNamespace(data={})
+    released: list[tuple[Any, str]] = []
+
+    original = config_flow.import_integration_package
+
+    try:
+
+        def _with_latch() -> Any:
+            return types.SimpleNamespace(
+                discard_pending_entry_reload=lambda h, entry_id: released.append(
+                    (h, entry_id)
+                )
+            )
+
+        config_flow.import_integration_package = _with_latch  # type: ignore[assignment]
+        config_flow._discard_entry_reload(hass, "entry-1")
+        assert released == [(hass, "entry-1")]
+
+        released.clear()
+        config_flow._discard_entry_reload(hass, "")
+        assert released == [], "an empty id has no latch to give back"
+
+        def _without_latch() -> Any:
+            return types.SimpleNamespace()
+
+        config_flow.import_integration_package = _without_latch  # type: ignore[assignment]
+        config_flow._discard_entry_reload(hass, "entry-1")
+
+        def _raise() -> Any:
+            raise RuntimeError("integration package unavailable")
+
+        config_flow.import_integration_package = _raise  # type: ignore[assignment]
+        config_flow._discard_entry_reload(hass, "entry-1")
+    finally:
+        config_flow.import_integration_package = original  # type: ignore[assignment]
+
+
+class _FinishedTask:
+    """A task that has already ended, with a chosen outcome.
+
+    The real sites hand a live ``asyncio.Task`` to the helper; what the helper
+    actually needs is only the done-callback protocol, and driving that
+    synchronously keeps the outcome under the test's control instead of the
+    event loop's.
+
+    ``add_done_callback`` catches what the callback raises and records it in
+    ``callback_error`` instead of letting it travel back to the caller. A real
+    ``asyncio.Future`` hands the callback to ``loop.call_soon``, so an exception
+    inside it reaches the loop's exception handler and never the code that
+    registered it. Without that isolation the helper's *outer* ``suppress``
+    would swallow every escape and a test could not tell whether the callback
+    itself handles a task that refuses to answer.
+    """
+
+    def __init__(
+        self,
+        *,
+        cancelled: bool = False,
+        exception: BaseException | None = None,
+        callback_raises: bool = False,
+        answer_raises: bool = False,
+    ) -> None:
+        self._cancelled = cancelled
+        self._exception = exception
+        self._callback_raises = callback_raises
+        self._answer_raises = answer_raises
+        self.callback_error: BaseException | None = None
+
+    def cancelled(self) -> bool:
+        if self._answer_raises:
+            raise RuntimeError("this future refuses to answer")
+        return self._cancelled
+
+    def exception(self) -> BaseException | None:
+        # A real future raises here for a cancelled task instead of answering
+        # ``None``. Mirroring that matters: it is what makes the guard in the
+        # callback load-bearing rather than cosmetic, because ``CancelledError``
+        # derives from ``BaseException`` and would pass an ``except Exception``.
+        if self._answer_raises:
+            raise RuntimeError("this future refuses to answer")
+        if self._cancelled:
+            raise asyncio.CancelledError
+        return self._exception
+
+    def add_done_callback(self, callback: Callable[[Any], None]) -> None:
+        if self._callback_raises:
+            raise RuntimeError("this stub takes no callbacks")
+        try:
+            callback(self)
+        except BaseException as err:  # noqa: BLE001 - the loop would absorb it too
+            self.callback_error = err
+
+
+def test_a_direct_reload_that_never_lands_gives_the_latch_back() -> None:
+    """A claim is a promise to reload; a dead task has to release it.
+
+    ``_schedule_claimed_reload`` covers only the synchronous half: a scheduling
+    call that raises releases the latch right there. A path that reloads
+    *directly* keeps the promise open for its task's whole lifetime, and that
+    task can still end without a reload -- ``async_unload`` rejects an entry in
+    a lifecycle state that forbids it, and the flow task dies with it. None of
+    the release points (unload, setup, removal) runs then, so the latch would
+    stay set for the life of the process and every later credential write would
+    stand down with its new credentials ineffective.
+    """
+
+    hass = types.SimpleNamespace(data={})
+    released: list[str] = []
+
+    original = config_flow.import_integration_package
+
+    def _with_latch() -> Any:
+        return types.SimpleNamespace(
+            discard_pending_entry_reload=lambda _h, entry_id: released.append(entry_id)
+        )
+
+    try:
+        config_flow.import_integration_package = _with_latch  # type: ignore[assignment]
+
+        config_flow._release_claim_when_reload_fails(
+            hass, "entry-1", _FinishedTask(exception=RuntimeError("no reload"))
+        )
+        assert released == ["entry-1"]
+
+        released.clear()
+        config_flow._release_claim_when_reload_fails(
+            hass, "entry-2", _FinishedTask(cancelled=True)
+        )
+        assert released == ["entry-2"], "a cancelled reload is no reload either"
+
+        released.clear()
+        config_flow._release_claim_when_reload_fails(hass, "entry-3", _FinishedTask())
+        assert released == [], (
+            "the reload arrived; unload and setup release the latch themselves"
+        )
+    finally:
+        config_flow.import_integration_package = original  # type: ignore[assignment]
+
+
+def test_the_release_helper_stays_quiet_on_a_task_that_cannot_answer() -> None:
+    """It runs on the error path of a failing operation and must never raise.
+
+    Three shapes a test double can take: no callback protocol at all, one that
+    rejects the callback, and one that refuses to report its outcome. None of
+    them may turn a failed reload into a failed flow, and none of them may
+    release a latch on a guess either.
+    """
+
+    hass = types.SimpleNamespace(data={})
+    released: list[str] = []
+
+    original = config_flow.import_integration_package
+
+    def _with_latch() -> Any:
+        return types.SimpleNamespace(
+            discard_pending_entry_reload=lambda _h, entry_id: released.append(entry_id)
+        )
+
+    try:
+        config_flow.import_integration_package = _with_latch  # type: ignore[assignment]
+
+        config_flow._release_claim_when_reload_fails(hass, "entry-1", object())
+        config_flow._release_claim_when_reload_fails(
+            hass, "entry-2", _FinishedTask(callback_raises=True)
+        )
+        mute = _FinishedTask(answer_raises=True)
+        config_flow._release_claim_when_reload_fails(hass, "entry-3", mute)
+
+        assert released == []
+        assert mute.callback_error is None, (
+            "the done-callback has to absorb a task that refuses to answer "
+            "itself; a real loop would only log the escape, so the helper's "
+            "outer suppress never sees it"
+        )
+    finally:
+        config_flow.import_integration_package = original  # type: ignore[assignment]
+
+
+def test_a_discovery_update_reload_that_is_rejected_gives_the_latch_back(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The non-interactive discovery update reloads directly, so it must clean up.
+
+    ``async_unload`` rejects an entry in a lifecycle state that forbids it, and
+    the reload task dies with that rejection. None of the release points
+    (unload, setup, entry removal) runs then, so a latch kept here would be
+    permanent: every later credential write would see the stale claim, stand
+    down, and leave its newly stored credentials ineffective until a restart.
+    """
+
+    # Canonical stub per tests/AGENTS.md: the factory guarantees ``data`` and
+    # ``options`` are plain dicts, which an ad-hoc class does not.
+    entry = make_config_entry(
+        entry_id="entry-id",
+        data={
+            CONF_GOOGLE_EMAIL: "existing@example.com",
+            CONF_OAUTH_TOKEN: "old-token",
+        },
+        unique_id=unique_account_id("existing@example.com"),
+        subentries={},
+    )
+
+    class _ConfigEntries(ConfigEntriesDomainUniqueIdLookupMixin):
+        def __init__(self) -> None:
+            self.updated: list[tuple[Any, dict[str, Any]]] = []
+            self.reloaded: list[str] = []
+            attach_config_entries_flow_manager(self)
+
+        def async_entries(self, domain: str) -> list[Any]:
+            return [entry]
+
+        def async_update_entry(self, target: Any, **updates: Any) -> None:
+            self.updated.append((target, updates))
+
+        async def async_reload(self, entry_id: str) -> None:
+            self.reloaded.append(entry_id)
+            raise config_flow.OperationNotAllowed(entry_id)
+
+        def async_get_entry(self, entry_id: str) -> Any | None:
+            return entry if entry_id == entry.entry_id else None
+
+        def async_get_subentries(self, entry_id: str) -> list[Any]:
+            return []
+
+        async def async_setup(self, entry_id: str) -> bool:
+            return True
+
+    class _Hass:
+        def __init__(self) -> None:
+            prepare_flow_hass_config_entries(
+                self,
+                _ConfigEntries,
+                frame_module=frame,
+            )
+            self.data: dict[str, Any] = {}
+            self.reload_coros: list[Any] = []
+
+        def async_create_task(self, coro: Any, *, name: str | None = None) -> Any:
+            # Held instead of run: the test decides when the reload task ends,
+            # so the failure is observed rather than raced.
+            self.reload_coros.append(coro)
+            return None
+
+    async def _fake_ingest(
+        flow: config_flow.ConfigFlow,
+        normalized: Any,
+        *,
+        existing_entry: Any | None = None,
+    ) -> tuple[dict[str, Any], dict[str, Any] | None]:
+        return (
+            {"data": {CONF_OAUTH_TOKEN: "unused"}},
+            {CONF_OAUTH_TOKEN: "aas_et/UPDATED"},
+        )
+
+    monkeypatch.setattr(config_flow, "_ingest_discovery_credentials", _fake_ingest)
+    monkeypatch.setattr(config_flow, "_find_entry_by_email", lambda _h, _e: entry)
+    monkeypatch.setattr(
+        config_flow,
+        "_normalize_and_validate_discovery_payload",
+        lambda _payload: config_flow.CloudDiscoveryData(
+            email="existing@example.com",
+            unique_id=unique_account_id("existing@example.com"),
+            candidates=(("candidate", "aas_et/UPDATED"),),
+            secrets_bundle=None,
+        ),
+    )
+
+    async def _exercise() -> tuple[Any, bool, bool]:
+        hass = _Hass()
+        flow = config_flow.ConfigFlow()
+        flow.hass = hass  # type: ignore[assignment]
+        flow.context = {}
+        flow._async_current_entries = types.MethodType(  # type: ignore[assignment]
+            lambda self, *, include_ignore=False: [entry], flow
+        )
+
+        async def _set_unique_id(
+            value: str, *, raise_on_progress: bool = False
+        ) -> None:
+            set_config_flow_unique_id(flow, value)
+
+        flow.async_set_unique_id = _set_unique_id  # type: ignore[assignment]
+
+        result = await flow.async_step_discovery_update_info(
+            {
+                CONF_GOOGLE_EMAIL: "existing@example.com",
+                "candidate_tokens": ["aas_et/UPDATED"],
+            }
+        )
+        if inspect.isawaitable(result):
+            result = await result
+
+        integration = config_flow.import_integration_package()
+        assert hass.reload_coros, "the flow did not reload directly at all"
+        held_before = (
+            integration.claim_pending_entry_reload(hass, entry.entry_id) is False
+        )
+
+        with pytest.raises(config_flow.OperationNotAllowed):
+            await hass.reload_coros[0]
+
+        free_after = integration.claim_pending_entry_reload(hass, entry.entry_id)
+        return result, held_before, free_after
+
+    result, held_before, free_after = asyncio.run(_exercise())
+
+    assert result["type"] == "abort"
+    assert held_before, "the flow has to claim the latch before reloading directly"
+    assert free_after, (
+        "the reload was rejected, so no release point ever ran; a latch kept "
+        "here suppresses every later credential reload of this entry"
     )

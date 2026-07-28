@@ -554,6 +554,32 @@ async def test_async_remove_entry_drains_only_this_entrys_cleanup_tickets() -> N
 
 
 @pytest.mark.asyncio
+async def test_async_remove_entry_clears_the_registry_selfheal_latch() -> None:
+    """The device_tracker self-heal latch must not outlive its entry.
+
+    The latch is deliberately kept at DOMAIN level so it survives the reload it
+    schedules. That is exactly why removal has to clear it: nothing else ever
+    will, and the entry id would sit in ``hass.data`` for the rest of the
+    process lifetime -- the same housekeeping rule the staged-cleanup discard
+    right next to it follows.
+    """
+
+    entry = make_config_entry(entry_id="entry-selfheal", unique_id="user@example.com")
+    entry.options[OPT_DELETE_CACHES_ON_REMOVE] = False
+    _coordinator, _token_cache, _filter, runtime_data = _setup_runtime(entry)
+    hass = _HassStub(entry, runtime_data)
+
+    assert integration.claim_registry_selfheal_reload(hass, entry.entry_id) is True
+    assert entry.entry_id in hass.data[DOMAIN]["registry_selfheal_reloads"]
+
+    await integration.async_remove_entry(hass, entry)
+
+    assert entry.entry_id not in hass.data[DOMAIN]["registry_selfheal_reloads"]
+    # A newly created entry that happens to reuse the id gets a fresh attempt.
+    assert integration.claim_registry_selfheal_reload(hass, entry.entry_id) is True
+
+
+@pytest.mark.asyncio
 async def test_async_remove_entry_discards_the_ticket_it_cannot_name() -> None:
     """Removal must also drop the create-path ticket that names no entry.
 
