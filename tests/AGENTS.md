@@ -304,31 +304,43 @@ subclasses the poisoned symbol later fails with
 Whenever you patch a symbol that other modules bind at module level:
 
 * **Import every consumer before the first `monkeypatch.setattr`**, so the copy
-  they take is the production object. `_prepare_async_setup_entry_harness`
-  does this via `_COORDINATOR_CONSUMER_MODULES`; that tuple was derived from an
-  AST scan for module-level `ImportFrom` nodes naming the symbol, not from
-  guesswork, and it must be re-derived when a new module starts importing the
-  coordinator.
+  they take is the production object. Use the shared tuple
+  `tests.conftest.COORDINATOR_CONSUMER_MODULES`; it was derived from an AST scan
+  for module-level `ImportFrom` nodes naming the symbol, not from guesswork. Do
+  **not** write a local subset: two harnesses used to carry hand-written,
+  incomplete copies, which is exactly the drift the shared list prevents.
 * **Or patch the consumers too**, if a test genuinely needs them to see the
   stub (this is why the harness pops and re-imports `map_view`).
 
+Three harnesses patch the symbol and therefore consume the tuple:
+`_prepare_async_setup_entry_harness` (`tests/test_hass_data_layout.py`),
+`_patch_integration_runtime` (`tests/test_device_entity_registration.py`) and
+`test_integration_device_info_uses_service_device`
+(`tests/test_entity_device_info_contract.py`). A fourth site,
+`tests/test_fcm_repair_reauth.py`, patches `repairs.GoogleFindMyCoordinator`
+without driving a platform setup and is therefore not affected.
+
 `tests/conftest.py` enforces the rule for `GoogleFindMyCoordinator`:
-`detect_coordinator_identity_leaks()` runs in `pytest_runtest_teardown` and
-fails the **causing** test. Its scope is deliberately one symbol — the one with
-a measured failure — while an AST sweep over `tests/` found eleven further
-symbols with the same structure (`ClientSession`, `Store`, `HomeAssistant`,
-`WebDriverWait`, and others). Those are structural candidates, not known
-defects; extend the guard when one of them actually bites.
+`detect_coordinator_identity_leaks()` runs in `pytest_runtest_teardown`,
+**restores** the production class and then fails the **causing** test. The
+restore is not cosmetic: reporting alone would leave the stub in place and
+redden every following test as well, turning one attributable failure into a red
+session. Its scope is deliberately one symbol, the one with a measured failure,
+while an AST sweep over `tests/` found eleven further symbols with the same
+structure (`ClientSession`, `Store`, `HomeAssistant`, `WebDriverWait`, and
+others). Those are structural candidates, not known defects; extend the guard
+when one of them actually bites.
 
 `tests/test_guard_coordinator_identity.py` covers the detection logic and pins
-the fix statically: the consumer tuple must still equal the AST-derived set of
-module-level binders, and the import loop must still precede the first
+the fix statically: the tuple must still equal the AST-derived set of
+module-level binders, and in **each** of the three harnesses a loop that really
+calls `importlib.import_module` over it must precede the first
 `monkeypatch.setattr`. The teardown *wiring* is verified by mutation rather
 than by a test: remove the early imports from
 `_prepare_async_setup_entry_harness` and
 `test_programmatic_subentry_creation_triggers_setup_and_entities` errors at
 teardown naming `device_tracker`. Testing that wiring from inside the session
-would require leaving a real leak behind — an earlier draft tried a runtime
+would require leaving a real leak behind. An earlier draft tried a runtime
 reproduction (dropping the consumers from `sys.modules` and re-importing them
 inside the window) and leaked `entity.get_url` into `test_metadata_helpers.py`
 instead. Do not reintroduce that approach.
