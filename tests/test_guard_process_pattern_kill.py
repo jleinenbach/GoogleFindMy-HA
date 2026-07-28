@@ -22,18 +22,24 @@ ancestry before signalling. This guard keeps the broad form from coming back.
 the *image name*, not a command line, so it cannot hit an unrelated process that
 merely mentions the name. Different failure class, Windows-only branch.
 
+Calls are resolved against the module's own imports, not matched by method name.
+This guard runs repository-wide, so a false positive does not annoy one author,
+it blocks everyone: an unrelated ``runner.run(["killall", "workers"])`` must stay
+invisible while ``import subprocess as sp; sp.run([...])`` must not.
+
 Known limit: the scan is AST based and only sees *literals*. A command assembled
 from variables (``subprocess.run([tool, "-f", pattern])``) or fetched at runtime
 passes unseen, as does an ``os.exec*``/``os.spawn*`` invocation. That is the
-deliberate trade: no false positives, because a guard that cries wolf gets
-switched off. Literal forms are covered in all three shapes that occur in
-practice -- argument list, ``shell=True`` string, and ``["sh", "-c", "..."]``.
+deliberate trade for staying free of false positives. Literal forms are covered
+in the three shapes that occur in practice -- argument list, ``shell=True``
+string, and ``["sh", "-c", "..."]``.
 """
 
 from __future__ import annotations
 
 import ast
 from pathlib import Path
+from typing import NamedTuple
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _SCAN_ROOTS = (
@@ -46,6 +52,9 @@ _PATTERN_KILL_TOOLS = frozenset({"pkill", "killall"})
 
 # Callables that hand their first argument to the OS as a command.
 _SUBPROCESS_RUNNERS = frozenset({"run", "call", "check_call", "check_output", "Popen"})
+
+# Callables that hand a whole command string to a shell.
+_SHELL_FUNCS = frozenset({"system", "getoutput", "getstatusoutput"})
 
 # Pre-existing offenders. Empty by construction: the two historical call sites in
 # ``chrome_driver.py`` were migrated to ``_terminate_matching_processes`` in the
@@ -76,13 +85,88 @@ def _first_string_element(node: ast.expr) -> str | None:
     return None
 
 
-def _is_subprocess_runner(func: ast.expr) -> bool:
-    """True for ``subprocess.run(...)`` and for a bare imported ``run(...)``."""
+class _ModuleBindings(NamedTuple):
+    """How a module reaches ``subprocess``/``os`` in its own namespace.
+
+    Resolving calls against the real imports is what keeps the guard free of
+    false positives: an unrelated ``runner.run([...])`` or ``scheduler.Popen(...)``
+    must not be able to fail a repository-wide test.
+    """
+
+    subprocess_aliases: frozenset[str]
+    os_aliases: frozenset[str]
+    imported_runners: frozenset[str]
+    imported_shell_funcs: frozenset[str]
+
+
+def _collect_bindings(tree: ast.Module) -> _ModuleBindings:
+    """Read the module's imports to learn which names really are subprocess/os."""
+    subprocess_aliases: set[str] = set()
+    os_aliases: set[str] = set()
+    imported_runners: set[str] = set()
+    imported_shell_funcs: set[str] = set()
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name == "subprocess":
+                    subprocess_aliases.add(alias.asname or "subprocess")
+                elif alias.name == "os":
+                    os_aliases.add(alias.asname or "os")
+        elif isinstance(node, ast.ImportFrom):
+            if node.module == "subprocess":
+                for alias in node.names:
+                    if alias.name in _SUBPROCESS_RUNNERS:
+                        imported_runners.add(alias.asname or alias.name)
+                    elif alias.name in _SHELL_FUNCS:
+                        imported_shell_funcs.add(alias.asname or alias.name)
+            elif node.module == "os":
+                for alias in node.names:
+                    if alias.name in _SHELL_FUNCS:
+                        imported_shell_funcs.add(alias.asname or alias.name)
+
+    return _ModuleBindings(
+        frozenset(subprocess_aliases),
+        frozenset(os_aliases),
+        frozenset(imported_runners),
+        frozenset(imported_shell_funcs),
+    )
+
+
+def _is_subprocess_runner(func: ast.expr, bindings: _ModuleBindings) -> bool:
+    """True only for a call that really reaches ``subprocess``."""
     if isinstance(func, ast.Attribute):
-        return func.attr in _SUBPROCESS_RUNNERS
+        return (
+            func.attr in _SUBPROCESS_RUNNERS
+            and isinstance(func.value, ast.Name)
+            and func.value.id in bindings.subprocess_aliases
+        )
     if isinstance(func, ast.Name):
-        return func.id in _SUBPROCESS_RUNNERS
+        return func.id in bindings.imported_runners
     return False
+
+
+def _is_shell_call(func: ast.expr, bindings: _ModuleBindings) -> bool:
+    """True only for ``os.system``/``subprocess.getoutput`` and imported twins."""
+    if isinstance(func, ast.Attribute):
+        return (
+            func.attr in _SHELL_FUNCS
+            and isinstance(func.value, ast.Name)
+            and func.value.id in (bindings.os_aliases | bindings.subprocess_aliases)
+        )
+    if isinstance(func, ast.Name):
+        return func.id in bindings.imported_shell_funcs
+    return False
+
+
+def _has_shell_true(node: ast.Call) -> bool:
+    """True when the call passes ``shell=True`` literally."""
+    return any(
+        keyword.arg == "shell"
+        and isinstance(keyword.value, ast.Constant)
+        and keyword.value.value is True
+        for keyword in node.keywords
+    )
 
 
 def _shell_string_offends(value: str) -> bool:
@@ -108,22 +192,25 @@ def find_violations(source: str, rel_path: str) -> list[str]:
     except SyntaxError as err:  # a broken file is a finding, not a silent pass
         return [f"{rel_path}:{err.lineno or 0} unparseable ({err.msg})"]
 
+    bindings = _collect_bindings(tree)
     violations: list[str] = []
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call) or not node.args:
             continue
         first_arg = node.args[0]
 
-        if _is_subprocess_runner(node.func):
+        if _is_subprocess_runner(node.func, bindings):
             tool = _first_string_element(first_arg)
             if tool is not None and Path(tool).name in _PATTERN_KILL_TOOLS:
                 violations.append(f"{rel_path}:{node.lineno} {Path(tool).name}")
                 continue
 
             # subprocess.run("pkill -f chrome", shell=True): the command is a
-            # bare string, not an argv list.
+            # bare string. Without shell=True that string is treated as a
+            # program *path*, so it is not an invocation of the tool at all.
             if (
-                isinstance(first_arg, ast.Constant)
+                _has_shell_true(node)
+                and isinstance(first_arg, ast.Constant)
                 and isinstance(first_arg.value, str)
                 and _shell_string_offends(first_arg.value)
             ):
@@ -140,14 +227,8 @@ def find_violations(source: str, rel_path: str) -> list[str]:
                 continue
 
         # os.system("pkill -f x") / subprocess.getoutput("killall x")
-        func = node.func
-        shell_call = isinstance(func, ast.Attribute) and func.attr in {
-            "system",
-            "getoutput",
-            "getstatusoutput",
-        }
         if (
-            shell_call
+            _is_shell_call(node.func, bindings)
             and isinstance(first_arg, ast.Constant)
             and isinstance(first_arg.value, str)
             and _shell_string_offends(first_arg.value)
@@ -195,13 +276,17 @@ def test_allowlist_has_no_stale_entries() -> None:
     )
 
 
+_IMPORTS = "import os\nimport subprocess\n"
+
+
 def test_guard_detects_a_synthetic_violation() -> None:
     """The detector must fire on the real form and stay quiet on look-alikes."""
-    offending = 'subprocess.run(["pkill", "-f", "chrome"], check=False)\n'
-    assert find_violations(offending, "x.py") == ["x.py:1 pkill"]
+    offending = _IMPORTS + 'subprocess.run(["pkill", "-f", "chrome"], check=False)\n'
+    assert find_violations(offending, "x.py") == ["x.py:3 pkill"]
 
     quiet = (
-        '"""A docstring that mentions subprocess.run(["pkill", "-f", "x"])."""\n'
+        _IMPORTS
+        + '"""A docstring that mentions subprocess.run(["pkill", "-f", "x"])."""\n'
         '# subprocess.run(["killall", "chrome"])\n'
         'subprocess.run(["taskkill", "/f", "/im", "chrome.exe"], check=False)\n'
         'subprocess.run(["pgrep", "-f", "chrome"], check=False)\n'
@@ -217,20 +302,57 @@ def test_guard_sees_the_shell_string_and_sh_c_forms() -> None:
     obvious way the pattern would come back.
     """
 
-    shell_string = 'subprocess.run("pkill -f chrome", shell=True, check=False)\n'
-    assert find_violations(shell_string, "x.py") == ["x.py:1 shell string"]
+    shell_string = _IMPORTS + 'subprocess.run("pkill -f chrome", shell=True)\n'
+    assert find_violations(shell_string, "x.py") == ["x.py:3 shell string"]
 
-    check_output = 'subprocess.check_output("killall chrome", shell=True)\n'
-    assert find_violations(check_output, "x.py") == ["x.py:1 shell string"]
+    check_output = _IMPORTS + 'subprocess.check_output("killall chrome", shell=True)\n'
+    assert find_violations(check_output, "x.py") == ["x.py:3 shell string"]
 
-    sh_c = 'subprocess.run(["sh", "-c", "pkill -f chrome"], check=False)\n'
-    assert find_violations(sh_c, "x.py") == ["x.py:1 shell argument"]
+    sh_c = _IMPORTS + 'subprocess.run(["sh", "-c", "pkill -f chrome"])\n'
+    assert find_violations(sh_c, "x.py") == ["x.py:3 shell argument"]
+
+    # Without shell=True the string is a program *path*, not a shell command.
+    assert find_violations(_IMPORTS + 'subprocess.run("pkill -f x")\n', "x.py") == []
 
     # The sanctioned lookup must stay quiet in every one of those shapes.
     assert (
-        find_violations('subprocess.run("pgrep -f chrome", shell=True)\n', "x.py") == []
+        find_violations(_IMPORTS + 'subprocess.run("pgrep -f c", shell=True)\n', "x.py")
+        == []
     )
-    assert find_violations('subprocess.run(["sh", "-c", "pgrep -f x"])\n', "x.py") == []
+    assert (
+        find_violations(
+            _IMPORTS + 'subprocess.run(["sh", "-c", "pgrep -f x"])\n', "x.py"
+        )
+        == []
+    )
+
+
+def test_guard_ignores_unrelated_objects_with_the_same_method_names() -> None:
+    """A foreign ``.run``/``.Popen``/``.system`` must never fail the whole suite.
+
+    The guard runs repository-wide, so a false positive does not annoy one
+    author, it blocks everyone. Calls are therefore resolved against the
+    module's actual imports rather than matched by method name. Codex flagged
+    exactly this on the first version: ``runner.run(["killall", "workers"])``
+    made the guard fail on a module that never touches ``subprocess``.
+    """
+
+    unrelated = (
+        _IMPORTS + 'runner.run(["killall", "workers"], check=False)\n'
+        'scheduler.Popen(["pkill", "-f", "job"])\n'
+        'config.system("pkill -f x")\n'
+        'self.check_output(["pkill", "-f", "y"])\n'
+    )
+    assert find_violations(unrelated, "x.py") == []
+
+    # An aliased import still resolves, so the escape does not become a hole.
+    aliased = (
+        "import subprocess as sp\n"
+        "from subprocess import run as _run\n"
+        'sp.run(["pkill", "-f", "chrome"])\n'
+        '_run(["killall", "chrome"])\n'
+    )
+    assert find_violations(aliased, "x.py") == ["x.py:3 pkill", "x.py:4 killall"]
 
 
 def test_guard_reports_an_unparseable_file_instead_of_skipping_it() -> None:
@@ -243,7 +365,7 @@ def test_guard_reports_an_unparseable_file_instead_of_skipping_it() -> None:
 
 def test_shell_string_kills_are_detected() -> None:
     """``os.system`` and friends bypass the argv list but not this guard."""
-    assert find_violations('os.system("pkill -f chrome")\n', "x.py") == [
-        "x.py:1 shell command"
+    assert find_violations(_IMPORTS + 'os.system("pkill -f chrome")\n', "x.py") == [
+        "x.py:3 shell command"
     ]
-    assert find_violations('os.system("echo pkill-safe")\n', "x.py") == []
+    assert find_violations(_IMPORTS + 'os.system("echo pkill-safe")\n', "x.py") == []
