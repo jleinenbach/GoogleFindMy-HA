@@ -542,6 +542,47 @@ async def async_setup_entry(
             )
 
         @callback
+        def _promote_registered_trackers(registered_count: int) -> None:
+            """Let trackers that reached the registry into the polling set.
+
+            The coordinator derives ``_enabled_poll_device_ids`` from the
+            *entity* registry but rebuilds it only on *device* registry events,
+            and a brand-new tracker gets its device entry before its entity
+            exists. The rebuild that device entry triggers therefore records the
+            device as present and not enabled, and the polling predicate admits
+            a device only while it is enabled or still absent from the registry:
+            from the next cycle on the silently added tracker would be skipped
+            for good, entity and all.
+
+            This probe is the point where the addition is known to have landed,
+            so it is also the point where that verdict has to be re-derived.
+            """
+
+            reindex = getattr(coordinator, "reindex_poll_targets", None)
+            if not callable(reindex):
+                # Not a detail: without the re-derivation those trackers own an
+                # entity that is never polled again, so this is warned about
+                # rather than whispered into a debug log.
+                _LOGGER.warning(
+                    "Device tracker setup: coordinator cannot reindex poll "
+                    "targets; %d newly registered tracker(s) stay out of the "
+                    "polling set until the next reload",
+                    registered_count,
+                )
+                return
+
+            try:
+                reindex()
+            except Exception:  # noqa: BLE001 - never let this eat the self-heal
+                _LOGGER.warning(
+                    "Device tracker setup: reindexing poll targets after %d "
+                    "registered tracker(s) failed; they stay out of the polling "
+                    "set until the next reload",
+                    registered_count,
+                    exc_info=True,
+                )
+
+        @callback
         def _verify_pending_registry_entries() -> None:
             """Confirm earlier additions, or reload the entry once to fix them.
 
@@ -573,6 +614,16 @@ async def async_setup_entry(
                 except Exception:  # pragma: no cover - best effort registry probe
                     _LOGGER.debug("Registry lookup failed for tracker %s", dev_id)
                     missing.append(dev_id)
+
+            registered_count = len(probe_ids) - len(missing)
+            if registered_count:
+                # Independent of the missing-check below, not of the count: with
+                # nothing registered there is nothing to promote. Running it even
+                # when some trackers are still missing is the point -- a self-heal
+                # reload can stand down (no lever, or another owner holds the
+                # latch), and the trackers that did register must not wait for a
+                # reload that may never come.
+                _promote_registered_trackers(registered_count)
 
             if not missing:
                 return

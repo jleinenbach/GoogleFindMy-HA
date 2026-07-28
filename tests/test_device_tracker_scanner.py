@@ -119,8 +119,17 @@ def _make_coordinator(
     devices: Iterable[Mapping[str, Any]],
     *,
     registry_hit: bool,
+    registry_hits: set[str] | None = None,
+    reindex_mode: str = "ok",
 ) -> Any:
-    """Build a coordinator stub whose registry probe answers deterministically."""
+    """Build a coordinator stub whose registry probe answers deterministically.
+
+    ``registry_hits`` answers per device id instead of for all of them, which is
+    what a mixed outcome (some trackers registered, some not) needs.
+    ``reindex_mode`` picks how the poll-target reindex behaves: ``ok`` records
+    the call, ``raises`` fails inside it, ``missing`` removes the helper from the
+    coordinator surface altogether (an older coordinator).
+    """
 
     class _StubCoordinator(device_tracker.GoogleFindMyCoordinator):
         def __init__(self) -> None:
@@ -135,6 +144,7 @@ def _make_coordinator(
             self._present_last_seen: dict[str, float] = {}
             self.registry_hit = registry_hit
             self.registry_lookups: list[str] = []
+            self.reindex_calls = 0
 
         def async_add_listener(
             self, listener: Callable[[], None]
@@ -178,9 +188,22 @@ def _make_coordinator(
 
         def find_tracker_entity_entry(self, device_id: str) -> Any:
             self.registry_lookups.append(device_id)
-            if not self.registry_hit:
+            if registry_hits is not None:
+                if device_id not in registry_hits:
+                    return None
+            elif not self.registry_hit:
                 return None
             return SimpleNamespace(entity_id="device_tracker.stub")
+
+        def reindex_poll_targets(self) -> None:
+            self.reindex_calls += 1
+            if reindex_mode == "raises":
+                raise RuntimeError("registry unavailable")
+
+    if reindex_mode == "missing":
+        # An older coordinator simply does not carry the helper; ``getattr``
+        # then hands back ``None`` and the platform has to cope.
+        _StubCoordinator.reindex_poll_targets = None  # type: ignore[assignment]
 
     return _StubCoordinator()
 
@@ -206,14 +229,19 @@ async def _set_up_platform(
     *,
     registry_hit: bool,
     added: list[list[Any]],
+    devices: Iterable[Mapping[str, Any]] | None = None,
+    registry_hits: set[str] | None = None,
+    reindex_mode: str = "ok",
 ) -> tuple[Any, SimpleNamespace]:
     """Run one full platform setup and return its coordinator and entry."""
 
     coordinator = _make_coordinator(
         device_tracker,
         hass,
-        [{"id": "tracker-1", "name": "Tracker"}],
+        devices if devices is not None else [{"id": "tracker-1", "name": "Tracker"}],
         registry_hit=registry_hit,
+        registry_hits=registry_hits,
+        reindex_mode=reindex_mode,
     )
     entry = _make_entry(coordinator)
     coordinator.config_entry = entry
@@ -785,4 +813,180 @@ async def test_a_failed_schedule_gives_both_latches_back(
     assert any(
         "Failed to schedule the self-heal reload" in record.getMessage()
         for record in caplog.records
+    )
+
+
+@pytest.mark.asyncio
+async def test_the_probe_lets_a_registered_tracker_into_the_polling_set(
+    probe_timer: _ProbeTimer,
+    deterministic_config_subentry_id: Callable[[Any, str, str | None], str],
+) -> None:
+    """A silently added tracker has to become pollable, not just visible.
+
+    The enabled-for-polling set is derived from the entity registry but rebuilt
+    only on device registry events, and the new tracker's device entry exists
+    before its entity does. Without this re-derivation the tracker would carry
+    an entity that never receives a position.
+    """
+
+    del deterministic_config_subentry_id
+
+    device_tracker = _device_tracker_module()
+    hass = _HassStub()
+    added: list[list[Any]] = []
+    coordinator, _entry = await _set_up_platform(
+        device_tracker, hass, registry_hit=True, added=added
+    )
+    assert coordinator.reindex_calls == 0
+
+    probe_timer.fire()
+
+    assert coordinator.reindex_calls == 1
+    assert hass.reloaded == []
+
+
+@pytest.mark.asyncio
+async def test_the_probe_promotes_what_registered_even_while_repairing_the_rest(
+    probe_timer: _ProbeTimer,
+    deterministic_config_subentry_id: Callable[[Any, str, str | None], str],
+) -> None:
+    """A pending repair must not hold back the trackers that did land.
+
+    The self-heal reload can still stand down (no lever, or another owner holds
+    the shared latch), so the registered trackers cannot be made to wait for it.
+    """
+
+    del deterministic_config_subentry_id
+
+    device_tracker = _device_tracker_module()
+    hass = _HassStub()
+    added: list[list[Any]] = []
+    coordinator, entry = await _set_up_platform(
+        device_tracker,
+        hass,
+        registry_hit=False,
+        added=added,
+        devices=[
+            {"id": "tracker-1", "name": "Tracker One"},
+            {"id": "tracker-2", "name": "Tracker Two"},
+        ],
+        registry_hits={"tracker-1"},
+    )
+
+    probe_timer.fire()
+
+    assert coordinator.reindex_calls == 1
+    assert hass.reloaded == [entry.entry_id]
+
+
+@pytest.mark.asyncio
+async def test_a_coordinator_without_the_reindex_helper_still_repairs(
+    probe_timer: _ProbeTimer,
+    deterministic_config_subentry_id: Callable[[Any, str, str | None], str],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A missing helper is logged and skipped, it never eats the self-heal."""
+
+    del deterministic_config_subentry_id
+
+    device_tracker = _device_tracker_module()
+    hass = _HassStub()
+    added: list[list[Any]] = []
+    coordinator, entry = await _set_up_platform(
+        device_tracker,
+        hass,
+        registry_hit=False,
+        added=added,
+        devices=[
+            {"id": "tracker-1", "name": "Tracker One"},
+            {"id": "tracker-2", "name": "Tracker Two"},
+        ],
+        registry_hits={"tracker-1"},
+        reindex_mode="missing",
+    )
+
+    with caplog.at_level(logging.DEBUG, logger=device_tracker._LOGGER.name):
+        probe_timer.fire()
+
+    assert coordinator.reindex_calls == 0
+    assert hass.reloaded == [entry.entry_id]
+    assert any(
+        record.levelno == logging.WARNING
+        and "cannot reindex poll targets" in record.getMessage()
+        for record in caplog.records
+    ), "a tracker that never polls again is a warning, not a debug whisper"
+
+
+@pytest.mark.asyncio
+async def test_a_failing_reindex_still_repairs_the_missing_trackers(
+    probe_timer: _ProbeTimer,
+    deterministic_config_subentry_id: Callable[[Any, str, str | None], str],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A reindex that raises must not swallow the self-heal reload behind it."""
+
+    del deterministic_config_subentry_id
+
+    device_tracker = _device_tracker_module()
+    hass = _HassStub()
+    added: list[list[Any]] = []
+    coordinator, entry = await _set_up_platform(
+        device_tracker,
+        hass,
+        registry_hit=False,
+        added=added,
+        devices=[
+            {"id": "tracker-1", "name": "Tracker One"},
+            {"id": "tracker-2", "name": "Tracker Two"},
+        ],
+        registry_hits={"tracker-1"},
+        reindex_mode="raises",
+    )
+
+    with caplog.at_level(logging.DEBUG, logger=device_tracker._LOGGER.name):
+        probe_timer.fire()
+
+    assert coordinator.reindex_calls == 1
+    assert hass.reloaded == [entry.entry_id]
+    assert any(
+        record.levelno == logging.WARNING
+        and "reindexing poll targets after" in record.getMessage()
+        and record.exc_info is not None
+        for record in caplog.records
+    ), "the failure has to name itself and carry its traceback"
+
+
+@pytest.mark.asyncio
+async def test_the_probe_promotes_nothing_when_nothing_registered(
+    probe_timer: _ProbeTimer,
+    deterministic_config_subentry_id: Callable[[Any, str, str | None], str],
+) -> None:
+    """No tracker reached the registry, so there is nothing to promote.
+
+    The promotion runs independently of the missing-check, not independently of
+    the count: re-deriving the polling set here would cost a full rebuild and
+    could only reproduce the verdict the last device-registry event already
+    reached. The self-heal reload is the answer in this case, and it still runs.
+    """
+
+    del deterministic_config_subentry_id
+
+    device_tracker = _device_tracker_module()
+    hass = _HassStub()
+    added: list[list[Any]] = []
+    coordinator, entry = await _set_up_platform(
+        device_tracker,
+        hass,
+        registry_hit=False,
+        added=added,
+        registry_hits=set(),
+    )
+
+    probe_timer.fire()
+
+    assert coordinator.reindex_calls == 0, (
+        "with nothing registered the rebuild has no new input to work from"
+    )
+    assert hass.reloaded == [entry.entry_id], (
+        "the missing trackers still have to trigger the one self-heal reload"
     )

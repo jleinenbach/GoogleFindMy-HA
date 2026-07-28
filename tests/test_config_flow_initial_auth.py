@@ -1128,11 +1128,22 @@ async def test_async_step_reconfigure_defers_reload_and_logs_exception(
     scheduled_tasks: list[_FakeTask] = []
 
     class _FakeTask:
+        """A finished task that raised, driven synchronously.
+
+        Mirrors the part of the ``asyncio.Future`` protocol the done-callback
+        under test actually uses. ``cancelled()`` belongs to it: the callback
+        has to ask before taking the result, because ``CancelledError`` derives
+        from ``BaseException`` and would sail past an ``except Exception``.
+        """
+
         def __init__(self, exc: Exception) -> None:
             self._exc = exc
 
         def add_done_callback(self, cb: Callable[[Any], Any]) -> None:
             cb(self)
+
+        def cancelled(self) -> bool:
+            return False
 
         def result(self) -> Any:
             raise self._exc

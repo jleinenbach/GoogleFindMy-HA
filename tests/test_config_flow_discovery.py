@@ -25,6 +25,7 @@ from custom_components.googlefindmy.const import (
     DATA_SUBENTRY_KEY,
 )
 from custom_components.googlefindmy.email_utils import unique_account_id
+from tests.helpers.config_entries_stub import make_config_entry
 from tests.helpers.config_flow import (
     ConfigEntriesDomainUniqueIdLookupMixin,
     attach_config_entries_flow_manager,
@@ -2033,3 +2034,280 @@ def test_the_latch_release_helper_reaches_the_latch_and_stays_quiet() -> None:
         config_flow._discard_entry_reload(hass, "entry-1")
     finally:
         config_flow.import_integration_package = original  # type: ignore[assignment]
+
+
+class _FinishedTask:
+    """A task that has already ended, with a chosen outcome.
+
+    The real sites hand a live ``asyncio.Task`` to the helper; what the helper
+    actually needs is only the done-callback protocol, and driving that
+    synchronously keeps the outcome under the test's control instead of the
+    event loop's.
+
+    ``add_done_callback`` catches what the callback raises and records it in
+    ``callback_error`` instead of letting it travel back to the caller. A real
+    ``asyncio.Future`` hands the callback to ``loop.call_soon``, so an exception
+    inside it reaches the loop's exception handler and never the code that
+    registered it. Without that isolation the helper's *outer* ``suppress``
+    would swallow every escape and a test could not tell whether the callback
+    itself handles a task that refuses to answer.
+    """
+
+    def __init__(
+        self,
+        *,
+        cancelled: bool = False,
+        exception: BaseException | None = None,
+        callback_raises: bool = False,
+        answer_raises: bool = False,
+    ) -> None:
+        self._cancelled = cancelled
+        self._exception = exception
+        self._callback_raises = callback_raises
+        self._answer_raises = answer_raises
+        self.callback_error: BaseException | None = None
+
+    def cancelled(self) -> bool:
+        if self._answer_raises:
+            raise RuntimeError("this future refuses to answer")
+        return self._cancelled
+
+    def exception(self) -> BaseException | None:
+        # A real future raises here for a cancelled task instead of answering
+        # ``None``. Mirroring that matters: it is what makes the guard in the
+        # callback load-bearing rather than cosmetic, because ``CancelledError``
+        # derives from ``BaseException`` and would pass an ``except Exception``.
+        if self._answer_raises:
+            raise RuntimeError("this future refuses to answer")
+        if self._cancelled:
+            raise asyncio.CancelledError
+        return self._exception
+
+    def add_done_callback(self, callback: Callable[[Any], None]) -> None:
+        if self._callback_raises:
+            raise RuntimeError("this stub takes no callbacks")
+        try:
+            callback(self)
+        except BaseException as err:  # noqa: BLE001 - the loop would absorb it too
+            self.callback_error = err
+
+
+def test_a_direct_reload_that_never_lands_gives_the_latch_back() -> None:
+    """A claim is a promise to reload; a dead task has to release it.
+
+    ``_schedule_claimed_reload`` covers only the synchronous half: a scheduling
+    call that raises releases the latch right there. A path that reloads
+    *directly* keeps the promise open for its task's whole lifetime, and that
+    task can still end without a reload -- ``async_unload`` rejects an entry in
+    a lifecycle state that forbids it, and the flow task dies with it. None of
+    the release points (unload, setup, removal) runs then, so the latch would
+    stay set for the life of the process and every later credential write would
+    stand down with its new credentials ineffective.
+    """
+
+    hass = types.SimpleNamespace(data={})
+    released: list[str] = []
+
+    original = config_flow.import_integration_package
+
+    def _with_latch() -> Any:
+        return types.SimpleNamespace(
+            discard_pending_entry_reload=lambda _h, entry_id: released.append(entry_id)
+        )
+
+    try:
+        config_flow.import_integration_package = _with_latch  # type: ignore[assignment]
+
+        config_flow._release_claim_when_reload_fails(
+            hass, "entry-1", _FinishedTask(exception=RuntimeError("no reload"))
+        )
+        assert released == ["entry-1"]
+
+        released.clear()
+        config_flow._release_claim_when_reload_fails(
+            hass, "entry-2", _FinishedTask(cancelled=True)
+        )
+        assert released == ["entry-2"], "a cancelled reload is no reload either"
+
+        released.clear()
+        config_flow._release_claim_when_reload_fails(hass, "entry-3", _FinishedTask())
+        assert released == [], (
+            "the reload arrived; unload and setup release the latch themselves"
+        )
+    finally:
+        config_flow.import_integration_package = original  # type: ignore[assignment]
+
+
+def test_the_release_helper_stays_quiet_on_a_task_that_cannot_answer() -> None:
+    """It runs on the error path of a failing operation and must never raise.
+
+    Three shapes a test double can take: no callback protocol at all, one that
+    rejects the callback, and one that refuses to report its outcome. None of
+    them may turn a failed reload into a failed flow, and none of them may
+    release a latch on a guess either.
+    """
+
+    hass = types.SimpleNamespace(data={})
+    released: list[str] = []
+
+    original = config_flow.import_integration_package
+
+    def _with_latch() -> Any:
+        return types.SimpleNamespace(
+            discard_pending_entry_reload=lambda _h, entry_id: released.append(entry_id)
+        )
+
+    try:
+        config_flow.import_integration_package = _with_latch  # type: ignore[assignment]
+
+        config_flow._release_claim_when_reload_fails(hass, "entry-1", object())
+        config_flow._release_claim_when_reload_fails(
+            hass, "entry-2", _FinishedTask(callback_raises=True)
+        )
+        mute = _FinishedTask(answer_raises=True)
+        config_flow._release_claim_when_reload_fails(hass, "entry-3", mute)
+
+        assert released == []
+        assert mute.callback_error is None, (
+            "the done-callback has to absorb a task that refuses to answer "
+            "itself; a real loop would only log the escape, so the helper's "
+            "outer suppress never sees it"
+        )
+    finally:
+        config_flow.import_integration_package = original  # type: ignore[assignment]
+
+
+def test_a_discovery_update_reload_that_is_rejected_gives_the_latch_back(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The non-interactive discovery update reloads directly, so it must clean up.
+
+    ``async_unload`` rejects an entry in a lifecycle state that forbids it, and
+    the reload task dies with that rejection. None of the release points
+    (unload, setup, entry removal) runs then, so a latch kept here would be
+    permanent: every later credential write would see the stale claim, stand
+    down, and leave its newly stored credentials ineffective until a restart.
+    """
+
+    # Canonical stub per tests/AGENTS.md: the factory guarantees ``data`` and
+    # ``options`` are plain dicts, which an ad-hoc class does not.
+    entry = make_config_entry(
+        entry_id="entry-id",
+        data={
+            CONF_GOOGLE_EMAIL: "existing@example.com",
+            CONF_OAUTH_TOKEN: "old-token",
+        },
+        unique_id=unique_account_id("existing@example.com"),
+        subentries={},
+    )
+
+    class _ConfigEntries(ConfigEntriesDomainUniqueIdLookupMixin):
+        def __init__(self) -> None:
+            self.updated: list[tuple[Any, dict[str, Any]]] = []
+            self.reloaded: list[str] = []
+            attach_config_entries_flow_manager(self)
+
+        def async_entries(self, domain: str) -> list[Any]:
+            return [entry]
+
+        def async_update_entry(self, target: Any, **updates: Any) -> None:
+            self.updated.append((target, updates))
+
+        async def async_reload(self, entry_id: str) -> None:
+            self.reloaded.append(entry_id)
+            raise config_flow.OperationNotAllowed(entry_id)
+
+        def async_get_entry(self, entry_id: str) -> Any | None:
+            return entry if entry_id == entry.entry_id else None
+
+        def async_get_subentries(self, entry_id: str) -> list[Any]:
+            return []
+
+        async def async_setup(self, entry_id: str) -> bool:
+            return True
+
+    class _Hass:
+        def __init__(self) -> None:
+            prepare_flow_hass_config_entries(
+                self,
+                _ConfigEntries,
+                frame_module=frame,
+            )
+            self.data: dict[str, Any] = {}
+            self.reload_coros: list[Any] = []
+
+        def async_create_task(self, coro: Any, *, name: str | None = None) -> Any:
+            # Held instead of run: the test decides when the reload task ends,
+            # so the failure is observed rather than raced.
+            self.reload_coros.append(coro)
+            return None
+
+    async def _fake_ingest(
+        flow: config_flow.ConfigFlow,
+        normalized: Any,
+        *,
+        existing_entry: Any | None = None,
+    ) -> tuple[dict[str, Any], dict[str, Any] | None]:
+        return (
+            {"data": {CONF_OAUTH_TOKEN: "unused"}},
+            {CONF_OAUTH_TOKEN: "aas_et/UPDATED"},
+        )
+
+    monkeypatch.setattr(config_flow, "_ingest_discovery_credentials", _fake_ingest)
+    monkeypatch.setattr(config_flow, "_find_entry_by_email", lambda _h, _e: entry)
+    monkeypatch.setattr(
+        config_flow,
+        "_normalize_and_validate_discovery_payload",
+        lambda _payload: config_flow.CloudDiscoveryData(
+            email="existing@example.com",
+            unique_id=unique_account_id("existing@example.com"),
+            candidates=(("candidate", "aas_et/UPDATED"),),
+            secrets_bundle=None,
+        ),
+    )
+
+    async def _exercise() -> tuple[Any, bool, bool]:
+        hass = _Hass()
+        flow = config_flow.ConfigFlow()
+        flow.hass = hass  # type: ignore[assignment]
+        flow.context = {}
+        flow._async_current_entries = types.MethodType(  # type: ignore[assignment]
+            lambda self, *, include_ignore=False: [entry], flow
+        )
+
+        async def _set_unique_id(
+            value: str, *, raise_on_progress: bool = False
+        ) -> None:
+            set_config_flow_unique_id(flow, value)
+
+        flow.async_set_unique_id = _set_unique_id  # type: ignore[assignment]
+
+        result = await flow.async_step_discovery_update_info(
+            {
+                CONF_GOOGLE_EMAIL: "existing@example.com",
+                "candidate_tokens": ["aas_et/UPDATED"],
+            }
+        )
+        if inspect.isawaitable(result):
+            result = await result
+
+        integration = config_flow.import_integration_package()
+        assert hass.reload_coros, "the flow did not reload directly at all"
+        held_before = (
+            integration.claim_pending_entry_reload(hass, entry.entry_id) is False
+        )
+
+        with pytest.raises(config_flow.OperationNotAllowed):
+            await hass.reload_coros[0]
+
+        free_after = integration.claim_pending_entry_reload(hass, entry.entry_id)
+        return result, held_before, free_after
+
+    result, held_before, free_after = asyncio.run(_exercise())
+
+    assert result["type"] == "abort"
+    assert held_before, "the flow has to claim the latch before reloading directly"
+    assert free_after, (
+        "the reload was rejected, so no release point ever ran; a latch kept "
+        "here suppresses every later credential reload of this entry"
+    )

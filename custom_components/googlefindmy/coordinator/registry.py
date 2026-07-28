@@ -1276,6 +1276,37 @@ class RegistryOperations(_MixinBase):
         """Public wrapper to expose tracker entity lookup to platforms."""
         return self._find_tracker_entity_entry(device_id)
 
+    @callback  # type: ignore[misc, untyped-decorator, unused-ignore]
+    def reindex_poll_targets(self) -> None:
+        """Re-derive the poll target sets after entities were registered.
+
+        ``_enabled_poll_device_ids`` is entity-driven but rebuilt only from
+        *device* registry events, and this coordinator subscribes to no entity
+        registry channel. A brand-new tracker gets its device registry entry
+        from ``_ensure_registry_for_devices`` **before** its entity exists, so
+        the event that rebuild triggers sees the device as present but not
+        enabled. Nothing revisits that verdict: the polling predicate admits a
+        device that is either enabled or not present at all, so from the next
+        cycle on the new tracker is excluded -- present, never enabled -- until
+        the entry is reloaded or Home Assistant restarts.
+
+        The platform therefore calls this once the additions it scheduled have
+        reached the entity registry. Re-deriving both sets from the registries
+        is idempotent, and it refreshes the subentry index along with them, so
+        the stored metadata stops calling the device disabled while its entity
+        already publishes state.
+
+        **Not during early setup.** The refresh underneath runs without
+        ``skip_manager_update``, so calling this while the stubbed
+        ``ConfigEntrySubEntryManager`` is still bound would mutate it, which the
+        repository contract forbids for coordinator metadata probes. The only
+        caller today is the tracker registry probe, which fires a full grace
+        period after setup; a new caller inside ``async_setup_entry`` needs the
+        flag plumbed through first.
+        """
+
+        self._reindex_poll_targets_from_device_registry()
+
     def _ensure_registry_for_devices(
         self,
         devices: list[dict[str, Any]],

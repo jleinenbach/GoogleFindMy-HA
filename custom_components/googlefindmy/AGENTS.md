@@ -56,7 +56,8 @@ Before tagging a release, grep all three:
 A tracker that appears in the account is added silently: no discovery flow, no card, no user click. There is no cloud
 discovery trigger in `device_tracker.py` any more, and no "X devices found" notification for trackers. Discovery is reserved
 for a new account and for refreshed credentials of an existing one. The registry check **after** entities are scheduled is
-still there, but it serves a different purpose: it is the input to a single self-healing reload, and it is only judged once a
+still there, but it serves a different purpose: it is the input to a single self-healing reload for what is missing **and**
+the moment the trackers that did register are re-derived into the polling set, and it is only judged once a
 grace period has passed, because scheduling an entity and registering it are not the same instant. Cross-link:
 [`agents/runtime_patterns/AGENTS.md`](agents/runtime_patterns/AGENTS.md#tracker-registry-gating)
 carries the canonical contract; that file wins if the two ever drift.

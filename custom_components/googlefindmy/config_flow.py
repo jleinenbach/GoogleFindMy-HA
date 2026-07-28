@@ -3077,6 +3077,59 @@ def _schedule_claimed_reload(hass: HomeAssistant, entry_id: str) -> bool:
     return True
 
 
+def _release_claim_when_reload_fails(
+    hass: HomeAssistant, entry_id: str, task: Any
+) -> None:
+    """Hand the reload latch back when ``task`` ends without having reloaded.
+
+    ``_schedule_claimed_reload`` only covers the synchronous half of the
+    promise: a scheduling call that raises gives the latch back right there. A
+    path that reloads *directly* keeps the promise open for the whole lifetime
+    of its task, and that task can still end without a reload -- Home
+    Assistant's ``async_unload`` raises ``OperationNotAllowed`` for an entry in
+    a lifecycle state that forbids it, and the flow task dies with it.
+
+    The release points (unload, setup, entry removal) all presuppose that a
+    reload actually arrived, so a latch left behind here is permanent: every
+    later credential write sees the stale claim, stands down, and its newly
+    stored credentials stay ineffective until the entry is restarted or
+    removed. A cancelled task counts as "no reload" for the same reason.
+
+    Releasing once too often only risks one reload too many, which is the
+    direction this latch deliberately fails towards (see
+    ``_claim_entry_reload``).
+    """
+
+    add_done_callback = getattr(task, "add_done_callback", None)
+    if not callable(add_done_callback):
+        return
+
+    def _on_done(finished: Any) -> None:
+        try:
+            failure: Any = True if finished.cancelled() else finished.exception()
+        except Exception:  # noqa: BLE001 - a stub future need not answer at all
+            return
+        if not failure:
+            return
+        # Warned about, not whispered: the flow has already told the user that
+        # the change was applied, and the credentials it wrote stay ineffective
+        # until the entry is reloaded by something else or Home Assistant
+        # restarts. Taking ``exception()`` above also consumes it, so Python's
+        # own "Task exception was never retrieved" no longer fires -- this line
+        # is the only remaining trace.
+        _LOGGER.warning(
+            "Reload of entry %s ended without reloading; its new credentials "
+            "stay ineffective until the entry is reloaded. Releasing the latch "
+            "so a later write can schedule one",
+            entry_id,
+            exc_info=failure if isinstance(failure, BaseException) else None,
+        )
+        _discard_entry_reload(hass, entry_id)
+
+    with suppress(Exception):  # a stub task need not accept a callback
+        add_done_callback(_on_done)
+
+
 async def _async_coalesce_account_entries(
     hass: HomeAssistant,
     entry: ConfigEntry,
@@ -4766,6 +4819,15 @@ class ConfigFlow(
                 async def _reload_and_normalize() -> None:
                     try:
                         await reload_coro
+                    except BaseException:
+                        # The claim above is a promise to reload. If the reload
+                        # never lands -- ``OperationNotAllowed`` for an entry in
+                        # a state that forbids unloading, or a cancelled task --
+                        # none of the release points (unload, setup, removal)
+                        # runs, and the latch would swallow every later reload
+                        # of this entry.
+                        _discard_entry_reload(hass, existing_entry.entry_id)
+                        raise
                     finally:
                         _normalize_tracking_lists()
 
@@ -5617,7 +5679,47 @@ class ConfigFlow(
         if callable(request_list_refresh):
             request_list_refresh(reason="reconfigure")
 
-        def _schedule_reload_via_manager(reason: str) -> None:
+        # Set once a hand-off to ``async_schedule_reload`` has been accepted.
+        # From that moment a core-owned task carries the reload, so a later dead
+        # end on *this* path is no longer a dead end for the entry, and giving
+        # the latch back would open the window the latch exists to close.
+        manager_owns_reload = False
+
+        def _give_up_on_reload() -> None:
+            """No further reload is coming from here; hand the latch back.
+
+            This path claims the shared latch and then reloads *directly*, so
+            the promise stays open until a reload actually arrives. Every dead
+            end below therefore releases it: the release points (unload, setup,
+            entry removal) never run without a reload, and a latch left behind
+            would suppress every later reload of this entry.
+
+            Only at *dead ends*, though, and only while this path still owns the
+            promise. A failed hand-off to the reload manager is no dead end: the
+            deferred retry below still follows. A *successful* one is not one
+            either, and it is the sharper case: the core task it created will
+            reach the unload that releases the latch anyway, so releasing here
+            as well would leave the entry unlatched while its reload is still on
+            its way, and the next claimant would queue a second teardown. If
+            that core task dies without reloading, the latch is stuck -- the
+            known residual described in the runtime-patterns contract, not
+            something this release can repair.
+            """
+
+            if manager_owns_reload:
+                _LOGGER.debug(
+                    "Reload of entry %s is already owned by a scheduled reload; "
+                    "keeping the latch",
+                    entry_for_update.entry_id,
+                )
+                return
+            _discard_entry_reload(self.hass, entry_for_update.entry_id)
+
+        def _schedule_reload_via_manager(reason: str) -> bool:
+            """Hand the reload to the core scheduler; report whether it took it."""
+
+            nonlocal manager_owns_reload
+
             schedule_reload = getattr(
                 self.hass.config_entries, "async_schedule_reload", None
             )
@@ -5627,7 +5729,7 @@ class ConfigFlow(
                     reason,
                     entry_for_update.entry_id,
                 )
-                return
+                return False
 
             try:
                 schedule_reload(entry_for_update.entry_id)
@@ -5637,6 +5739,10 @@ class ConfigFlow(
                     reason,
                     entry_for_update.entry_id,
                 )
+                return False
+
+            manager_owns_reload = True
+            return True
 
         def _log_failed_reload(result: Any, *, deferred: bool) -> None:
             if result is False:
@@ -5649,7 +5755,34 @@ class ConfigFlow(
                     entry_for_update.entry_id,
                 )
 
+        def _handle_reports_its_outcome(task: Any) -> bool:
+            """Whether ``task`` implements the part of the future protocol we use.
+
+            The two call sites take whatever ``hass.async_create_task`` (or the
+            loop) hands back. A real ``asyncio.Task`` always answers both, but a
+            handle that carries only ``add_done_callback`` would make the
+            callback raise ``AttributeError`` into the loop and leave the latch
+            claimed -- the very state this path exists to avoid. Ask for both,
+            and stand down together with the callback if either is missing.
+            """
+
+            return callable(getattr(task, "add_done_callback", None)) and callable(
+                getattr(task, "cancelled", None)
+            )
+
         def _log_task_result(task: asyncio.Future[Any]) -> None:
+            if task.cancelled():
+                # A cancelled task is a dead end like any other: ``result()``
+                # would raise ``CancelledError``, which derives from
+                # ``BaseException`` and would sail past the handler below,
+                # leaving the promise open. Ask before taking the result.
+                _LOGGER.debug(
+                    "Deferred reload after reconfigure for entry %s was cancelled",
+                    entry_for_update.entry_id,
+                )
+                _give_up_on_reload()
+                return
+
             try:
                 task_result = task.result()
             except Exception:  # noqa: BLE001 - log unexpected task failures
@@ -5657,6 +5790,7 @@ class ConfigFlow(
                     "Deferred reload after reconfigure for entry %s raised an exception",
                     entry_for_update.entry_id,
                 )
+                _give_up_on_reload()
                 return
 
             _log_failed_reload(task_result, deferred=True)
@@ -5703,19 +5837,21 @@ class ConfigFlow(
                         ),
                         entry_for_update.entry_id,
                     )
+                    _give_up_on_reload()
                     return
                 except Exception:  # noqa: BLE001 - logged for visibility
                     _LOGGER.exception(
                         "Deferred reload after reconfigure for entry %s failed",
                         entry_for_update.entry_id,
                     )
+                    _give_up_on_reload()
                     return
 
                 if inspect.isawaitable(reload_result_inner):
                     create_task = getattr(self.hass, "async_create_task", None)
                     if callable(create_task):
                         task = create_task(reload_result_inner)
-                        if hasattr(task, "add_done_callback"):
+                        if _handle_reports_its_outcome(task):
                             task.add_done_callback(_log_task_result)
                         return
 
@@ -5725,7 +5861,7 @@ class ConfigFlow(
                             reload_result_inner,
                             name=f"{DOMAIN}.deferred_reload_after_reconfigure",
                         )
-                        if hasattr(task, "add_done_callback"):
+                        if _handle_reports_its_outcome(task):
                             task.add_done_callback(_log_task_result)
                         return
 
@@ -5738,6 +5874,7 @@ class ConfigFlow(
                         ),
                         entry_for_update.entry_id,
                     )
+                    _give_up_on_reload()
                     return
 
                 _log_failed_reload(reload_result_inner, deferred=True)
@@ -5745,8 +5882,26 @@ class ConfigFlow(
                 if reload_result_inner is False:
                     _schedule_reload_via_manager("reload_returned_false_deferred")
 
-            async_call_later(self.hass, 0, _schedule_reload)
+            # Inside a handler: an exception raised here is NOT caught by the
+            # sibling ``except BaseException`` below (Python does not consult
+            # further clauses for an error raised from within one). Without this
+            # guard a hass whose loop is already closed -- shutdown during a
+            # reconfigure -- would leave the claim behind for good.
+            try:
+                async_call_later(self.hass, 0, _schedule_reload)
+            except Exception:  # noqa: BLE001 - the retry is the last chance
+                _LOGGER.exception(
+                    "Deferred reload after reconfigure for entry %s could not be armed",
+                    entry_for_update.entry_id,
+                )
+                _give_up_on_reload()
             return
+        except BaseException:
+            # Anything other than the rejection handled above ends this path
+            # without a reload, and the flow task dies with it. Unreachable for
+            # ``OperationNotAllowed``: that clause always returns.
+            _give_up_on_reload()
+            raise
 
         _log_failed_reload(reload_result, deferred=False)
 
@@ -8268,10 +8423,17 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin, _ContainerLoginMixi
                             # listener, which reloads for exactly this change.
                             # Whichever side claims the latch first reloads.
                             if _claim_entry_reload(self.hass, entry.entry_id):
-                                self.hass.async_create_task(
+                                reload_task = self.hass.async_create_task(
                                     self.hass.config_entries.async_reload(
                                         entry.entry_id
                                     )
+                                )
+                                # Fire-and-forget keeps the promise open for the
+                                # task's whole lifetime; a task that dies before
+                                # the unload/setup release points would leave
+                                # the latch set for good.
+                                _release_claim_when_reload_fails(
+                                    self.hass, entry.entry_id, reload_task
                                 )
                             return self.async_abort(reason="reconfigure_successful")
 
