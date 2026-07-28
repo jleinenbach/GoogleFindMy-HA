@@ -20,6 +20,7 @@ from custom_components.googlefindmy.coordinator import (
     GoogleFindMyCoordinator,
     SubentryMetadata,
 )
+from tests.helpers.config_entries_stub import make_config_entry
 
 
 def _stable_subentry_id(entry_id: str, key: str) -> str:
@@ -256,3 +257,202 @@ def test_default_subentry_prefers_tracker_and_skips_service_manager_updates(
     assert isinstance(manager_stub, _ManagerStub)
     assert manager_stub.calls
     assert all(key != SERVICE_SUBENTRY_KEY for key, _ in manager_stub.calls)
+
+
+def _coordinator_with_tracker_allowlist(
+    entry_id: str, stored_visible: list[str]
+) -> tuple[GoogleFindMyCoordinator, object]:
+    """Return a coordinator whose tracker subentry carries a stored allow-list."""
+
+    subentry = ConfigSubentry(
+        data=MappingProxyType(
+            {
+                "group_key": TRACKER_SUBENTRY_KEY,
+                "visible_device_ids": list(stored_visible),
+            }
+        ),
+        subentry_type=SUBENTRY_TYPE_TRACKER,
+        title="Core",
+        unique_id=f"{entry_id}-core",
+        subentry_id=_stable_subentry_id(entry_id, TRACKER_SUBENTRY_KEY),
+    )
+    entry = make_config_entry(
+        entry_id=entry_id,
+        title="Google Find My",
+        subentries={subentry.subentry_id: subentry},
+    )
+    hass_stub = SimpleNamespace(
+        loop=SimpleNamespace(call_soon_threadsafe=lambda *args, **kwargs: None),
+        data={DOMAIN: {}},
+    )
+
+    coordinator = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
+    coordinator.hass = hass_stub  # type: ignore[assignment]
+    coordinator.config_entry = entry  # type: ignore[attr-defined]
+    entry.runtime_data = SimpleNamespace(coordinator=coordinator)
+    coordinator.allow_history_fallback = False
+    coordinator.device_poll_delay = 30
+    coordinator.min_poll_interval = 60
+    coordinator.location_poll_interval = 120
+    coordinator._subentry_metadata = {}
+    coordinator._subentry_snapshots = {}
+    coordinator._feature_to_subentry = {}
+    coordinator._default_subentry_key_value = None
+    coordinator._subentry_manager = None
+    coordinator._pending_subentry_repair = None
+    coordinator._skip_repair_during_reload_refresh = False
+    coordinator._reload_repair_skip_pending_release = False
+    coordinator._warned_bad_identifier_devices = set()
+    coordinator._diag = SimpleNamespace(
+        add_warning=lambda **kwargs: None,
+        remove_warning=lambda *args, **kwargs: None,
+    )
+    return coordinator, entry
+
+
+def test_a_device_the_account_gained_joins_the_tracker_allowlist() -> None:
+    """A tracker added after the initial sync must not stay invisible.
+
+    The stored ``visible_device_ids`` is a device-to-subentry assignment, and the
+    initial config-flow sync is the only writer that ever filled it. A device the
+    account gained afterwards is in no list at all, so the grouping helper routes
+    it to the default (tracker) key and its entity is built -- but the metadata
+    would keep reporting it as neither visible nor enabled, which is the state the
+    silent-add path leaves behind.
+    """
+
+    old_id, new_id = "tracker-old", "tracker-new"
+    coordinator, _entry = _coordinator_with_tracker_allowlist("entry-grew", [old_id])
+    coordinator.data = [{"id": old_id, "name": "Old"}, {"id": new_id, "name": "New"}]
+    coordinator._enabled_poll_device_ids = {old_id, new_id}
+
+    coordinator._refresh_subentry_index(
+        [{"id": old_id, "name": "Old"}, {"id": new_id, "name": "New"}]
+    )
+
+    metadata = coordinator.get_subentry_metadata(key=TRACKER_SUBENTRY_KEY)
+    assert metadata is not None
+    assert new_id in metadata.visible_device_ids, (
+        "a device assigned to no subentry belongs to the tracker, and the stored "
+        "list has to say so"
+    )
+    assert new_id in metadata.enabled_device_ids
+
+
+def test_a_device_moved_to_the_service_subentry_is_left_alone() -> None:
+    """The merge must not undo a user's move and persist the device elsewhere.
+
+    The service subentry is a selectable target in the repair-move, repair-delete
+    and visibility steps, but its *metadata* visible ids are forced to empty. Going
+    by the metadata would therefore call such a device unassigned, pull it into the
+    tracker, and the manager write-back would make that permanent.
+    """
+
+    tracker_id, moved_id = "tracker-own", "tracker-moved-to-service"
+    coordinator, entry = _coordinator_with_tracker_allowlist(
+        "entry-service-move", [tracker_id]
+    )
+    service_subentry = ConfigSubentry(
+        data=MappingProxyType(
+            {
+                "group_key": SERVICE_SUBENTRY_KEY,
+                "visible_device_ids": [moved_id],
+            }
+        ),
+        subentry_type=SUBENTRY_TYPE_SERVICE,
+        title="Service",
+        unique_id="entry-service-move-service",
+        subentry_id=_stable_subentry_id("entry-service-move", SERVICE_SUBENTRY_KEY),
+    )
+    entry.subentries[service_subentry.subentry_id] = service_subentry
+    manager = _ManagerStub()
+    coordinator._subentry_manager = manager
+    devices = [
+        {"id": tracker_id, "name": "Own"},
+        {"id": moved_id, "name": "Moved"},
+    ]
+    coordinator.data = devices
+    coordinator._enabled_poll_device_ids = {tracker_id, moved_id}
+
+    coordinator._refresh_subentry_index(devices)
+
+    metadata = coordinator.get_subentry_metadata(key=TRACKER_SUBENTRY_KEY)
+    assert metadata is not None
+    assert moved_id not in metadata.visible_device_ids, (
+        "a device the user moved to the service subentry is assigned, so the "
+        "tracker merge must not claim it"
+    )
+    tracker_writes = [ids for key, ids in manager.calls if key == TRACKER_SUBENTRY_KEY]
+    assert all(moved_id not in ids for ids in tracker_writes), (
+        "and the write-back must not make the undone move permanent"
+    )
+
+
+def test_a_device_assigned_to_another_subentry_is_left_alone() -> None:
+    """The merge must not pull a user's subentry assignment back to the tracker."""
+
+    tracker_id, foreign_id = "tracker-own", "tracker-elsewhere"
+    coordinator, entry = _coordinator_with_tracker_allowlist(
+        "entry-split", [tracker_id]
+    )
+    foreign = ConfigSubentry(
+        data=MappingProxyType(
+            {"group_key": "extra_group", "visible_device_ids": [foreign_id]}
+        ),
+        subentry_type=SUBENTRY_TYPE_TRACKER,
+        title="Extra",
+        unique_id="entry-split-extra",
+        subentry_id="entry-split-extra-subentry",
+    )
+    entry.subentries[foreign.subentry_id] = foreign
+    coordinator.data = [
+        {"id": tracker_id, "name": "Own"},
+        {"id": foreign_id, "name": "Elsewhere"},
+    ]
+    coordinator._enabled_poll_device_ids = {tracker_id, foreign_id}
+
+    coordinator._refresh_subentry_index(
+        [{"id": tracker_id, "name": "Own"}, {"id": foreign_id, "name": "Elsewhere"}]
+    )
+
+    metadata = coordinator.get_subentry_metadata(key=TRACKER_SUBENTRY_KEY)
+    assert metadata is not None
+    assert foreign_id not in metadata.visible_device_ids, (
+        "a device that already belongs to another subentry is assigned, so the "
+        "tracker merge must not claim it"
+    )
+
+
+def test_the_merge_converges_and_stops_writing() -> None:
+    """Once the gained device is stored, a second refresh must write nothing new."""
+
+    old_id, new_id = "tracker-old", "tracker-new"
+    coordinator, _entry = _coordinator_with_tracker_allowlist(
+        "entry-converge", [old_id, new_id]
+    )
+    # A complete pair of core subentries: a missing one would send the refresh
+    # into the repair path, which is not what this test is about.
+    service_subentry = ConfigSubentry(
+        data=MappingProxyType({"group_key": SERVICE_SUBENTRY_KEY}),
+        subentry_type=SUBENTRY_TYPE_SERVICE,
+        title="Service",
+        unique_id="entry-converge-service",
+        subentry_id=_stable_subentry_id("entry-converge", SERVICE_SUBENTRY_KEY),
+    )
+    _entry.subentries[service_subentry.subentry_id] = service_subentry
+    manager = _ManagerStub()
+    coordinator._subentry_manager = manager
+    devices = [{"id": old_id, "name": "Old"}, {"id": new_id, "name": "New"}]
+    coordinator.data = devices
+    coordinator._enabled_poll_device_ids = {old_id, new_id}
+
+    coordinator._refresh_subentry_index(devices)
+
+    metadata = coordinator.get_subentry_metadata(key=TRACKER_SUBENTRY_KEY)
+    assert metadata is not None
+    assert metadata.visible_device_ids == tuple(sorted((old_id, new_id)))
+    tracker_writes = [ids for key, ids in manager.calls if key == TRACKER_SUBENTRY_KEY]
+    assert all(set(ids) == {old_id, new_id} for ids in tracker_writes), (
+        "with both ids already stored the merge adds nothing, so the write-back "
+        "cannot drift"
+    )

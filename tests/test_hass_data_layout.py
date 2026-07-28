@@ -56,6 +56,7 @@ from custom_components.googlefindmy.const import (
     TRACKER_SUBENTRY_TRANSLATION_KEY,
 )
 from tests.helpers import drain_loop
+from tests.helpers.config_entries_stub import make_config_entry
 from tests.helpers.config_flow import ConfigEntriesDomainUniqueIdLookupMixin
 from tests.helpers.homeassistant import (
     FakeDeviceEntry,
@@ -3840,3 +3841,126 @@ def _platform_names(platforms: tuple[object, ...]) -> tuple[str, ...]:
             else:
                 names.append(str(platform))
     return tuple(names)
+
+
+@pytest.mark.asyncio
+async def test_the_reload_latch_survives_the_unload_phase(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The claim must outlive the teardown, not the first line of the router.
+
+    The platform teardown is the longest stretch of a reload. Releasing the latch
+    before it lets the state-blind schedulers -- the credential-writing config
+    flows and the tracker registry probe, neither of which inspects
+    ``entry.state`` the way the update listener does -- claim it again and queue a
+    second reload, even though the replacement setup that is already on its way
+    reads the newest ``entry.data`` anyway. That is the consecutive teardown the
+    latch exists to prevent.
+    """
+
+    integration = importlib.import_module("custom_components.googlefindmy")
+
+    hass = SimpleNamespace(data={})
+    entry = make_config_entry(entry_id="entry-unload", parent_entry_id=None)
+
+    assert integration.claim_pending_entry_reload(hass, entry.entry_id) is True
+
+    seen_during_unload: list[bool] = []
+
+    async def _unload_probe(
+        _hass: object, _entry: object
+    ) -> bool:  # pragma: no cover - trivial stub
+        # A second owner asking for the latch mid-teardown must be told "no".
+        seen_during_unload.append(
+            integration.claim_pending_entry_reload(hass, entry.entry_id)
+        )
+        return True
+
+    monkeypatch.setattr(integration, "_async_unload_parent_entry", _unload_probe)
+
+    assert await integration.async_unload_entry(hass, entry) is True
+
+    assert seen_during_unload == [False], (
+        "the latch must still be held while the platforms are being torn down"
+    )
+    assert integration.claim_pending_entry_reload(hass, entry.entry_id) is True, (
+        "once the unload has run the latch is free again, so a later change can "
+        "schedule the next reload"
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_failed_unload_hands_the_reload_latch_back(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No setup half follows a failed unload, so the release cannot wait for one."""
+
+    integration = importlib.import_module("custom_components.googlefindmy")
+
+    hass = SimpleNamespace(data={})
+    entry = make_config_entry(entry_id="entry-unload-fails", parent_entry_id=None)
+
+    assert integration.claim_pending_entry_reload(hass, entry.entry_id) is True
+
+    async def _boom(_hass: object, _entry: object) -> bool:
+        raise RuntimeError("teardown exploded")
+
+    monkeypatch.setattr(integration, "_async_unload_parent_entry", _boom)
+
+    with pytest.raises(RuntimeError):
+        await integration.async_unload_entry(hass, entry)
+
+    assert integration.claim_pending_entry_reload(hass, entry.entry_id) is True, (
+        "a latch kept by a failed unload would swallow every later reload"
+    )
+
+
+@pytest.mark.asyncio
+async def test_an_unload_that_returns_false_hands_the_reload_latch_back(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A refused unload reports through the return value, not an exception."""
+
+    integration = importlib.import_module("custom_components.googlefindmy")
+
+    hass = SimpleNamespace(data={})
+    entry = make_config_entry(entry_id="entry-unload-refused", parent_entry_id=None)
+
+    assert integration.claim_pending_entry_reload(hass, entry.entry_id) is True
+
+    async def _refuse(_hass: object, _entry: object) -> bool:
+        return False
+
+    monkeypatch.setattr(integration, "_async_unload_parent_entry", _refuse)
+
+    assert await integration.async_unload_entry(hass, entry) is False
+    assert integration.claim_pending_entry_reload(hass, entry.entry_id) is True, (
+        "no setup half follows a refused unload, so the latch has to come back here"
+    )
+
+
+@pytest.mark.asyncio
+async def test_the_subentry_unload_runs_through_the_same_release(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Both router branches share the release, and each frees its own entry id."""
+
+    integration = importlib.import_module("custom_components.googlefindmy")
+
+    hass = SimpleNamespace(data={})
+    entry = make_config_entry(entry_id="sub-entry", parent_entry_id="parent-entry")
+
+    assert integration.claim_pending_entry_reload(hass, "sub-entry") is True
+    assert integration.claim_pending_entry_reload(hass, "parent-entry") is True
+
+    async def _unload_sub(_hass: object, _entry: object) -> bool:
+        return True
+
+    monkeypatch.setattr(integration, "_async_unload_subentry", _unload_sub)
+
+    assert await integration.async_unload_entry(hass, entry) is True
+
+    assert integration.claim_pending_entry_reload(hass, "sub-entry") is True
+    assert integration.claim_pending_entry_reload(hass, "parent-entry") is False, (
+        "a subentry unload must not release the parent entry's latch"
+    )

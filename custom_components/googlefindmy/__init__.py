@@ -7528,18 +7528,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
             )
             return
 
-        # A reload that is already under way is not visible in the latch for the
-        # whole of its duration: ``async_unload_entry`` releases the latch as its
-        # first act (a reload has arrived at that point), while Home Assistant
-        # removes this listener only *after* ``async_unload_entry`` returns, in
-        # ``_async_process_on_unload``. Between the two lies the entire platform
-        # unload with its awaits, so an invocation queued before the reload can
-        # wake up in that window, pass the identity check above and find the
-        # latch free again: a second teardown of an entry that is already being
-        # torn down. The core closes this for us because it sets
-        # ``UNLOAD_IN_PROGRESS`` *before* calling ``async_unload_entry`` (checked
-        # in dev and in the declared floor 2025.9.1), so the state is never
-        # ``LOADED`` inside that window. An unknown state means fail-open, as
+        # Second guard against a teardown of an entry that is already being torn
+        # down. Home Assistant removes this listener only *after*
+        # ``async_unload_entry`` returns, in ``_async_process_on_unload``, so an
+        # invocation queued before a reload can still wake up during the platform
+        # unload and pass the identity check above. Two independent things stop it
+        # there: ``async_unload_entry`` now holds the latch across the whole
+        # teardown and releases it in a ``finally``, and the core sets
+        # ``UNLOAD_IN_PROGRESS`` *before* calling it (checked in dev and in the
+        # declared floor 2025.9.1), so the state below is never ``LOADED`` inside
+        # that window. The state check is the cheaper of the two and keeps working
+        # if the latch is ever claimed by someone else; it also covers the entry
+        # that is simply not loaded. An unknown state means fail-open, as
         # everywhere else here: a missing reload is worse than one too many, and
         # the test stubs do not populate the field (contract in
         # ``agents/config_flow/AGENTS.md``).
@@ -9090,10 +9090,6 @@ async def async_unload_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
 
     parent_entry_id = getattr(entry, "parent_entry_id", None)
 
-    # The claimed reload has arrived at its unload half; release the latch so a
-    # change made after this point can schedule the next one.
-    discard_pending_entry_reload(hass, entry.entry_id)
-
     # Re-arm the decoder's canonicless-device warning for this scope. That guard is
     # process-wide and survives a config-entry reload (the module stays imported), so
     # without this an unchanged affected-device count would stay suppressed across a
@@ -9103,9 +9099,24 @@ async def async_unload_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
 
     _reset_canonicless_warning_state(parent_entry_id or entry.entry_id)
 
-    if parent_entry_id:
-        return await _async_unload_subentry(hass, entry)
-    return await _async_unload_parent_entry(hass, entry)
+    try:
+        if parent_entry_id:
+            return await _async_unload_subentry(hass, entry)
+        return await _async_unload_parent_entry(hass, entry)
+    finally:
+        # The claimed reload has arrived at its unload half; release the latch so a
+        # change made after this point can schedule the next one. Deliberately in
+        # ``finally`` and not at the head of this function: the whole platform
+        # teardown runs in between, and it is the longest stretch of the reload.
+        # A latch released before it lets the state-blind schedulers -- the
+        # credential-writing config flows and the tracker registry probe, which
+        # unlike the update listener do not inspect ``entry.state`` -- claim it
+        # again and queue a second reload, even though the replacement setup that
+        # is already coming will read the newest ``entry.data`` anyway. Releasing
+        # here also covers a failed unload, where no setup half follows that could
+        # release it, and an unload that is not part of a reload at all: the entry
+        # keeps no latch it would never hand back.
+        discard_pending_entry_reload(hass, entry.entry_id)
 
 
 async def _async_refresh_discovery_watch_paths(

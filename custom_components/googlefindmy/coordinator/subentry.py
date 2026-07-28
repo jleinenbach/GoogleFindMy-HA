@@ -453,6 +453,9 @@ class SubentryOperations(_MixinBase):
 
         canonical_to_registry_id: dict[str, str] = {}
         registry_to_canonical: dict[str, str] = {}
+        # Ids that some subentry's *stored* allow-list claims, collected while the
+        # lists are read below and used by the unassigned-device merge at the end.
+        stored_assigned_ids: set[str] = set()
         if device_registry is not None:
             candidate_entries: list[Any] = []
             raw_devices = getattr(device_registry, "devices", None)
@@ -602,6 +605,15 @@ class SubentryOperations(_MixinBase):
                 else:
                     normalized_allowed = None
 
+            if normalized_allowed:
+                # Every id any subentry stores, in both spellings the loop above
+                # produced. The unassigned-device merge further down needs the
+                # *stored* assignment, not the metadata one: the service key has
+                # its visible ids forced to empty a few lines below, so a device
+                # the user moved there would otherwise look unassigned and be
+                # pulled back into the tracker -- and persisted there.
+                stored_assigned_ids.update(normalized_allowed)
+
             allow_filter = normalized_allowed
 
             if device_index:
@@ -728,6 +740,57 @@ class SubentryOperations(_MixinBase):
             )
             for feature in tracker_features:
                 feature_map.setdefault(feature, TRACKER_SUBENTRY_KEY)
+
+        # A device the account gained after the last subentry sync appears in no
+        # allow-list at all: the stored lists are a device-to-subentry assignment,
+        # not a user's show/hide choice, and every writer of the tracker list only
+        # ever feeds back what ``allow_filter`` already let through -- so the list
+        # can shrink and stay put, but nothing adds to it once the initial sync
+        # filled it. Two places already treat "assigned to nobody" as "belongs to
+        # the tracker": ``group_devices_by_subentry`` routes such a device to the
+        # default key, and the branch above that builds a missing tracker subentry
+        # uses the full device index. The stored list has to agree, or the metadata
+        # would keep calling a device invisible while its entity already exists --
+        # which is exactly what the silent-add path produces.
+        #
+        # The question asked is "does any *stored* list claim this id", not "does
+        # the metadata": a device the user moved to the service subentry is in that
+        # stored list, while its metadata visible ids are forced to empty above.
+        # Going by the metadata would quietly undo such a move and persist the
+        # device under the tracker instead.
+        if device_index and TRACKER_SUBENTRY_KEY in metadata:
+            assigned_ids: set[str] = set(stored_assigned_ids)
+            for assigned_meta in metadata.values():
+                assigned_ids.update(assigned_meta.visible_device_ids)
+            unassigned_ids = [
+                dev_id for dev_id in device_index if dev_id not in assigned_ids
+            ]
+            if unassigned_ids:
+                tracker_meta = metadata[TRACKER_SUBENTRY_KEY]
+                merged_visible = tuple(
+                    sorted(
+                        dict.fromkeys(
+                            (*tracker_meta.visible_device_ids, *unassigned_ids)
+                        )
+                    )
+                )
+                metadata[TRACKER_SUBENTRY_KEY] = replace(
+                    tracker_meta,
+                    visible_device_ids=merged_visible,
+                    enabled_device_ids=tuple(
+                        sorted(
+                            dev_id
+                            for dev_id in merged_visible
+                            if dev_id in self._enabled_poll_device_ids
+                        )
+                    ),
+                )
+                manager_visible[TRACKER_SUBENTRY_KEY] = tuple(
+                    dict.fromkeys(
+                        canonical_to_registry_id.get(dev_id, dev_id)
+                        for dev_id in merged_visible
+                    )
+                )
 
         if isinstance(entry_id, str) and entry_id:
             stable_ids = {
