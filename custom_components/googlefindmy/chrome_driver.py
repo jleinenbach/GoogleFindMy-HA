@@ -347,10 +347,18 @@ def _protected_pids() -> frozenset[int] | None:
                 current,
             )
             return None
-        if parent == 0 or parent in visited:
-            # Reached the top, or a cycle in a corrupted table: the chain above
-            # PID 1 is complete.
+        if parent == 0:
+            # PID 1's parent: the chain is complete.
             return frozenset(protected)
+        if parent in visited:
+            # A cycle proves the PPID data is inconsistent, not that the chain
+            # was walked to the end. Some ancestor above the loop is missing from
+            # the set, and signalling it is exactly the failure this prevents.
+            LOGGER.debug(
+                "Cycle in the PPID chain at PID %s; skipping process cleanup.",
+                parent,
+            )
+            return None
         protected.add(parent)
         visited.add(parent)
         current = parent

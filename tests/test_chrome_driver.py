@@ -781,10 +781,16 @@ def test_protected_pids_falls_back_to_ps_without_proc(
     assert {own, real_parent, 400, 1} <= protected
 
 
-def test_protected_pids_survives_a_cyclic_ppid_table(
+def test_protected_pids_refuses_a_cyclic_ppid_table(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A corrupted table must terminate the walk, not hang it."""
+    """A cycle terminates the walk *and* invalidates the answer.
+
+    A loop proves the PPID data is inconsistent, not that the chain was walked
+    to PID 1: some ancestor above the loop is missing from the set, and
+    signalling it is precisely the failure this helper prevents. Returning the
+    partial set would look like protection while being none.
+    """
 
     own = os.getpid()
     table = f"{own} 5\n5 7\n7 5\n"
@@ -795,9 +801,7 @@ def test_protected_pids_survives_a_cyclic_ppid_table(
         lambda cmd, **k: SimpleNamespace(returncode=0, stdout=table, stderr=""),
     )
 
-    protected = chrome_driver._protected_pids()
-
-    assert {5, 7} <= protected
+    assert chrome_driver._protected_pids() is None
 
 
 def test_read_ppid_from_proc_returns_none_without_a_ppid_line(
