@@ -7,6 +7,7 @@ import importlib
 import inspect
 import json
 import sys
+import warnings
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -30,6 +31,141 @@ def pytest_configure(config: pytest.Config) -> None:
         "markers",
         "asyncio: execute the coroutine test using an isolated event loop",
     )
+    _freeze_coordinator_identity_reference()
+
+
+#: Frozen at ``pytest_configure`` time, before the first test can patch
+#: anything.  ``None`` means the reference could not be taken; the guard then
+#: stays silent rather than reporting a leak it cannot substantiate.
+_COORDINATOR_IDENTITY_REFERENCE: type[Any] | None = None
+
+#: Module that *defines* ``GoogleFindMyCoordinator``.  Deliberately not the
+#: ``coordinator`` package: that one is the re-export other modules copy from
+#: and the one test harnesses patch, so it cannot serve as its own reference.
+_COORDINATOR_DEFINING_MODULE = "custom_components.googlefindmy.coordinator.main"
+
+#: Modules that bind ``GoogleFindMyCoordinator`` into their own namespace at
+#: import time (``from .coordinator import GoogleFindMyCoordinator`` at module
+#: level).  Each copies whatever ``coordinator`` holds at the moment of its
+#: first import, so an import that happens *inside* a patch window captures the
+#: stub permanently: ``monkeypatch`` only undoes the assignments it made itself
+#: and knows nothing about the copies.  Every harness that patches the symbol
+#: therefore imports this list before it patches anything.
+#:
+#: Lives here rather than in one test module because three harnesses need it;
+#: two of them used to carry hand-written, incomplete copies.  Derived by AST
+#: scan, pinned by ``tests/test_guard_coordinator_identity.py``.
+COORDINATOR_CONSUMER_MODULES: tuple[str, ...] = (
+    "custom_components.googlefindmy.binary_sensor",
+    "custom_components.googlefindmy.button",
+    "custom_components.googlefindmy.device_tracker",
+    "custom_components.googlefindmy.eid_resolver",
+    "custom_components.googlefindmy.entity",
+    "custom_components.googlefindmy.repairs",
+    "custom_components.googlefindmy.sensor",
+)
+
+#: Package prefix the guard scans.  Compared as ``name == PREFIX`` or
+#: ``name.startswith(PREFIX + ".")`` so a hypothetical sibling package such as
+#: ``custom_components.googlefindmy_legacy`` is not swept in by accident.
+_INTEGRATION_PACKAGE = "custom_components.googlefindmy"
+
+#: Modules exempt from the identity check.  The integration package binds the
+#: symbol lazily through ``_ensure_runtime_imports()`` (see the teardown hook
+#: below), so a placeholder there is an expected, self-healing state rather
+#: than a leak.  This exemption alone carries that case: the healing helper does
+#: not influence it.
+_COORDINATOR_IDENTITY_EXEMPT = frozenset({_INTEGRATION_PACKAGE})
+
+
+def _freeze_coordinator_identity_reference() -> None:
+    """Remember the production coordinator class before any test runs.
+
+    Load-bearing side effect: importing ``coordinator.main`` also imports its
+    parent package ``custom_components.googlefindmy.coordinator``.  That keeps
+    the fallback branch in ``tests/test_button_setup.py`` (which would install a
+    permanent, unpatched ``ModuleType`` stub under that name) unreachable.
+    Making this reference lazy would re-open it, and the guard would then report
+    an unhealable leak.
+    """
+
+    global _COORDINATOR_IDENTITY_REFERENCE
+
+    try:
+        module = importlib.import_module(_COORDINATOR_DEFINING_MODULE)
+    except Exception as err:  # noqa: BLE001 - a missing reference disables the guard
+        # Never silent: without a reference the guard returns "no leaks" for the
+        # whole session, so the reason has to reach whoever wonders why
+        # ``test_guard_reports_a_replaced_symbol`` went red.
+        warnings.warn(
+            "coordinator identity guard disabled: could not import "
+            f"{_COORDINATOR_DEFINING_MODULE} ({err!r})",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        return
+    _COORDINATOR_IDENTITY_REFERENCE = getattr(module, "GoogleFindMyCoordinator", None)
+
+
+def detect_coordinator_identity_leaks() -> list[str]:
+    """Return the modules whose ``GoogleFindMyCoordinator`` is not the real one.
+
+    A module that does ``from .coordinator import GoogleFindMyCoordinator`` at
+    import time takes a *copy* of whatever the source module holds right then.
+    When that import happens inside a ``monkeypatch`` window, the copy is the
+    test stub, and ``monkeypatch`` cannot undo a binding it never made: the
+    stub then survives for the rest of the session and every later
+    ``isinstance`` check against the production class fails somewhere else
+    entirely.  Checking identity after each test names the culprit instead of
+    the victim.
+
+    Two blind spots, both accepted knowingly:
+
+    * The reference comes from ``coordinator.main``.  A test that patches the
+      class *there* would move the yardstick along with the measurement, which
+      is why the reference is frozen at configure time rather than read on
+      demand.
+    * ``importlib.reload(coordinator.main)`` would build a fresh class object.
+      Every consumer reloaded afterwards would then differ from the frozen
+      reference permanently, without a leak being present.  No test reloads
+      that module today.
+    """
+
+    reference = _COORDINATOR_IDENTITY_REFERENCE
+    if reference is None:
+        return []
+
+    leaked: list[str] = []
+    for name, module in list(sys.modules.items()):
+        if name != _INTEGRATION_PACKAGE and not name.startswith(
+            _INTEGRATION_PACKAGE + "."
+        ):
+            continue
+        if name in _COORDINATOR_IDENTITY_EXEMPT:
+            continue
+        current = getattr(module, "GoogleFindMyCoordinator", None)
+        if current is not None and current is not reference:
+            leaked.append(name)
+    return sorted(leaked)
+
+
+def _restore_coordinator_identity(modules: list[str]) -> None:
+    """Put the production class back into the modules a test poisoned.
+
+    Reporting alone is not enough.  The stub stays in the consumer's namespace,
+    so without this the *next* test, and every test after it, fails in teardown
+    for a leak it did not cause: one culprit turns into a red session and the
+    diagnosis gets worse, not better.  Healing keeps the failure attributable to
+    exactly one test.
+    """
+
+    reference = _COORDINATOR_IDENTITY_REFERENCE
+    if reference is None:
+        return
+    for name in modules:
+        module = sys.modules.get(name)
+        if module is not None:
+            module.GoogleFindMyCoordinator = reference
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -144,7 +280,27 @@ def disable_http_server() -> Iterable[None]:
 
 @pytest.hookimpl(trylast=True)
 def pytest_runtest_teardown() -> None:
-    """Heal the lazy ``GoogleFindMyCoordinator`` symbol after each test.
+    """Heal the lazy symbol, then fail the culprit of a cross-test symbol leak.
+
+    Two independent jobs share this hook because both need the same moment:
+    after every fixture finalizer, ``monkeypatch`` included.
+
+    **Part one** heals the lazy ``GoogleFindMyCoordinator`` symbol in the
+    integration package (details below).
+
+    **Part two** is the cross-test guard:
+    :func:`detect_coordinator_identity_leaks` compares every integration
+    module's ``GoogleFindMyCoordinator`` against the class frozen at configure
+    time.  A mismatch means a stub outlived its ``monkeypatch`` window; the test
+    that caused it fails here rather than an unrelated test file failing minutes
+    later.  For that promise to hold, the symbol is *restored* before the
+    failure is raised: reporting alone would leave the stub in place and redden
+    every following test as well.
+
+    The two parts are independent, and the order between them does not matter:
+    part one only touches the integration package itself, and that package is
+    exempt from part two's check anyway (see
+    ``_COORDINATOR_IDENTITY_EXEMPT``).
 
     The integration package binds ``GoogleFindMyCoordinator`` lazily: it starts
     as a placeholder class and ``_ensure_runtime_imports()`` swaps in the real
@@ -166,6 +322,24 @@ def pytest_runtest_teardown() -> None:
     classes are checked, not only the coordinator, because the same monkeypatch
     trap applies symmetrically to ``DiscoveryManager`` and the two map views.
     """
+
+    _heal_lazy_runtime_imports()
+
+    leaked = detect_coordinator_identity_leaks()
+    if leaked:
+        _restore_coordinator_identity(leaked)
+        pytest.fail(
+            "this test left a foreign GoogleFindMyCoordinator in "
+            f"{leaked}. A module that imports the symbol at module level copies "
+            "it; when that first import happens inside a monkeypatch window the "
+            "copy is the stub and monkeypatch cannot undo it. Import those "
+            "modules before patching, or patch them too.",
+            pytrace=False,
+        )
+
+
+def _heal_lazy_runtime_imports() -> None:
+    """Rebind the integration package's lazily loaded runtime classes."""
 
     integration = sys.modules.get("custom_components.googlefindmy")
     if integration is None:

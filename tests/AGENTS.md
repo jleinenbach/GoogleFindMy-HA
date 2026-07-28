@@ -238,6 +238,12 @@ are installed. **Review this checklist on every single change under
    Assistant components continue to wrap those imports in
    `pytest.skip(..., allow_module_level=True)` guards so the suite
    degrades gracefully when the plugin is absent.
+7. **Cross-test symbol identity** — confirm
+   `detect_coordinator_identity_leaks()` in `tests/conftest.py` still runs from
+   `pytest_runtest_teardown` and that its reference is still frozen in
+   `pytest_configure`. Reading the reference on demand instead would let a
+   patched source module move the yardstick along with the measurement. See
+   [Patching a symbol that other modules copy at import time](#patching-a-symbol-that-other-modules-copy-at-import-time).
 
 Treat this checklist as a living document: if a new helper or guard
 becomes necessary, add it here and verify each item before completing
@@ -283,6 +289,49 @@ sync with reality when refactoring:
 
 If a test stops using an attribute, update both the harness comment and this
 list so future cleanups can trim unused fields confidently.
+
+### Patching a symbol that other modules copy at import time
+
+A module that does `from .coordinator import GoogleFindMyCoordinator` at module
+level takes a **copy** of whatever the source module holds at that moment.
+`monkeypatch` only undoes the assignments it made itself, so a module whose
+*first* import happens inside a patch window keeps the stub for the rest of the
+session. The symptom appears far from the cause: an unrelated test file that
+subclasses the poisoned symbol later fails with
+`HomeAssistantError: googlefindmy coordinator not ready` from
+`entity.resolve_coordinator`.
+
+Whenever you patch a symbol that other modules bind at module level:
+
+* **Import every consumer before the first `monkeypatch.setattr`**, so the copy
+  they take is the production object. `_prepare_async_setup_entry_harness`
+  does this via `_COORDINATOR_CONSUMER_MODULES`; that tuple was derived from an
+  AST scan for module-level `ImportFrom` nodes naming the symbol, not from
+  guesswork, and it must be re-derived when a new module starts importing the
+  coordinator.
+* **Or patch the consumers too**, if a test genuinely needs them to see the
+  stub (this is why the harness pops and re-imports `map_view`).
+
+`tests/conftest.py` enforces the rule for `GoogleFindMyCoordinator`:
+`detect_coordinator_identity_leaks()` runs in `pytest_runtest_teardown` and
+fails the **causing** test. Its scope is deliberately one symbol — the one with
+a measured failure — while an AST sweep over `tests/` found eleven further
+symbols with the same structure (`ClientSession`, `Store`, `HomeAssistant`,
+`WebDriverWait`, and others). Those are structural candidates, not known
+defects; extend the guard when one of them actually bites.
+
+`tests/test_guard_coordinator_identity.py` covers the detection logic and pins
+the fix statically: the consumer tuple must still equal the AST-derived set of
+module-level binders, and the import loop must still precede the first
+`monkeypatch.setattr`. The teardown *wiring* is verified by mutation rather
+than by a test: remove the early imports from
+`_prepare_async_setup_entry_harness` and
+`test_programmatic_subentry_creation_triggers_setup_and_entities` errors at
+teardown naming `device_tracker`. Testing that wiring from inside the session
+would require leaving a real leak behind — an earlier draft tried a runtime
+reproduction (dropping the consumers from `sys.modules` and re-importing them
+inside the window) and leaked `entity.get_url` into `test_metadata_helpers.py`
+instead. Do not reintroduce that approach.
 
 ## ADM token retrieval contract
 
