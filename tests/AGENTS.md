@@ -345,6 +345,46 @@ reproduction (dropping the consumers from `sys.modules` and re-importing them
 inside the window) and leaked `entity.get_url` into `test_metadata_helpers.py`
 instead. Do not reintroduce that approach.
 
+## No command-line-pattern process kills
+
+`pkill -f <pattern>` and `killall` select by matching the **full command line**
+of every process on the machine, so any ancestor of the calling process whose
+argv happens to carry the pattern is a valid target. The tool spares only itself,
+never its caller. Measured on 2026-07-28: `chrome_driver.py` ran
+`subprocess.run(["pkill", "-f", "chrome"])` in the Chrome auth flow, and a pytest
+invocation that had `tests/test_chrome_driver.py` in its argv was killed by the
+CLI subprocess it had started — exit 143 (SIGTERM), no traceback, no summary. The
+A/B control differed only by a `-k` filter matching nothing, i.e. by the word in
+argv alone: without it exit 0, with it exit 143.
+
+Use `chrome_driver._terminate_matching_processes(pattern)` instead: it keeps the
+`pgrep` selection (same matcher, so the same processes are found) but filters the
+own PID and the whole ancestry before signalling. `taskkill /f /im chrome.exe` is
+**not** affected — it matches the image name, not a command line.
+
+`tests/test_guard_process_pattern_kill.py` pins the **literal** forms with an AST
+scan over `custom_components/googlefindmy/**` and `tests/**`: an argv list, a
+`shell=True` string, and `["sh", "-c", "…"]`. Its `LEGACY_ALLOWLIST` is empty
+because both historical call sites were migrated in the same change. The guard
+deliberately does *not* see commands assembled from variables or `os.exec*`
+invocations — that is the price of zero false positives, and it means the guard
+is a ratchet, not a proof.
+
+CLI subprocess tests carry the second half of the defence: `tests/test_main.py`
+runs them through the `cli_sandbox` fixture. It shims `pkill`/`killall` onto
+`PATH` into one sentinel file and `pgrep` (the sanctioned lookup) into a separate
+one, so a kill attempt is a failed assertion while a legitimate lookup is not; it
+points `GOOGLEFINDMY_SECRETS_PATH` at a throwaway file so the tests stop reading
+and writing the developer's own `Auth/secrets.json`; and it *drops*
+`GOOGLEFINDMY_CONTAINER_LOGIN` and the other branch-steering variables from the
+inherited environment. That last part is not cosmetic: with the variable exported
+in the developer's shell, the CLI takes the container branch, skips both the
+desktop gate and the cleanup, and actually launches Chromium — the assertions
+would pass while covering nothing. New tests that spawn the CLI must use the
+fixture, assert `_assert_no_process_kill`, and assert positively *where* the CLI
+stopped (`"attended terminal" in stderr`), so they cannot become vacuous when an
+unrelated change makes the CLI exit earlier.
+
 ## ADM token retrieval contract
 
 The ADM token helpers (`custom_components/googlefindmy/Auth/adm_token_retrieval.py`)
