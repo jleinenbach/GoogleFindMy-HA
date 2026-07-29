@@ -98,7 +98,14 @@ try:
         ConfigEntryState,
         OperationNotAllowed,
     )
-except ImportError:  # Pre-2025.5 HA builds do not expose the helper.
+except ImportError:  # pragma: no cover - pre-2025.5 builds are below our floor
+    # Unreachable on every supported core: hacs.json declares 2025.9.1, and
+    # ``OperationNotAllowed`` has been exported since 2025.5. Kept as a landing
+    # pad rather than removed, and marked instead of tested because reaching it
+    # would mean importing a core we do not support. Note the asymmetry: only
+    # this helper is optional. ``ConfigEntry`` and ``ConfigEntryState`` are hard
+    # requirements here, so their disappearance is meant to fail loudly at
+    # import time rather than degrade quietly.
     from homeassistant.config_entries import ConfigEntry, ConfigEntryState
 
     OperationNotAllowed = type("OperationNotAllowed", (HomeAssistantError,), {})
