@@ -176,7 +176,8 @@ async def test_semantic_locations_options_lifecycle() -> None:
         "longitude": 78.0,
         "accuracy": 45.0,
     }
-    assert hass.config_entries.reloaded == [entry.entry_id]
+    assert hass.config_entries.scheduled_reloads == [entry.entry_id]
+    assert hass.config_entries.reloaded == []
 
     duplicate = await flow.async_step_semantic_locations_add(
         {
@@ -187,6 +188,16 @@ async def test_semantic_locations_options_lifecycle() -> None:
         }
     )
     assert duplicate["errors"] == {"semantic_name": "duplicate_semantic_location"}
+
+    # The add above claimed the shared latch, and in production the scheduled
+    # reload hands it back when it arrives (release points: unload and setup).
+    # Nothing schedules a real reload here, so the release is replayed by hand.
+    # Without it the delete below would stand down -- correctly, but for a reason
+    # that exists only in this stub, and the second user action would go
+    # unmeasured.
+    config_flow.import_integration_package().discard_pending_entry_reload(
+        hass, entry.entry_id
+    )
 
     delete_form = await flow.async_step_semantic_locations_delete(None)
     selected = {marker.schema for marker in delete_form["data_schema"].schema}
@@ -201,7 +212,11 @@ async def test_semantic_locations_options_lifecycle() -> None:
     assert hass.config_entries.updated_options[-1][OPT_SEMANTIC_LOCATIONS] == {
         "Office": {"latitude": 1.0, "longitude": 2.0, "accuracy": 3.0}
     }
-    assert hass.config_entries.reloaded == [entry.entry_id, entry.entry_id]
+    # Two entries, not one: adding and deleting are two separate user actions,
+    # each owning its own reload, with the replayed release in between standing
+    # in for the reload that a running core would have delivered.
+    assert hass.config_entries.scheduled_reloads == [entry.entry_id, entry.entry_id]
+    assert hass.config_entries.reloaded == []
 
 
 @pytest.mark.asyncio
@@ -273,12 +288,13 @@ async def test_semantic_location_edit_prefills_existing_values() -> None:
 
 
 def test_the_scheduling_double_matches_the_core_call_shape() -> None:
-    """The recorder has to be reachable and synchronous, or AP4 debugs a typo.
+    """The recorder has to be reachable and synchronous, or a typo hides here.
 
-    Nothing in this file asserts on ``scheduled_reloads`` yet -- the options
-    steps still take the awaited route. Without this check a misspelled method
-    name would stay invisible here and only surface one work package later, as a
-    production helper silently taking its "no lever" branch.
+    The tests above now assert on ``scheduled_reloads``, so a misspelled method
+    name would no longer pass unnoticed. What stays worth pinning is the *shape*:
+    an awaitable double would let the production call site look awaitable when it
+    is not, and a recorder that quietly chained into ``async_reload`` would make
+    the two routes indistinguishable.
     """
 
     entry = make_config_entry(entry_id="entry-shape", title="Shape")
@@ -297,3 +313,130 @@ def test_the_scheduling_double_matches_the_core_call_shape() -> None:
         "the two recorders have to stay distinguishable; that is the whole "
         "point of keeping async_reload next to it"
     )
+
+
+# --- AP4: the semantic steps stand behind the single reload owner ------------
+
+
+def _latch_is_free(hass: Any, entry_id: str) -> bool:
+    """Whether the shared reload latch of ``entry_id`` can be claimed again.
+
+    Claims the latch as a side effect, so this belongs at the end of a test.
+    Same shape as the helper in ``tests/test_config_flow_reload_latch_state_guard.py``.
+    """
+
+    integration = config_flow.import_integration_package()
+    return bool(integration.claim_pending_entry_reload(hass, entry_id))
+
+
+def _claim_latch(hass: Any, entry_id: str) -> None:
+    """Take the shared latch on behalf of a foreign reload owner."""
+
+    integration = config_flow.import_integration_package()
+    assert integration.claim_pending_entry_reload(hass, entry_id) is True
+
+
+def _semantic_flow(hass: Any, entry: Any) -> Any:
+    """An options flow bound to ``hass`` and ``entry``."""
+
+    flow = config_flow.OptionsFlowHandler()
+    flow.hass = hass  # type: ignore[assignment]
+    flow.config_entry = entry  # type: ignore[attr-defined]
+    return flow
+
+
+@pytest.mark.asyncio
+async def test_a_delete_schedules_exactly_one_reload() -> None:
+    """Test A: the normal path owns its reload and schedules it once."""
+
+    entry = make_config_entry(
+        entry_id="entry-semantic",
+        title="Semantic",
+        options={
+            OPT_SEMANTIC_LOCATIONS: {
+                "Office": {"latitude": 1.0, "longitude": 2.0, "accuracy": 3.0}
+            }
+        },
+    )
+    hass = _HassStub(entry)
+    flow = _semantic_flow(hass, entry)
+
+    result = await flow.async_step_semantic_locations_delete(
+        {"semantic_locations": ["Office"]}
+    )
+
+    assert result["type"] == "menu"
+    assert hass.config_entries.scheduled_reloads == [entry.entry_id]
+    assert hass.config_entries.reloaded == []
+
+
+@pytest.mark.asyncio
+async def test_a_foreign_owner_makes_the_delete_stand_down_but_not_skip() -> None:
+    """Test B: standing down never costs the write.
+
+    The second assertion is the point of the whole work package: the options are
+    in the entry before the claim, so the foreign reload picks them up. A version
+    that stood down *before* writing would pass the first assertion and lose the
+    user's deletion.
+    """
+
+    entry = make_config_entry(
+        entry_id="entry-semantic",
+        title="Semantic",
+        options={
+            OPT_SEMANTIC_LOCATIONS: {
+                "Office": {"latitude": 1.0, "longitude": 2.0, "accuracy": 3.0}
+            }
+        },
+    )
+    hass = _HassStub(entry)
+    _claim_latch(hass, entry.entry_id)
+    flow = _semantic_flow(hass, entry)
+
+    result = await flow.async_step_semantic_locations_delete(
+        {"semantic_locations": ["Office"]}
+    )
+
+    assert result["type"] == "menu"
+    assert hass.config_entries.scheduled_reloads == []
+    assert hass.config_entries.reloaded == []
+    assert entry.options[OPT_SEMANTIC_LOCATIONS] == {}
+
+
+@pytest.mark.asyncio
+async def test_a_core_without_the_lever_leaves_the_latch_alone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Test C: no lever, no reload -- and above all no burnt latch.
+
+    An implementation that claimed first and only then noticed the missing
+    ``async_schedule_reload`` would leave the latch set for the lifetime of the
+    process and swallow every later reload of this entry.
+    """
+
+    entry = make_config_entry(
+        entry_id="entry-semantic",
+        title="Semantic",
+        options={
+            OPT_SEMANTIC_LOCATIONS: {
+                "Office": {"latitude": 1.0, "longitude": 2.0, "accuracy": 3.0}
+            }
+        },
+    )
+    # Removed on the class, not shadowed on the instance: the production helper
+    # resolves the lever with ``getattr(..., None)``, and an instance attribute
+    # set to ``None`` would exercise the same branch for the wrong reason. A core
+    # from before ``async_schedule_reload`` simply does not carry the method.
+    monkeypatch.delattr(_SemanticConfigEntries, "async_schedule_reload")
+    hass = _HassStub(entry)
+    flow = _semantic_flow(hass, entry)
+
+    result = await flow.async_step_semantic_locations_delete(
+        {"semantic_locations": ["Office"]}
+    )
+
+    assert result["type"] == "menu"
+    assert hass.config_entries.scheduled_reloads == []
+    assert hass.config_entries.reloaded == []
+    assert entry.options[OPT_SEMANTIC_LOCATIONS] == {}
+    assert _latch_is_free(hass, entry.entry_id) is True

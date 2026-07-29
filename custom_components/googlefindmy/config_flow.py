@@ -3162,8 +3162,19 @@ def _entry_reload_is_hopeless(
 def _schedule_claimed_reload(hass: HomeAssistant, entry_id: str) -> bool:
     """Schedule the one reload of ``entry_id`` and report whether it was ours.
 
-    Single owner of the write-then-reload sequence used by every credential
-    writing path in this flow. Order matters twice: the availability of
+    Single owner for the paths that route through it, which is no longer only
+    the credential paths: the semantic-location and subentry repair steps go
+    through here too, and they are the ones *without* a fallback, because the
+    credential update listener returns early on an unchanged fingerprint.
+
+    It is deliberately **not** the only claimant in this module. Three paths
+    still take ``_claim_entry_reload`` and call ``async_reload`` themselves and
+    therefore bypass the hopeless-state gate below: the discovery unique-id
+    guard, ``_async_reload_entry_after_reconfigure`` and ``_finalize_success``.
+    Routing them here is a separate change with its own regression surface;
+    until then a latch they leak also blocks the steps routed here, so do not
+    read this docstring as "every path in this flow". Order matters twice: the
+    availability of
     ``async_schedule_reload`` is checked **before** the claim, so an old core
     without it does not burn the latch, and the claim happens **last**, so the
     window between claim and scheduling stays as short as it can be. If the
@@ -3179,8 +3190,8 @@ def _schedule_claimed_reload(hass: HomeAssistant, entry_id: str) -> bool:
     )
     if not callable(schedule_reload):
         _LOGGER.debug(
-            "async_schedule_reload is unavailable; entry %s keeps its old "
-            "credentials until it is reloaded",
+            "async_schedule_reload is unavailable; the write for entry %s is "
+            "stored but takes effect only after the next reload or restart",
             entry_id,
         )
         return False
@@ -3210,7 +3221,7 @@ def _schedule_claimed_reload(hass: HomeAssistant, entry_id: str) -> bool:
         schedule_reload(entry_id)
     except Exception:  # noqa: BLE001 - the write itself already landed
         _LOGGER.exception(
-            "Failed to schedule the reload of entry %s after writing credentials",
+            "Failed to schedule the reload of entry %s after writing to it",
             entry_id,
         )
         _discard_entry_reload(hass, entry_id)
@@ -7928,9 +7939,18 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin, _ContainerLoginMixi
         self.hass.config_entries.async_update_entry(
             self.config_entry, options=new_options
         )
-        self.hass.async_create_task(
-            self.hass.config_entries.async_reload(self.config_entry.entry_id)
-        )
+        # Standing down is safe as long as the holder keeps its promise: the
+        # options are already in the entry above, and the latch is only handed
+        # back once the foreign reload has *finished* its unload half (release
+        # in the ``finally`` at its end) or, where there was none because the
+        # entry was not loaded, at the head of the setup. In both of those cases
+        # the setup half reads the state written here. One window is *not*
+        # covered: the core returns from ``async_reload`` before any setup when
+        # the holder's unload fails or the entry was disabled in between, and
+        # then this write waits for the next reload or restart. That is the
+        # mirror image of the state gate in ``_schedule_claimed_reload``, which
+        # keeps us from becoming such a holder ourselves.
+        _schedule_claimed_reload(self.hass, self.config_entry.entry_id)
         return await self.async_step_init()
 
     async def _async_semantic_location_form(
@@ -8028,9 +8048,11 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin, _ContainerLoginMixi
         self.hass.config_entries.async_update_entry(
             self.config_entry, options=new_options
         )
-        self.hass.async_create_task(
-            self.hass.config_entries.async_reload(self.config_entry.entry_id)
-        )
+        # Same reasoning as in ``async_step_semantic_locations_delete``: the new
+        # mapping is in the entry before the claim, and the latch comes back only
+        # after the foreign reload finished its unload half or, lacking one, at
+        # the head of the setup, so its setup half picks the mapping up.
+        _schedule_claimed_reload(self.hass, self.config_entry.entry_id)
         self._semantic_location_editing = None
         return await self.async_step_init()
 
@@ -8410,9 +8432,12 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin, _ContainerLoginMixi
                     description_placeholders=placeholders,
                 )
 
-            self.hass.async_create_task(
-                self.hass.config_entries.async_reload(self.config_entry.entry_id)
-            )
+            # Unlike the semantic steps there is an ``await`` between the write
+            # and the claim (``_async_assign_devices_to_subentry`` above), during
+            # which a foreign reload may release the latch again. That leads to
+            # two reloads at worst -- a nuisance, not a loss: the assignment is
+            # already in the entry either way.
+            _schedule_claimed_reload(self.hass, self.config_entry.entry_id)
             return self.async_abort(
                 reason="subentry_move_success", description_placeholders=placeholders
             )
@@ -8479,9 +8504,10 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin, _ContainerLoginMixi
                 "count": str(len(devices)),
             }
 
-            self.hass.async_create_task(
-                self.hass.config_entries.async_reload(self.config_entry.entry_id)
-            )
+            # Same window as in ``async_step_repairs_move``: the removal is
+            # awaited above and done, so a latch that changed hands in between
+            # costs at most a second reload, never the change itself.
+            _schedule_claimed_reload(self.hass, self.config_entry.entry_id)
             return self.async_abort(
                 reason="subentry_delete_success",
                 description_placeholders=placeholders,
