@@ -3164,8 +3164,19 @@ def _schedule_claimed_reload(hass: HomeAssistant, entry_id: str) -> bool:
 
     Single owner for the paths that route through it, which is no longer only
     the credential paths: the semantic-location and subentry repair steps go
-    through here too, and they are the ones *without* a fallback, because the
-    credential update listener returns early on an unchanged fingerprint.
+    through here too. Their fallbacks differ, and the difference decides what a
+    stand-down actually costs. The credential update listener is a fallback for
+    neither of them, because it returns early on an unchanged fingerprint. The
+    semantic steps have a stronger one in its place: ``_apply_semantic_mapping``
+    reads ``entry.options`` live on every payload, and ``async_update_entry``
+    writes into the very entry object the coordinator holds, so the mapping is
+    effective without any reload and the reload only pulls the first application
+    forward through the first refresh at the end of the setup. The subentry
+    repair steps are the ones that need it, and only for one half: their metadata
+    still reaches the coordinator at the next poll, because
+    ``_refresh_subentry_index`` re-reads ``entry.subentries`` there as well, but
+    the entity-to-subentry binding is handed out at platform setup and changes on
+    a reload only.
 
     It is deliberately **not** the only claimant in this module. Three paths
     still take ``_claim_entry_reload`` and call ``async_reload`` themselves and
@@ -7939,17 +7950,20 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin, _ContainerLoginMixi
         self.hass.config_entries.async_update_entry(
             self.config_entry, options=new_options
         )
-        # Standing down is safe as long as the holder keeps its promise: the
-        # options are already in the entry above, and the latch is only handed
-        # back once the foreign reload has *finished* its unload half (release
-        # in the ``finally`` at its end) or, where there was none because the
-        # entry was not loaded, at the head of the setup. In both of those cases
-        # the setup half reads the state written here. One window is *not*
-        # covered: the core returns from ``async_reload`` before any setup when
-        # the holder's unload fails or the entry was disabled in between, and
-        # then this write waits for the next reload or restart. That is the
-        # mirror image of the state gate in ``_schedule_claimed_reload``, which
-        # keeps us from becoming such a holder ourselves.
+        # Standing down costs the reload, never the mapping. The options are in
+        # the entry above, and ``_apply_semantic_mapping`` reads them live from
+        # that same object on every payload, so the next poll or push applies
+        # them whatever the foreign holder does; the reload only pulls that
+        # forward. Do not restate the narrower claim this comment used to make
+        # ("safe as long as the holder keeps its promise, one window is not
+        # covered"). It rested on the holder reaching a setup, and there are
+        # several ways it does not: a cancelled or refused reload task, a
+        # scheduling call that raised, a failed unload, an entry disabled in
+        # between, and the core-owned task after ``async_schedule_reload`` that
+        # can die unobserved (see the residual paragraph in
+        # ``agents/runtime_patterns/AGENTS.md``). None of them reaches this
+        # write, which is why the live read and not the promise is the reason
+        # standing down is safe here.
         _schedule_claimed_reload(self.hass, self.config_entry.entry_id)
         return await self.async_step_init()
 
@@ -8049,9 +8063,9 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin, _ContainerLoginMixi
             self.config_entry, options=new_options
         )
         # Same reasoning as in ``async_step_semantic_locations_delete``: the new
-        # mapping is in the entry before the claim, and the latch comes back only
-        # after the foreign reload finished its unload half or, lacking one, at
-        # the head of the setup, so its setup half picks the mapping up.
+        # mapping is in the entry before the claim and is read live from there,
+        # so a stand-down delays the first application to the next poll or push
+        # and loses nothing, whether or not the foreign holder reaches a setup.
         _schedule_claimed_reload(self.hass, self.config_entry.entry_id)
         self._semantic_location_editing = None
         return await self.async_step_init()
@@ -8432,11 +8446,22 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin, _ContainerLoginMixi
                     description_placeholders=placeholders,
                 )
 
-            # Unlike the semantic steps there is an ``await`` between the write
-            # and the claim (``_async_assign_devices_to_subentry`` above), during
-            # which a foreign reload may release the latch again. That leads to
-            # two reloads at worst -- a nuisance, not a loss: the assignment is
-            # already in the entry either way.
+            # Two directions here, and only one of them is a nuisance. Towards a
+            # second reload: unlike the semantic steps there is an ``await``
+            # between the write and the claim
+            # (``_async_assign_devices_to_subentry`` above), during which a
+            # foreign reload may release the latch again, which costs one reload
+            # too many and never the assignment. Towards no reload at all:
+            # standing down leaves the assignment stored, and the coordinator
+            # still picks its metadata up at the next poll, because
+            # ``_refresh_subentry_index`` re-reads ``entry.subentries`` there.
+            # What waits for a reload is the entity-to-subentry binding, which
+            # platform setup hands out. If the holder ends in one of the dead
+            # ends that release the latch without reloading, that half waits for
+            # the next reload. Weigh it against the fact that
+            # ``async_step_visibility`` performs the same assignment with no
+            # reload at all: the two steps disagree, and that disagreement is
+            # older than this latch.
             _schedule_claimed_reload(self.hass, self.config_entry.entry_id)
             return self.async_abort(
                 reason="subentry_move_success", description_placeholders=placeholders
@@ -8504,9 +8529,13 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin, _ContainerLoginMixi
                 "count": str(len(devices)),
             }
 
-            # Same window as in ``async_step_repairs_move``: the removal is
-            # awaited above and done, so a latch that changed hands in between
-            # costs at most a second reload, never the change itself.
+            # Same two directions as in ``async_step_repairs_move``: the removal
+            # is awaited above and done, and the core clears the device and
+            # entity registry links of the subentry as part of it, so a latch
+            # that changed hands in between costs at most a second reload, never
+            # the change itself. In the other direction, a stand-down whose
+            # holder never reaches a setup leaves the already loaded entities of
+            # the removed subentry standing until the next reload.
             _schedule_claimed_reload(self.hass, self.config_entry.entry_id)
             return self.async_abort(
                 reason="subentry_delete_success",
