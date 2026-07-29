@@ -1275,9 +1275,17 @@ class GoogleFindMyCoordinator(
         if entry is None:
             return False
 
+        # Presence, not truthiness. The options flow writes this key on every
+        # add, edit and delete, so an empty mapping is the user having removed
+        # their last semantic location -- a deliberate "no mappings", not a
+        # missing setting. Falling through to `entry.data` on a falsy value
+        # revived the pre-migration copy, which `_async_soft_migrate_data_to_
+        # options` only ever copies and never clears, so the deleted mapping
+        # kept relabelling coordinates as `trusted` and survived restarts.
         options = getattr(entry, "options", None) or {}
-        raw_mappings = options.get(OPT_SEMANTIC_LOCATIONS)
-        if not raw_mappings:
+        if OPT_SEMANTIC_LOCATIONS in options:
+            raw_mappings = options[OPT_SEMANTIC_LOCATIONS]
+        else:
             data = getattr(entry, "data", None) or {}
             raw_mappings = data.get(OPT_SEMANTIC_LOCATIONS)
         if not isinstance(raw_mappings, Mapping):
