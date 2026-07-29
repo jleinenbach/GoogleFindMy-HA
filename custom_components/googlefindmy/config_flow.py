@@ -93,9 +93,13 @@ from homeassistant.helpers.event import async_call_later
 from homeassistant.helpers.storage import Store
 
 try:
-    from homeassistant.config_entries import ConfigEntry, OperationNotAllowed
+    from homeassistant.config_entries import (
+        ConfigEntry,
+        ConfigEntryState,
+        OperationNotAllowed,
+    )
 except ImportError:  # Pre-2025.5 HA builds do not expose the helper.
-    from homeassistant.config_entries import ConfigEntry
+    from homeassistant.config_entries import ConfigEntry, ConfigEntryState
 
     OperationNotAllowed = type("OperationNotAllowed", (HomeAssistantError,), {})
 
@@ -3032,6 +3036,129 @@ def _discard_entry_reload(hass: HomeAssistant, entry_id: str) -> None:
         )
 
 
+_TERMINAL_ENTRY_RELOAD_STATES: Final[frozenset[Any]] = frozenset(
+    state
+    for state in (
+        getattr(ConfigEntryState, "MIGRATION_ERROR", None),
+        getattr(ConfigEntryState, "FAILED_UNLOAD", None),
+    )
+    if state is not None
+)
+"""Entry states a reload can no longer come back from.
+
+A **positive list of terminal states**, not the negation of an "is recoverable"
+property. Home Assistant reports ``recoverable is False`` for four states, but
+only two of them are terminal: ``MIGRATION_ERROR`` and ``FAILED_UNLOAD`` stay
+that way without outside help, while ``SETUP_IN_PROGRESS`` and
+``UNLOAD_IN_PROGRESS`` heal within seconds. ``async_reload`` enters
+``entry.setup_lock``, which the running setup holds, so a reload scheduled
+during either transient state waits and then runs against a state that is
+recoverable again. Standing down for them would drop a legitimate reload -- and
+with it freshly written credentials -- which is the very damage this latch
+exists to prevent, only with the sign flipped. A future, unknown state is not in
+this set either and therefore keeps today's behaviour.
+
+The members are resolved from the imported symbols rather than spelled as
+strings, and a name that cannot be resolved drops out of the set instead of
+raising: an upstream rename shrinks the set (fail-open, reload as before)
+instead of breaking the flow. ``tests/test_config_flow_reload_latch_state_guard.py``
+pins that the set did not silently run empty.
+"""
+
+
+def _resolve_config_entry(hass: HomeAssistant, entry_id: str) -> Any | None:
+    """Look ``entry_id`` up through the entry manager, ``None`` when that fails.
+
+    One place for the lookup, so the state gate and its caller cannot disagree
+    on which manager method to use or on how a missing one is treated. Every
+    doubt ends in ``None``; the callers read that as "no information" and carry
+    on rather than standing down.
+
+    ``async_get_entry`` and not ``async_get_known_entry``: it is the way already
+    established in this module, it returns ``None`` instead of raising
+    ``UnknownEntry``, and the test stub carries it.
+
+    No guard against an empty ``entry_id`` here: the only callers rule that out
+    before they get this far, and the manager answers ``None`` for it anyway. A
+    second guard would be a branch no test can reach, and an unreachable guard
+    is not a safety net, it is a blind spot in the coverage report.
+    """
+
+    resolve = getattr(getattr(hass, "config_entries", None), "async_get_entry", None)
+    if not callable(resolve):
+        return None
+    try:
+        return resolve(entry_id)
+    except Exception:  # noqa: BLE001 - a lookup must never block a reload
+        _LOGGER.debug(
+            "Could not resolve entry %s; treating it as unknown",
+            entry_id,
+            exc_info=True,
+        )
+        return None
+
+
+def _entry_reload_is_hopeless(
+    hass: HomeAssistant, entry_id: str, entry: Any | None = None
+) -> bool:
+    """Whether reloading ``entry_id`` cannot possibly reach a setup.
+
+    Claiming the shared latch is a *promise to reload*, and the release points
+    (unload, setup, entry removal) all presuppose that a reload actually arrives.
+    Where it cannot, the promise must not be made in the first place: the reload
+    itself runs in a core-owned task that ``async_schedule_reload`` neither
+    returns nor exposes, so nothing would hand the latch back and every later
+    reload of that entry would stand down -- with its credentials ineffective --
+    until the process restarts.
+
+    Three cases qualify, all measured against the installed core:
+
+    * a **terminal state** (``_TERMINAL_ENTRY_RELOAD_STATES``): the reload can
+      only raise ``OperationNotAllowed``;
+    * a **disabled** entry: ``async_reload`` returns right after the unload
+      (``if not unload_result or entry.disabled_by: return unload_result``) and
+      never calls ``async_setup``;
+    * an **ignored** entry (``SOURCE_IGNORE``): ``ConfigEntry.async_setup``
+      bails out immediately (``if self.source == SOURCE_IGNORE or
+      self.disabled_by: return``).
+
+    The last two are invisible from the outside: the state stays recoverable and
+    the result is truthy, so neither the state nor the return value of the reload
+    tells them apart from a reload that landed.
+
+    Fails **open** on every doubt -- an empty id, no resolver, a resolver that
+    raises or returns ``None``, an entry without a state -- because one reload
+    too many is a nuisance while a missing one leaves written credentials
+    ineffective. That is the same direction the whole latch fails towards.
+
+    ``entry`` may be passed when the caller already holds the object; that skips
+    the second lookup and, more importantly, keeps the check from depending on
+    whether a given manager happens to offer ``async_get_entry``.
+    """
+
+    if not entry_id:
+        return False
+
+    if entry is None:
+        entry = _resolve_config_entry(hass, entry_id)
+    if entry is None:
+        return False
+
+    if getattr(entry, "disabled_by", None):
+        return True
+
+    if getattr(entry, "source", None) == getattr(
+        config_entries, "SOURCE_IGNORE", "ignore"
+    ):
+        return True
+
+    state = getattr(entry, "state", None)
+    if state is None:
+        return False
+
+    return state in _TERMINAL_ENTRY_RELOAD_STATES
+
+
 def _schedule_claimed_reload(hass: HomeAssistant, entry_id: str) -> bool:
     """Schedule the one reload of ``entry_id`` and report whether it was ours.
 
@@ -3054,6 +3181,20 @@ def _schedule_claimed_reload(hass: HomeAssistant, entry_id: str) -> bool:
         _LOGGER.debug(
             "async_schedule_reload is unavailable; entry %s keeps its old "
             "credentials until it is reloaded",
+            entry_id,
+        )
+        return False
+
+    if _entry_reload_is_hopeless(hass, entry_id):
+        # No second lookup to name the state: for two of the three reasons the
+        # state would actively mislead (a disabled or ignored entry sits in a
+        # perfectly recoverable ``NOT_LOADED``), and an entry that vanished in
+        # between would produce a "state=None" line that contradicts the verdict
+        # above it. The message names the reason set instead.
+        _LOGGER.debug(
+            "Not claiming the reload latch for entry %s: it is disabled, ignored "
+            "or in a terminal state, so a reload would not reach a setup and "
+            "nothing would hand the latch back",
             entry_id,
         )
         return False
