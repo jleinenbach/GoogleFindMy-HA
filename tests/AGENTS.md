@@ -345,12 +345,14 @@ reproduction (dropping the consumers from `sys.modules` and re-importing them
 inside the window) and leaked `entity.get_url` into `test_metadata_helpers.py`
 instead. Do not reintroduce that approach.
 
-## No command-line-pattern process kills
+## No full-command-line process kills
 
-`pkill -f <pattern>` and `killall` select by matching the **full command line**
-of every process on the machine, so any ancestor of the calling process whose
-argv happens to carry the pattern is a valid target. The tool spares only itself,
-never its caller. Measured on 2026-07-28: `chrome_driver.py` ran
+`pkill -f <pattern>` selects by matching the **full command line** of every
+process on the machine, so any ancestor of the calling process whose argv happens
+to carry the pattern is a valid target. The tool spares only itself, never its
+caller. (`killall` and `pkill -x` match the command *name* and are a different,
+narrower class — see the guard section below.) Measured on 2026-07-28:
+`chrome_driver.py` ran
 `subprocess.run(["pkill", "-f", "chrome"])` in the Chrome auth flow, and a pytest
 invocation that had `tests/test_chrome_driver.py` in its argv was killed by the
 CLI subprocess it had started — exit 143 (SIGTERM), no traceback, no summary. The
