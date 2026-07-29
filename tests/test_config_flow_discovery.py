@@ -2366,6 +2366,8 @@ async def _drive_discovery_update_reload(
     *,
     reload_result: Any,
     loaded_components: tuple[str, ...],
+    entry_overrides: dict[str, Any] | None = None,
+    expect_reload: bool = True,
 ) -> tuple[Any, Any, Any, Any]:
     """Drive the non-interactive discovery update up to its held reload task.
 
@@ -2383,6 +2385,13 @@ async def _drive_discovery_update_reload(
     queries) and the step result.
     """
 
+    entry_fields: dict[str, Any] = {
+        "state": "loaded",
+        "source": "user",
+        "disabled_by": None,
+    }
+    entry_fields.update(entry_overrides or {})
+
     entry = make_config_entry(
         entry_id="entry-id",
         data={
@@ -2391,9 +2400,7 @@ async def _drive_discovery_update_reload(
         },
         unique_id=unique_account_id("existing@example.com"),
         subentries={},
-        state="loaded",
-        source="user",
-        disabled_by=None,
+        **entry_fields,
     )
 
     class _ConfigEntries(ConfigEntriesDomainUniqueIdLookupMixin):
@@ -2485,10 +2492,11 @@ async def _drive_discovery_update_reload(
         result = await result
 
     integration = config_flow.import_integration_package()
-    assert hass.reload_coros, "the flow did not reload directly at all"
-    assert integration.claim_pending_entry_reload(hass, entry.entry_id) is False, (
-        "the flow has to claim the latch before reloading directly"
-    )
+    if expect_reload:
+        assert hass.reload_coros, "the flow did not reload directly at all"
+        assert integration.claim_pending_entry_reload(hass, entry.entry_id) is False, (
+            "the flow has to claim the latch before reloading directly"
+        )
 
     return hass, entry, integration, result
 
@@ -2583,3 +2591,54 @@ async def test_a_discovery_update_reload_that_succeeds_keeps_the_latch(
     assert integration.claim_pending_entry_reload(hass, entry.entry_id) is False, (
         "the reload arrived; unload and setup release the latch themselves"
     )
+
+
+@pytest.mark.asyncio
+async def test_a_discovery_update_stands_down_for_an_entry_that_is_already_hopeless(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """No promise is made where no reload can reach a setup.
+
+    A disabled entry makes ``async_reload`` return the truthy unload result
+    without ever calling ``async_setup``, so no release point fires and a claim
+    made here would be stranded. The result cannot be told apart from a reload
+    that landed, which is why the question is asked *before* the claim. Nothing
+    is lost: the credentials are written and the next setup reads them.
+    """
+
+    hass, entry, integration, result = await _drive_discovery_update_reload(
+        monkeypatch,
+        reload_result=True,
+        loaded_components=(config_flow.DOMAIN,),
+        entry_overrides={"disabled_by": "user", "state": "not_loaded"},
+        expect_reload=False,
+    )
+
+    assert result["type"] == "abort"
+    assert hass.reload_coros == [], "a hopeless entry must not be reloaded at all"
+    assert integration.claim_pending_entry_reload(hass, entry.entry_id) is True, (
+        "the gate stands down before the claim, so the latch stays free for a "
+        "writer that can actually reach a setup"
+    )
+    assert "Not reloading entry" in caplog.text, (
+        "standing down silently would hide that the written credentials are "
+        "stored but not yet in effect"
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_discovery_update_still_reloads_a_healthy_entry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The gate is a gate, not a wall: a healthy entry reloads exactly as before."""
+
+    hass, entry, integration, result = await _drive_discovery_update_reload(
+        monkeypatch,
+        reload_result=True,
+        loaded_components=(config_flow.DOMAIN,),
+    )
+
+    await hass.reload_coros[0]
+
+    assert result["type"] == "abort"
+    assert hass.config_entries.reloaded == [entry.entry_id]
