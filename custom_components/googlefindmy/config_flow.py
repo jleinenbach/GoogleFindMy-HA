@@ -3043,7 +3043,7 @@ def _discard_entry_reload(hass: HomeAssistant, entry_id: str) -> None:
         )
 
 
-_TERMINAL_ENTRY_RELOAD_STATES: Final[frozenset[Any]] = frozenset(
+_TERMINAL_ENTRY_RELOAD_STATES: Final[frozenset[ConfigEntryState]] = frozenset(
     state
     for state in (
         getattr(ConfigEntryState, "MIGRATION_ERROR", None),
@@ -3896,8 +3896,14 @@ class ConfigFlow(
             entry
             for entry in hass.config_entries.async_entries(DOMAIN)
             # Guard source lookup so discovery-update stubs without `.source`
-            # keep the Home Assistant contract intact.
-            if getattr(entry, "source", None) != config_entries.SOURCE_IGNORE
+            # keep the Home Assistant contract intact, and resolve the module
+            # constant the same way `_entry_reload_is_hopeless` does. The
+            # lightweight `config_entries` stub in `tests/conftest.py` defines
+            # only the two `SOURCE_*` names this module needs at import time,
+            # so a direct attribute access is safe wherever the real Home
+            # Assistant package is installed and a landmine wherever it is not.
+            if getattr(entry, "source", None)
+            != getattr(config_entries, "SOURCE_IGNORE", "ignore")
         ]
 
         if not entries:
