@@ -3166,6 +3166,43 @@ def _entry_reload_is_hopeless(
     return state in _TERMINAL_ENTRY_RELOAD_STATES
 
 
+def _falsy_reload_left_the_latch_behind(hass: HomeAssistant, entry_id: str) -> bool:
+    """Whether a falsy ``async_reload`` result means no release point ran.
+
+    ``async_reload`` reports three different outcomes with the same falsy value,
+    and only one of them is a dead end for the latch:
+
+    * the **unload failed** -- our ``async_unload_entry`` ran and its ``finally``
+      handed the latch back already;
+    * the **entry setup returned ``False``** -- our ``async_setup_entry`` ran and
+      its head handed the latch back already;
+    * the **component could not be set up at all** -- the reload took the
+      ``entry.domain not in hass.config.components`` short circuit, so neither of
+      our lifecycle hooks ran and the claim is still held.
+
+    Treating the first two as dead ends would discard a claim someone else may
+    have taken in the meantime, which is the very double reload this latch
+    exists to prevent, and it would blame the credentials for a reload that
+    actually happened. Only the third one is visible from the outside, and it is
+    visible exactly there: the domain is missing from the loaded components.
+
+    Fails towards releasing, like everything else about this latch: where the
+    component list or the entry cannot be read, one reload too many beats a
+    promise nobody redeems.
+
+    Callers must only ask this once they know the result is falsy. It is the one
+    truth about that question, shared by the direct reload paths and by
+    ``_release_claim_when_reload_fails``; a second, private answer would drift.
+    """
+
+    entry = _resolve_config_entry(hass, entry_id)
+    domain = getattr(entry, "domain", None) if entry is not None else None
+    components = getattr(getattr(hass, "config", None), "components", None)
+    if domain is not None and components is not None and domain in components:
+        return False
+    return True
+
+
 def _schedule_claimed_reload(hass: HomeAssistant, entry_id: str) -> bool:
     """Schedule the one reload of ``entry_id`` and report whether it was ours.
 
@@ -3305,23 +3342,10 @@ def _release_claim_when_reload_fails(
                 return
             if reloaded:
                 return
-            # Falsy has three causes, and two of them already passed a release
-            # point: a failed unload runs our ``async_unload_entry`` whose
-            # ``finally`` hands the latch back, and a setup that returns False
-            # ran our ``async_setup_entry`` whose head does the same. Treating
-            # those as dead ends would discard a claim someone else may have
-            # taken in the meantime -- the very double reload this latch
-            # prevents -- and would blame the credentials for a reload that
-            # actually happened. Only the third cause leaves the latch behind:
-            # the component itself could not be set up, so our entry setup never
-            # ran. That one is visible from the outside.
-            # Fails towards releasing, like everything else about this latch:
-            # where the component list or the entry cannot be read, one reload
-            # too many beats a promise nobody redeems.
-            entry = _resolve_config_entry(hass, entry_id)
-            domain = getattr(entry, "domain", None) if entry is not None else None
-            components = getattr(getattr(hass, "config", None), "components", None)
-            if domain is not None and components is not None and domain in components:
+            # Falsy has three causes and only one of them leaves the latch
+            # behind; the shared helper carries that distinction, so the direct
+            # reload paths and this callback cannot drift apart on it.
+            if not _falsy_reload_left_the_latch_behind(hass, entry_id):
                 return
             failure = True
         # Warned about, not whispered: the flow has already told the user that
@@ -5048,7 +5072,7 @@ class ConfigFlow(
 
                 async def _reload_and_normalize() -> None:
                     try:
-                        await reload_coro
+                        reloaded = await reload_coro
                     except BaseException:
                         # The claim above is a promise to reload. If the reload
                         # never lands -- ``OperationNotAllowed`` for an entry in
@@ -5058,6 +5082,30 @@ class ConfigFlow(
                         # of this entry.
                         _discard_entry_reload(hass, existing_entry.entry_id)
                         raise
+                    else:
+                        # No exception is not the same as "reloaded":
+                        # ``async_reload`` reports a failed unload, a setup that
+                        # returned ``False`` and a component it could not set up
+                        # by *returning* falsy rather than by raising. Only the
+                        # last of the three leaves the claim behind, and the
+                        # shared helper is what knows the difference -- deciding
+                        # it here as well would be a second truth that drifts.
+                        # No retry is scheduled, deliberately and unlike
+                        # reconfigure: this step ends in an abort anyway, a
+                        # reload pushed against a setup that just failed would
+                        # loop, and the next setup reads ``entry.data`` afresh.
+                        if not reloaded and _falsy_reload_left_the_latch_behind(
+                            hass, existing_entry.entry_id
+                        ):
+                            _LOGGER.warning(
+                                "Reload of entry %s after a discovery update "
+                                "ended without reloading; its new credentials "
+                                "stay ineffective until the entry is reloaded. "
+                                "Releasing the latch so a later write can "
+                                "schedule one",
+                                existing_entry.entry_id,
+                            )
+                            _discard_entry_reload(hass, existing_entry.entry_id)
                     finally:
                         _normalize_tracking_lists()
 

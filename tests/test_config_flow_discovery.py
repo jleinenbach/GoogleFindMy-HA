@@ -2359,3 +2359,227 @@ def test_a_discovery_update_reload_that_is_rejected_gives_the_latch_back(
         "the reload was rejected, so no release point ever ran; a latch kept "
         "here suppresses every later credential reload of this entry"
     )
+
+
+async def _drive_discovery_update_reload(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    reload_result: Any,
+    loaded_components: tuple[str, ...],
+) -> tuple[Any, Any, Any, Any]:
+    """Drive the non-interactive discovery update up to its held reload task.
+
+    The step claims the latch and reloads *directly*, in a task. This helper
+    stops right after the task was handed to ``async_create_task``, which the
+    stub keeps instead of running, so a test decides when the reload ends and
+    observes the latch rather than racing it.
+
+    ``reload_result`` is what the core hands back. ``loaded_components`` becomes
+    ``hass.config.components``: it is the one externally visible difference
+    between a falsy reload that already passed a release point and one that
+    never reached our setup at all.
+
+    Returns the hass stub, the entry, the integration package (for latch
+    queries) and the step result.
+    """
+
+    entry = make_config_entry(
+        entry_id="entry-id",
+        data={
+            CONF_GOOGLE_EMAIL: "existing@example.com",
+            CONF_OAUTH_TOKEN: "old-token",
+        },
+        unique_id=unique_account_id("existing@example.com"),
+        subentries={},
+        state="loaded",
+        source="user",
+        disabled_by=None,
+    )
+
+    class _ConfigEntries(ConfigEntriesDomainUniqueIdLookupMixin):
+        def __init__(self) -> None:
+            self.updated: list[tuple[Any, dict[str, Any]]] = []
+            self.reloaded: list[str] = []
+            attach_config_entries_flow_manager(self)
+
+        def async_entries(self, domain: str) -> list[Any]:
+            return [entry]
+
+        def async_update_entry(self, target: Any, **updates: Any) -> None:
+            self.updated.append((target, updates))
+
+        async def async_reload(self, entry_id: str) -> Any:
+            self.reloaded.append(entry_id)
+            return reload_result
+
+        def async_get_entry(self, entry_id: str) -> Any | None:
+            return entry if entry_id == entry.entry_id else None
+
+        def async_get_subentries(self, entry_id: str) -> list[Any]:
+            return []
+
+        async def async_setup(self, entry_id: str) -> bool:
+            return True
+
+    class _Hass:
+        def __init__(self) -> None:
+            prepare_flow_hass_config_entries(
+                self,
+                _ConfigEntries,
+                frame_module=frame,
+            )
+            self.data: dict[str, Any] = {}
+            self.reload_coros: list[Any] = []
+            # The shared helper reads the loaded components to tell the three
+            # falsy causes apart, so this stub has to carry them.
+            self.config = types.SimpleNamespace(components=set(loaded_components))
+
+        def async_create_task(self, coro: Any, *, name: str | None = None) -> Any:
+            self.reload_coros.append(coro)
+            return None
+
+    async def _fake_ingest(
+        flow: config_flow.ConfigFlow,
+        normalized: Any,
+        *,
+        existing_entry: Any | None = None,
+    ) -> tuple[dict[str, Any], dict[str, Any] | None]:
+        return (
+            {"data": {CONF_OAUTH_TOKEN: "unused"}},
+            {CONF_OAUTH_TOKEN: "aas_et/UPDATED"},
+        )
+
+    monkeypatch.setattr(config_flow, "_ingest_discovery_credentials", _fake_ingest)
+    monkeypatch.setattr(config_flow, "_find_entry_by_email", lambda _h, _e: entry)
+    monkeypatch.setattr(
+        config_flow,
+        "_normalize_and_validate_discovery_payload",
+        lambda _payload: config_flow.CloudDiscoveryData(
+            email="existing@example.com",
+            unique_id=unique_account_id("existing@example.com"),
+            candidates=(("candidate", "aas_et/UPDATED"),),
+            secrets_bundle=None,
+        ),
+    )
+
+    hass = _Hass()
+    flow = config_flow.ConfigFlow()
+    flow.hass = hass  # type: ignore[assignment]
+    flow.context = {}
+    flow._async_current_entries = types.MethodType(  # type: ignore[assignment]
+        lambda self, *, include_ignore=False: [entry], flow
+    )
+
+    async def _set_unique_id(value: str, *, raise_on_progress: bool = False) -> None:
+        set_config_flow_unique_id(flow, value)
+
+    flow.async_set_unique_id = _set_unique_id  # type: ignore[assignment]
+
+    result = await flow.async_step_discovery_update_info(
+        {
+            CONF_GOOGLE_EMAIL: "existing@example.com",
+            "candidate_tokens": ["aas_et/UPDATED"],
+        }
+    )
+    if inspect.isawaitable(result):
+        result = await result
+
+    integration = config_flow.import_integration_package()
+    assert hass.reload_coros, "the flow did not reload directly at all"
+    assert integration.claim_pending_entry_reload(hass, entry.entry_id) is False, (
+        "the flow has to claim the latch before reloading directly"
+    )
+
+    return hass, entry, integration, result
+
+
+@pytest.mark.asyncio
+async def test_a_discovery_update_reload_that_never_set_up_gives_the_latch_back(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A falsy reload that never reached our setup is a dead end like a raise.
+
+    ``async_reload`` returns ``entry.state is ConfigEntryState.LOADED`` from the
+    ``entry.domain not in hass.config.components`` short circuit, so a component
+    that could not be set up reports failure by *returning* falsy. Our
+    ``async_setup_entry`` never ran, so the head discard never ran either, and
+    neither did the unload ``finally``. The claim is a promise to reload; with no
+    release point behind it the latch would swallow every later credential write
+    for this entry until the process restarts.
+    """
+
+    hass, entry, integration, result = await _drive_discovery_update_reload(
+        monkeypatch,
+        reload_result=False,
+        loaded_components=(),
+    )
+
+    with caplog.at_level("WARNING"):
+        await hass.reload_coros[0]
+
+    assert result["type"] == "abort"
+    assert integration.claim_pending_entry_reload(hass, entry.entry_id) is True, (
+        "the reload returned falsy without reaching a setup, so no release "
+        "point ran and the latch has to be free again"
+    )
+    assert "stay ineffective" in caplog.text, (
+        "a silently released latch hides that the written credentials are inert"
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_discovery_update_reload_that_failed_after_a_release_point_keeps_the_latch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Not every falsy reload is a dead end, and releasing anyway does damage.
+
+    Of the three falsy causes two already passed a release point: a failed
+    unload ran our ``async_unload_entry`` whose ``finally`` handed the latch
+    back, and an entry setup that returned ``False`` ran our
+    ``async_setup_entry`` whose head did the same. Both are indistinguishable
+    from the outside except by one signal: the domain is still among the loaded
+    components. Releasing here would discard a claim another writer may have
+    taken in the meantime, which is the double reload this latch exists to
+    prevent.
+
+    This test is the guard against the simpler-looking rule "falsy means dead
+    end", which an earlier draft of this change proposed.
+    """
+
+    hass, entry, integration, result = await _drive_discovery_update_reload(
+        monkeypatch,
+        reload_result=False,
+        loaded_components=(config_flow.DOMAIN,),
+    )
+
+    await hass.reload_coros[0]
+
+    assert result["type"] == "abort"
+    assert integration.claim_pending_entry_reload(hass, entry.entry_id) is False, (
+        "the component stayed loaded, so one of our lifecycle hooks ran and "
+        "released the latch itself; releasing again could drop a fresh claim"
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_discovery_update_reload_that_succeeds_keeps_the_latch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A reload that landed releases the latch through unload and setup, not here.
+
+    Releasing on success would leave the entry unlatched while its reload is
+    still on its way, and the next claimant would queue a second teardown.
+    """
+
+    hass, entry, integration, result = await _drive_discovery_update_reload(
+        monkeypatch,
+        reload_result=True,
+        loaded_components=(config_flow.DOMAIN,),
+    )
+
+    await hass.reload_coros[0]
+
+    assert result["type"] == "abort"
+    assert integration.claim_pending_entry_reload(hass, entry.entry_id) is False, (
+        "the reload arrived; unload and setup release the latch themselves"
+    )

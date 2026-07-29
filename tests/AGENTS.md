@@ -267,7 +267,24 @@ are installed. **Review this checklist on every single change under
    them lets the state gate answer "not hopeless" unconditionally and a test
    that claims to exercise the gate exercises nothing. Use the submodule form
    `from homeassistant.config_entries import ConfigEntryState`, which is the
-   module world the production comparison lives in.
+   module world the production comparison lives in. Note that
+   `make_config_entry` defaults `state` to the **string** `"loaded"` while
+   `_TERMINAL_ENTRY_RELOAD_STATES` is a `frozenset[ConfigEntryState]`: a string
+   never matches, so a test meaning to exercise a terminal state has to pass the
+   enum member rather than its value.
+
+9. **Direct-reload result doubles** — the non-interactive discovery update
+   evaluates the reload *result*, not only exceptions, and it asks
+   `config_flow._falsy_reload_left_the_latch_behind` what a falsy result means.
+   That helper reads `hass.config.components`, so a hass double for those tests
+   must carry a `config` object with a `components` container. Without it the
+   helper fails open and reports every falsy reload as a dead end, which makes
+   the "a lifecycle hook already released it" branch untestable and lets a test
+   that claims to exercise it exercise nothing. Their `async_reload` must be
+   `async` and return the core's `bool`: a *synchronous* double never reaches
+   the closure at all, because production guards it with
+   `inspect.isawaitable`. Two of the module's older doubles are synchronous for
+   that reason and are not a template for these tests.
 
 Treat this checklist as a living document: if a new helper or guard
 becomes necessary, add it here and verify each item before completing
