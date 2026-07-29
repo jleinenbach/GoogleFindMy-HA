@@ -471,10 +471,17 @@ class FakeConfigEntriesManager:
 
         self.update_calls.append((entry, dict(kwargs)))
 
-    async def async_reload(self, entry_id: str) -> None:
-        """Record reload attempts made by the integration."""
+    async def async_reload(self, entry_id: str) -> bool:
+        """Record reload attempts made by the integration.
+
+        Returns the core's ``bool``, not ``None``: ``_release_claim_when_reload
+        _fails`` reads the task's result, and a falsy one means "ended without
+        reloading". A double answering ``None`` would report every successful
+        reload as a dead end (tests/AGENTS.md, checklist item 8).
+        """
 
         self.reload_calls.append(entry_id)
+        return True
 
     async def async_migrate_entry(self, entry: FakeConfigEntry) -> bool:
         """Record migration attempts and optionally mark the entry as reloadable."""

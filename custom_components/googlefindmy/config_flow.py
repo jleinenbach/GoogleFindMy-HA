@@ -3179,9 +3179,11 @@ def _schedule_claimed_reload(hass: HomeAssistant, entry_id: str) -> bool:
     a reload only.
 
     It is deliberately **not** the only claimant in this module. Three paths
-    still take ``_claim_entry_reload`` and call ``async_reload`` themselves and
-    therefore bypass the hopeless-state gate below: the discovery unique-id
-    guard, ``_async_reload_entry_after_reconfigure`` and ``_finalize_success``.
+    still take ``_claim_entry_reload`` and call ``async_reload`` themselves: the
+    discovery unique-id guard, ``_async_reload_entry_after_reconfigure`` and
+    ``_finalize_success``. Only the first two bypass the hopeless-state gate
+    below; ``_finalize_success`` runs its own copy of that check before its
+    claim, so counting it among the unguarded ones would misread it.
     Routing them here is a separate change with its own regression surface;
     until then a latch they leak also blocks the steps routed here, so do not
     read this docstring as "every path in this flow". Order matters twice: the
@@ -3294,6 +3296,24 @@ def _release_claim_when_reload_fails(
             except Exception:  # noqa: BLE001 - same reason as above
                 return
             if reloaded:
+                return
+            # Falsy has three causes, and two of them already passed a release
+            # point: a failed unload runs our ``async_unload_entry`` whose
+            # ``finally`` hands the latch back, and a setup that returns False
+            # ran our ``async_setup_entry`` whose head does the same. Treating
+            # those as dead ends would discard a claim someone else may have
+            # taken in the meantime -- the very double reload this latch
+            # prevents -- and would blame the credentials for a reload that
+            # actually happened. Only the third cause leaves the latch behind:
+            # the component itself could not be set up, so our entry setup never
+            # ran. That one is visible from the outside.
+            # Fails towards releasing, like everything else about this latch:
+            # where the component list or the entry cannot be read, one reload
+            # too many beats a promise nobody redeems.
+            entry = _resolve_config_entry(hass, entry_id)
+            domain = getattr(entry, "domain", None) if entry is not None else None
+            components = getattr(getattr(hass, "config", None), "components", None)
+            if domain is not None and components is not None and domain in components:
                 return
             failure = True
         # Warned about, not whispered: the flow has already told the user that

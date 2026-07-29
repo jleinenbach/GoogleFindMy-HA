@@ -488,6 +488,35 @@ async def test_a_reload_that_returns_false_hands_the_latch_back(
     )
 
 
+async def test_a_falsy_reload_keeps_the_latch_when_a_release_point_ran(
+    monkeypatch: pytest.MonkeyPatch, latch: _LatchRecorder
+) -> None:
+    """Falsy alone is not a dead end, and treating it as one costs more than it saves.
+
+    Of the three ways ``async_reload`` returns falsy, two already passed a
+    release point: a failed unload runs our ``async_unload_entry`` whose
+    ``finally`` hands the latch back, and a setup returning ``False`` ran our
+    ``async_setup_entry`` whose head does the same. Discarding there would drop
+    a claim someone else may have taken during that setup -- the very double
+    reload this latch exists to prevent. Only a component that could not be set
+    up at all leaves the latch behind, and that one is visible from outside.
+    """
+
+    cache = _MemoryCache()
+    entry = _make_entry(entry_id="entry-loaded-component", cache=cache)
+    hass = _DummyHass(entry, cache)
+    hass.config_entries.reload_result = False
+    hass.config = SimpleNamespace(components={entry.domain})
+
+    await _rotate(monkeypatch, hass, entry)
+
+    assert latch.claims == ["entry-loaded-component"]
+    assert latch.discards == [], (
+        "the component is loaded, so our setup ran and released the latch "
+        "already; a second discard could take someone else's claim"
+    )
+
+
 async def test_a_cancelled_reload_still_hands_the_latch_back(
     monkeypatch: pytest.MonkeyPatch, latch: _LatchRecorder
 ) -> None:

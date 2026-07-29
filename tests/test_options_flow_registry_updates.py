@@ -9,7 +9,7 @@ from types import MappingProxyType, SimpleNamespace
 from typing import Any
 
 import pytest
-from homeassistant.config_entries import ConfigSubentry
+from homeassistant.config_entries import ConfigEntryState, ConfigSubentry
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import frame
 
@@ -235,6 +235,13 @@ class _EntryStub:
         self.options: dict[str, Any] = {}
         self.subentries: dict[str, ConfigSubentry] = {}
         self.runtime_data = SimpleNamespace(coordinator=SimpleNamespace(data=[]))
+        # ``_entry_reload_is_hopeless`` reads these three through
+        # ``getattr(..., None)`` and fails open, so a stub without them lets the
+        # state gate answer "not hopeless" unconditionally and the repair tests
+        # below would exercise nothing (tests/AGENTS.md, checklist item 8).
+        self.state = ConfigEntryState.LOADED
+        self.source = "user"
+        self.disabled_by: str | None = None
 
     def add_subentry(
         self,
