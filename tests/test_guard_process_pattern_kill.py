@@ -62,6 +62,10 @@ _SUBPROCESS_RUNNERS = frozenset({"run", "call", "check_call", "check_output", "P
 # Callables that hand a whole command string to a shell.
 _SHELL_FUNCS = frozenset({"system", "getoutput", "getstatusoutput"})
 
+# Programs that execute their -c argument as shell code.
+_SHELL_LAUNCHERS = frozenset({"sh", "bash", "dash", "zsh", "ksh"})
+_SHELL_LAUNCH_MIN_ARGS = 3  # launcher, -c, command
+
 # Pre-existing offenders. Empty by construction: the two historical call sites in
 # ``chrome_driver.py`` were migrated to ``_terminate_matching_processes`` in the
 # same change that added this guard, so there is nothing legitimate left to
@@ -210,6 +214,23 @@ def _shell_string_offends(value: str) -> bool:
     return False
 
 
+def _shell_command_argument_offends(argv: list[str]) -> bool:
+    """True for ``["sh", "-c", "<hazardous>"]`` and equivalents.
+
+    Only the command string of an explicit shell launcher is inspected. A
+    mention anywhere else executes nothing -- ``["git", "commit", "-m",
+    "pkill -f is unsafe"]`` is a commit message, not a process kill, and
+    flagging it would be a false positive on a repository-wide guard.
+    """
+    if len(argv) < _SHELL_LAUNCH_MIN_ARGS or Path(argv[0]).name not in _SHELL_LAUNCHERS:
+        return False
+    try:
+        command_index = argv.index("-c") + 1
+    except ValueError:
+        return False
+    return command_index < len(argv) and _shell_string_offends(argv[command_index])
+
+
 def _literal_strings(node: ast.expr) -> list[str]:
     """Return the string constants of a literal list/tuple, in order."""
     if not isinstance(node, ast.List | ast.Tuple):
@@ -259,11 +280,10 @@ def find_violations(source: str, rel_path: str) -> list[str]:
                 continue
 
             # subprocess.run(["sh", "-c", "pkill -f chrome"]): the kill hides in
-            # a later element of an otherwise innocent argv list.
-            if any(
-                _shell_string_offends(element)
-                for element in _literal_strings(first_arg)[1:]
-            ):
+            # the command string of an explicit shell launcher. Only that
+            # position is scanned -- a mention in any other argument (a commit
+            # message, a grep pattern) executes nothing.
+            if _shell_command_argument_offends(argv):
                 violations.append(f"{rel_path}:{node.lineno} shell argument")
                 continue
 
@@ -399,6 +419,32 @@ def test_guard_ignores_unrelated_objects_with_the_same_method_names() -> None:
         '_run(["pkill", "--full", "chrome"])\n'
     )
     assert find_violations(aliased, "x.py") == ["x.py:3 pkill -f", "x.py:4 pkill -f"]
+
+
+def test_guard_only_scans_the_command_string_of_a_shell_launcher() -> None:
+    """A mention in any other argument executes nothing and must stay quiet.
+
+    Codex flagged the earlier version, which scanned every later literal
+    argument: a commit message or a grep pattern that happens to contain
+    "pkill -f" would have failed the repository-wide guard.
+    """
+
+    for safe in (
+        'subprocess.run(["git", "commit", "-m", "pkill -f is unsafe"])\n',
+        'subprocess.run(["grep", "-r", "pkill -f", "."])\n',
+        'subprocess.run(["sh", "-c", "pkill -x chrome"])\n',
+        'subprocess.run(["sh", "pkill -f chrome"])\n',  # no -c: not shell code
+    ):
+        assert find_violations(_IMPORTS + safe, "x.py") == [], safe
+
+    for hazardous in (
+        'subprocess.run(["sh", "-c", "pkill -f chrome"])\n',
+        'subprocess.run(["bash", "-c", "pkill --full chrome"])\n',
+        'subprocess.run(["/bin/sh", "-c", "pkill -f chrome"])\n',
+    ):
+        assert find_violations(_IMPORTS + hazardous, "x.py") == [
+            "x.py:3 shell argument"
+        ], hazardous
 
 
 def test_guard_reports_an_unparseable_file_instead_of_skipping_it() -> None:
