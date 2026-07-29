@@ -3857,6 +3857,158 @@ def _platform_names(platforms: tuple[object, ...]) -> tuple[str, ...]:
     return tuple(names)
 
 
+def _make_latch_watching_entry(
+    integration: ModuleType, hass: Any, recording: list[bool], seen: list[bool]
+) -> _StubConfigEntry:
+    """Return an entry stub that samples the reload latch on every ``data`` read.
+
+    Deliberately samples the **state** of the latch rather than watching for a
+    call to ``discard_pending_entry_reload``. Watching the call would pin the
+    name of a helper: a behaviour-preserving refactor that inlines the release,
+    or renames it, would fail the assertion although the invariant holds. The
+    state survives both.
+    """
+
+    class _LatchWatchingEntry(_StubConfigEntry):
+        @property
+        def data(self) -> dict[str, Any]:
+            if recording[0]:
+                bucket = hass.data.get(integration.DOMAIN, {})
+                pending = bucket.get("pending_entry_reloads", set())
+                seen.append(self.entry_id in pending)
+            return self._data
+
+        @data.setter
+        def data(self, value: dict[str, Any]) -> None:
+            self._data = value
+
+    return _LatchWatchingEntry()
+
+
+@pytest.mark.asyncio
+async def test_the_setup_releases_the_reload_latch_before_it_reads_the_entry_data(
+    monkeypatch: pytest.MonkeyPatch,
+    stub_coordinator_factory: Callable[..., type[Any]],
+) -> None:
+    """The release has to be the first act of the setup half, not merely one of them.
+
+    Two independent reasons, both from the production code:
+
+    First, for an entry that was not loaded Home Assistant's ``async_reload``
+    skips the unload half entirely, so this release is then the **only** one that
+    runs. A latch nobody releases swallows every later reload of that entry.
+
+    Second, it is the reason a writer that finds the latch taken may stand down
+    without losing its change. Standing down is safe because the reload holding
+    the latch has not finished its unload half -- that release sits in the
+    ``finally`` at its very end -- so the replacement setup still reads what the
+    stander-down wrote. Move this release behind the first entry read and the
+    guarantee inverts: the window in which a writer sees a free latch now
+    overlaps a setup that has already read the entry, and the value written into
+    it goes nowhere until something else reloads.
+
+    Scope, stated so the name is not read as more than it is: only ``entry.data``
+    is instrumented. ``entry.entry_id`` is by construction read earlier -- it is
+    the argument of the release call itself.
+
+    The sibling ``test_the_reload_latch_survives_the_unload_phase`` pins the other
+    end of the same invariant, deliberately in the opposite direction.
+    """
+
+    loop = asyncio.get_running_loop()
+
+    recording = [False]
+    latch_held_at_read: list[bool] = []
+
+    integration = importlib.import_module("custom_components.googlefindmy")
+    harness = _prepare_async_setup_entry_harness(
+        monkeypatch, stub_coordinator_factory, loop
+    )
+    hass = harness.hass
+    entry = _make_latch_watching_entry(integration, hass, recording, latch_held_at_read)
+    entry._attach_hass(hass)
+    hass.config_entries._entries = [entry]
+
+    entry.data[DATA_AAS_TOKEN] = "aas_et/OLD_TOKEN_VALUE"
+    harness.cache.values = {integration.username_string: "user@example.com"}
+
+    assert await integration.async_setup(hass, {}) is True
+
+    # The claimed reload arrives at its setup half.
+    assert integration.claim_pending_entry_reload(hass, entry.entry_id) is True
+
+    recording[0] = True
+    try:
+        assert await integration.async_setup_entry(hass, entry) is True
+    finally:
+        recording[0] = False
+
+    assert latch_held_at_read, (
+        "the setup has to read the entry data at all -- without a read the "
+        "assertion below would hold vacuously and pin nothing"
+    )
+    assert latch_held_at_read[0] is False, (
+        "the latch was still held when the setup first read the entry data; the "
+        "release has to run before that, not somewhere inside the setup"
+    )
+
+    pending = hass.data[integration.DOMAIN]["pending_entry_reloads"]
+    assert entry.entry_id not in pending, (
+        "the arrived reload has to leave the latch free for the next change"
+    )
+
+
+@pytest.mark.asyncio
+async def test_the_subentry_branch_is_behind_the_reload_latch_release(
+    monkeypatch: pytest.MonkeyPatch,
+    stub_coordinator_factory: Callable[..., type[Any]],
+) -> None:
+    """The early exit for a subentry must not overtake the release either.
+
+    ``async_setup_entry`` routes a subentry away after two lines. A release moved
+    just one step down -- behind that ``if`` -- would leave every subentry setup
+    with a latch it never hands back, and the previous test would stay green
+    because it never takes this branch. Unreachable today (claims are made for
+    parent entries), which is exactly why nothing but a test keeps it that way.
+    """
+
+    loop = asyncio.get_running_loop()
+
+    recording = [False]
+    latch_held_at_read: list[bool] = []
+
+    integration = importlib.import_module("custom_components.googlefindmy")
+    harness = _prepare_async_setup_entry_harness(
+        monkeypatch, stub_coordinator_factory, loop
+    )
+    hass = harness.hass
+    entry = _make_latch_watching_entry(integration, hass, recording, latch_held_at_read)
+    entry._attach_hass(hass)
+    entry.parent_entry_id = "parent-entry"  # type: ignore[attr-defined]
+
+    async def _subentry_setup(_hass: Any, subentry: Any) -> bool:
+        # Stands in for the real subentry setup; the only thing that matters here
+        # is that it touches the entry, so the sample above has something to see.
+        assert subentry.data is not None
+        return True
+
+    monkeypatch.setattr(integration, "_async_setup_subentry", _subentry_setup)
+
+    assert await integration.async_setup(hass, {}) is True
+    assert integration.claim_pending_entry_reload(hass, entry.entry_id) is True
+
+    recording[0] = True
+    try:
+        assert await integration.async_setup_entry(hass, entry) is True
+    finally:
+        recording[0] = False
+
+    assert latch_held_at_read, "the subentry branch has to touch the entry at all"
+    assert latch_held_at_read[0] is False, (
+        "the release has to run before the subentry branch takes over"
+    )
+
+
 @pytest.mark.asyncio
 async def test_the_reload_latch_survives_the_unload_phase(
     monkeypatch: pytest.MonkeyPatch,
@@ -3870,6 +4022,15 @@ async def test_the_reload_latch_survives_the_unload_phase(
     second reload, even though the replacement setup that is already on its way
     reads the newest ``entry.data`` anyway. That is the consecutive teardown the
     latch exists to prevent.
+
+    Beyond that, this position is what makes standing down safe at all: a writer
+    that finds the latch taken keeps its change only because the reload holding it
+    has not finished its unload half, so the setup half still ahead of it reads
+    what the stander-down wrote. Releasing at the head of the router would take
+    that guarantee away. This is not a tidiness test, and deleting it in a later
+    cleanup would silently unpin the assumption the whole single-owner design
+    rests on. The opposite end is pinned by
+    ``test_the_setup_releases_the_reload_latch_before_it_reads_the_entry_data``.
     """
 
     integration = importlib.import_module("custom_components.googlefindmy")
