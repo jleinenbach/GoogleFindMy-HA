@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 from dataclasses import dataclass
 from types import MappingProxyType, SimpleNamespace
 from typing import Any
@@ -40,6 +41,7 @@ class _ManagerStub:
         self.updated: list[tuple[str, dict[str, Any]]] = []
         self.removed: list[str] = []
         self.reloads: list[str] = []
+        self.scheduled_reloads: list[str] = []
         self.setup_calls: list[str] = []
 
     def async_update_entry(self, entry: _EntryStub, *, data: dict[str, Any]) -> None:
@@ -72,7 +74,36 @@ class _ManagerStub:
         self.removed.append(subentry_id)
         return True
 
+    def async_schedule_reload(self, entry_id: str) -> None:
+        """Record the call; deliberately do not chain into ``async_reload``.
+
+        Synchronous on purpose: ``ConfigEntries.async_schedule_reload`` is a
+        ``@callback`` returning ``None``, and a coroutine here would make the
+        production call site look awaitable when it is not.
+
+        Two core behaviours are left out knowingly, so nothing here is mistaken
+        for a faithful replica: the core raises ``UnknownEntry`` for an entry id
+        it does not know, and it hands the reload to ``async_create_task``. This
+        recorder does neither, which is what lets an assertion tell the two call
+        styles apart -- but it also means the failure branch of
+        ``_schedule_claimed_reload`` cannot be reached from this file.
+
+        Latent coupling, deliberately named here: ``_core_auto_schedules_subentries``
+        only consults this attribute once the manager also exposes
+        ``async_setup_subentry`` **and** ``async_get_subentries``. This stub has the
+        second but not the first, so the probe still answers ``False``. Adding
+        ``async_setup_subentry`` here later would flip that probe silently.
+        """
+
+        self.scheduled_reloads.append(entry_id)
+
     async def async_reload(self, entry_id: str) -> None:
+        """Kept next to :meth:`async_schedule_reload` as a regression tripwire.
+
+        A later fall back to the awaited variant would otherwise pass silently;
+        with both recorders present the assertions can tell the two apart.
+        """
+
         self.reloads.append(entry_id)
 
     def async_get_entry(self, entry_id: str) -> _EntryStub | None:
@@ -133,6 +164,15 @@ class _HassStub:
 
     def __init__(self, entry: _EntryStub) -> None:
         self._entry = entry
+        # Prepared for the upcoming switch of the options steps to
+        # ``_schedule_claimed_reload``; unused by the paths this file exercises
+        # today, and deliberately kept rather than removed as dead weight. The
+        # reload latch lives in ``hass.data``: without this mapping
+        # ``_domain_data`` raises ``AttributeError`` inside
+        # ``_claim_entry_reload``, which swallows it and fails open with ``True``.
+        # The stand-down branch would then be unreachable and its mutation probe
+        # meaningless.
+        self.data: dict[str, Any] = {}
 
     @classmethod
     async def create(cls, entry: _EntryStub) -> _HassStub:
@@ -263,3 +303,33 @@ async def test_repairs_delete_moves_devices_and_removes_subentry() -> None:
         "dev-2",
     )
     assert manager.reloads == [entry.entry_id]
+
+
+async def test_the_scheduling_double_matches_the_core_call_shape() -> None:
+    """The recorder has to be reachable and synchronous, or AP4 debugs a typo.
+
+    Declared ``async`` only because this module carries a file-wide
+    ``pytestmark = pytest.mark.asyncio``; the check itself needs no event loop.
+
+    Nothing in this file asserts on ``scheduled_reloads`` yet -- the subentry
+    steps still take the awaited route. Without this check a misspelled method
+    name would stay invisible here and only surface one work package later, as a
+    production helper silently taking its "no lever" branch.
+    """
+
+    entry = _EntryStub()
+    manager = _ManagerStub(entry)
+
+    schedule = getattr(manager, "async_schedule_reload", None)
+    assert callable(schedule)
+    assert not inspect.iscoroutinefunction(schedule), (
+        "the core's async_schedule_reload is a @callback; an awaitable double "
+        "would hide that the production call site does not await it"
+    )
+
+    schedule(entry.entry_id)
+    assert manager.scheduled_reloads == [entry.entry_id]
+    assert manager.reloads == [], (
+        "the two recorders have to stay distinguishable; that is the whole "
+        "point of keeping async_reload next to it"
+    )

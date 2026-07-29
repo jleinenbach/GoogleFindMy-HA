@@ -1,6 +1,10 @@
+# tests/test_options_flow_semantic_locations.py
+"""Options flow coverage for the semantic-location steps."""
+
 from __future__ import annotations
 
 import asyncio
+import inspect
 from collections.abc import Awaitable, Callable, Mapping
 from types import SimpleNamespace
 from typing import Any
@@ -24,6 +28,7 @@ class _SemanticConfigEntries:
         self._entry = entry
         self.updated_options: list[dict[str, Any]] = []
         self.reloaded: list[str] = []
+        self.scheduled_reloads: list[str] = []
 
     def async_get_entry(self, entry_id: str) -> SimpleNamespace | None:
         if entry_id == self._entry.entry_id:
@@ -38,7 +43,30 @@ class _SemanticConfigEntries:
             self.updated_options.append(options)
             entry.options = options
 
+    def async_schedule_reload(self, entry_id: str) -> None:
+        """Record the call; deliberately do not chain into ``async_reload``.
+
+        Synchronous on purpose: ``ConfigEntries.async_schedule_reload`` is a
+        ``@callback`` returning ``None``, and a coroutine here would make the
+        production call site look awaitable when it is not.
+
+        Two core behaviours are left out knowingly, so nothing here is mistaken
+        for a faithful replica: the core raises ``UnknownEntry`` for an entry id
+        it does not know, and it hands the reload to ``async_create_task``. This
+        recorder does neither, which is what lets an assertion tell the two call
+        styles apart -- but it also means the failure branch of
+        ``_schedule_claimed_reload`` cannot be reached from this file.
+        """
+
+        self.scheduled_reloads.append(entry_id)
+
     async def async_reload(self, entry_id: str) -> None:
+        """Kept next to :meth:`async_schedule_reload` as a regression tripwire.
+
+        A later fall back to the awaited variant would otherwise pass silently;
+        with both recorders present the assertions can tell the two apart.
+        """
+
         self.reloaded.append(entry_id)
 
 
@@ -242,3 +270,30 @@ async def test_semantic_location_edit_prefills_existing_values() -> None:
         "longitude": 10.0,
         "accuracy": 7.0,
     }
+
+
+def test_the_scheduling_double_matches_the_core_call_shape() -> None:
+    """The recorder has to be reachable and synchronous, or AP4 debugs a typo.
+
+    Nothing in this file asserts on ``scheduled_reloads`` yet -- the options
+    steps still take the awaited route. Without this check a misspelled method
+    name would stay invisible here and only surface one work package later, as a
+    production helper silently taking its "no lever" branch.
+    """
+
+    entry = make_config_entry(entry_id="entry-shape", title="Shape")
+    manager = _SemanticConfigEntries(entry)
+
+    schedule = getattr(manager, "async_schedule_reload", None)
+    assert callable(schedule)
+    assert not inspect.iscoroutinefunction(schedule), (
+        "the core's async_schedule_reload is a @callback; an awaitable double "
+        "would hide that the production call site does not await it"
+    )
+
+    schedule(entry.entry_id)
+    assert manager.scheduled_reloads == [entry.entry_id]
+    assert manager.reloaded == [], (
+        "the two recorders have to stay distinguishable; that is the whole "
+        "point of keeping async_reload next to it"
+    )
