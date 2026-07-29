@@ -9,7 +9,7 @@ from types import MappingProxyType, SimpleNamespace
 from typing import Any
 
 import pytest
-from homeassistant.config_entries import ConfigSubentry
+from homeassistant.config_entries import ConfigEntryState, ConfigSubentry
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import frame
 
@@ -87,6 +87,7 @@ class _ManagerWithRegistries:
         self.updated: list[tuple[str, dict[str, Any]]] = []
         self.removed: list[str] = []
         self.reloads: list[str] = []
+        self.scheduled_reloads: list[str] = []
         self.setup_calls: list[str] = []
 
     def async_update_entry(self, entry: _EntryStub, *, data: dict[str, Any]) -> None:
@@ -144,7 +145,24 @@ class _ManagerWithRegistries:
         self.removed.append(subentry_id)
         return True
 
+    def async_schedule_reload(self, entry_id: str) -> None:
+        """Record the call; synchronous, like the core's ``@callback``.
+
+        The options steps own their reload through ``_schedule_claimed_reload``
+        rather than awaiting ``async_reload``. A double without this method sends
+        that helper down its "no lever" branch, where it schedules nothing at
+        all, so the absence would make every repair test here pass for the wrong
+        reason.
+        """
+
+        self.scheduled_reloads.append(entry_id)
+
     async def async_reload(self, entry_id: str) -> None:
+        """Kept next to :meth:`async_schedule_reload` as a regression tripwire.
+
+        A later fall back to the awaited variant would otherwise pass silently.
+        """
+
         self.reloads.append(entry_id)
 
     async def async_setup(self, entry_id: str) -> bool:
@@ -217,6 +235,13 @@ class _EntryStub:
         self.options: dict[str, Any] = {}
         self.subentries: dict[str, ConfigSubentry] = {}
         self.runtime_data = SimpleNamespace(coordinator=SimpleNamespace(data=[]))
+        # ``_entry_reload_is_hopeless`` reads these three through
+        # ``getattr(..., None)`` and fails open, so a stub without them lets the
+        # state gate answer "not hopeless" unconditionally and the repair tests
+        # below would exercise nothing (tests/AGENTS.md, checklist item 8).
+        self.state = ConfigEntryState.LOADED
+        self.source = "user"
+        self.disabled_by: str | None = None
 
     def add_subentry(
         self,
@@ -291,7 +316,8 @@ async def test_repairs_move_updates_registries_for_devices() -> None:
     }
     assert entity_registry.by_subentry[other.subentry_id] == ()
     assert device_registry.by_subentry[other.subentry_id] == ()
-    assert manager.reloads == [entry.entry_id]
+    assert manager.scheduled_reloads == [entry.entry_id]
+    assert manager.reloads == []
 
 
 async def test_repairs_delete_removes_registry_entries() -> None:
@@ -340,6 +366,12 @@ async def test_repairs_delete_removes_registry_entries() -> None:
     )
     assert entity_registry.removals == [removable.subentry_id]
     assert device_registry.removals == [removable.subentry_id]
+    # Same two-sided reload assertion as its move twin above. Without the second
+    # line a silent fall back from the scheduling lever to the awaited
+    # ``async_reload`` would pass here, which is exactly the regression the
+    # tripwire on the stub exists to catch.
+    assert manager.scheduled_reloads == [entry.entry_id]
+    assert manager.reloads == []
 
 
 async def test_coordinator_propagates_visible_devices_to_registries() -> None:

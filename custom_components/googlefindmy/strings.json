@@ -352,6 +352,7 @@
     },
     "abort": {
       "reconfigure_successful": "Reconfiguration successful.",
+      "credentials_saved_not_reloaded": "Credentials saved. The entry could not be reloaded; they take effect the next time it is set up successfully.",
       "no_ignored_devices": "There are no ignored devices to restore.",
       "no_semantic_locations": "No semantic locations are configured.",
       "repairs_no_subentries": "There are no subentries to repair.",

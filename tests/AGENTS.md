@@ -245,6 +245,30 @@ are installed. **Review this checklist on every single change under
    patched source module move the yardstick along with the measurement. See
    [Patching a symbol that other modules copy at import time](#patching-a-symbol-that-other-modules-copy-at-import-time).
 
+8. **Options-flow reload doubles** — the options steps for semantic locations
+   and subentry repairs schedule their reload through
+   `config_flow._schedule_claimed_reload`, so their manager doubles must expose
+   a **synchronous** `async_schedule_reload` recorder (the core method is a
+   `@callback`, an `async def` here would make the production call site look
+   awaitable) and keep `async_reload` next to it as a tripwire, so an assertion
+   can tell a silent fall back to the awaited variant from the intended path.
+   Assert both sides (`scheduled_reloads == [entry_id]` **and** `reloads == []`);
+   a one-sided assertion goes green on the "no lever" branch, which is how a
+   missing recorder once slipped through. A double whose `async_reload` is
+   *awaited* must return the core's `bool` (`return True` on success), not
+   `None`: `_release_claim_when_reload_fails` reads the task's result as well
+   as its exception, because the core reports a failed unload — and a component
+   it could not set up — by returning `False` rather than by raising. A `None`
+   therefore makes every successful reload look like a dead end, hands the
+   latch back, and silently defeats the coalescing such tests assert.
+   Entry stubs used by those tests must
+   also carry `state`, `source` and `disabled_by`: `_entry_reload_is_hopeless`
+   reads all three via `getattr(..., None)` and fails open, so a stub without
+   them lets the state gate answer "not hopeless" unconditionally and a test
+   that claims to exercise the gate exercises nothing. Use the submodule form
+   `from homeassistant.config_entries import ConfigEntryState`, which is the
+   module world the production comparison lives in.
+
 Treat this checklist as a living document: if a new helper or guard
 becomes necessary, add it here and verify each item before completing
 any change under `tests/`.

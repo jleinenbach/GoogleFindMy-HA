@@ -352,6 +352,7 @@
     },
     "abort": {
       "reconfigure_successful": "Herconfiguratie geslaagd.",
+      "credentials_saved_not_reloaded": "Inloggegevens opgeslagen. De invoer kon niet opnieuw worden geladen; ze worden van kracht bij de volgende geslaagde installatie ervan.",
       "no_ignored_devices": "Er zijn geen genegeerde apparaten om te herstellen.",
       "no_semantic_locations": "Er zijn geen semantische locaties geconfigureerd.",
       "repairs_no_subentries": "Er zijn geen subentries om te repareren.",

@@ -82,7 +82,6 @@ LEGACY_ALLOWLIST: set[str] = {
     "tests/test_key_propagation_flow.py",
     "tests/test_map_view_features.py",
     "tests/test_metadata_helpers.py",
-    "tests/test_options_flow_semantic_locations.py",
     "tests/test_phone_device_key_handling.py",
     "tests/test_pip_audit_security.py",
     "tests/test_python315_compat_guard.py",

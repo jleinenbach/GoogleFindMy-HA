@@ -673,6 +673,71 @@ async def test_reconfigure_gives_the_latch_back_when_the_deferred_task_is_cancel
 
 
 @pytest.mark.asyncio
+async def test_reconfigure_keeps_the_latch_when_the_entry_was_disabled_in_between() -> (
+    None
+):
+    """Characterization: the disabled-entry residual of the direct reload path.
+
+    This pins a documented shortcoming, not a desired behaviour. Reconfigure
+    claims the shared latch and then reloads *directly*, without the check that
+    ``_schedule_claimed_reload`` runs before its claim. If the entry is disabled
+    while the form stands open, the core sets ``disabled_by`` before it reloads,
+    ``ConfigEntry.async_unload`` returns ``True`` for the already unloaded entry
+    without running our ``async_unload_entry``, and ``async_reload`` returns
+    that truthy unload result without calling ``async_setup``. No release point
+    fires and no dead end is recognised, so the claim stays behind until the
+    entry is switched back on or removed.
+
+    The residual is bounded: the latch is a per-entry set, and while the entry
+    is disabled every other claimant either runs the hopeless check and stands
+    down anyway or needs a loaded entry. Should the path ever gain a check on
+    the entry *after* a truthy reload, this test turns red, which is the point:
+    the contract paragraph in ``agents/runtime_patterns/AGENTS.md`` must then be
+    corrected in the same change.
+    """
+
+    entry = make_config_entry(
+        entry_id="entry-disabled-in-between",
+        title="Find My",
+        subentries={},
+        runtime_data=SimpleNamespace(),
+        state="not_loaded",
+        source="user",
+        disabled_by="user",
+    )
+    entry.data[CONF_GOOGLE_EMAIL] = "existing@example.com"
+
+    class _ConfigEntries:
+        def __init__(self) -> None:
+            self.reloads: list[str] = []
+            self.scheduled: list[str] = []
+
+        async def async_reload(self, entry_id: str) -> bool:
+            # What the core returns for a disabled entry: the truthy unload
+            # result, with no setup behind it.
+            self.reloads.append(entry_id)
+            return True
+
+        def async_schedule_reload(self, entry_id: str) -> None:
+            self.scheduled.append(entry_id)
+
+        def async_get_entry(self, entry_id: str) -> Any:
+            return entry if entry_id == entry.entry_id else None
+
+    manager = _ConfigEntries()
+    flow = _reconfigure_flow_with_latch(entry, manager)
+
+    await flow._async_reload_entry_after_reconfigure(entry)  # type: ignore[attr-defined]
+
+    # The reload was attempted and reported success, so neither the falsy-result
+    # branch nor an exception handler ran.
+    assert manager.reloads == [entry.entry_id]
+    assert manager.scheduled == []
+    # And the claim is still held: a second claimant cannot get the latch.
+    assert not _latch_is_free(flow.hass, entry.entry_id)
+
+
+@pytest.mark.asyncio
 async def test_reconfigure_keeps_the_latch_when_the_scheduler_took_the_reload(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

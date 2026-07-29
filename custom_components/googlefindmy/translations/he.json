@@ -352,6 +352,7 @@
     },
     "abort": {
       "reconfigure_successful": "הגדרה מחדש הצליחה.",
+      "credentials_saved_not_reloaded": "פרטי ההתחברות נשמרו. לא ניתן היה לטעון מחדש את הרשומה; הם ייכנסו לתוקף בהגדרה המוצלחת הבאה שלה.",
       "no_ignored_devices": "אין התקנים מוסתרים לשחזור.",
       "no_semantic_locations": "לא מוגדרים מיקומים סמנטיים.",
       "repairs_no_subentries": "אין תת-רשומות לתיקון.",

@@ -98,13 +98,42 @@ def test_reference_translation_exists() -> None:
 
 def test_all_expected_languages_present() -> None:
     """Ensure all expected language translations are present."""
-    expected_languages = {"en", "de", "fr", "es", "it", "pl", "pt", "pt-BR"}
+    # Every catalogue that ships in `translations/`. The structural parity test
+    # above compares whatever is present against `en.json`; only this set keeps
+    # a shipped catalogue from being deleted unnoticed, so an omission here is
+    # a hole rather than a shorter list. `nl` and `he` were missing while both
+    # files shipped.
+    expected_languages = {
+        "en",
+        "de",
+        "fr",
+        "es",
+        "he",
+        "it",
+        "nl",
+        "pl",
+        "pt",
+        "pt-BR",
+    }
     translation_files = _get_translation_files()
     actual_languages = {f.stem for f in translation_files}
 
     missing_languages = expected_languages - actual_languages
     assert not missing_languages, (
         f"Missing translation files: {sorted(missing_languages)}"
+    )
+
+    # The other direction, and the reason the set above is spelled out rather
+    # than derived from the directory: a catalogue that ships without being
+    # listed here could be deleted again without any test noticing. Listing it
+    # is what arms the assertion above for it. Two assertions rather than one
+    # equality check, because "a shipped catalogue vanished" and "a shipped
+    # catalogue is unregistered" call for different repairs.
+    unlisted_languages = actual_languages - expected_languages
+    assert not unlisted_languages, (
+        "Translation files that ship but are not listed in `expected_languages`: "
+        f"{sorted(unlisted_languages)}. Add them there so a later deletion turns "
+        "this test red."
     )
 
 

@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from typing import Protocol
 
 import pytest
+from homeassistant.core import HomeAssistant
 
 from custom_components.googlefindmy import config_flow
 from custom_components.googlefindmy.const import (
@@ -166,3 +167,46 @@ async def test_hub_subentry_flow_logs_and_delegates(
         "Hub subentry flow requested" in record.getMessage()
         for record in caplog.records
     ), "Expected hub subentry flow to log when invoked"
+
+
+@pytest.mark.asyncio
+async def test_visibility_hub_selection_filters_ignored_entries() -> None:
+    """The hub picker offers every entry except the ignored one.
+
+    This pins the filter itself, not the way the module constant is resolved.
+    Under an ordinary run the production module binds the *package attribute*
+    ``homeassistant.config_entries``, which is the installed module rather than
+    the ``sys.modules`` stub this suite installs, so ``SOURCE_IGNORE`` is
+    present and the ``getattr`` default there never fires; turning the default
+    back into a direct attribute access leaves this test green. The step had no
+    test at all before, which is how a filter over ``SOURCE_*`` names stayed
+    unexercised.
+    """
+
+    primary = make_config_entry(entry_id="hub-1", title="Primary", source="user")
+    secondary = make_config_entry(entry_id="hub-2", title="Secondary", source="user")
+    ignored = make_config_entry(entry_id="hub-3", title="Ignored", source="ignore")
+
+    class _ConfigEntries(ConfigEntriesDomainUniqueIdLookupMixin):
+        def __init__(self) -> None:
+            attach_config_entries_flow_manager(self)
+
+        def async_entries(self, domain: str) -> list[SimpleNamespace]:
+            assert domain == config_flow.DOMAIN
+            return [primary, secondary, ignored]
+
+    hass = HomeAssistant()
+    hass.config_entries = _ConfigEntries()  # type: ignore[attr-defined]
+
+    flow = config_flow.ConfigFlow()
+    flow.hass = hass  # type: ignore[assignment]
+    flow.context = {}
+
+    result = await flow.async_step_select_hub_for_visibility()
+
+    assert result["step_id"] == "select_hub_for_visibility"
+    marker = next(iter(result["data_schema"].schema))
+    choices = result["data_schema"].schema[marker].container
+    assert set(choices) == {"hub-1", "hub-2"}, (
+        "The ignored entry must not be offered as a visibility hub"
+    )

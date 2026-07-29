@@ -93,9 +93,20 @@ from homeassistant.helpers.event import async_call_later
 from homeassistant.helpers.storage import Store
 
 try:
-    from homeassistant.config_entries import ConfigEntry, OperationNotAllowed
-except ImportError:  # Pre-2025.5 HA builds do not expose the helper.
-    from homeassistant.config_entries import ConfigEntry
+    from homeassistant.config_entries import (
+        ConfigEntry,
+        ConfigEntryState,
+        OperationNotAllowed,
+    )
+except ImportError:  # pragma: no cover - pre-2025.5 builds are below our floor
+    # Unreachable on every supported core: hacs.json declares 2025.9.1, and
+    # ``OperationNotAllowed`` has been exported since 2025.5. Kept as a landing
+    # pad rather than removed, and marked instead of tested because reaching it
+    # would mean importing a core we do not support. Note the asymmetry: only
+    # this helper is optional. ``ConfigEntry`` and ``ConfigEntryState`` are hard
+    # requirements here, so their disappearance is meant to fail loudly at
+    # import time rather than degrade quietly.
+    from homeassistant.config_entries import ConfigEntry, ConfigEntryState
 
     OperationNotAllowed = type("OperationNotAllowed", (HomeAssistantError,), {})
 
@@ -3032,11 +3043,158 @@ def _discard_entry_reload(hass: HomeAssistant, entry_id: str) -> None:
         )
 
 
+_TERMINAL_ENTRY_RELOAD_STATES: Final[frozenset[ConfigEntryState]] = frozenset(
+    state
+    for state in (
+        getattr(ConfigEntryState, "MIGRATION_ERROR", None),
+        getattr(ConfigEntryState, "FAILED_UNLOAD", None),
+    )
+    if state is not None
+)
+"""Entry states a reload can no longer come back from.
+
+A **positive list of terminal states**, not the negation of an "is recoverable"
+property. Home Assistant reports ``recoverable is False`` for four states, but
+only two of them are terminal: ``MIGRATION_ERROR`` and ``FAILED_UNLOAD`` stay
+that way without outside help, while ``SETUP_IN_PROGRESS`` and
+``UNLOAD_IN_PROGRESS`` heal within seconds. ``async_reload`` enters
+``entry.setup_lock``, which the running setup holds, so a reload scheduled
+during either transient state waits and then runs against a state that is
+recoverable again. Standing down for them would drop a legitimate reload -- and
+with it freshly written credentials -- which is the very damage this latch
+exists to prevent, only with the sign flipped. A future, unknown state is not in
+this set either and therefore keeps today's behaviour.
+
+The members are resolved from the imported symbols rather than spelled as
+strings, and a name that cannot be resolved drops out of the set instead of
+raising: an upstream rename shrinks the set (fail-open, reload as before)
+instead of breaking the flow. ``tests/test_config_flow_reload_latch_state_guard.py``
+pins that the set did not silently run empty.
+"""
+
+
+def _resolve_config_entry(hass: HomeAssistant, entry_id: str) -> Any | None:
+    """Look ``entry_id`` up through the entry manager, ``None`` when that fails.
+
+    One place for the lookup, so the state gate and its caller cannot disagree
+    on which manager method to use or on how a missing one is treated. Every
+    doubt ends in ``None``; the callers read that as "no information" and carry
+    on rather than standing down.
+
+    ``async_get_entry`` and not ``async_get_known_entry``: it is the way already
+    established in this module, it returns ``None`` instead of raising
+    ``UnknownEntry``, and the test stub carries it.
+
+    No guard against an empty ``entry_id`` here: the only callers rule that out
+    before they get this far, and the manager answers ``None`` for it anyway. A
+    second guard would be a branch no test can reach, and an unreachable guard
+    is not a safety net, it is a blind spot in the coverage report.
+    """
+
+    resolve = getattr(getattr(hass, "config_entries", None), "async_get_entry", None)
+    if not callable(resolve):
+        return None
+    try:
+        return resolve(entry_id)
+    except Exception:  # noqa: BLE001 - a lookup must never block a reload
+        _LOGGER.debug(
+            "Could not resolve entry %s; treating it as unknown",
+            entry_id,
+            exc_info=True,
+        )
+        return None
+
+
+def _entry_reload_is_hopeless(
+    hass: HomeAssistant, entry_id: str, entry: Any | None = None
+) -> bool:
+    """Whether reloading ``entry_id`` cannot possibly reach a setup.
+
+    Claiming the shared latch is a *promise to reload*, and the release points
+    (unload, setup, entry removal) all presuppose that a reload actually arrives.
+    Where it cannot, the promise must not be made in the first place: the reload
+    itself runs in a core-owned task that ``async_schedule_reload`` neither
+    returns nor exposes, so nothing would hand the latch back and every later
+    reload of that entry would stand down -- with its credentials ineffective --
+    until the process restarts.
+
+    Three cases qualify, all measured against the installed core:
+
+    * a **terminal state** (``_TERMINAL_ENTRY_RELOAD_STATES``): the reload can
+      only raise ``OperationNotAllowed``;
+    * a **disabled** entry: ``async_reload`` returns right after the unload
+      (``if not unload_result or entry.disabled_by: return unload_result``) and
+      never calls ``async_setup``;
+    * an **ignored** entry (``SOURCE_IGNORE``): ``ConfigEntry.async_setup``
+      bails out immediately (``if self.source == SOURCE_IGNORE or
+      self.disabled_by: return``).
+
+    The last two are invisible from the outside: the state stays recoverable and
+    the result is truthy, so neither the state nor the return value of the reload
+    tells them apart from a reload that landed.
+
+    Fails **open** on every doubt -- an empty id, no resolver, a resolver that
+    raises or returns ``None``, an entry without a state -- because one reload
+    too many is a nuisance while a missing one leaves written credentials
+    ineffective. That is the same direction the whole latch fails towards.
+
+    ``entry`` may be passed when the caller already holds the object; that skips
+    the second lookup and, more importantly, keeps the check from depending on
+    whether a given manager happens to offer ``async_get_entry``.
+    """
+
+    if not entry_id:
+        return False
+
+    if entry is None:
+        entry = _resolve_config_entry(hass, entry_id)
+    if entry is None:
+        return False
+
+    if getattr(entry, "disabled_by", None):
+        return True
+
+    if getattr(entry, "source", None) == getattr(
+        config_entries, "SOURCE_IGNORE", "ignore"
+    ):
+        return True
+
+    state = getattr(entry, "state", None)
+    if state is None:
+        return False
+
+    return state in _TERMINAL_ENTRY_RELOAD_STATES
+
+
 def _schedule_claimed_reload(hass: HomeAssistant, entry_id: str) -> bool:
     """Schedule the one reload of ``entry_id`` and report whether it was ours.
 
-    Single owner of the write-then-reload sequence used by every credential
-    writing path in this flow. Order matters twice: the availability of
+    Single owner for the paths that route through it, which is no longer only
+    the credential paths: the semantic-location and subentry repair steps go
+    through here too. Their fallbacks differ, and the difference decides what a
+    stand-down actually costs. The credential update listener is a fallback for
+    neither of them, because it returns early on an unchanged fingerprint. The
+    semantic steps have a stronger one in its place: ``_apply_semantic_mapping``
+    reads ``entry.options`` live on every payload, and ``async_update_entry``
+    writes into the very entry object the coordinator holds, so the mapping is
+    effective without any reload and the reload only pulls the first application
+    forward through the first refresh at the end of the setup. The subentry
+    repair steps are the ones that need it, and only for one half: their metadata
+    still reaches the coordinator at the next poll, because
+    ``_refresh_subentry_index`` re-reads ``entry.subentries`` there as well, but
+    the entity-to-subentry binding is handed out at platform setup and changes on
+    a reload only.
+
+    It is deliberately **not** the only claimant in this module. Three paths
+    still take ``_claim_entry_reload`` and call ``async_reload`` themselves: the
+    discovery unique-id guard, ``_async_reload_entry_after_reconfigure`` and
+    ``_finalize_success``. Only the first two bypass the hopeless-state gate
+    below; ``_finalize_success`` runs its own copy of that check before its
+    claim, so counting it among the unguarded ones would misread it.
+    Routing them here is a separate change with its own regression surface;
+    until then a latch they leak also blocks the steps routed here, so do not
+    read this docstring as "every path in this flow". Order matters twice: the
+    availability of
     ``async_schedule_reload`` is checked **before** the claim, so an old core
     without it does not burn the latch, and the claim happens **last**, so the
     window between claim and scheduling stays as short as it can be. If the
@@ -3052,8 +3210,23 @@ def _schedule_claimed_reload(hass: HomeAssistant, entry_id: str) -> bool:
     )
     if not callable(schedule_reload):
         _LOGGER.debug(
-            "async_schedule_reload is unavailable; entry %s keeps its old "
-            "credentials until it is reloaded",
+            "async_schedule_reload is unavailable; no reload was scheduled for "
+            "entry %s, so whatever about this write needs a setup stays pending "
+            "until the entry is next set up successfully",
+            entry_id,
+        )
+        return False
+
+    if _entry_reload_is_hopeless(hass, entry_id):
+        # No second lookup to name the state: for two of the three reasons the
+        # state would actively mislead (a disabled or ignored entry sits in a
+        # perfectly recoverable ``NOT_LOADED``), and an entry that vanished in
+        # between would produce a "state=None" line that contradicts the verdict
+        # above it. The message names the reason set instead.
+        _LOGGER.debug(
+            "Not claiming the reload latch for entry %s: it is disabled, ignored "
+            "or in a terminal state, so a reload would not reach a setup and "
+            "nothing would hand the latch back",
             entry_id,
         )
         return False
@@ -3069,7 +3242,7 @@ def _schedule_claimed_reload(hass: HomeAssistant, entry_id: str) -> bool:
         schedule_reload(entry_id)
     except Exception:  # noqa: BLE001 - the write itself already landed
         _LOGGER.exception(
-            "Failed to schedule the reload of entry %s after writing credentials",
+            "Failed to schedule the reload of entry %s after writing to it",
             entry_id,
         )
         _discard_entry_reload(hass, entry_id)
@@ -3093,7 +3266,12 @@ def _release_claim_when_reload_fails(
     reload actually arrived, so a latch left behind here is permanent: every
     later credential write sees the stale claim, stands down, and its newly
     stored credentials stay ineffective until the entry is restarted or
-    removed. A cancelled task counts as "no reload" for the same reason.
+    removed. A cancelled task counts as "no reload" for the same reason, and so
+    does a task that merely *returns* falsy: ``async_reload`` reports a failed
+    unload, and a component it could not set up, by returning ``False`` rather
+    than by raising. A *disabled* entry is deliberately not on that list -- it
+    returns the truthy unload result without ever reaching a setup, so only the
+    check before the claim (``_entry_reload_is_hopeless``) catches it.
 
     Releasing once too often only risks one reload too many, which is the
     direction this latch deliberately fails towards (see
@@ -3110,7 +3288,42 @@ def _release_claim_when_reload_fails(
         except Exception:  # noqa: BLE001 - a stub future need not answer at all
             return
         if not failure:
-            return
+            # No exception is not the same as "reloaded". ``async_reload``
+            # returns ``False`` without raising when the unload failed and when
+            # the component could not be set up; the release points do not run
+            # in those cases either, so the latch would stay behind just as
+            # permanently as after a raising task. (A disabled entry returns the
+            # truthy unload result instead and is caught before the claim.)
+            result = getattr(finished, "result", None)
+            if not callable(result):
+                # A double without a result protocol says nothing either way,
+                # and a latch is never released on a guess.
+                return
+            try:
+                reloaded = result()
+            except Exception:  # noqa: BLE001 - same reason as above
+                return
+            if reloaded:
+                return
+            # Falsy has three causes, and two of them already passed a release
+            # point: a failed unload runs our ``async_unload_entry`` whose
+            # ``finally`` hands the latch back, and a setup that returns False
+            # ran our ``async_setup_entry`` whose head does the same. Treating
+            # those as dead ends would discard a claim someone else may have
+            # taken in the meantime -- the very double reload this latch
+            # prevents -- and would blame the credentials for a reload that
+            # actually happened. Only the third cause leaves the latch behind:
+            # the component itself could not be set up, so our entry setup never
+            # ran. That one is visible from the outside.
+            # Fails towards releasing, like everything else about this latch:
+            # where the component list or the entry cannot be read, one reload
+            # too many beats a promise nobody redeems.
+            entry = _resolve_config_entry(hass, entry_id)
+            domain = getattr(entry, "domain", None) if entry is not None else None
+            components = getattr(getattr(hass, "config", None), "components", None)
+            if domain is not None and components is not None and domain in components:
+                return
+            failure = True
         # Warned about, not whispered: the flow has already told the user that
         # the change was applied, and the credentials it wrote stay ineffective
         # until the entry is reloaded by something else or Home Assistant
@@ -3683,9 +3896,26 @@ class ConfigFlow(
         entries = [
             entry
             for entry in hass.config_entries.async_entries(DOMAIN)
-            # Guard source lookup so discovery-update stubs without `.source`
-            # keep the Home Assistant contract intact.
-            if getattr(entry, "source", None) != config_entries.SOURCE_IGNORE
+            # Two guards, two reasons. `getattr(entry, "source", None)` keeps
+            # discovery-update stubs without a `.source` attribute inside the
+            # Home Assistant contract. The module constant is resolved the same
+            # way `_entry_reload_is_hopeless` does, and what that default guards
+            # is an import world, not a core version: `SOURCE_IGNORE` predates
+            # the declared minimum by years. Line 85 binds the *package
+            # attribute* (`from homeassistant import config_entries`), and in an
+            # ordinary test run that attribute is the installed module, because
+            # `pytest_homeassistant_custom_component` imports it before
+            # `tests/conftest.py` swaps the `sys.modules` entry for its stub and
+            # the attribute survives the swap. There the constant is present and
+            # the default never fires. It fires where that attribute is absent
+            # and the import falls back to `sys.modules`: the conftest stub
+            # carries `SOURCE_DISCOVERY` and `SOURCE_RECONFIGURE` and nothing
+            # else, so a direct attribute access would raise `AttributeError`
+            # there. Reproduce that world with `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1`.
+            # Of those two names only `SOURCE_DISCOVERY` is required at import
+            # time (it raises); `SOURCE_RECONFIGURE` already reads via a default.
+            if getattr(entry, "source", None)
+            != getattr(config_entries, "SOURCE_IGNORE", "ignore")
         ]
 
         if not entries:
@@ -7787,9 +8017,21 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin, _ContainerLoginMixi
         self.hass.config_entries.async_update_entry(
             self.config_entry, options=new_options
         )
-        self.hass.async_create_task(
-            self.hass.config_entries.async_reload(self.config_entry.entry_id)
-        )
+        # Standing down costs the reload, never the mapping. The options are in
+        # the entry above, and ``_apply_semantic_mapping`` reads them live from
+        # that same object on every payload, so the next poll or push applies
+        # them whatever the foreign holder does; the reload only pulls that
+        # forward. Do not restate the narrower claim this comment used to make
+        # ("safe as long as the holder keeps its promise, one window is not
+        # covered"). It rested on the holder reaching a setup, and there are
+        # several ways it does not: a cancelled or refused reload task, a
+        # scheduling call that raised, a failed unload, an entry disabled in
+        # between, and the core-owned task after ``async_schedule_reload`` that
+        # can die unobserved (see the residual paragraph in
+        # ``agents/runtime_patterns/AGENTS.md``). None of them reaches this
+        # write, which is why the live read and not the promise is the reason
+        # standing down is safe here.
+        _schedule_claimed_reload(self.hass, self.config_entry.entry_id)
         return await self.async_step_init()
 
     async def _async_semantic_location_form(
@@ -7887,9 +8129,11 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin, _ContainerLoginMixi
         self.hass.config_entries.async_update_entry(
             self.config_entry, options=new_options
         )
-        self.hass.async_create_task(
-            self.hass.config_entries.async_reload(self.config_entry.entry_id)
-        )
+        # Same reasoning as in ``async_step_semantic_locations_delete``: the new
+        # mapping is in the entry before the claim and is read live from there,
+        # so a stand-down delays the first application to the next poll or push
+        # and loses nothing, whether or not the foreign holder reaches a setup.
+        _schedule_claimed_reload(self.hass, self.config_entry.entry_id)
         self._semantic_location_editing = None
         return await self.async_step_init()
 
@@ -8269,9 +8513,23 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin, _ContainerLoginMixi
                     description_placeholders=placeholders,
                 )
 
-            self.hass.async_create_task(
-                self.hass.config_entries.async_reload(self.config_entry.entry_id)
-            )
+            # Two directions here, and only one of them is a nuisance. Towards a
+            # second reload: unlike the semantic steps there is an ``await``
+            # between the write and the claim
+            # (``_async_assign_devices_to_subentry`` above), during which a
+            # foreign reload may release the latch again, which costs one reload
+            # too many and never the assignment. Towards no reload at all:
+            # standing down leaves the assignment stored, and the coordinator
+            # still picks its metadata up at the next poll, because
+            # ``_refresh_subentry_index`` re-reads ``entry.subentries`` there.
+            # What waits for a reload is the entity-to-subentry binding, which
+            # platform setup hands out. If the holder ends in one of the dead
+            # ends that release the latch without reloading, that half waits for
+            # the next reload. Weigh it against the fact that
+            # ``async_step_visibility`` performs the same assignment with no
+            # reload at all: the two steps disagree, and that disagreement is
+            # older than this latch.
+            _schedule_claimed_reload(self.hass, self.config_entry.entry_id)
             return self.async_abort(
                 reason="subentry_move_success", description_placeholders=placeholders
             )
@@ -8338,9 +8596,14 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin, _ContainerLoginMixi
                 "count": str(len(devices)),
             }
 
-            self.hass.async_create_task(
-                self.hass.config_entries.async_reload(self.config_entry.entry_id)
-            )
+            # Same two directions as in ``async_step_repairs_move``: the removal
+            # is awaited above and done, and the core clears the device and
+            # entity registry links of the subentry as part of it, so a latch
+            # that changed hands in between costs at most a second reload, never
+            # the change itself. In the other direction, a stand-down whose
+            # holder never reaches a setup leaves the already loaded entities of
+            # the removed subentry standing until the next reload.
+            _schedule_claimed_reload(self.hass, self.config_entry.entry_id)
             return self.async_abort(
                 reason="subentry_delete_success",
                 description_placeholders=placeholders,
@@ -8418,6 +8681,35 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin, _ContainerLoginMixi
                             if selected_option is not None:
                                 await self._async_refresh_subentry_entry_title(
                                     entry, selected_option
+                                )
+                            # A claim is a promise to reload, and the release
+                            # points (unload, setup, removal) all presuppose
+                            # that a reload arrives. Where it cannot, promising
+                            # would strand the latch for the life of the
+                            # process and every later credential write would
+                            # stand down with its credentials ineffective.
+                            if _entry_reload_is_hopeless(
+                                self.hass, entry.entry_id, entry
+                            ):
+                                # Names all three inputs rather than the state
+                                # alone: for a disabled or ignored entry the
+                                # state stays recoverable and would mislead.
+                                _LOGGER.warning(
+                                    "Not reloading entry %s after a credential "
+                                    "write (state=%s, disabled_by=%s, "
+                                    "source=%s); the credentials are stored and "
+                                    "take effect the next time the entry is "
+                                    "set up successfully",
+                                    entry.entry_id,
+                                    getattr(entry, "state", None),
+                                    getattr(entry, "disabled_by", None),
+                                    getattr(entry, "source", None),
+                                )
+                                # Only this branch reports differently. The
+                                # regular path keeps ``reconfigure_successful``,
+                                # where that message is true.
+                                return self.async_abort(
+                                    reason="credentials_saved_not_reloaded"
                                 )
                             # The write above notifies the credential update
                             # listener, which reloads for exactly this change.
