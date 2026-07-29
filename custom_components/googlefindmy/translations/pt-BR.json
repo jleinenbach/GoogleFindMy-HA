@@ -352,7 +352,7 @@
     },
     "abort": {
       "reconfigure_successful": "Reconfiguração bem-sucedida.",
-      "credentials_saved_not_reloaded": "Credenciais salvas. Não foi possível recarregar a entrada; entram em vigor na próxima configuração dela.",
+      "credentials_saved_not_reloaded": "Credenciais salvas. Não foi possível recarregar a entrada; entram em vigor na próxima configuração bem-sucedida dela.",
       "no_ignored_devices": "Não há dispositivos ignorados para restaurar.",
       "no_semantic_locations": "Não há localizações semânticas configuradas.",
       "repairs_no_subentries": "Não há subentradas para reparar.",

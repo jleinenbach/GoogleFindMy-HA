@@ -352,7 +352,7 @@
     },
     "abort": {
       "reconfigure_successful": "Reconfiguration réussie.",
-      "credentials_saved_not_reloaded": "Identifiants enregistrés. L’entrée n’a pas pu être rechargée ; ils prendront effet lors de sa prochaine configuration.",
+      "credentials_saved_not_reloaded": "Identifiants enregistrés. L’entrée n’a pas pu être rechargée ; ils prendront effet lors de sa prochaine configuration réussie.",
       "no_ignored_devices": "Aucun appareil ignoré à restaurer.",
       "no_semantic_locations": "Aucun emplacement sémantique n’est configuré.",
       "repairs_no_subentries": "Aucun groupe de fonctionnalités à réparer.",

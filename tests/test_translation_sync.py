@@ -98,7 +98,23 @@ def test_reference_translation_exists() -> None:
 
 def test_all_expected_languages_present() -> None:
     """Ensure all expected language translations are present."""
-    expected_languages = {"en", "de", "fr", "es", "it", "pl", "pt", "pt-BR"}
+    # Every catalogue that ships in `translations/`. The structural parity test
+    # above compares whatever is present against `en.json`; only this set keeps
+    # a shipped catalogue from being deleted unnoticed, so an omission here is
+    # a hole rather than a shorter list. `nl` and `he` were missing while both
+    # files shipped.
+    expected_languages = {
+        "en",
+        "de",
+        "fr",
+        "es",
+        "he",
+        "it",
+        "nl",
+        "pl",
+        "pt",
+        "pt-BR",
+    }
     translation_files = _get_translation_files()
     actual_languages = {f.stem for f in translation_files}
 

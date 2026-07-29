@@ -352,7 +352,7 @@
     },
     "abort": {
       "reconfigure_successful": "Ponowna konfiguracja zakończona pomyślnie.",
-      "credentials_saved_not_reloaded": "Poświadczenia zostały zapisane. Nie udało się ponownie załadować wpisu; zaczną obowiązywać przy jego następnej konfiguracji.",
+      "credentials_saved_not_reloaded": "Poświadczenia zostały zapisane. Nie udało się ponownie załadować wpisu; zaczną obowiązywać przy jego następnej udanej konfiguracji.",
       "no_ignored_devices": "Brak ignorowanych urządzeń do przywrócenia.",
       "no_semantic_locations": "Nie skonfigurowano lokalizacji semantycznych.",
       "repairs_no_subentries": "Brak grup funkcji do naprawy.",
