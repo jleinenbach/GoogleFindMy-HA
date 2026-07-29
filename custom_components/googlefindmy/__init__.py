@@ -2417,9 +2417,14 @@ class GoogleFindMyDomainData(TypedDict, total=False):
     # The device_tracker registry self-heal claims it too -- its own one-shot latch
     # answers a different question ("has this entry healed itself yet") and knows
     # nothing about a reload someone else already scheduled -- and hands that
-    # one-shot back when it stands down here. Reloads for other reasons (options,
-    # semantic locations, subentry moves) go through ``async_reload`` as the direct
-    # consequence of a user action and stay out. Released as soon as
+    # one-shot back when it stands down here. The options steps for semantic
+    # locations and subentry repairs claim it as well: they schedule through the
+    # config flow's single owner, and unlike a credential write they have no
+    # fallback, because the credential update listener returns early on an
+    # unchanged fingerprint. What stays out is every reload a caller issues
+    # directly via ``async_reload`` (the discovery unique-id guard, the
+    # reconfigure path, the credentials finalizer) -- those still claim the latch
+    # by hand and bypass the flow's state gate. Released as soon as
     # the reload arrives (unload, and setup for an entry that was not loaded), and
     # given back by a claimant whose scheduling call failed, so a genuinely later
     # change reloads again.
