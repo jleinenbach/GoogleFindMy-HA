@@ -123,6 +123,19 @@ def test_all_expected_languages_present() -> None:
         f"Missing translation files: {sorted(missing_languages)}"
     )
 
+    # The other direction, and the reason the set above is spelled out rather
+    # than derived from the directory: a catalogue that ships without being
+    # listed here could be deleted again without any test noticing. Listing it
+    # is what arms the assertion above for it. Two assertions rather than one
+    # equality check, because "a shipped catalogue vanished" and "a shipped
+    # catalogue is unregistered" call for different repairs.
+    unlisted_languages = actual_languages - expected_languages
+    assert not unlisted_languages, (
+        "Translation files that ship but are not listed in `expected_languages`: "
+        f"{sorted(unlisted_languages)}. Add them there so a later deletion turns "
+        "this test red."
+    )
+
 
 def test_translation_files_are_valid_json() -> None:
     """Ensure all translation files are valid JSON."""
