@@ -352,6 +352,7 @@
     },
     "abort": {
       "reconfigure_successful": "Riconfigurazione riuscita.",
+      "credentials_saved_not_reloaded": "Credenziali salvate. Il ricaricamento non è riuscito. Verranno usate dopo il prossimo riavvio.",
       "no_ignored_devices": "Non ci sono dispositivi ignorati da ripristinare.",
       "no_semantic_locations": "Non sono configurate posizioni semantiche.",
       "repairs_no_subentries": "Non ci sono gruppi di funzionalità da riparare.",

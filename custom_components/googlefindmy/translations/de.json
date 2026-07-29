@@ -352,6 +352,7 @@
     },
     "abort": {
       "reconfigure_successful": "Neukonfiguration erfolgreich.",
+      "credentials_saved_not_reloaded": "Zugangsdaten gespeichert. Das Neuladen ist nicht gelungen. Die neuen Daten werden erst nach dem nächsten Neustart verwendet.",
       "no_ignored_devices": "Es gibt keine ignorierten Geräte, die wiederhergestellt werden können.",
       "no_semantic_locations": "Es sind keine semantischen Orte konfiguriert.",
       "repairs_no_subentries": "Es sind keine Funktionsgruppen zur Reparatur vorhanden.",

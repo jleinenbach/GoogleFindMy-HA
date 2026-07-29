@@ -352,6 +352,7 @@
     },
     "abort": {
       "reconfigure_successful": "Reconfiguration réussie.",
+      "credentials_saved_not_reloaded": "Identifiants enregistrés. Le rechargement n’a pas abouti. Ils seront utilisés après le prochain redémarrage.",
       "no_ignored_devices": "Aucun appareil ignoré à restaurer.",
       "no_semantic_locations": "Aucun emplacement sémantique n’est configuré.",
       "repairs_no_subentries": "Aucun groupe de fonctionnalités à réparer.",

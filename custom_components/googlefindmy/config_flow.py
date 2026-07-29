@@ -3256,7 +3256,12 @@ def _release_claim_when_reload_fails(
     reload actually arrived, so a latch left behind here is permanent: every
     later credential write sees the stale claim, stands down, and its newly
     stored credentials stay ineffective until the entry is restarted or
-    removed. A cancelled task counts as "no reload" for the same reason.
+    removed. A cancelled task counts as "no reload" for the same reason, and so
+    does a task that merely *returns* falsy: ``async_reload`` reports a failed
+    unload, and a component it could not set up, by returning ``False`` rather
+    than by raising. A *disabled* entry is deliberately not on that list -- it
+    returns the truthy unload result without ever reaching a setup, so only the
+    check before the claim (``_entry_reload_is_hopeless``) catches it.
 
     Releasing once too often only risks one reload too many, which is the
     direction this latch deliberately fails towards (see
@@ -3273,7 +3278,24 @@ def _release_claim_when_reload_fails(
         except Exception:  # noqa: BLE001 - a stub future need not answer at all
             return
         if not failure:
-            return
+            # No exception is not the same as "reloaded". ``async_reload``
+            # returns ``False`` without raising when the unload failed and when
+            # the component could not be set up; the release points do not run
+            # in those cases either, so the latch would stay behind just as
+            # permanently as after a raising task. (A disabled entry returns the
+            # truthy unload result instead and is caught before the claim.)
+            result = getattr(finished, "result", None)
+            if not callable(result):
+                # A double without a result protocol says nothing either way,
+                # and a latch is never released on a guess.
+                return
+            try:
+                reloaded = result()
+            except Exception:  # noqa: BLE001 - same reason as above
+                return
+            if reloaded:
+                return
+            failure = True
         # Warned about, not whispered: the flow has already told the user that
         # the change was applied, and the credentials it wrote stay ineffective
         # until the entry is reloaded by something else or Home Assistant
@@ -8614,6 +8636,35 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin, _ContainerLoginMixi
                             if selected_option is not None:
                                 await self._async_refresh_subentry_entry_title(
                                     entry, selected_option
+                                )
+                            # A claim is a promise to reload, and the release
+                            # points (unload, setup, removal) all presuppose
+                            # that a reload arrives. Where it cannot, promising
+                            # would strand the latch for the life of the
+                            # process and every later credential write would
+                            # stand down with its credentials ineffective.
+                            if _entry_reload_is_hopeless(
+                                self.hass, entry.entry_id, entry
+                            ):
+                                # Names all three inputs rather than the state
+                                # alone: for a disabled or ignored entry the
+                                # state stays recoverable and would mislead.
+                                _LOGGER.warning(
+                                    "Not reloading entry %s after a credential "
+                                    "write (state=%s, disabled_by=%s, "
+                                    "source=%s); the credentials are stored and "
+                                    "take effect the next time the entry is "
+                                    "set up",
+                                    entry.entry_id,
+                                    getattr(entry, "state", None),
+                                    getattr(entry, "disabled_by", None),
+                                    getattr(entry, "source", None),
+                                )
+                                # Only this branch reports differently. The
+                                # regular path keeps ``reconfigure_successful``,
+                                # where that message is true.
+                                return self.async_abort(
+                                    reason="credentials_saved_not_reloaded"
                                 )
                             # The write above notifies the credential update
                             # listener, which reloads for exactly this change.

@@ -159,10 +159,16 @@ class _DummyConfigEntries:
         self.removed_subentries.append(subentry_id)
         return True
 
-    async def async_reload(self, entry_id: str) -> None:
+    async def async_reload(self, entry_id: str) -> bool:
         assert DATA_AAS_TOKEN not in self._entry.data
         assert await self._entry.runtime_data.cache.get(DATA_AAS_TOKEN) is None
         self.reloaded.append(entry_id)
+        # The core returns ``bool`` and the release callback reads it: a falsy
+        # result means "ended without reloading" and hands the latch back. A
+        # double returning ``None`` would therefore report every successful
+        # reload as a failed one and silently defeat the coalescing this file
+        # asserts a few lines below.
+        return True
 
     async def async_setup(self, entry_id: str) -> bool:
         self.setup_calls.append(entry_id)

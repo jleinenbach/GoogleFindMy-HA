@@ -352,6 +352,7 @@
     },
     "abort": {
       "reconfigure_successful": "הגדרה מחדש הצליחה.",
+      "credentials_saved_not_reloaded": "פרטי ההתחברות נשמרו. הטעינה מחדש לא הצליחה. ייעשה בהם שימוש לאחר ההפעלה מחדש הבאה.",
       "no_ignored_devices": "אין התקנים מוסתרים לשחזור.",
       "no_semantic_locations": "לא מוגדרים מיקומים סמנטיים.",
       "repairs_no_subentries": "אין תת-רשומות לתיקון.",

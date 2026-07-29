@@ -2060,11 +2060,15 @@ class _FinishedTask:
         exception: BaseException | None = None,
         callback_raises: bool = False,
         answer_raises: bool = False,
+        result: Any = True,
+        result_raises: bool = False,
     ) -> None:
         self._cancelled = cancelled
         self._exception = exception
         self._callback_raises = callback_raises
         self._answer_raises = answer_raises
+        self._result = result
+        self._result_raises = result_raises
         self.callback_error: BaseException | None = None
 
     def cancelled(self) -> bool:
@@ -2082,6 +2086,17 @@ class _FinishedTask:
         if self._cancelled:
             raise asyncio.CancelledError
         return self._exception
+
+    def result(self) -> Any:
+        # ``async_reload`` reports a failed unload, and a component it could not
+        # set up, by *returning* ``False`` rather than by raising, so the
+        # callback has to read the outcome as well as the exception. A double
+        # without this method would leave that branch untested here.
+        if self._answer_raises or self._result_raises:
+            raise RuntimeError("this future refuses to answer")
+        if self._exception is not None:
+            raise self._exception
+        return self._result
 
     def add_done_callback(self, callback: Callable[[Any], None]) -> None:
         if self._callback_raises:
@@ -2134,6 +2149,17 @@ def test_a_direct_reload_that_never_lands_gives_the_latch_back() -> None:
         assert released == [], (
             "the reload arrived; unload and setup release the latch themselves"
         )
+
+        released.clear()
+        config_flow._release_claim_when_reload_fails(
+            hass, "entry-4", _FinishedTask(result=False)
+        )
+        assert released == ["entry-4"], (
+            "no exception is not the same as reloaded: async_reload reports a "
+            "failed unload, and a component it could not set up, by returning "
+            "False. None of the release points runs then either, so a latch "
+            "kept here would be just as permanent as after a raising task"
+        )
     finally:
         config_flow.import_integration_package = original  # type: ignore[assignment]
 
@@ -2166,6 +2192,28 @@ def test_the_release_helper_stays_quiet_on_a_task_that_cannot_answer() -> None:
         )
         mute = _FinishedTask(answer_raises=True)
         config_flow._release_claim_when_reload_fails(hass, "entry-3", mute)
+
+        # Two more shapes, both introduced with the outcome check: a double from
+        # before that check exists (no ``result`` at all) and one that answers
+        # ``cancelled``/``exception`` but refuses to report its outcome. Neither
+        # says the reload failed, so neither may release a latch on a guess.
+        class _NoResult:
+            def cancelled(self) -> bool:
+                return False
+
+            def exception(self) -> BaseException | None:
+                return None
+
+            def add_done_callback(self, callback: Callable[[Any], None]) -> None:
+                callback(self)
+
+        config_flow._release_claim_when_reload_fails(hass, "entry-4", _NoResult())
+        coy = _FinishedTask(result_raises=True)
+        config_flow._release_claim_when_reload_fails(hass, "entry-5", coy)
+        assert coy.callback_error is None, (
+            "a task that refuses to report its outcome must not escape the "
+            "callback either"
+        )
 
         assert released == []
         assert mute.callback_error is None, (
