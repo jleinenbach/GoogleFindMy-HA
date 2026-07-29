@@ -283,7 +283,7 @@ Config flows communicate state transitions through **abort reasons**, which powe
 | `subentry_remove_failed` | Repairs → Delete subentry | Removing the requested feature group failed unexpectedly. |
 | `subentry_delete_success` | Repairs → Delete subentry | A feature group was deleted (after optional device reassignment). |
 | `reconfigure_successful` | Credentials refresh flow | The integration applied new credentials and refreshed the chosen feature group. |
-| `credentials_saved_not_reloaded` | Credentials refresh flow | The new credentials were stored, but the entry could not be reloaded (it is disabled, ignored, or in a state a reload cannot come back from). They take effect the next time it is set up. |
+| `credentials_saved_not_reloaded` | Credentials refresh flow | The new credentials were stored, but the entry could not be reloaded (it is disabled, ignored, or in a state a reload cannot come back from). They take effect the next time it is set up successfully. |
 
 The `strings.json` and translation files under `custom_components/googlefindmy/translations/` provide localized messages for each key so UI notifications remain consistent.
 

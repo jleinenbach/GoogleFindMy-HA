@@ -173,10 +173,14 @@ async def test_hub_subentry_flow_logs_and_delegates(
 async def test_visibility_hub_selection_filters_ignored_entries() -> None:
     """The hub picker offers every entry except the ignored one.
 
-    This pins the filter itself, not the way the module constant is resolved:
-    wherever the real Home Assistant package is installed, ``SOURCE_IGNORE``
-    is present either way. The step had no test at all before, which is how a
-    filter over ``SOURCE_*`` names stayed unexercised.
+    This pins the filter itself, not the way the module constant is resolved.
+    Under an ordinary run the production module binds the *package attribute*
+    ``homeassistant.config_entries``, which is the installed module rather than
+    the ``sys.modules`` stub this suite installs, so ``SOURCE_IGNORE`` is
+    present and the ``getattr`` default there never fires; turning the default
+    back into a direct attribute access leaves this test green. The step had no
+    test at all before, which is how a filter over ``SOURCE_*`` names stayed
+    unexercised.
     """
 
     primary = make_config_entry(entry_id="hub-1", title="Primary", source="user")

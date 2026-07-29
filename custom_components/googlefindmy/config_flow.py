@@ -3210,8 +3210,9 @@ def _schedule_claimed_reload(hass: HomeAssistant, entry_id: str) -> bool:
     )
     if not callable(schedule_reload):
         _LOGGER.debug(
-            "async_schedule_reload is unavailable; the write for entry %s is "
-            "stored but takes effect only after the next reload or restart",
+            "async_schedule_reload is unavailable; no reload was scheduled for "
+            "entry %s, so whatever about this write needs a setup stays pending "
+            "until the entry is next set up successfully",
             entry_id,
         )
         return False
@@ -3895,13 +3896,24 @@ class ConfigFlow(
         entries = [
             entry
             for entry in hass.config_entries.async_entries(DOMAIN)
-            # Guard source lookup so discovery-update stubs without `.source`
-            # keep the Home Assistant contract intact, and resolve the module
-            # constant the same way `_entry_reload_is_hopeless` does. The
-            # lightweight `config_entries` stub in `tests/conftest.py` defines
-            # only the two `SOURCE_*` names this module needs at import time,
-            # so a direct attribute access is safe wherever the real Home
-            # Assistant package is installed and a landmine wherever it is not.
+            # Two guards, two reasons. `getattr(entry, "source", None)` keeps
+            # discovery-update stubs without a `.source` attribute inside the
+            # Home Assistant contract. The module constant is resolved the same
+            # way `_entry_reload_is_hopeless` does, and what that default guards
+            # is an import world, not a core version: `SOURCE_IGNORE` predates
+            # the declared minimum by years. Line 85 binds the *package
+            # attribute* (`from homeassistant import config_entries`), and in an
+            # ordinary test run that attribute is the installed module, because
+            # `pytest_homeassistant_custom_component` imports it before
+            # `tests/conftest.py` swaps the `sys.modules` entry for its stub and
+            # the attribute survives the swap. There the constant is present and
+            # the default never fires. It fires where that attribute is absent
+            # and the import falls back to `sys.modules`: the conftest stub
+            # carries `SOURCE_DISCOVERY` and `SOURCE_RECONFIGURE` and nothing
+            # else, so a direct attribute access would raise `AttributeError`
+            # there. Reproduce that world with `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1`.
+            # Of those two names only `SOURCE_DISCOVERY` is required at import
+            # time (it raises); `SOURCE_RECONFIGURE` already reads via a default.
             if getattr(entry, "source", None)
             != getattr(config_entries, "SOURCE_IGNORE", "ignore")
         ]
@@ -8687,7 +8699,7 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin, _ContainerLoginMixi
                                     "write (state=%s, disabled_by=%s, "
                                     "source=%s); the credentials are stored and "
                                     "take effect the next time the entry is "
-                                    "set up",
+                                    "set up successfully",
                                     entry.entry_id,
                                     getattr(entry, "state", None),
                                     getattr(entry, "disabled_by", None),
