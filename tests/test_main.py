@@ -9,11 +9,103 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import subprocess
 import sys
+from pathlib import Path
+from typing import NamedTuple
 from unittest import mock
 
 import pytest
+
+# ---------------------------------------------------------------------------
+# CLI subprocess sandbox
+# ---------------------------------------------------------------------------
+
+# ``pgrep`` is the sanctioned selection path and is shimmed separately: seeing it
+# is not a defect, seeing pkill/killall is.
+_LOOKUP_TOOLS = ("pgrep",)
+_KILL_TOOLS = ("pkill", "killall")
+
+# Variables that would steer the CLI down a different branch. They are dropped
+# from the inherited environment so an exported value in the developer's shell
+# cannot change what the test exercises. ``GOOGLEFINDMY_CONTAINER_LOGIN=1`` in
+# particular skips the desktop gate *and* the process cleanup, which would make
+# the assertions below silently vacuous.
+_NEUTRALISED_ENV = (
+    "GOOGLEFINDMY_CONTAINER_LOGIN",
+    "GOOGLEFINDMY_ASSUME_INTERACTIVE",
+    "GOOGLEFINDMY_NOVNC_URL",
+    "GOOGLEFINDMY_NOVNC_PASSWORD",
+    "GOOGLEFINDMY_CHROME_PATH",
+    "GOOGLEFINDMY_CHROME_VERSION",
+)
+
+
+class _CliSandbox(NamedTuple):
+    """Environment for a CLI subprocess plus the files recording tool calls."""
+
+    env: dict[str, str]
+    kill_log: Path
+    lookup_log: Path
+
+
+@pytest.fixture
+def cli_sandbox(tmp_path: Path) -> _CliSandbox:
+    """Run the CLI without touching real credentials or real processes.
+
+    Two hazards are neutralised here, both measured on 2026-07-28:
+
+    * **Process kills.** ``main`` without credentials falls into the Chrome auth
+      flow, which used to shell out to ``pkill -f chrome``. That pattern matches
+      the *full command line*, so a pytest run listing ``tests/test_chrome_driver.py``
+      as an argument was killed by its own grandchild (exit 143). Shims for the
+      kill tools record the attempt and exit 1, so a regression is visible as a
+      failed assertion instead of a dead test session.
+    * **Real credentials.** Without ``GOOGLEFINDMY_SECRETS_PATH`` the CLI reads
+      *and writes* the developer's own ``Auth/secrets.json``. The override points
+      at a file inside ``tmp_path`` that does not exist, which also makes the
+      "no credentials" path deterministic in both directions.
+    """
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    kill_log = tmp_path / "kill-attempts.log"
+    lookup_log = tmp_path / "lookup-attempts.log"
+    for tool, sentinel in [
+        *((name, "$GFMY_KILL_SENTINEL") for name in _KILL_TOOLS),
+        *((name, "$GFMY_LOOKUP_SENTINEL") for name in _LOOKUP_TOOLS),
+    ]:
+        shim = bin_dir / tool
+        shim.write_text(
+            f'#!/bin/sh\nprintf "%s %s\\n" "{tool}" "$*" >> "{sentinel}"\nexit 1\n',
+            encoding="utf-8",
+        )
+        shim.chmod(0o755)
+
+    env = dict(os.environ)
+    for name in _NEUTRALISED_ENV:
+        env.pop(name, None)
+    env.update(
+        {
+            "PATH": f"{bin_dir}{os.pathsep}{env.get('PATH', '')}",
+            "PYTHONPATH": ".",
+            "GFMY_KILL_SENTINEL": str(kill_log),
+            "GFMY_LOOKUP_SENTINEL": str(lookup_log),
+            "GOOGLEFINDMY_SECRETS_PATH": str(tmp_path / "secrets.json"),
+        }
+    )
+    return _CliSandbox(env=env, kill_log=kill_log, lookup_log=lookup_log)
+
+
+def _assert_no_process_kill(sandbox: _CliSandbox) -> None:
+    """Fail with the attempted command line if the CLI tried to kill processes."""
+
+    assert not sandbox.kill_log.exists(), (
+        "the CLI attempted a process kill:\n"
+        f"{sandbox.kill_log.read_text(encoding='utf-8')}"
+    )
+
 
 # ---------------------------------------------------------------------------
 # list_devices (sync wrapper in nbe_list_devices)
@@ -69,7 +161,7 @@ class TestListDevicesSync:
 class TestDunderMain:
     """Cover the ``if __name__ == '__main__'`` block via subprocess."""
 
-    def test_dunder_main_invokes_help(self) -> None:
+    def test_dunder_main_invokes_help(self, cli_sandbox: _CliSandbox) -> None:
         """``python -m custom_components.googlefindmy.main --help`` must work
         because list_devices delegates to nbe_list_devices' argparse."""
         result = subprocess.run(
@@ -78,12 +170,15 @@ class TestDunderMain:
             text=True,
             timeout=30,
             check=False,
+            env=cli_sandbox.env,
+            stdin=subprocess.DEVNULL,
         )
         # list_devices() doesn't parse --help itself, so it may either
         # exit 0 (if argparse is reached) or fail.  Just verify it imports.
         assert result.returncode in (0, 1, 2)
+        _assert_no_process_kill(cli_sandbox)
 
-    def test_dunder_main_lists_entry_in_help(self) -> None:
+    def test_dunder_main_lists_entry_in_help(self, cli_sandbox: _CliSandbox) -> None:
         """--entry and --reauth must appear in --help output.
 
         Regression test for Codex review on c902169104: the argparse parser
@@ -97,7 +192,8 @@ class TestDunderMain:
             text=True,
             timeout=30,
             check=False,
-            env={**dict(__import__("os").environ), "PYTHONPATH": "."},
+            env=cli_sandbox.env,
+            stdin=subprocess.DEVNULL,
         )
         assert result.returncode == 0, (
             f"--help must exit 0; got {result.returncode}\n"
@@ -112,8 +208,9 @@ class TestDunderMain:
         assert "--debug" in result.stdout, (
             f"--debug missing from --help output:\n{result.stdout}"
         )
+        _assert_no_process_kill(cli_sandbox)
 
-    def test_dunder_main_accepts_entry_flag(self) -> None:
+    def test_dunder_main_accepts_entry_flag(self, cli_sandbox: _CliSandbox) -> None:
         """--entry XYZ must not fail with 'unrecognized arguments'.
 
         The token cache is empty in CI, so the command will fail downstream
@@ -132,13 +229,64 @@ class TestDunderMain:
             text=True,
             timeout=30,
             check=False,
-            env={**dict(__import__("os").environ), "PYTHONPATH": "."},
+            env=cli_sandbox.env,
+            stdin=subprocess.DEVNULL,
         )
         assert "unrecognized arguments" not in result.stderr, (
             f"--entry must be recognized; stderr was:\n{result.stderr}"
         )
         assert "error: argument --entry" not in result.stderr, (
             f"--entry argparse error; stderr was:\n{result.stderr}"
+        )
+        _assert_no_process_kill(cli_sandbox)
+
+    def test_entry_flag_subprocess_never_attempts_a_process_kill(
+        self, cli_sandbox: _CliSandbox
+    ) -> None:
+        """Regression: ``--entry`` without credentials must not reach the kill path.
+
+        Measured on 2026-07-28: this invocation falls through to the Chrome auth
+        flow, which called ``pkill -f chrome``. Because ``-f`` matches the full
+        command line, the pytest process that had ``tests/test_chrome_driver.py``
+        in its argv was terminated by its own grandchild. The A/B control differed
+        only by a ``-k`` filter matching nothing, i.e. by the word in argv alone:
+        without it exit 0, with it exit 143 (SIGTERM).
+
+        The defence asserted here is the interactive gate in ``Auth/auth_flow.py``:
+        it refuses to open a browser without an attended terminal, so the Chrome
+        cleanup is never reached from a test. That the gate was *actually* the
+        stopping point is asserted positively -- without it the test would keep
+        passing on any future change that makes the CLI exit earlier, while
+        covering nothing. The ancestry filter in ``chrome_driver.py`` is the
+        second, independent defence and is tested at its own level in
+        ``tests/test_chrome_driver.py``; the kill shims here only ensure that a
+        regression shows up as a failed assertion rather than a dead session.
+        """
+
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "custom_components.googlefindmy.main",
+                "--entry",
+                "nonexistent_entry_id",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+            env=cli_sandbox.env,
+            stdin=subprocess.DEVNULL,
+        )
+
+        _assert_no_process_kill(cli_sandbox)
+        assert result.returncode != 0, (
+            f"the CLI must not succeed without credentials:\n{result.stdout}"
+        )
+        assert "attended terminal" in result.stderr, (
+            "the interactive gate must be the stopping point; without this "
+            "assertion the test would still pass if the CLI started failing "
+            f"earlier for an unrelated reason. stderr was:\n{result.stderr}"
         )
 
 
@@ -150,7 +298,9 @@ class TestDunderMain:
 class TestFunctionalCLI:
     """End-to-end test: invoke main.py as a subprocess."""
 
-    def test_subprocess_no_cache_fails_gracefully(self) -> None:
+    def test_subprocess_no_cache_fails_gracefully(
+        self, cli_sandbox: _CliSandbox
+    ) -> None:
         """Running without a valid token cache must fail with a non-zero exit
         code (not an import error)."""
         result = subprocess.run(
@@ -163,10 +313,12 @@ class TestFunctionalCLI:
             text=True,
             timeout=30,
             check=False,
-            env={**dict(__import__("os").environ), "PYTHONPATH": "."},
+            env=cli_sandbox.env,
+            stdin=subprocess.DEVNULL,
         )
         # Should fail because no token cache is registered, but NOT with ImportError
         assert "ImportError" not in result.stderr
+        _assert_no_process_kill(cli_sandbox)
 
 
 # ---------------------------------------------------------------------------

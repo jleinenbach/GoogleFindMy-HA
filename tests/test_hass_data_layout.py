@@ -55,6 +55,7 @@ from custom_components.googlefindmy.const import (
     TRACKER_SUBENTRY_KEY,
     TRACKER_SUBENTRY_TRANSLATION_KEY,
 )
+from tests.conftest import COORDINATOR_CONSUMER_MODULES
 from tests.helpers import drain_loop
 from tests.helpers.config_entries_stub import make_config_entry
 from tests.helpers.config_flow import ConfigEntriesDomainUniqueIdLookupMixin
@@ -448,6 +449,19 @@ def _prepare_async_setup_entry_harness(
     sys.modules.pop("custom_components.googlefindmy.map_view", None)
     map_view_module = importlib.import_module("custom_components.googlefindmy.map_view")
     services_module = importlib.import_module("custom_components.googlefindmy.services")
+
+    # Import every module that copies ``GoogleFindMyCoordinator`` into its own
+    # namespace *before* the first monkeypatch below.  A platform setup driven
+    # from inside the patch window imports some of them lazily for the first
+    # time; the copy they take is then the stub, and monkeypatch cannot undo a
+    # binding it never made.  Importing up front makes them copy the production
+    # class, which is the state the suite already has whenever an earlier test
+    # file happened to import them first.  Guarded statically by
+    # ``tests/test_guard_coordinator_identity.py`` (list completeness and the
+    # ordering below) and at runtime by ``detect_coordinator_identity_leaks()``
+    # in ``tests/conftest.py``.
+    for consumer in COORDINATOR_CONSUMER_MODULES:
+        importlib.import_module(consumer)
 
     cache = _StubCache()
     monkeypatch.setattr(integration.TokenCache, "create", AsyncMock(return_value=cache))

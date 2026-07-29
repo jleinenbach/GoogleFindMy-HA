@@ -160,7 +160,7 @@ Generate the `secrets.json` bundle with **this repository's own login tooling**.
 
 **Option A — Docker login helper (recommended).** Run the bundled one-command wrapper on your Docker host and complete the Google login through a browser tab: [`custom_components/googlefindmy/docker-login/`](custom_components/googlefindmy/docker-login/README.md). It runs Chrome **inside the container** at a controlled version, so you are not at the mercy of whatever Chrome your desktop auto-updates to — the exact failure that currently breaks the external browser flow ([BSkando#207](https://github.com/BSkando/GoogleFindMy-HA/issues/207)). No local Python or Chrome is required, and it works on ARM Linux too.
 
-**Option B — Bundled CLI (`main.py`).** Copy the *contents* of `custom_components/googlefindmy/` into a fresh, empty directory (so that `main.py`, `Auth/`, `NovaApi/`, etc. sit directly at its top level) and run `python main.py` from there. The flat layout is required because the script auto-detects its location: run in place at `custom_components/googlefindmy/main.py` it operates in Home Assistant mode and only lists devices from an **existing** `secrets.json`, so it will not open the Chrome login that creates the bundle. If Chrome startup aborts with `only supports Chrome version …`, pin the version as described under [Chrome/ChromeDriver version mismatch](#chromechromedriver-version-mismatch-standalone-auth-scripts).
+**Option B — Bundled CLI (`main.py`).** Copy the *contents* of `custom_components/googlefindmy/` into a fresh, empty directory (so that `main.py`, `Auth/`, `NovaApi/`, etc. sit directly at its top level) and run `python main.py` from there. The flat layout is required because the script auto-detects its location: run in place at `custom_components/googlefindmy/main.py` it operates in Home Assistant mode and only lists devices from an **existing** `secrets.json`, so it will not open the Chrome login that creates the bundle. Run it from an **interactive terminal**: the desktop login opens Chrome on your own screen and asks you to confirm first, so it refuses to start when nobody can answer (see [Standalone login refuses to start](#standalone-login-refuses-to-start-attended-terminal-required)). If Chrome startup aborts with `only supports Chrome version …`, pin the version as described under [Chrome/ChromeDriver version mismatch](#chromechromedriver-version-mismatch-standalone-auth-scripts).
 
 When either option finishes, copy the entire contents of the generated `secrets.json` (open it in a text editor, select all, copy) for Part 2.
 
@@ -419,6 +419,35 @@ export GOOGLEFINDMY_CHROME_PATH=/usr/bin/google-chrome
 ```
 
 Run any of the scripts with `--help` to list the available options.
+
+### Standalone login refuses to start (attended terminal required)
+The desktop login opens Chrome **on your own screen** and prints a "Press Enter
+to continue" prompt first, so you decide when a browser window takes over. When
+standard input is not a terminal there is nobody to decide, and the flow aborts
+before Chrome starts:
+
+```
+RuntimeError: [AuthFlow] The interactive Chrome login needs an attended terminal
+(stdin is not a terminal).
+```
+
+This is deliberate. An unattended run would open a browser nobody is watching,
+and reading the prompt from a pipe would swallow the account e-mail that the CLI
+asks for on the same standard input a moment later. Pick the option that matches
+your situation:
+
+| Situation | What to do |
+| --- | --- |
+| Normal shell / SSH session | Nothing — this is the supported path. |
+| IDE run window (PyCharm, VS Code) that proxies stdin | `export GOOGLEFINDMY_ASSUME_INTERACTIVE=1` for that run. |
+| No graphical desktop, or you prefer a browser tab | Use the [Docker login helper](custom_components/googlefindmy/docker-login/README.md); its entrypoint sets `GOOGLEFINDMY_CONTAINER_LOGIN=1` itself, and the prompt does not apply there because Chrome runs inside the container. |
+| Automated caller (no browser window wanted) | Call the flow with `headless=True`. |
+
+> [!WARNING]
+> `GOOGLEFINDMY_ASSUME_INTERACTIVE=1` only claims "a human is sitting here"; it
+> does not make an unattended run work. Set it per invocation, not permanently
+> in a container, service unit or shell profile — that would restore exactly the
+> unattended browser start this check prevents.
 
 ### Location updates stopped after an upgrade
 Location data is fetched **outbound** from Home Assistant to Google (FCM push plus Nova/SPOT polling); it does **not** depend on your Home Assistant internal or external URL configuration. If updates stop after upgrading the integration:

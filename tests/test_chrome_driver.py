@@ -7,8 +7,11 @@ import importlib
 import logging
 import os
 import platform
+import shutil
+import signal
 import subprocess
 import sys
+import uuid
 from types import SimpleNamespace
 from typing import Any
 
@@ -322,7 +325,7 @@ def _clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("GOOGLEFINDMY_CHROME_PATH", raising=False)
     monkeypatch.delenv("GOOGLEFINDMY_CHROME_VERSION", raising=False)
     # Neutralize the container signal so the non-container kill/teardown tests
-    # observe the pkill path regardless of the ambient environment; tests that
+    # observe the cleanup path regardless of the ambient environment; tests that
     # exercise the container guard set it explicitly.
     monkeypatch.delenv("GOOGLEFINDMY_CONTAINER_LOGIN", raising=False)
 
@@ -639,19 +642,45 @@ def test_get_chrome_version_windows_prefer_binary_skips_registry(
 # ---------------------------------------------------------------------------
 
 
+def _stub_pgrep(
+    monkeypatch: pytest.MonkeyPatch, pids: list[int]
+) -> tuple[list[list[str]], list[tuple[int, int]]]:
+    """Route ``pgrep`` to *pids* and record every signal that is sent.
+
+    Returns ``(recorded_commands, recorded_kills)``. The stub answers with a
+    complete ``CompletedProcess`` shape on purpose: an incomplete stub would
+    raise ``AttributeError`` inside the helper, and both call sites swallow
+    exceptions for best-effort cleanup -- the test would then pass while
+    exercising nothing.
+    """
+
+    commands: list[list[str]] = []
+    kills: list[tuple[int, int]] = []
+
+    def _fake_run(cmd: list[str], **_kwargs: Any) -> SimpleNamespace:
+        commands.append(cmd)
+        return SimpleNamespace(
+            returncode=0 if pids else 1,
+            stdout="".join(f"{pid}\n" for pid in pids),
+            stderr="",
+        )
+
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+    monkeypatch.setattr(os, "kill", lambda pid, sig: kills.append((pid, sig)))
+    return commands, kills
+
+
 def test_kill_existing_chrome_processes_non_windows(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    calls: list[list[str]] = []
     monkeypatch.setattr(platform, "system", lambda: "Linux")
     monkeypatch.setattr(chrome_driver.time, "sleep", lambda _s: None)
-    monkeypatch.setattr(
-        subprocess, "run", lambda cmd, **k: calls.append(cmd) or SimpleNamespace()
-    )
+    calls, kills = _stub_pgrep(monkeypatch, [4242])
 
     chrome_driver._kill_existing_chrome_processes()
 
-    assert calls == [["pkill", "-f", "chrome"]]
+    assert calls == [["pgrep", "-f", "chrome"]]
+    assert kills == [(4242, signal.SIGTERM)]
 
 
 def test_kill_existing_chrome_processes_windows(
@@ -667,6 +696,410 @@ def test_kill_existing_chrome_processes_windows(
     chrome_driver._kill_existing_chrome_processes()
 
     assert calls == [["taskkill", "/f", "/im", "chrome.exe"]]
+
+
+def test_kill_existing_chrome_processes_spares_self_and_ancestors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression: the cleanup must never signal itself or one of its ancestors.
+
+    ``pkill -f chrome`` matches the *full command line*, so any process that
+    merely carries the word in its argv is a target -- including the caller's
+    own ancestry.  Measured on 2026-07-28: a pytest run that received
+    ``tests/test_chrome_driver.py`` as an argument died with exit 143
+    (SIGTERM) at exactly the test that spawns ``main`` as a subprocess.  The
+    A/B control differed only by a ``-k`` filter that matched nothing, i.e. by
+    the word in argv alone: without it exit 0, with it exit 143.  The grandchild
+    shot its grandparent.
+    """
+
+    monkeypatch.setattr(platform, "system", lambda: "Linux")
+    monkeypatch.setattr(chrome_driver.time, "sleep", lambda _s: None)
+
+    run_commands: list[list[str]] = []
+    own_pid = os.getpid()
+    parent_pid = os.getppid()
+
+    def _fake_run(cmd: list[str], **_kwargs: Any) -> SimpleNamespace:
+        run_commands.append(cmd)
+        # Emulate pgrep: the pattern matches our own ancestry *and* a stranger.
+        return SimpleNamespace(
+            returncode=0, stdout=f"{own_pid}\n{parent_pid}\n4242\n", stderr=""
+        )
+
+    killed: list[tuple[int, int]] = []
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+    monkeypatch.setattr(os, "kill", lambda pid, sig: killed.append((pid, sig)))
+
+    chrome_driver._kill_existing_chrome_processes()
+
+    assert not any("pkill" in cmd for cmd in run_commands), (
+        f"the broad pattern kill must be gone; commands were {run_commands}"
+    )
+    assert killed == [(4242, signal.SIGTERM)], (
+        f"only the stranger may be signalled, got {killed}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# ancestry-aware process cleanup helpers
+# ---------------------------------------------------------------------------
+
+
+def test_protected_pids_contains_self_parent_and_init() -> None:
+    """No mocks: the real ``/proc`` walk must reach the whole ancestry."""
+
+    protected = chrome_driver._protected_pids()
+
+    assert os.getpid() in protected
+    assert os.getppid() in protected
+    assert 1 in protected, f"the walk stopped early: {sorted(protected)}"
+
+
+def test_protected_pids_falls_back_to_ps_without_proc(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Without ``/proc`` (macOS) the ancestry comes from a single ``ps`` call.
+
+    The table starts at the *real* parent PID on purpose: a walk that uses the
+    protected set as its cycle guard aborts on the first step (the parent is
+    pre-seeded) and would silently return a two-element set.
+    """
+
+    own = os.getpid()
+    real_parent = os.getppid()
+    table = f"{own} {real_parent}\n{real_parent} 400\n400 1\n1 0\n"
+    monkeypatch.setattr(os.path, "isdir", lambda path: False)
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda cmd, **k: SimpleNamespace(returncode=0, stdout=table, stderr=""),
+    )
+
+    protected = chrome_driver._protected_pids()
+
+    assert {own, real_parent, 400, 1} <= protected
+
+
+def test_protected_pids_refuses_a_cyclic_ppid_table(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A cycle terminates the walk *and* invalidates the answer.
+
+    A loop proves the PPID data is inconsistent, not that the chain was walked
+    to PID 1: some ancestor above the loop is missing from the set, and
+    signalling it is precisely the failure this helper prevents. Returning the
+    partial set would look like protection while being none.
+    """
+
+    own = os.getpid()
+    table = f"{own} 5\n5 7\n7 5\n"
+    monkeypatch.setattr(os.path, "isdir", lambda path: False)
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda cmd, **k: SimpleNamespace(returncode=0, stdout=table, stderr=""),
+    )
+
+    assert chrome_driver._protected_pids() is None
+
+
+def test_read_ppid_from_proc_returns_none_without_a_ppid_line(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    """A status file without a ``PPid:`` line is unknown, not an error."""
+
+    status = tmp_path / "status"
+    status.write_text("Name:\tsomething\nState:\tS (sleeping)\n", encoding="utf-8")
+    monkeypatch.setattr(
+        "builtins.open", lambda _path, **_k: status.open(encoding="utf-8")
+    )
+
+    assert chrome_driver._read_ppid_from_proc(4242) is None
+
+
+def test_protected_pids_stops_at_the_depth_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A pathologically deep chain terminates at the limit and refuses to answer.
+
+    Synthetic PIDs start far above ``pid_max`` defaults so they cannot collide
+    with this process' real parent, which would make the assertion flaky.
+    """
+
+    own = os.getpid()
+    depth = chrome_driver._ANCESTRY_MAX_DEPTH
+    base = 10**7
+    chain = {own: base}
+    chain.update({base + step: base + 1 + step for step in range(depth + 10)})
+    table = "".join(f"{pid} {ppid}\n" for pid, ppid in chain.items())
+
+    monkeypatch.setattr(os.path, "isdir", lambda path: False)
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda cmd, **k: SimpleNamespace(returncode=0, stdout=table, stderr=""),
+    )
+
+    # A chain that never reaches PID 1 within the limit is an incomplete answer,
+    # and an incomplete ancestry filter is what the fix exists to prevent.
+    assert chrome_driver._protected_pids() is None
+
+
+def test_protected_pids_returns_none_when_the_chain_breaks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unreadable ancestry (hidepid, no ps) yields ``None``, not a partial set.
+
+    A partial set is the dangerous answer: it looks like protection while the
+    grandparent -- the process that actually died in the measured incident -- is
+    already unprotected.
+    """
+
+    monkeypatch.setattr(os.path, "isdir", lambda path: True)
+    monkeypatch.setattr(chrome_driver, "_read_ppid_from_proc", lambda _pid: None)
+
+    def _no_ps(*_a: Any, **_k: Any) -> Any:
+        raise FileNotFoundError("ps missing")
+
+    monkeypatch.setattr(subprocess, "run", _no_ps)
+
+    assert chrome_driver._protected_pids() is None
+
+
+def test_protected_pids_falls_back_to_ps_when_proc_entry_is_unreadable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``/proc`` present but an entry unreadable: ``ps`` completes the chain."""
+
+    own = os.getpid()
+    real_parent = os.getppid()
+    table = f"{own} {real_parent}\n{real_parent} 400\n400 1\n1 0\n"
+
+    monkeypatch.setattr(os.path, "isdir", lambda path: True)
+    monkeypatch.setattr(chrome_driver, "_read_ppid_from_proc", lambda _pid: None)
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda cmd, **k: SimpleNamespace(returncode=0, stdout=table, stderr=""),
+    )
+
+    protected = chrome_driver._protected_pids()
+
+    assert protected is not None
+    assert {own, real_parent, 400, 1} <= protected
+
+
+def test_terminate_matching_processes_signals_nothing_on_unknown_ancestry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With an unresolvable ancestry the cleanup is skipped, not run blindly."""
+
+    monkeypatch.setattr(chrome_driver, "_protected_pids", lambda: None)
+    monkeypatch.setattr(
+        chrome_driver,
+        "_pgrep_pids",
+        lambda _p: pytest.fail("pgrep must not even be consulted"),
+    )
+
+    def _forbidden(_pid: int, _sig: int) -> None:
+        pytest.fail("nothing may be signalled without a complete ancestry")
+
+    monkeypatch.setattr(os, "kill", _forbidden)
+
+    assert chrome_driver._terminate_matching_processes("chrome") == 0
+
+
+def test_ppid_map_from_ps_ignores_malformed_lines(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda cmd, **k: SimpleNamespace(
+            returncode=0, stdout="10 4\nnot a row\n\n20 x\n30 6\n", stderr=""
+        ),
+    )
+
+    assert chrome_driver._ppid_map_from_ps() == {10: 4, 30: 6}
+
+
+def test_ppid_map_from_ps_returns_empty_without_ps(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _boom(*_a: Any, **_k: Any) -> Any:
+        raise FileNotFoundError("ps missing")
+
+    monkeypatch.setattr(subprocess, "run", _boom)
+
+    assert chrome_driver._ppid_map_from_ps() == {}
+
+
+@pytest.mark.parametrize(
+    ("returncode", "stdout", "expected"),
+    [
+        (0, "111\n222\n", [111, 222]),
+        (1, "", []),  # pgrep's "no match" is not an error
+        (0, "111\nrubbish\n222\n", [111, 222]),
+        (2, "111\n", []),  # a real failure yields nothing
+    ],
+)
+def test_pgrep_pids_parses_output(
+    monkeypatch: pytest.MonkeyPatch,
+    returncode: int,
+    stdout: str,
+    expected: list[int],
+) -> None:
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda cmd, **k: SimpleNamespace(
+            returncode=returncode, stdout=stdout, stderr=""
+        ),
+    )
+
+    assert chrome_driver._pgrep_pids("chrome") == expected
+
+
+def test_pgrep_pids_returns_empty_without_pgrep(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _boom(*_a: Any, **_k: Any) -> Any:
+        raise FileNotFoundError("pgrep missing")
+
+    monkeypatch.setattr(subprocess, "run", _boom)
+
+    assert chrome_driver._pgrep_pids("chrome") == []
+
+
+def test_terminate_matching_processes_skips_pid_one_and_vanished(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PID 1 is never a target, and a process that dies mid-flight is no error."""
+
+    monkeypatch.setattr(chrome_driver, "_protected_pids", lambda: frozenset({99}))
+    monkeypatch.setattr(chrome_driver, "_pgrep_pids", lambda _p: [1, 99, 500, 501])
+
+    kills: list[int] = []
+
+    def _kill(pid: int, _sig: int) -> None:
+        if pid == 500:
+            raise ProcessLookupError
+        kills.append(pid)
+
+    monkeypatch.setattr(os, "kill", _kill)
+
+    assert chrome_driver._terminate_matching_processes("chrome") == 1
+    assert kills == [501]
+
+
+def test_terminate_matching_processes_tolerates_permission_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _nothing_protected() -> frozenset[int]:
+        return frozenset()
+
+    monkeypatch.setattr(chrome_driver, "_protected_pids", _nothing_protected)
+    monkeypatch.setattr(chrome_driver, "_pgrep_pids", lambda _p: [700])
+
+    def _kill(_pid: int, _sig: int) -> None:
+        raise PermissionError
+
+    monkeypatch.setattr(os, "kill", _kill)
+
+    assert chrome_driver._terminate_matching_processes("chrome") == 0
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX process semantics")
+@pytest.mark.skipif(shutil.which("pgrep") is None, reason="pgrep not available")
+def test_terminate_matching_processes_spares_its_own_grandparent(
+    tmp_path: Any,
+) -> None:
+    """End-to-end without mocks: the grandparent survives, a stranger dies.
+
+    Reproduction of the measured case, at its real depth. Only the *grandparent*
+    carries the marker in its argv: pytest -> CLI subprocess -> cleanup. The
+    grandchild runs the cleanup for that very marker, and before the fix this was
+    fatal (measured as exit 143 on a pytest run).
+
+    The depth matters. A two-level version (parent -> child) would pass even with
+    the whole ancestry walk deleted, because ``_protected_pids`` seeds itself with
+    ``os.getppid()``; only from the grandparent upwards does the walk carry the
+    result. Verified by mutation: removing the walk keeps a two-level test green
+    and turns this one red.
+
+    A ``stranger`` with the same marker proves the cleanup still terminates
+    unrelated processes: the fix must be a filter, not an off switch. A unique
+    UUID marker is used instead of ``chrome`` so nothing else on the machine can
+    be hit.
+    """
+
+    marker = f"gfmy-kill-probe-{uuid.uuid4().hex}"
+    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+    # Level 3: runs the cleanup. Its argv does NOT carry the marker.
+    child = tmp_path / "child.py"
+    child.write_text(
+        "import sys\n"
+        f"sys.path.insert(0, {repo_root!r})\n"
+        "from custom_components.googlefindmy import chrome_driver\n"
+        "print(chrome_driver._terminate_matching_processes(sys.argv[1]))\n",
+        encoding="utf-8",
+    )
+    # Level 2: pure relay, marker-free argv, so the marked process is strictly
+    # the grandparent of the cleanup.
+    parent = tmp_path / "parent.py"
+    parent.write_text(
+        "import subprocess, sys\n"
+        "proc = subprocess.run([sys.executable, sys.argv[1], sys.argv[2]],\n"
+        "                      capture_output=True, text=True, timeout=60)\n"
+        "sys.stdout.write(proc.stdout)\n"
+        "sys.stderr.write(proc.stderr)\n"
+        "sys.exit(proc.returncode)\n",
+        encoding="utf-8",
+    )
+    # Level 1: the only process whose command line matches the marker.
+    grandparent = tmp_path / "grandparent.py"
+    grandparent.write_text(
+        "import subprocess, sys\n"
+        "proc = subprocess.run(\n"
+        "    [sys.executable, sys.argv[1], sys.argv[2], sys.argv[3]],\n"
+        "    capture_output=True, text=True, timeout=60)\n"
+        "sys.stdout.write(proc.stdout)\n"
+        "sys.stderr.write(proc.stderr)\n"
+        "sys.exit(proc.returncode)\n",
+        encoding="utf-8",
+    )
+
+    sleeper = "import sys, time; time.sleep(30)"
+    stranger = subprocess.Popen(  # noqa: S603 - fixed interpreter, generated marker
+        [sys.executable, "-c", sleeper, marker],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        # Only the grandparent's argv carries the marker, so pgrep returns it and
+        # nothing but the ancestry walk keeps it alive.
+        result = subprocess.run(  # noqa: S603 - fixed interpreter, generated files
+            [sys.executable, str(grandparent), str(parent), str(child), marker],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+
+        assert result.returncode == 0, (
+            "the grandparent was killed by its own grandchild: "
+            f"rc={result.returncode} stderr={result.stderr}"
+        )
+        assert int(result.stdout.strip() or 0) >= 1, (
+            f"the stranger should have been signalled, output was {result.stdout!r}"
+        )
+        assert stranger.wait(timeout=10) != 0
+    finally:
+        if stranger.poll() is None:  # pragma: no cover - cleanup path
+            stranger.kill()
+            stranger.wait(timeout=10)
 
 
 # ---------------------------------------------------------------------------
@@ -694,14 +1127,18 @@ def test_is_container_login_reads_env(
 def test_kill_existing_chrome_processes_skipped_in_container(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Regression: inside the docker-login container the broad ``pkill -f chrome``
+    """Regression: inside the docker-login container the broad Chrome pre-kill
     must be skipped.
 
-    In the ``selenium/standalone-chrome`` base image ``pkill -f chrome`` matches
-    the Java Selenium Grid node and its exit makes supervisord tear the whole
-    stack down (crash log: ``selenium-standalone (exit status 143)`` ->
-    ``received SIGINT`` -> noVNC/vnc/xvfb stopped). Without the guard this test
-    fails because ``subprocess.run`` is invoked.
+    In the ``selenium/standalone-chrome`` base image matching ``chrome`` against
+    the full command line hits the Java Selenium Grid node, and its exit makes
+    supervisord tear the whole stack down (crash log:
+    ``selenium-standalone (exit status 143)`` -> ``received SIGINT`` ->
+    noVNC/vnc/xvfb stopped). Without the guard this test fails because
+    ``subprocess.run`` is invoked.
+
+    The ancestry filter added later does not replace this guard: the Grid node is
+    a sibling under supervisord, not an ancestor, so it would not be spared.
     """
 
     monkeypatch.setenv("GOOGLEFINDMY_CONTAINER_LOGIN", "1")
@@ -709,7 +1146,7 @@ def test_kill_existing_chrome_processes_skipped_in_container(
     monkeypatch.setattr(
         subprocess,
         "run",
-        lambda *a, **k: pytest.fail("pkill must not run inside the container"),
+        lambda *a, **k: pytest.fail("no process lookup may run inside the container"),
     )
 
     # Must be a no-op on the kill path (no subprocess call, no raise).
@@ -719,7 +1156,7 @@ def test_kill_existing_chrome_processes_skipped_in_container(
 def test_safe_quit_driver_skips_force_kill_in_container(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Regression: the teardown ``pkill -f chromedriver`` is skipped in the
+    """Regression: the teardown chromedriver force-kill is skipped in the
     container too, so it cannot collapse the shared Selenium/noVNC stack; the
     driver is still quit normally.
     """
@@ -1001,11 +1438,8 @@ def test_safe_quit_driver_none_is_noop(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_safe_quit_driver_normal_non_windows(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    calls: list[list[str]] = []
     monkeypatch.setattr(platform, "system", lambda: "Linux")
-    monkeypatch.setattr(
-        subprocess, "run", lambda cmd, **k: calls.append(cmd) or SimpleNamespace()
-    )
+    calls, kills = _stub_pgrep(monkeypatch, [4243])
 
     quit_calls = {"n": 0}
 
@@ -1016,7 +1450,8 @@ def test_safe_quit_driver_normal_non_windows(
     chrome_driver.safe_quit_driver(_Driver())  # type: ignore[arg-type]
 
     assert quit_calls["n"] == 1
-    assert calls == [["pkill", "-f", "chromedriver"]]
+    assert calls == [["pgrep", "-f", "chromedriver"]]
+    assert kills == [(4243, signal.SIGTERM)]
 
 
 def test_safe_quit_driver_oserror_is_handled(
@@ -1874,6 +2309,71 @@ def test_version_guard_defensive_on_incomplete_capabilities(
         chrome_driver._warn_on_driver_version_mismatch(driver, detected_version=None)
 
     assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("150.0.7258.66", 150),
+        ("150.0.7258.66 (abcdef)", 150),
+        ("not-a-version", None),
+        ("", None),
+        (150, None),  # not a string
+    ],
+)
+def test_major_from_version_string_parses_or_degrades(
+    value: object, expected: int | None
+) -> None:
+    """Unparseable capability strings degrade to ``None`` instead of raising.
+
+    Pre-existing gap picked up in the open diff (code-architekt rule 20): the
+    ``ValueError`` branch had no test, and covering it costs one parametrisation.
+    """
+
+    assert chrome_driver._major_from_version_string(value) == expected
+
+
+def test_version_guard_debug_logs_a_stale_detected_major(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Driver and session agree, but the earlier detection disagreed: debug only."""
+
+    driver = _FakeCapsDriver(
+        {
+            "browserVersion": "150.0.7258.66",
+            "chrome": {"chromedriverVersion": "150.0.7258.66 (abcdef)"},
+        }
+    )
+    with caplog.at_level(logging.DEBUG, logger=chrome_driver.LOGGER.name):
+        chrome_driver._warn_on_driver_version_mismatch(driver, detected_version=149)
+
+    assert any(
+        "differs from the live session's Chrome" in record.getMessage()
+        for record in caplog.records
+    )
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+
+
+def test_version_guard_never_raises_on_a_hostile_driver(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A capabilities property that raises must not break driver creation."""
+
+    class _ExplodingDriver:
+        @property
+        def capabilities(self) -> dict[str, Any]:
+            raise RuntimeError("capabilities unavailable")
+
+    with caplog.at_level(logging.DEBUG, logger=chrome_driver.LOGGER.name):
+        chrome_driver._warn_on_driver_version_mismatch(
+            _ExplodingDriver(),  # type: ignore[arg-type]
+            detected_version=150,
+        )
+
+    assert any(
+        "Post-construction version guard skipped" in record.getMessage()
+        for record in caplog.records
+    )
 
 
 def test_create_driver_warns_but_returns_on_version_mismatch(

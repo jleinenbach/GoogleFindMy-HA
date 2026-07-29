@@ -7,6 +7,7 @@ import os
 import platform
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -231,14 +232,203 @@ def _is_container_login() -> bool:
     The entrypoint sets ``GOOGLEFINDMY_CONTAINER_LOGIN=1`` for the standalone
     login process (``Auth/auth_flow.py`` reads the same signal). Inside the
     ``selenium/standalone-chrome`` base image the broad process kills below are
-    actively harmful: ``pkill -f chrome`` / ``pkill -f chromedriver`` match on
-    the *full* command line and hit the Java Selenium Grid node (its argv
-    references chrome/chromedriver). That node's unexpected exit makes
-    supervisord tear down the whole stack -- xvfb, vnc and noVNC included --
-    destroying the very display the login needs. undetected-chromedriver manages
-    its own driver lifecycle, so the pre-emptive kill is unnecessary here anyway.
+    actively harmful: matching ``chrome``/``chromedriver`` against the *full*
+    command line hits the Java Selenium Grid node (its argv references both).
+    That node's unexpected exit makes supervisord tear down the whole stack --
+    xvfb, vnc and noVNC included -- destroying the very display the login needs.
+    undetected-chromedriver manages its own driver lifecycle, so the pre-emptive
+    kill is unnecessary here anyway.
+
+    The ancestry filter in ``_terminate_matching_processes`` does **not** make
+    this guard redundant: the Grid node is a sibling under supervisord, not an
+    ancestor of the login process, so nothing would spare it.
     """
     return os.environ.get("GOOGLEFINDMY_CONTAINER_LOGIN") == "1"
+
+
+# Depth limit for the ancestry walk. A realistic chain is four to six levels
+# (shell -> pytest -> python -m ... -> helper); the limit only guards against a
+# corrupted PPID table, it is not a functional bound.
+_ANCESTRY_MAX_DEPTH = 64
+
+# ``ps -o pid=,ppid=`` yields exactly these two fields per row.
+_PS_ROW_FIELDS = 2
+
+
+def _read_ppid_from_proc(pid: int) -> int | None:
+    """Return the parent PID of *pid* from ``/proc``, or ``None`` if unknown.
+
+    Reads ``/proc/<pid>/status`` rather than ``/proc/<pid>/stat``: the parent PID
+    lives in field 4 of ``stat``, but field 2 (``comm``) may itself contain
+    spaces and parentheses, so a positional split is only correct after an
+    ``rpartition(')')`` dance. ``status`` is line oriented and parses safely.
+    """
+    try:
+        with open(f"/proc/{pid}/status", encoding="utf-8") as handle:
+            for line in handle:
+                if line.startswith("PPid:"):
+                    return int(line.split(":", 1)[1].strip())
+    except (OSError, ValueError):  # pragma: no cover - racy/foreign process
+        return None
+    return None
+
+
+def _ppid_map_from_ps() -> dict[int, int]:
+    """Return a ``{pid: ppid}`` map via ``ps`` for systems without ``/proc``.
+
+    One ``ps`` call for the whole table instead of one call per ancestry level:
+    cheaper, and a single seam for tests. The trailing ``=`` in the format
+    suppresses the header on both Linux and BSD/macOS.
+    """
+    mapping: dict[int, int] = {}
+    try:
+        result = subprocess.run(
+            ["ps", "-A", "-o", "pid=,ppid="],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):  # pragma: no cover - defensive
+        LOGGER.debug("Could not enumerate processes via ps")
+        return mapping
+    for line in result.stdout.splitlines():
+        parts = line.split()
+        if len(parts) < _PS_ROW_FIELDS:
+            continue
+        try:
+            mapping[int(parts[0])] = int(parts[1])
+        except ValueError:
+            continue
+    return mapping
+
+
+def _protected_pids() -> frozenset[int] | None:
+    """Return self plus every ancestor, or ``None`` if the walk was incomplete.
+
+    ``pkill -f``/``pgrep -f`` match the *full command line*, so any ancestor
+    whose argv happens to carry the pattern is a target. That is not theory: a
+    pytest invocation listing ``tests/test_chrome_driver.py`` was killed by its
+    own grandchild (exit 143). Excluding only ``os.getpid()`` would not help,
+    because the process that dies is the *grandparent*.
+
+    A partial answer is worse than none: it looks like a protection while the
+    grandparent is already unprotected, which is exactly the original bug. So an
+    interrupted walk (unreadable ``/proc`` under ``hidepid``, no ``ps``, a
+    corrupted table) returns ``None`` and the caller skips the cleanup entirely.
+    Skipping is safe -- the pre-kill is best effort -- while a wrong kill is not.
+    """
+    proc_available = os.path.isdir("/proc/self")
+    ppid_map: dict[int, int] = {} if proc_available else _ppid_map_from_ps()
+
+    def _parent_of(pid: int) -> int | None:
+        if proc_available:
+            parent = _read_ppid_from_proc(pid)
+            if parent is not None:
+                return parent
+            # /proc exists but this entry is unreadable (hidepid, foreign uid).
+            # Fall back to ps once instead of silently truncating the chain.
+            if not ppid_map:
+                ppid_map.update(_ppid_map_from_ps())
+        return ppid_map.get(pid)
+
+    protected: set[int] = {os.getpid(), os.getppid()}
+    # ``visited`` tracks the walk itself and must stay separate from
+    # ``protected``: the latter is pre-seeded with the direct parent, so reusing
+    # it as the cycle guard would abort the walk on its very first step.
+    current = os.getpid()
+    visited: set[int] = {current}
+    for _ in range(_ANCESTRY_MAX_DEPTH):
+        parent = _parent_of(current)
+        if parent is None:
+            LOGGER.debug(
+                "Could not resolve the parent of PID %s; skipping process cleanup "
+                "rather than risking a partial ancestry filter.",
+                current,
+            )
+            return None
+        if parent == 0:
+            # PID 1's parent: the chain is complete.
+            return frozenset(protected)
+        if parent in visited:
+            # A cycle proves the PPID data is inconsistent, not that the chain
+            # was walked to the end. Some ancestor above the loop is missing from
+            # the set, and signalling it is exactly the failure this prevents.
+            LOGGER.debug(
+                "Cycle in the PPID chain at PID %s; skipping process cleanup.",
+                parent,
+            )
+            return None
+        protected.add(parent)
+        visited.add(parent)
+        current = parent
+
+    LOGGER.debug(
+        "Ancestry walk exceeded %s levels; skipping process cleanup.",
+        _ANCESTRY_MAX_DEPTH,
+    )
+    return None
+
+
+def _pgrep_pids(pattern: str) -> list[int]:
+    """Return the PIDs whose full command line matches *pattern*.
+
+    Same selection semantics as ``pkill -f <pattern>`` (both tools share the
+    procps/BSD matcher), but the result is a list we can filter before killing.
+    Exit code 1 means "no match" and is not an error.
+    """
+    try:
+        result = subprocess.run(
+            ["pgrep", "-f", pattern],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        LOGGER.debug("pgrep unavailable; skipping cleanup for pattern %r", pattern)
+        return []
+    if result.returncode not in (0, 1):
+        LOGGER.debug("pgrep exited with %s for pattern %r", result.returncode, pattern)
+        return []
+    pids: list[int] = []
+    for line in result.stdout.split():
+        try:
+            pids.append(int(line))
+        except ValueError:
+            continue
+    return pids
+
+
+def _terminate_matching_processes(pattern: str) -> int:
+    """Signal every process matching *pattern*, except self and its ancestors.
+
+    Replaces the historical ``subprocess.run(["pkill", "-f", pattern])``. The
+    selection is identical, but ``pkill`` only ever spares *itself* -- not the
+    caller, and not the caller's ancestry -- which made the cleanup lethal to its
+    own process tree whenever the pattern appeared in an ancestor's command line.
+    Doing the selection here keeps the behaviour testable.
+
+    Returns the number of processes that were signalled. Returns ``0`` without
+    touching anything when the ancestry could not be resolved completely: a
+    partial filter would reproduce the very bug this replaces.
+    """
+    protected = _protected_pids()
+    if protected is None:
+        return 0
+    signalled = 0
+    for pid in _pgrep_pids(pattern):
+        if pid <= 1 or pid in protected:
+            continue
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            continue  # Already gone between pgrep and kill.
+        except PermissionError:
+            LOGGER.debug("Not allowed to terminate PID %s", pid)
+            continue
+        signalled += 1
+    return signalled
 
 
 def _kill_existing_chrome_processes() -> None:
@@ -264,7 +454,7 @@ def _kill_existing_chrome_processes() -> None:
                 check=False,
             )
         else:
-            subprocess.run(["pkill", "-f", "chrome"], capture_output=True, check=False)
+            _terminate_matching_processes("chrome")
         time.sleep(2)  # Allow time for processes to terminate
     except Exception:  # pragma: no cover - defensive, best-effort cleanup
         LOGGER.debug("Failed to kill existing Chrome processes (non-fatal)")
@@ -516,11 +706,7 @@ def safe_quit_driver(driver: RemoteWebDriver | None) -> None:
                     check=False,
                 )
             else:
-                subprocess.run(
-                    ["pkill", "-f", "chromedriver"],
-                    capture_output=True,
-                    check=False,
-                )
+                _terminate_matching_processes("chromedriver")
         except Exception:  # noqa: BLE001 - cleanup should not raise
             pass
 

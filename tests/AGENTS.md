@@ -238,6 +238,12 @@ are installed. **Review this checklist on every single change under
    Assistant components continue to wrap those imports in
    `pytest.skip(..., allow_module_level=True)` guards so the suite
    degrades gracefully when the plugin is absent.
+7. **Cross-test symbol identity** — confirm
+   `detect_coordinator_identity_leaks()` in `tests/conftest.py` still runs from
+   `pytest_runtest_teardown` and that its reference is still frozen in
+   `pytest_configure`. Reading the reference on demand instead would let a
+   patched source module move the yardstick along with the measurement. See
+   [Patching a symbol that other modules copy at import time](#patching-a-symbol-that-other-modules-copy-at-import-time).
 
 Treat this checklist as a living document: if a new helper or guard
 becomes necessary, add it here and verify each item before completing
@@ -283,6 +289,116 @@ sync with reality when refactoring:
 
 If a test stops using an attribute, update both the harness comment and this
 list so future cleanups can trim unused fields confidently.
+
+### Patching a symbol that other modules copy at import time
+
+A module that does `from .coordinator import GoogleFindMyCoordinator` at module
+level takes a **copy** of whatever the source module holds at that moment.
+`monkeypatch` only undoes the assignments it made itself, so a module whose
+*first* import happens inside a patch window keeps the stub for the rest of the
+session. The symptom appears far from the cause: an unrelated test file that
+subclasses the poisoned symbol later fails with
+`HomeAssistantError: googlefindmy coordinator not ready` from
+`entity.resolve_coordinator`.
+
+Whenever you patch a symbol that other modules bind at module level:
+
+* **Import every consumer before the first `monkeypatch.setattr`**, so the copy
+  they take is the production object. Use the shared tuple
+  `tests.conftest.COORDINATOR_CONSUMER_MODULES`; it was derived from an AST scan
+  for module-level `ImportFrom` nodes naming the symbol, not from guesswork. Do
+  **not** write a local subset: two harnesses used to carry hand-written,
+  incomplete copies, which is exactly the drift the shared list prevents.
+* **Or patch the consumers too**, if a test genuinely needs them to see the
+  stub (this is why the harness pops and re-imports `map_view`).
+
+Three harnesses patch the symbol and therefore consume the tuple:
+`_prepare_async_setup_entry_harness` (`tests/test_hass_data_layout.py`),
+`_patch_integration_runtime` (`tests/test_device_entity_registration.py`) and
+`test_integration_device_info_uses_service_device`
+(`tests/test_entity_device_info_contract.py`). A fourth site,
+`tests/test_fcm_repair_reauth.py`, patches `repairs.GoogleFindMyCoordinator`
+without driving a platform setup and is therefore not affected.
+
+`tests/conftest.py` enforces the rule for `GoogleFindMyCoordinator`:
+`detect_coordinator_identity_leaks()` runs in `pytest_runtest_teardown`,
+**restores** the production class and then fails the **causing** test. The
+restore is not cosmetic: reporting alone would leave the stub in place and
+redden every following test as well, turning one attributable failure into a red
+session. Its scope is deliberately one symbol, the one with a measured failure,
+while an AST sweep over `tests/` found eleven further symbols with the same
+structure (`ClientSession`, `Store`, `HomeAssistant`, `WebDriverWait`, and
+others). Those are structural candidates, not known defects; extend the guard
+when one of them actually bites.
+
+`tests/test_guard_coordinator_identity.py` covers the detection logic and pins
+the fix statically: the tuple must still equal the AST-derived set of
+module-level binders, and in **each** of the three harnesses a loop that really
+calls `importlib.import_module` over it must precede the first
+`monkeypatch.setattr`. The teardown *wiring* is verified by mutation rather
+than by a test: remove the early imports from
+`_prepare_async_setup_entry_harness` and
+`test_programmatic_subentry_creation_triggers_setup_and_entities` errors at
+teardown naming `device_tracker`. Testing that wiring from inside the session
+would require leaving a real leak behind. An earlier draft tried a runtime
+reproduction (dropping the consumers from `sys.modules` and re-importing them
+inside the window) and leaked `entity.get_url` into `test_metadata_helpers.py`
+instead. Do not reintroduce that approach.
+
+## No full-command-line process kills
+
+`pkill -f <pattern>` selects by matching the **full command line** of every
+process on the machine, so any ancestor of the calling process whose argv happens
+to carry the pattern is a valid target. The tool spares only itself, never its
+caller. (`killall` and `pkill -x` match the command *name* and are a different,
+narrower class — see the guard section below.) Measured on 2026-07-28:
+`chrome_driver.py` ran
+`subprocess.run(["pkill", "-f", "chrome"])` in the Chrome auth flow, and a pytest
+invocation that had `tests/test_chrome_driver.py` in its argv was killed by the
+CLI subprocess it had started — exit 143 (SIGTERM), no traceback, no summary. The
+A/B control differed only by a `-k` filter matching nothing, i.e. by the word in
+argv alone: without it exit 0, with it exit 143.
+
+Use `chrome_driver._terminate_matching_processes(pattern)` instead: it keeps the
+`pgrep` selection (same matcher, so the same processes are found) but filters the
+own PID and the whole ancestry before signalling. `taskkill /f /im chrome.exe` is
+**not** affected — it matches the image name, not a command line.
+
+`tests/test_guard_process_pattern_kill.py` pins the **literal** forms with an AST
+scan over `custom_components/googlefindmy/**` and `tests/**`: an argv list, a
+`shell=True` string, and `["sh", "-c", "…"]`. Its `LEGACY_ALLOWLIST` is empty
+because both historical call sites were migrated in the same change.
+
+Two deliberate narrowings keep it free of false positives, because a
+repository-wide guard that cries wolf gets switched off rather than obeyed.
+First, only the `-f`/`--full` form is rejected: `pkill --help` distinguishes
+`-f, --full` ("use full process name to match") from `-x, --exact` ("match
+exactly with the command name"), and the name-matching variants (`pkill -x`,
+`pkill -P`, `killall`, `taskkill /im`) cannot hit a process that merely
+*mentions* the pattern — a different failure class. Second, calls are resolved
+against the module's own imports rather than matched by method name, so an
+unrelated `runner.run([...])` stays invisible while `import subprocess as sp`
+does not. Both narrowings came from Codex review findings on this PR.
+
+The guard deliberately does *not* see commands assembled from variables or
+`os.exec*` invocations — that is the remaining price, and it means the guard is a
+ratchet, not a proof.
+
+CLI subprocess tests carry the second half of the defence: `tests/test_main.py`
+runs them through the `cli_sandbox` fixture. It shims `pkill`/`killall` onto
+`PATH` into one sentinel file and `pgrep` (the sanctioned lookup) into a separate
+one, so a kill attempt is a failed assertion while a legitimate lookup is not; it
+points `GOOGLEFINDMY_SECRETS_PATH` at a throwaway file so the tests stop reading
+and writing the developer's own `Auth/secrets.json`; and it *drops*
+`GOOGLEFINDMY_CONTAINER_LOGIN`, `GOOGLEFINDMY_ASSUME_INTERACTIVE` and the other
+branch-steering variables from the
+inherited environment. That last part is not cosmetic: with the variable exported
+in the developer's shell, the CLI takes the container branch, skips both the
+desktop gate and the cleanup, and actually launches Chromium — the assertions
+would pass while covering nothing. New tests that spawn the CLI must use the
+fixture, assert `_assert_no_process_kill`, and assert positively *where* the CLI
+stopped (`"attended terminal" in stderr`), so they cannot become vacuous when an
+unrelated change makes the CLI exit earlier.
 
 ## ADM token retrieval contract
 
