@@ -456,3 +456,245 @@ def test_the_merge_converges_and_stops_writing() -> None:
         "with both ids already stored the merge adds nothing, so the write-back "
         "cannot drift"
     )
+
+
+def test_a_service_twin_does_not_occupy_the_tracker_key_in_the_index() -> None:
+    """A service subentry storing a tracker key must not displace the tracker.
+
+    Early migrations left service subentries carrying ``core_tracking`` in
+    their stored ``group_key``. The runtime index used to key purely off that
+    stored value, so the service twin took the tracker's slot: the tracker's
+    metadata was overwritten, the service was described by a synthesised
+    placeholder pointing at a subentry that does not exist, and the visible
+    ids were written back through the tracker key onto the service twin.
+    """
+
+    entry_id = "entry-service-twin"
+    tracker_id = _stable_subentry_id(entry_id, TRACKER_SUBENTRY_KEY)
+    # Deliberately NOT the id the synthesised service placeholder would carry,
+    # so a placeholder cannot masquerade as the real subentry below.
+    service_id = f"{entry_id}-legacy-service"
+
+    tracker_subentry = ConfigSubentry(
+        data=MappingProxyType(
+            {
+                "group_key": TRACKER_SUBENTRY_KEY,
+                "visible_device_ids": ["device-1"],
+            }
+        ),
+        subentry_type=SUBENTRY_TYPE_TRACKER,
+        title="Trackers",
+        unique_id=f"{entry_id}-trackers",
+        subentry_id=tracker_id,
+    )
+    service_subentry = ConfigSubentry(
+        data=MappingProxyType({"group_key": TRACKER_SUBENTRY_KEY}),
+        subentry_type=SUBENTRY_TYPE_SERVICE,
+        title="Service",
+        unique_id=f"{entry_id}-service",
+        subentry_id=service_id,
+    )
+
+    # The service twin is inserted last on purpose: keyed by the stored value
+    # it would be the surviving writer for ``core_tracking``.
+    entry = make_config_entry(
+        entry_id=entry_id,
+        title="Google Find My",
+        subentries={
+            tracker_subentry.subentry_id: tracker_subentry,
+            service_subentry.subentry_id: service_subentry,
+        },
+    )
+
+    hass_stub = SimpleNamespace(
+        loop=SimpleNamespace(call_soon_threadsafe=lambda *args, **kwargs: None),
+        data={DOMAIN: {}},
+    )
+    coordinator = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
+    coordinator.hass = hass_stub  # type: ignore[assignment]
+    coordinator.config_entry = entry  # type: ignore[attr-defined]
+    entry.runtime_data = SimpleNamespace(coordinator=coordinator)
+    coordinator.data = [{"id": "device-1", "name": "Tracker One"}]
+    coordinator._enabled_poll_device_ids = {"device-1"}
+    coordinator.allow_history_fallback = False
+    coordinator.device_poll_delay = 30
+    coordinator.min_poll_interval = 60
+    coordinator.location_poll_interval = 120
+    coordinator._subentry_metadata = {}
+    coordinator._subentry_snapshots = {}
+    coordinator._feature_to_subentry = {}
+    coordinator._default_subentry_key_value = None
+    coordinator._subentry_manager = _ManagerStub()
+    coordinator._pending_subentry_repair = None
+    coordinator._skip_repair_during_reload_refresh = False
+    coordinator._reload_repair_skip_pending_release = False
+    coordinator._warned_bad_identifier_devices = set()
+    coordinator._diag = SimpleNamespace(
+        add_warning=lambda **kwargs: None,
+        remove_warning=lambda *args, **kwargs: None,
+    )
+
+    coordinator._refresh_subentry_index(skip_repair=True)
+
+    tracker_meta = coordinator.get_subentry_metadata(key=TRACKER_SUBENTRY_KEY)
+    assert tracker_meta is not None
+    assert tracker_meta.config_subentry_id == tracker_id, (
+        "the tracker key must still describe the tracker subentry, not the "
+        "service twin that stored the same key"
+    )
+    assert tracker_meta.visible_device_ids == ("device-1",)
+
+    service_meta = coordinator.get_subentry_metadata(key=SERVICE_SUBENTRY_KEY)
+    assert service_meta is not None
+    assert service_meta.config_subentry_id == service_id, (
+        "the service key must describe the real service subentry rather than a "
+        "synthesised placeholder"
+    )
+    assert service_meta.visible_device_ids == ()
+
+    manager_stub = coordinator._subentry_manager
+    assert isinstance(manager_stub, _ManagerStub)
+    assert manager_stub.calls == [(TRACKER_SUBENTRY_KEY, ("device-1",))]
+
+
+def _service_twin_coordinator(
+    entry_id: str, *, service_specs: list[tuple[str, str, list[str]]]
+) -> tuple[GoogleFindMyCoordinator, object, _ManagerStub]:
+    """Return a coordinator with one real tracker plus the given service twins.
+
+    ``service_specs`` holds ``(subentry_id, stored_group_key, visible ids)``
+    for each service-typed subentry.
+    """
+
+    tracker_subentry = ConfigSubentry(
+        data=MappingProxyType(
+            {
+                "group_key": TRACKER_SUBENTRY_KEY,
+                "visible_device_ids": ["device-1"],
+            }
+        ),
+        subentry_type=SUBENTRY_TYPE_TRACKER,
+        title="Trackers",
+        unique_id=f"{entry_id}-trackers",
+        subentry_id=_stable_subentry_id(entry_id, TRACKER_SUBENTRY_KEY),
+    )
+    subentries = {tracker_subentry.subentry_id: tracker_subentry}
+    for subentry_id, stored_key, visible in service_specs:
+        payload: dict[str, object] = {"group_key": stored_key}
+        if visible:
+            payload["visible_device_ids"] = list(visible)
+        service_subentry = ConfigSubentry(
+            data=MappingProxyType(payload),
+            subentry_type=SUBENTRY_TYPE_SERVICE,
+            title="Service",
+            unique_id=f"{entry_id}-{subentry_id}",
+            subentry_id=subentry_id,
+        )
+        subentries[service_subentry.subentry_id] = service_subentry
+
+    entry = make_config_entry(
+        entry_id=entry_id, title="Google Find My", subentries=subentries
+    )
+    hass_stub = SimpleNamespace(
+        loop=SimpleNamespace(call_soon_threadsafe=lambda *args, **kwargs: None),
+        data={DOMAIN: {}},
+    )
+    coordinator = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
+    coordinator.hass = hass_stub  # type: ignore[assignment]
+    coordinator.config_entry = entry  # type: ignore[attr-defined]
+    entry.runtime_data = SimpleNamespace(coordinator=coordinator)
+    coordinator.data = [
+        {"id": "device-1", "name": "Tracker One"},
+        {"id": "device-2", "name": "Tracker Two"},
+    ]
+    coordinator._enabled_poll_device_ids = {"device-1", "device-2"}
+    coordinator.allow_history_fallback = False
+    coordinator.device_poll_delay = 30
+    coordinator.min_poll_interval = 60
+    coordinator.location_poll_interval = 120
+    coordinator._subentry_metadata = {}
+    coordinator._subentry_snapshots = {}
+    coordinator._feature_to_subentry = {}
+    coordinator._default_subentry_key_value = None
+    manager_stub = _ManagerStub()
+    coordinator._subentry_manager = manager_stub
+    coordinator._pending_subentry_repair = None
+    coordinator._skip_repair_during_reload_refresh = False
+    coordinator._reload_repair_skip_pending_release = False
+    coordinator._warned_bad_identifier_devices = set()
+    coordinator._diag = SimpleNamespace(
+        add_warning=lambda **kwargs: None,
+        remove_warning=lambda *args, **kwargs: None,
+    )
+    return coordinator, entry, manager_stub
+
+
+def test_devices_parked_on_a_mis_keyed_service_twin_are_reclaimed() -> None:
+    """Folding the twin must not strand the ids it accumulated.
+
+    The twin only holds those ids because it used to attract the write-back;
+    the flows never offer a service-typed subentry as an assignment target.
+    Counting them as assigned would keep the unassigned-device merge away from
+    them while the service branch forces the visible ids to empty, leaving the
+    devices in no group at all.
+    """
+
+    entry_id = "entry-reclaim"
+    coordinator, _entry, _manager = _service_twin_coordinator(
+        entry_id,
+        service_specs=[("legacy-service-id", TRACKER_SUBENTRY_KEY, ["device-2"])],
+    )
+
+    coordinator._refresh_subentry_index(skip_repair=True)
+
+    visible_anywhere = {
+        device_id
+        for meta in coordinator._subentry_metadata.values()
+        for device_id in meta.visible_device_ids
+    }
+    assert "device-2" in visible_anywhere, (
+        "a device parked on the mis-keyed twin must not disappear from every "
+        "group when that twin is folded onto the service key"
+    )
+    tracker_meta = coordinator.get_subentry_metadata(key=TRACKER_SUBENTRY_KEY)
+    assert tracker_meta is not None
+    assert tracker_meta.visible_device_ids == ("device-1", "device-2")
+    service_meta = coordinator.get_subentry_metadata(key=SERVICE_SUBENTRY_KEY)
+    assert service_meta is not None
+    assert service_meta.visible_device_ids == ()
+
+
+@pytest.mark.parametrize("canonical_first", [True, False])
+def test_the_canonically_keyed_service_subentry_wins_regardless_of_order(
+    canonical_first: bool,
+) -> None:
+    """Two service-typed subentries fold onto one key, so the winner is fixed.
+
+    The repair path creates a canonically keyed service subentry while a
+    mis-keyed twin is still on disk. Without a tie-break the surviving
+    description would depend on the order ``entry.subentries`` yields, and the
+    service device could be bound to the leftover.
+    """
+
+    entry_id = "entry-two-services"
+    canonical_id = f"{entry_id}-real-service"
+    legacy_id = f"{entry_id}-legacy-service"
+    specs = [
+        (canonical_id, SERVICE_SUBENTRY_KEY, []),
+        (legacy_id, "owner@example.com", []),
+    ]
+    if not canonical_first:
+        specs.reverse()
+
+    coordinator, _entry, _manager = _service_twin_coordinator(
+        entry_id, service_specs=specs
+    )
+
+    coordinator._refresh_subentry_index(skip_repair=True)
+
+    service_meta = coordinator.get_subentry_metadata(key=SERVICE_SUBENTRY_KEY)
+    assert service_meta is not None
+    assert service_meta.config_subentry_id == canonical_id, (
+        "the subentry that already stored the canonical key must describe the "
+        "service group, whichever order the entry yields"
+    )

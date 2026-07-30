@@ -378,6 +378,38 @@ class SubentryOperations(_MixinBase):
                 group_key = _extract_group_key_impl(data, subentry_id_raw)
                 if group_key in (SERVICE_SUBENTRY_KEY, TRACKER_SUBENTRY_KEY):
                     core_group_keys_present.add(group_key)
+                # The repair detection above deliberately reads the *stored*
+                # key: which core groups exist on disk is what it answers.
+                # Everything below indexes runtime state, and there the
+                # ``subentry_type`` is authoritative -- the same rule
+                # ``ConfigEntrySubEntryManager`` applies when it canonicalises
+                # (`__init__.py`, ``_refresh_from_entry``). A service subentry
+                # that still stores a legacy or tracker key would otherwise
+                # occupy a device-bearing key here, overwrite the twin that
+                # legitimately owns it, and have visible ids written back to
+                # it. Tracker subentries keep their stored key, because
+                # several tracker groups with distinct keys are a supported
+                # shape (unlike in the manager, which folds them all onto
+                # ``TRACKER_SUBENTRY_KEY``).
+                if (
+                    getattr(subentry, "subentry_type", None) == SUBENTRY_TYPE_SERVICE
+                    and group_key != SERVICE_SUBENTRY_KEY
+                ):
+                    group_key = SERVICE_SUBENTRY_KEY
+                    # Whatever ids this subentry stores did not get there by a
+                    # deliberate move onto the service group -- the flows never
+                    # offer a service-typed subentry as an assignment target
+                    # (`_accepts_device_assignment` reads both axes). They are
+                    # the residue of the write-back that the mis-keyed twin
+                    # used to attract. Folding alone would strand them: the
+                    # service branch below forces the visible ids to empty
+                    # while ``stored_assigned_ids`` would still count them as
+                    # assigned, so the unassigned-device merge would not pull
+                    # them into the tracker group and they would sit in no
+                    # group at all. Dropping them from this *in-memory* view
+                    # (the stored subentry is untouched) lets that merge
+                    # reclaim them.
+                    data.pop("visible_device_ids", None)
                 identifier = _sanitize_subentry_identifier(subentry_id_raw)
 
                 # Use filter_provisional_identifier for service subentries
@@ -661,6 +693,20 @@ class SubentryOperations(_MixinBase):
                         for dev_id in visible_ids
                     )
                 )
+
+            if (
+                group_key == SERVICE_SUBENTRY_KEY
+                and SERVICE_SUBENTRY_KEY in metadata
+                and data.get("group_key") != SERVICE_SUBENTRY_KEY
+            ):
+                # Two service-typed subentries can coexist: the repair path
+                # creates a canonically keyed one while a mis-keyed twin from
+                # an early migration is still on disk. Both fold onto this key,
+                # so without a tie-break the surviving description would depend
+                # on the order ``entry.subentries`` happens to yield. The one
+                # that already stored the canonical key wins, mirroring
+                # ``ConfigEntrySubEntryManager._select_preferred_managed``.
+                continue
 
             metadata[group_key] = SubentryMetadata(
                 key=group_key,
