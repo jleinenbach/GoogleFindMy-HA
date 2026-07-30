@@ -17,6 +17,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from homeassistant.config_entries import ConfigEntryState
 
 from custom_components.googlefindmy.const import (
     CONF_GOOGLE_EMAIL,
@@ -990,3 +991,126 @@ async def test_the_probe_promotes_nothing_when_nothing_registered(
     assert hass.reloaded == [entry.entry_id], (
         "the missing trackers still have to trigger the one self-heal reload"
     )
+
+
+# --- the state gate in front of both latches ---------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_hopeless_entry_claims_neither_reload_latch(
+    caplog: pytest.LogCaptureFixture,
+    probe_timer: _ProbeTimer,
+    deterministic_config_subentry_id: Callable[[Any, str, str | None], str],
+) -> None:
+    """T-S1: an entry that cannot reach a setup gets no promise at all.
+
+    This probe is the one claimant whose timer survives a failed unload:
+    ``async_on_unload`` callbacks run only in the success branch, so the entry
+    can sit in ``FAILED_UNLOAD`` while the grace timer is still armed. A claim
+    taken here would never be handed back, because the reload the promise refers
+    to can only raise ``OperationNotAllowed`` inside a core-owned task.
+    """
+
+    del deterministic_config_subentry_id
+
+    device_tracker = _device_tracker_module()
+    hass = _HassStub()
+    added: list[list[Any]] = []
+    _coordinator, entry = await _set_up_platform(
+        device_tracker, hass, registry_hit=False, added=added
+    )
+
+    # The unload failed after the platform was set up; the grace timer above
+    # outlived it because its cancellation never ran.
+    entry.state = ConfigEntryState.FAILED_UNLOAD
+    caplog.set_level(logging.DEBUG, "custom_components.googlefindmy.device_tracker")
+
+    probe_timer.fire()
+
+    assert hass.reloaded == []
+    assert any(
+        "cannot reach a setup" in record.getMessage() for record in caplog.records
+    )
+    domain_data = hass.data.get(DOMAIN, {})
+    assert entry.entry_id not in domain_data.get("pending_entry_reloads", set()), (
+        "the shared latch would swallow every later reload of this entry"
+    )
+    assert entry.entry_id not in domain_data.get("registry_selfheal_reloads", set()), (
+        "the one-shot attempt has a single release point and must not be spent "
+        "on a reload that cannot happen"
+    )
+
+
+@pytest.mark.asyncio
+async def test_the_gate_does_not_burn_the_one_shot_latch(
+    probe_timer: _ProbeTimer,
+    deterministic_config_subentry_id: Callable[[Any, str, str | None], str],
+) -> None:
+    """T-S2: a disabled entry keeps its single attempt for after it is enabled.
+
+    The recoverable case, and the reason the gate sits *before* the one-shot
+    claim rather than after it. A disabled entry is re-enabled by the user at
+    any time, and ``async_set_disabled_by`` reloads it; a ``FAILED_UNLOAD``
+    entry, by contrast, does not heal at runtime, so it is not the case this
+    ordering is for.
+    """
+
+    del deterministic_config_subentry_id
+
+    device_tracker = _device_tracker_module()
+    hass = _HassStub()
+    added: list[list[Any]] = []
+    _coordinator, entry = await _set_up_platform(
+        device_tracker, hass, registry_hit=False, added=added
+    )
+
+    entry.disabled_by = "user"
+    probe_timer.fire()
+    assert hass.reloaded == []
+
+    # The user enables it again, which reloads the entry and sets this platform
+    # up afresh. The one-shot latch lives under ``hass.data`` and survives that,
+    # so an attempt spent above would be gone for good.
+    entries_bucket = hass.data.setdefault(DOMAIN, {}).setdefault("entries", {})
+    entries_bucket.pop(entry.entry_id, None)
+    _coordinator_after, entry_after = await _set_up_platform(
+        device_tracker, hass, registry_hit=False, added=added
+    )
+    assert entry_after.entry_id == entry.entry_id
+    probe_timer.fire()
+
+    assert hass.reloaded == [entry.entry_id]
+    claimed = hass.data.get(DOMAIN, {}).get("registry_selfheal_reloads", set())
+    assert entry.entry_id in claimed
+
+
+@pytest.mark.asyncio
+async def test_the_gate_is_asked_with_the_entry_the_platform_holds(
+    probe_timer: _ProbeTimer,
+    deterministic_config_subentry_id: Callable[[Any, str, str | None], str],
+) -> None:
+    """T-S4: the verdict must not depend on an entry manager this side lacks.
+
+    ``_HassStub`` deliberately carries no ``async_get_entry`` -- the platform
+    never needed one -- so a gate call without the third argument would resolve
+    ``None``, fail open and schedule the reload. Passing the held entry is what
+    makes the gate reach a verdict here at all.
+    """
+
+    del deterministic_config_subentry_id
+
+    device_tracker = _device_tracker_module()
+    hass = _HassStub()
+    added: list[list[Any]] = []
+    _coordinator, entry = await _set_up_platform(
+        device_tracker, hass, registry_hit=False, added=added
+    )
+
+    assert not hasattr(hass.config_entries, "async_get_entry"), (
+        "the point of this test is a manager that cannot resolve the entry"
+    )
+    entry.state = ConfigEntryState.MIGRATION_ERROR
+
+    probe_timer.fire()
+
+    assert hass.reloaded == []

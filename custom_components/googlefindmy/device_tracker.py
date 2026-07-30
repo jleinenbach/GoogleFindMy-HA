@@ -73,6 +73,7 @@ from .entity import (
     resolve_coordinator,
     schedule_add_entities,
 )
+from .entry_reload_gate import entry_reload_is_hopeless
 from .ha_typing import RestoreEntity, TrackerEntity, callback
 
 _LOGGER = logging.getLogger(__name__)
@@ -464,6 +465,12 @@ async def async_setup_entry(
                 registry_probe_unsub()
                 registry_probe_unsub = None
 
+        # Home Assistant runs these callbacks only in the success branch of
+        # ``ConfigEntry.async_unload``; a failed unload leaves the entry in
+        # ``FAILED_UNLOAD`` *and* leaves this timer armed. That is why
+        # ``_schedule_selfheal_reload`` consults the state gate before it
+        # promises anything: this probe is the claimant that outlives the very
+        # dead end the latch cannot recover from (core 2026.2.3).
         config_entry.async_on_unload(_cancel_registry_probe)
 
         @callback
@@ -478,10 +485,18 @@ async def async_setup_entry(
             ``async_schedule_reload`` does not coalesce: a credential write and
             this probe would otherwise tear the entry down twice in a row.
 
-            Order is not cosmetic. The lever is resolved *before* any claim, so
-            an old core without the method does not burn the one-shot attempt,
-            and the shared latch is claimed *last*, immediately before
-            scheduling, as its own contract demands.
+            Order is not cosmetic, and it is four steps. The lever is resolved
+            *before* any claim, so an old core without the method does not burn
+            the one-shot attempt. The state gate comes next, for the same
+            reason: ``discard_registry_selfheal_reload`` has a single release
+            point, in ``async_remove_entry``, so a one-shot spent on an entry
+            that cannot reach a setup is spent for the life of that entry. And
+            the shared latch is claimed *last*, immediately before scheduling,
+            as its own contract demands.
+
+            The gate matters here more than anywhere else: this is the one
+            claimant whose timer outlives a failed unload, because
+            ``async_on_unload`` callbacks only run once the unload succeeded.
             """
 
             schedule_reload = getattr(
@@ -492,6 +507,20 @@ async def async_setup_entry(
                     "Device tracker setup: async_schedule_reload unavailable; "
                     "leaving %d unregistered tracker(s) as they are",
                     missing_count,
+                )
+                return
+
+            if entry_reload_is_hopeless(hass, config_entry.entry_id, config_entry):
+                # Nothing has been claimed yet, so there is nothing to hand
+                # back. The entry object we already hold is passed on purpose:
+                # this platform's hass double carries no entry manager, and the
+                # gate must not depend on one to reach its verdict.
+                _LOGGER.debug(
+                    "Device tracker setup: %d tracker(s) still missing from the "
+                    "entity registry, but entry %s cannot reach a setup; not "
+                    "promising a reload",
+                    missing_count,
+                    config_entry.entry_id,
                 )
                 return
 
