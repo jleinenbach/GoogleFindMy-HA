@@ -146,6 +146,11 @@ def _make_coordinator(
             self.registry_hit = registry_hit
             self.registry_lookups: list[str] = []
             self.reindex_calls = 0
+            # Positive control for the listener tests: counting snapshot reads
+            # separates "the listener ran and saw the device" from "the listener
+            # never got there", which an assertion on the entity count alone
+            # cannot tell apart.
+            self.snapshot_reads = 0
 
         def async_add_listener(
             self, listener: Callable[[], None]
@@ -168,6 +173,7 @@ def _make_coordinator(
             *,
             feature: str | None = None,
         ) -> list[dict[str, Any]]:
+            self.snapshot_reads += 1
             if not self._bootstrap_consumed:
                 self._bootstrap_consumed = True
                 return []
@@ -444,8 +450,16 @@ async def test_a_returning_tracker_gets_no_entity_back_without_a_reload(
     # ... and takes it back on the visibility page: same id, same snapshot as
     # before, and the listener notices the change.
     coordinator._devices = [{"id": "tracker-1", "name": "Tracker"}]
+    snapshots_before = coordinator.snapshot_reads
     coordinator.listeners[0]()
 
+    # Positive control first: without it the test would stay green for any reason
+    # the listener failed to reach the device at all, and would then pin nothing.
+    assert coordinator.snapshot_reads > snapshots_before
+    assert coordinator.get_subentry_snapshot(TRACKER_SUBENTRY_KEY) == [
+        {"id": "tracker-1", "name": "Tracker"}
+    ]
+    # ... and only then the property under test.
     assert sum(len(batch) for batch in added) == built_before
 
 

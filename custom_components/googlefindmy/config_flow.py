@@ -3055,9 +3055,12 @@ def _schedule_claimed_reload(hass: HomeAssistant, entry_id: str) -> bool:
     """Schedule the one reload of ``entry_id`` and report whether it was ours.
 
     Single owner for the paths that route through it, which is no longer only
-    the credential paths: the semantic-location and subentry repair steps go
-    through here too. Their fallbacks differ, and the difference decides what a
-    stand-down actually costs. The credential update listener is a fallback for
+    the credential paths: the semantic-location, subentry repair and device
+    visibility steps go through here too. Their fallbacks differ, and the
+    difference decides what a stand-down actually costs. Visibility is the one
+    with no fallback at all: un-ignoring a device reverses a registry removal,
+    and the monotone per-setup known-sets in the platforms mean no poll rebuilds
+    the entity. A stand-down there costs the whole thing, not a half. The credential update listener is a fallback for
     neither of them, because it returns early on an unchanged fingerprint. The
     semantic steps have a stronger one in its place: ``_apply_semantic_mapping``
     reads ``entry.options`` live on every payload, and ``async_update_entry``
@@ -8471,14 +8474,45 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin, _ContainerLoginMixi
                 # is already on its way from turning into two.
                 #
                 # The claim happens before ``async_create_entry`` stores the
-                # options, and that ordering is safe rather than lucky:
-                # ``async_schedule_reload`` only creates a task, and the path from
-                # this return to ``OptionsFlowManager.async_finish_flow``, where
-                # ``async_update_entry`` writes them, holds no suspension point
-                # (checked against core 2026.1.3 and 2026.2.3). The reload
-                # therefore reads the options this step just wrote, not the ones
-                # it replaced.
-                _schedule_claimed_reload(self.hass, entry.entry_id)
+                # options, and what makes that safe is narrower than it looks.
+                # ``async_schedule_reload`` does **not** merely queue a task:
+                # ``hass.async_create_task`` defaults to ``eager_start=True``, so
+                # ``async_reload`` runs synchronously up to its first real
+                # suspension, and the *unload* half is therefore already under way
+                # before this step returns. That half does not read
+                # ``entry.options``, so it is harmless. The *setup* half is the one
+                # that reads them, and it sits behind the ``await asyncio.gather``
+                # in the platform teardown, which yields; by the time it runs, the
+                # step has returned and ``OptionsFlowManager.async_finish_flow`` has
+                # written the options through ``async_update_entry`` (that path
+                # itself holds no suspension point). So the invariant is: *some*
+                # real await must remain in the unload path. Were the parent unload
+                # ever to return synchronously for a loaded entry, the setup half
+                # would read the options this step has not written yet and the
+                # restore would be silently lost. Measured against core 2026.1.3
+                # and 2026.2.3; a core bump puts the question again.
+                if not _schedule_claimed_reload(self.hass, entry.entry_id):
+                    # Falsy covers two situations the helper cannot tell apart for
+                    # us, and neither of them leaks the latch (it returns before
+                    # its claim in both). Either another owner already holds the
+                    # reload, in which case that reload carries this write too and
+                    # nothing is lost, or there is no usable lever: a terminal
+                    # entry, or a core without ``async_schedule_reload``. The
+                    # second case costs the whole thing here rather than a half,
+                    # because the restored devices have no entity to fall back on.
+                    # A warning rather than an abort reason, precisely because the
+                    # two cases are indistinguishable from here; the credential
+                    # path can report ``credentials_saved_not_reloaded`` because it
+                    # runs the state check itself and knows which case it is in.
+                    _LOGGER.warning(
+                        "Restored %d device(s) from the ignore list for entry %s, "
+                        "but no reload was scheduled by this step. If another "
+                        "reload is already on its way the devices come back with "
+                        "it; otherwise they stay without entities until the entry "
+                        "is set up again",
+                        len(to_restore),
+                        entry.entry_id,
+                    )
 
             return self.async_create_entry(title="", data=new_options)
 
