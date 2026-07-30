@@ -255,8 +255,10 @@ are installed. **Review this checklist on every single change under
    patched source module move the yardstick along with the measurement. See
    [Patching a symbol that other modules copy at import time](#patching-a-symbol-that-other-modules-copy-at-import-time).
 
-8. **Options-flow reload doubles** — the options steps for semantic locations
-   and subentry repairs schedule their reload through
+8. **Options-flow reload doubles** — the options steps for semantic locations,
+   subentry repairs and device visibility (`async_step_visibility`, whose reload
+   is the only thing that gets an un-ignored device its entity back) schedule
+   their reload through
    `config_flow._schedule_claimed_reload`, so their manager doubles must expose
    a **synchronous** `async_schedule_reload` recorder (the core method is a
    `@callback`, an `async def` here would make the production call site look
