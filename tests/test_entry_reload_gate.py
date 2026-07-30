@@ -207,14 +207,21 @@ def test_every_terminal_state_name_resolved() -> None:
 
 
 def test_the_enum_binding_survives_the_module_boundary() -> None:
-    """The gate compares against the same `ConfigEntryState` the tests see.
+    """The module binds the same `ConfigEntryState` object the tests see.
 
     Before the move, set and comparison sat in one file behind one import, so
     this held by construction. Now they are one import away from every caller,
-    and switching that import to `config_entries.ConfigEntryState` would be a
-    silent total failure of the gate: under the stub the two are different
-    objects, both comparisons would simply never match, and no behavioural test
-    would notice because every entry would look healthy.
+    and a switch to `config_entries.ConfigEntryState` would compare against a
+    different object under the stub, where nothing would ever match again.
+
+    Scope, stated honestly: this pins the module's **binding**, not its use. A
+    change that leaves the import in place (the annotation needs it) and only
+    rewrites the two comparison sites would keep this test green. What catches
+    that is the behavioural half -- `test_a_terminal_state_is_hopeless` and
+    `test_every_terminal_state_name_resolved` feed real entries back through the
+    predicate, and `test_a_setup_that_never_reached_our_hook_leaves_the_claim`
+    does the same for the `MIGRATION_ERROR` comparison in the classifier. This
+    test is the cheap tripwire in front of them, not their replacement.
     """
 
     assert entry_reload_gate.ConfigEntryState is ConfigEntryState

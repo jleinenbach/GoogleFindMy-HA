@@ -4016,12 +4016,14 @@ async def test_the_reload_latch_survives_the_unload_phase(
     """The claim must outlive the teardown, not the first line of the router.
 
     The platform teardown is the longest stretch of a reload. Releasing the latch
-    before it lets the state-blind schedulers -- the credential-writing config
-    flows and the tracker registry probe, neither of which inspects
-    ``entry.state`` the way the update listener does -- claim it again and queue a
-    second reload, even though the replacement setup that is already on its way
-    reads the newest ``entry.data`` anyway. That is the consecutive teardown the
-    latch exists to prevent.
+    before it lets the schedulers that do not wait for ``LOADED`` -- the
+    credential-writing config flows and the tracker registry probe -- claim it
+    again and queue a second reload, even though the replacement setup that is
+    already on its way reads the newest ``entry.data`` anyway. That is the
+    consecutive teardown the latch exists to prevent. Both do consult
+    ``entry.state`` by now, through ``entry_reload_gate``, but only for the
+    *terminal* states, and ``UNLOAD_IN_PROGRESS`` is deliberately not one of
+    them: this position stays necessary for exactly that reason.
 
     Beyond that, this position is what makes standing down safe at all: a writer
     that finds the latch taken keeps its change only because the reload holding it

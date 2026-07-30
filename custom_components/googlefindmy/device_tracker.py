@@ -488,9 +488,12 @@ async def async_setup_entry(
             Order is not cosmetic, and it is four steps. The lever is resolved
             *before* any claim, so an old core without the method does not burn
             the one-shot attempt. The state gate comes next, for the same
-            reason: ``discard_registry_selfheal_reload`` has a single release
-            point, in ``async_remove_entry``, so a one-shot spent on an entry
-            that cannot reach a setup is spent for the life of that entry. And
+            reason: the one-shot is handed back only on the two failure paths
+            below, which have taken it themselves, and in ``async_remove_entry``.
+            A hopeless verdict returns before any claim and hands nothing back,
+            so an attempt spent there would be spent for the life of that entry.
+            Behind the one-shot the gate would need a third release path of its
+            own for no gain. And
             the shared latch is claimed *last*, immediately before scheduling,
             as its own contract demands.
 
