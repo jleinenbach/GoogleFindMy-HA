@@ -156,6 +156,7 @@ class _EntryStub:
         visible_device_ids: list[str] | None = None,
         feature_flags: dict[str, Any] | None = None,
         subentry_type: str = SUBENTRY_TYPE_TRACKER,
+        identity: str | None = None,
     ) -> ConfigSubentry:
         """Add a subentry to the stub.
 
@@ -166,6 +167,14 @@ class _EntryStub:
         subentry whose ``group_key`` drifted from its type -- the alias case
         ``agents/config_flow/AGENTS.md`` describes under
         ``Subentry alias handling``.
+
+        ``identity`` decouples the Home Assistant identifiers from ``key`` and
+        is what makes the *collision* half of that same alias case expressible.
+        Without it this helper derives ``subentry_id`` from ``key`` and stores
+        the result under that id, so two calls sharing a ``group_key`` silently
+        overwrite one another and leave a single subentry behind -- the stub
+        would quietly refuse to build the very shape
+        ``tests/test_config_flow_subentry_sync.py`` pins for the manager.
         """
 
         payload = {
@@ -174,12 +183,13 @@ class _EntryStub:
         }
         if visible_device_ids is not None:
             payload["visible_device_ids"] = list(visible_device_ids)
+        slug = identity or key
         subentry = ConfigSubentry(
             data=payload,
             subentry_type=subentry_type,
             title=title,
-            unique_id=f"{self.entry_id}-{key}",
-            subentry_id=_stable_subentry_id(self.entry_id, key),
+            unique_id=f"{self.entry_id}-{slug}",
+            subentry_id=_stable_subentry_id(self.entry_id, slug),
             translation_key=key,
         )
         self.subentries[subentry.subentry_id] = subentry
@@ -628,13 +638,14 @@ async def test_repairs_delete_narrows_the_fallback_but_not_the_deletion() -> Non
 async def test_the_three_non_assigning_steps_keep_the_service_subentry() -> None:
     """The narrowing stops at the three steps that assign devices.
 
-    ``_subentry_choice_map`` has six callers. Filtering inside it would have
-    been the smaller diff and the larger mistake: ``async_step_settings`` and
-    ``async_step_credentials`` legitimately target the service group, and
-    ``async_step_repairs`` only asks whether *any* subentry exists, so a shared
-    filter could send an entry whose sole subentry is the service group into
-    ``repairs_no_subentries``. All three are checked here, the last one in its
-    worst case.
+    ``_subentry_choice_map`` fed all six steps before the split. Filtering
+    inside it would have been the smaller diff and the larger mistake:
+    ``async_step_settings`` and ``async_step_credentials`` legitimately target
+    the service group, and ``async_step_repairs`` only asks whether *any*
+    subentry exists, so a shared filter could send an entry whose sole subentry
+    is the service group into ``repairs_no_subentries``. All three are checked
+    here, the last one in its worst case. The fourth remaining caller, the
+    ``removable_choices`` of ``async_step_repairs_delete``, has its own test.
     """
 
     entry = _EntryStub()
@@ -669,9 +680,9 @@ async def test_the_sink_refuses_a_service_target_on_a_direct_call() -> None:
 
     The forms can no longer produce this call, so any occurrence is a caller
     bug. It is still worth pinning: ``_async_assign_devices_to_subentry`` is
-    the single writer able to break an invariant that four other places already
-    keep, and a fourth caller added later would inherit the protection without
-    knowing about it.
+    the single writer able to break an invariant that three other production
+    sites already keep, and a fourth caller added later would inherit the
+    protection without knowing about it.
 
     Standing down rather than stripping the ids elsewhere is asserted too: the
     tracker group keeps what it legitimately holds.
@@ -733,14 +744,249 @@ async def test_a_legacy_subentry_typed_service_is_excluded_by_its_type() -> None
     assert "owner@example.com" not in _offered_keys(delete, "fallback_subentry")
 
 
+@pytest.mark.parametrize(
+    ("service_title", "tracker_title", "service_sorts_first"),
+    [
+        ("Alpha service", "Zulu trackers", True),
+        ("Zulu service", "Alpha trackers", False),
+    ],
+    ids=["service-sorts-first", "tracker-sorts-first"],
+)
+async def test_a_group_key_shared_by_two_types_still_lands_on_the_tracker(
+    service_title: str, tracker_title: str, service_sorts_first: bool
+) -> None:
+    """The two orderings fail differently, so both are exercised.
+
+    ``Subentry alias handling`` lets one legacy label sit on a service and a
+    tracker subentry at once, and ``_gather_subentry_options`` sorts by label,
+    so the alphabet decided which subentry a key resolved to. Resolving the
+    first holder while writing to every holder meant: service first -> the
+    guard judged the wrong twin and refused, so the move reported success
+    without moving anything; tracker first -> the guard passed and the write
+    fanned out onto the service group, storing exactly the ids the invariant
+    forbids.
+
+    Both assertions are needed. Only checking the return value misses the
+    fan-out, only checking the service payload misses the silent refusal.
+    """
+
+    entry = _EntryStub()
+    service = entry.add_subentry(
+        key="owner@example.com",
+        title=service_title,
+        subentry_type=SUBENTRY_TYPE_SERVICE,
+        identity="legacy-service",
+    )
+    tracker = entry.add_subentry(
+        key="owner@example.com",
+        title=tracker_title,
+        visible_device_ids=[],
+        identity="legacy-tracker",
+    )
+    entry.options = {OPT_IGNORED_DEVICES: {"dev-1": {"name": "Device 1"}}}
+    flow = await _build_flow(entry)
+
+    offered = _offered_keys(await flow.async_step_visibility(), "subentry")
+    options = flow._gather_subentry_options()
+    target_key = next(option.key for option in options if option.subentry is tracker)
+
+    # The ordering this case claims to exercise is pinned against a value from
+    # the parameter list, not derived from the titles. Deriving it would only
+    # restate the sort and would still pass if both parameter sets happened to
+    # order the same way -- which is exactly how the first version of this test
+    # left the second half of the asymmetry uncovered while staying green.
+    assert (options[0].subentry is service) is service_sorts_first
+    assert target_key in offered
+
+    changed = await flow._async_assign_devices_to_subentry(
+        entry,  # type: ignore[arg-type]
+        target_key,
+        ["dev-1"],
+    )
+
+    assert changed == {target_key}
+    assert tuple(tracker.data.get("visible_device_ids", ())) == ("dev-1",)
+    assert tuple(service.data.get("visible_device_ids", ())) == ()
+
+
+async def test_the_option_key_identifies_exactly_one_subentry() -> None:
+    """The property the two choice maps and the deletion step depend on.
+
+    Both ``_subentry_choice_map`` and ``_device_target_choice_map`` collapse the
+    key into a ``dict``, and ``async_step_repairs_delete`` resolves both the
+    deletion target and the devices it hands on through that mapping. A key
+    carried by two subentries therefore hides one of them from every form and
+    can delete the other. Asserted as an invariant over the whole list rather
+    than against a fixed expectation, so a future shape inherits the guarantee.
+
+    Three holders rather than two, and one of them a service group, so the
+    disambiguation is not read as a two-element swap. The last two subentries
+    build the chain that defeats a rewrite touching only the duplicates: the
+    fourth stores the ``subentry_id`` a duplicate would move to, and the fifth
+    stores the ``subentry_id`` of the fourth. Any rewrite bounded by a fixed
+    number of passes hands out a fresh duplicate here, which is why the
+    production rule moves *every* option once one duplicate exists.
+
+    Both identifiers are derived from ``entry.entry_id`` rather than written
+    out. A literal would stop matching a real ``subentry_id`` the moment that
+    attribute changed, the collision would not arise, and the invariant below
+    would hold trivially while covering nothing.
+    """
+
+    entry = _EntryStub()
+    entry.add_subentry(key=TRACKER_SUBENTRY_KEY, title="Core")
+    entry.add_subentry(key="shared", title="First", identity="first")
+    entry.add_subentry(key="shared", title="Second", identity="second")
+    entry.add_subentry(
+        key="shared",
+        title="Legacy service",
+        subentry_type=SUBENTRY_TYPE_SERVICE,
+        identity="third",
+    )
+    entry.add_subentry(
+        key=_stable_subentry_id(entry.entry_id, "first"),
+        title="Collides with a replacement",
+        identity="fourth",
+    )
+    entry.add_subentry(
+        key=_stable_subentry_id(entry.entry_id, "fourth"),
+        title="Collides one step further out",
+        identity="fifth",
+    )
+    flow = await _build_flow(entry)
+
+    options = flow._gather_subentry_options()
+
+    assert len(options) == 6
+    assert len({option.key for option in options}) == len(options)
+    # All-or-nothing: once one duplicate exists every option carries its own
+    # ``subentry_id``, including the healthy tracker group. Pinned so the
+    # difference to the narrower rule stays visible, and asserted through the
+    # subentries rather than against written-out ids.
+    assert {option.key for option in options} == set(entry.subentries)
+    assert TRACKER_SUBENTRY_KEY not in {option.key for option in options}
+
+
+async def test_a_subentry_without_a_stored_group_key_falls_back_to_its_id() -> None:
+    """The other source of an option key, and the reason it is already unique.
+
+    A subentry whose ``group_key`` is missing or blank takes its
+    ``subentry_id`` as the key. That branch is what makes the disambiguation
+    above a no-op for such a subentry, and it is why the rewrite can claim not
+    to change what ``_async_update_feature_group_subentry`` would store.
+    """
+
+    entry = _EntryStub()
+    blank = entry.add_subentry(key="   ", title="Blank", identity="blank")
+    entry.add_subentry(key=TRACKER_SUBENTRY_KEY, title="Core")
+
+    flow = await _build_flow(entry)
+
+    options = flow._gather_subentry_options()
+    keys = {option.subentry_id: option.key for option in options}
+
+    assert keys[blank.subentry_id] == blank.subentry_id
+    assert len({option.key for option in options}) == len(options)
+
+
+async def test_a_shared_group_key_leaves_both_groups_reachable_for_deletion() -> None:
+    """What the injectivity buys at the consumer, not just as a property.
+
+    ``async_step_repairs_delete`` resolves both the deletion target and the
+    devices it hands to the fallback through the ``dict`` of
+    ``_subentry_choice_map``. While two subentries shared one key that mapping
+    held a single entry, so one group was invisible, the coupling
+    ``fallback_key != target_key`` could never be satisfied and the whole step
+    aborted on ``subentry_delete_invalid``: the user could not delete either
+    group.
+    """
+
+    entry = _EntryStub()
+    service = entry.add_subentry(
+        key="owner@example.com",
+        title="Zulu service",
+        subentry_type=SUBENTRY_TYPE_SERVICE,
+        identity="legacy-service",
+    )
+    tracker = entry.add_subentry(
+        key="owner@example.com",
+        title="Alpha trackers",
+        visible_device_ids=["dev-1"],
+        identity="legacy-tracker",
+    )
+    flow = await _build_flow(entry)
+
+    form = await flow.async_step_repairs_delete()
+    keys = {
+        option.subentry_id: option.key for option in flow._gather_subentry_options()
+    }
+
+    assert form["type"] == "form"
+    assert _offered_keys(form, "delete_subentry") == {keys[service.subentry_id]}
+    assert _offered_keys(form, "fallback_subentry") == {keys[tracker.subentry_id]}
+
+
+async def test_a_move_onto_a_shared_key_reports_success_only_when_it_moved() -> None:
+    """The refusal and "nothing to do" must not look alike to the caller.
+
+    ``async_step_repairs_move`` maps an empty return value onto
+    ``subentry_move_success``. While the guard could refuse on behalf of a twin
+    the user never picked, that abort told the user their device had moved when
+    it had not.
+    """
+
+    entry = _EntryStub()
+    entry.add_subentry(
+        key="owner@example.com",
+        title="Alpha service",
+        subentry_type=SUBENTRY_TYPE_SERVICE,
+        identity="legacy-service",
+    )
+    tracker = entry.add_subentry(
+        key="owner@example.com",
+        title="Zulu trackers",
+        visible_device_ids=[],
+        identity="legacy-tracker",
+    )
+    entry.runtime_data.coordinator.data = [{"device_id": "dev-1", "name": "Device 1"}]
+    flow = await _build_flow(entry)
+
+    form = await flow.async_step_repairs_move()
+    target_key = next(
+        option.key
+        for option in flow._gather_subentry_options()
+        if option.subentry is tracker
+    )
+
+    assert target_key in _offered_keys(form, "target_subentry")
+
+    result = await flow.async_step_repairs_move(
+        {"target_subentry": target_key, "device_ids": ["dev-1"]}
+    )
+    await asyncio.sleep(0)
+
+    assert result["reason"] == "subentry_move_success"
+    manager = flow.hass.config_entries  # type: ignore[assignment]
+    updated = {sid: payload for sid, payload in manager.updated}
+    assert tuple(updated[tracker.subentry_id]["visible_device_ids"]) == ("dev-1",)
+
+
 async def test_an_entry_with_only_a_service_group_still_offers_a_target() -> None:
-    """The empty arm of the narrowing is exercised, not merely assumed.
+    """The empty arm of the narrowing is exercised through to its effect.
 
     Filtering an entry whose only subentry is a service group would leave
     ``vol.In`` with an empty mapping, which renders a form the user cannot
     submit. The fallback mirrors the one ``_gather_subentry_options`` already
     applies for an entry without any subentry (invariant LC-1: a set operation
     needs its clear counterpart spelled out).
+
+    Both sides are asserted, because the offered key is a *synthesised* option
+    with no backing subentry, so the assignment writes nothing. That is not a
+    dead end: an id no subentry claims is merged into the tracker group by
+    ``coordinator/subentry.py::_refresh_subentry_index``, which synthesises the
+    tracker metadata when the entry has none. What the user asked for -- the
+    device out of the ignore list and visible again -- therefore happens, and
+    the un-ignore write plus the reload claim are what carry it.
     """
 
     entry = _EntryStub()
@@ -758,6 +1004,63 @@ async def test_an_entry_with_only_a_service_group_still_offers_a_target() -> Non
 
     assert offered == {TRACKER_SUBENTRY_KEY}
     assert SERVICE_SUBENTRY_KEY not in offered
+
+    result = await flow.async_step_visibility(
+        {"subentry": TRACKER_SUBENTRY_KEY, "unignore_devices": ["dev-1"]}
+    )
+    await asyncio.sleep(0)
+
+    assert result["type"] == "create_entry"
+    assert result["data"][OPT_IGNORED_DEVICES] == {}
+    manager = flow.hass.config_entries  # type: ignore[assignment]
+    # No subentry write: the only real subentry is the service group, and it
+    # must not receive the id.
+    assert manager.updated == []
+    assert manager.scheduled_reloads == [entry.entry_id]
+
+
+async def test_repairs_delete_stays_submittable_in_the_common_two_group_shape() -> None:
+    """Narrowing the fallback must re-derive what is deletable, not just filter.
+
+    The two lists are coupled through ``fallback_key != target_key``. In the
+    shape the integration provisions for itself -- one tracker group and one
+    service group -- narrowing only the fallback side left a form whose single
+    fallback value was always the deletion target, so every submission failed
+    on ``invalid_subentry`` with no way out. That is the same defect the step
+    was narrowed to remove, one field higher up.
+
+    The tracker group therefore drops out of the deletion list here: nothing
+    else could inherit its devices. The service group stays, and deleting it
+    works end to end.
+    """
+
+    entry = _EntryStub()
+    entry.add_subentry(key=TRACKER_SUBENTRY_KEY, title="Core")
+    service = entry.add_subentry(
+        key=SERVICE_SUBENTRY_KEY,
+        title="Service",
+        subentry_type=SUBENTRY_TYPE_SERVICE,
+    )
+
+    flow = await _build_flow(entry)
+
+    form = await flow.async_step_repairs_delete()
+    assert form["type"] == "form"
+    assert _offered_keys(form, "delete_subentry") == {SERVICE_SUBENTRY_KEY}
+    assert _offered_keys(form, "fallback_subentry") == {TRACKER_SUBENTRY_KEY}
+
+    result = await flow.async_step_repairs_delete(
+        {
+            "delete_subentry": SERVICE_SUBENTRY_KEY,
+            "fallback_subentry": TRACKER_SUBENTRY_KEY,
+        }
+    )
+    await asyncio.sleep(0)
+
+    assert result["type"] == "abort"
+    assert result["reason"] == "subentry_delete_success"
+    manager = flow.hass.config_entries  # type: ignore[assignment]
+    assert service.subentry_id in manager.removed
 
 
 async def test_repairs_move_assigns_devices_to_selected_subentry() -> None:

@@ -59,6 +59,7 @@ import os
 import re
 import sys
 import time
+from collections import Counter
 from collections.abc import Awaitable, Callable, Mapping, MutableMapping
 from collections.abc import Iterable as CollIterable
 from collections.abc import Mapping as CollMapping
@@ -7595,7 +7596,7 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin, _ContainerLoginMixi
 
         entry = self.config_entry
         options: list[_SubentryOption] = []
-        seen_keys: set[str] = set()
+        key_counts: Counter[str] = Counter()
 
         subentries = getattr(entry, "subentries", None)
         if isinstance(subentries, dict):
@@ -7605,7 +7606,7 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin, _ContainerLoginMixi
                 if isinstance(raw_key, str) and raw_key.strip():
                     key = raw_key.strip()
                 else:
-                    key = str(getattr(subentry, "subentry_id", "core_tracking"))
+                    key = str(getattr(subentry, "subentry_id", TRACKER_SUBENTRY_KEY))
                 label = (
                     getattr(subentry, "title", None)
                     or data.get("entry_title")
@@ -7630,13 +7631,49 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin, _ContainerLoginMixi
                         visible_device_ids=visible,
                     )
                 )
-                seen_keys.add(key)
+                key_counts[key] += 1
+
+        # The key must identify the option, and the stored ``group_key`` does
+        # not: ``Subentry alias handling`` in ``agents/config_flow/AGENTS.md``
+        # explicitly lets a legacy subentry keep an email-style ``group_key``
+        # while being typed ``service``, so the *same* label can sit on a
+        # service and a tracker subentry at once. That shape is pinned in
+        # ``tests/test_config_flow_subentry_sync.py``. Every consumer downstream
+        # treats this key as an identity: ``_subentry_choice_map`` and
+        # ``_device_target_choice_map`` collapse it into a ``dict``, and
+        # ``async_step_repairs_delete`` resolves both the deletion target and
+        # the devices it hands on through that mapping. A duplicate key
+        # therefore hides one subentry from every form, and it used to let
+        # ``options.sort`` below decide which subentry an assignment wrote to.
+        #
+        # The rewrite is all-or-nothing on purpose. Moving only the duplicates
+        # looks smaller but is not total: a subentry may store the very
+        # ``subentry_id`` a duplicate is about to move to, which recreates the
+        # collision one step further out, and chaining that a second time
+        # defeats any fixed number of passes. Sending *every* option to its own
+        # ``subentry_id`` as soon as one duplicate exists is injective in a
+        # single pass, because ``subentry_id`` is the key under which
+        # ``entry.subentries`` stores the subentry and is therefore unique by
+        # construction. It also avoids picking a winner, which would leave the
+        # outcome dependent on the ``options.sort`` below.
+        #
+        # The healthy entry is untouched: without a duplicate this loop does not
+        # run, so the stored ``group_key`` keeps reaching the forms. Only an
+        # entry that already carries drifting aliases sees opaque keys, and the
+        # label the user reads is unaffected either way. Nothing new reaches
+        # storage either: ``_async_update_feature_group_subentry`` only fills a
+        # *missing* ``group_key``, and an option whose key this loop actually
+        # changes had one to begin with; an option without a stored key already
+        # carried its ``subentry_id``, so the rewrite is a no-op for it.
+        if any(count > 1 for count in key_counts.values()):
+            for option in options:
+                option.key = str(option.subentry_id or option.key)
 
         if not options:
             title = getattr(entry, "title", None) or "Core tracking"
             options.append(
                 _SubentryOption(
-                    key="core_tracking",
+                    key=TRACKER_SUBENTRY_KEY,
                     label=str(title),
                     subentry=None,
                     visible_device_ids=(),
@@ -7662,12 +7699,15 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin, _ContainerLoginMixi
         """Return the subentry choices that can actually hold device assignments.
 
         Deliberately a second helper rather than a filter inside
-        ``_subentry_choice_map``: that one has six callers, and only the three
-        that assign devices may narrow their choices. ``async_step_settings``
-        and ``async_step_credentials`` legitimately target the service group,
-        and ``async_step_repairs`` only asks whether *any* subentry exists, so a
-        shared filter could send an entry whose sole subentry is the service
-        group into ``repairs_no_subentries``.
+        ``_subentry_choice_map``: that one fed all six steps before this
+        change, and only the three that assign devices may narrow their
+        choices. The four it still feeds must keep seeing every group:
+        ``async_step_settings`` and ``async_step_credentials`` legitimately
+        target the service group, ``async_step_repairs`` only asks whether
+        *any* subentry exists (a shared filter could send an entry whose sole
+        subentry is the service group into ``repairs_no_subentries``), and
+        ``async_step_repairs_delete`` builds its ``removable_choices`` from it,
+        because deletability is not assignability.
         """
 
         options = [
@@ -7845,21 +7885,31 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin, _ContainerLoginMixi
         options = self._gather_subentry_options()
 
         # Authoritative checkpoint for the invariant described at
-        # ``_NON_DEVICE_SUBENTRY_KEYS``. Four places already write it -- both
-        # ``_visible_device_ids`` overrides, the ``service_payload`` of
-        # ``_async_sync_feature_subentries``, and the assertion in
-        # ``tests/test_config_flow_subentry_sync.py`` -- and this function was
-        # the single writer able to break it. The guard sits here rather than in
-        # each calling step because this is where every assignment passes,
-        # including any future caller.
+        # ``_NON_DEVICE_SUBENTRY_KEYS``. Three production sites in this module
+        # already write it that way -- both ``_visible_device_ids`` overrides
+        # and the ``service_payload`` of ``_async_sync_feature_subentries`` --
+        # and ``tests/test_config_flow_subentry_sync.py`` pins their result, but
+        # none of them is a checkpoint. The guard sits here rather than in each
+        # calling step because this is where every assignment in this module
+        # passes, including any future caller.
+        #
+        # The predicate is decided per *option* and must therefore be consumed
+        # per option. Resolving the first holder of the key and then writing to
+        # every holder is what let a service subentry receive ids while the
+        # guard judged its tracker twin (or refused on behalf of a twin the user
+        # never picked). ``_gather_subentry_options`` now hands out injective
+        # keys, so a twin cannot arise in the first place; the identity
+        # comparison in the loop below is the second, independent half, and it
+        # holds even if that ever regresses.
         #
         # Standing down instead of stripping the ids: the request cannot take
         # effect, so changing nothing is safer than unassigning the devices from
         # the group that legitimately holds them.
+        matching = [option for option in options if option.key == target_key]
         target_option = next(
-            (option for option in options if option.key == target_key), None
+            (option for option in matching if _accepts_device_assignment(option)), None
         )
-        if target_option is not None and not _accepts_device_assignment(target_option):
+        if matching and target_option is None:
             _LOGGER.warning(
                 "Refusing to assign %d device(s) to subentry %r: this feature group "
                 "never carries device visibility",
@@ -7885,7 +7935,12 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin, _ContainerLoginMixi
                 visible = list(option.visible_device_ids)
 
             before = list(visible)
-            if option.key == target_key:
+            # Identity, not key equality: see the note above the guard. When no
+            # option carries ``target_key`` at all -- the synthesised fallback of
+            # ``_device_target_choice_map`` produces exactly that -- every option
+            # takes the ``else`` branch, which is what this function did before
+            # and what the empty arm of the narrowing relies on.
+            if option is target_option:
                 for dev_id in device_ids:
                     if dev_id not in visible:
                         visible.append(dev_id)
@@ -8841,14 +8896,32 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin, _ContainerLoginMixi
         # service subentry stays removable (the core repair path recreates a
         # missing one), while it must not be offered as the fallback target,
         # because the devices moved there would go nowhere.
+        #
+        # The two questions are still coupled, through ``fallback_key !=
+        # target_key`` below: a group may only be offered for deletion while a
+        # *different* group can inherit its devices. Narrowing the fallback
+        # side without re-deriving the deletable side left the common shape
+        # (one tracker group plus one service group) with a form whose single
+        # fallback value was always the deletion target, so every submission
+        # failed on ``invalid_subentry`` with no way out. Offering an action
+        # that can never be carried out is the very defect this step was
+        # narrowed to remove, one field higher up.
         subentry_choices, option_map = self._subentry_choice_map()
-        fallback_choices, _ = self._device_target_choice_map()
+        fallback_choices, fallback_option_map = self._device_target_choice_map()
+        # Synthesised entries do not count: the ``core_tracking`` placeholder
+        # that ``_device_target_choice_map`` falls back to has no backing
+        # subentry, so it cannot actually inherit anything.
+        real_fallback_keys = {
+            key
+            for key, option in fallback_option_map.items()
+            if option.subentry is not None
+        }
         removable_choices = {
             key: label
             for key, label in subentry_choices.items()
-            if option_map[key].subentry
+            if option_map[key].subentry and (real_fallback_keys - {key})
         }
-        if not removable_choices or len(removable_choices) <= 1:
+        if not removable_choices:
             return self.async_abort(reason="subentry_delete_invalid")
 
         schema = vol.Schema(
