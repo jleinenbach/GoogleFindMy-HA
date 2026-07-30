@@ -18,6 +18,8 @@ from custom_components.googlefindmy.const import (
     OPT_CONTRIBUTOR_MODE,
     OPT_IGNORED_DEVICES,
     OPT_MAP_VIEW_TOKEN_EXPIRATION,
+    SERVICE_SUBENTRY_KEY,
+    SUBENTRY_TYPE_SERVICE,
     SUBENTRY_TYPE_TRACKER,
     TRACKER_SUBENTRY_KEY,
 )
@@ -153,7 +155,19 @@ class _EntryStub:
         title: str,
         visible_device_ids: list[str] | None = None,
         feature_flags: dict[str, Any] | None = None,
+        subentry_type: str = SUBENTRY_TYPE_TRACKER,
     ) -> ConfigSubentry:
+        """Add a subentry to the stub.
+
+        ``subentry_type`` is a parameter rather than a constant because the
+        assignability predicate reads *both* axes: the stored ``group_key`` and
+        the subentry type. A stub that could only produce ``tracker`` would let
+        a key-only predicate pass every test while still missing a legacy
+        subentry whose ``group_key`` drifted from its type -- the alias case
+        ``agents/config_flow/AGENTS.md`` describes under
+        ``Subentry alias handling``.
+        """
+
         payload = {
             "group_key": key,
             "feature_flags": feature_flags or {},
@@ -162,7 +176,7 @@ class _EntryStub:
             payload["visible_device_ids"] = list(visible_device_ids)
         subentry = ConfigSubentry(
             data=payload,
-            subentry_type=SUBENTRY_TYPE_TRACKER,
+            subentry_type=subentry_type,
             title=title,
             unique_id=f"{self.entry_id}-{key}",
             subentry_id=_stable_subentry_id(self.entry_id, key),
@@ -213,6 +227,26 @@ async def _build_flow(entry: _EntryStub) -> config_flow.OptionsFlowHandler:
     flow.hass = await _HassStub.create(entry)  # type: ignore[assignment]
     flow.config_entry = entry  # type: ignore[attr-defined]
     return flow
+
+
+def _offered_keys(result: dict[str, Any], field: str) -> set[str]:
+    """Return the selectable keys a shown form offers for ``field``.
+
+    Reads the ``vol.In`` container out of the rendered schema instead of
+    calling the production helper that built it. That is deliberate: the point
+    of these tests is what the *user* can pick, so a later rename or a second
+    helper must not be able to keep them green while the form changes.
+    """
+
+    schema = result["data_schema"].schema
+    for marker, validator in schema.items():
+        if str(marker) != field:
+            continue
+        container = getattr(validator, "container", None)
+        if container is None:  # pragma: no cover - schema shape changed
+            raise AssertionError(f"field {field!r} is not a vol.In selector")
+        return set(container)
+    raise AssertionError(f"field {field!r} not present in the shown form")
 
 
 async def test_settings_updates_feature_flags_for_selected_subentry() -> None:
@@ -460,6 +494,47 @@ async def test_visibility_assigns_devices_to_target_subentry() -> None:
     # ``test_device_tracker_scanner.py``.
     assert manager.scheduled_reloads == [entry.entry_id]
     assert manager.reloads == []
+
+
+async def test_visibility_offers_and_uses_the_service_subentry_as_target() -> None:
+    """Characterisation: today the service subentry is a selectable device target.
+
+    Recorded before the fix so the change is visible as a diff rather than as a
+    claim. Both halves matter and are asserted together: the form *offers* the
+    key, and the sink *writes* device ids into that subentry. A later fix that
+    only hid the option while leaving the sink writable would still flip the
+    first assertion and keep the second, which is exactly the half-fix this
+    pairing is meant to expose.
+
+    The write is a dead end for the user: ``coordinator/subentry.py`` forces
+    ``visible_device_ids`` back to ``()`` for the service key on every index
+    refresh, so the device gets no entity from that subentry -- see
+    ``test_service_subentry_visibility_is_cleared_by_the_setup_roundtrip``.
+    """
+
+    entry = _EntryStub()
+    entry.add_subentry(key=TRACKER_SUBENTRY_KEY, title="Core")
+    service = entry.add_subentry(
+        key=SERVICE_SUBENTRY_KEY,
+        title="Service",
+        subentry_type=SUBENTRY_TYPE_SERVICE,
+    )
+    entry.options = {OPT_IGNORED_DEVICES: {"dev-1": {"name": "Device 1"}}}
+
+    flow = await _build_flow(entry)
+
+    form = await flow.async_step_visibility()
+    assert SERVICE_SUBENTRY_KEY in _offered_keys(form, "subentry")
+
+    result = await flow.async_step_visibility(
+        {"subentry": SERVICE_SUBENTRY_KEY, "unignore_devices": ["dev-1"]}
+    )
+
+    assert result["type"] == "create_entry"
+    manager = flow.hass.config_entries  # type: ignore[assignment]
+    updated_id, payload = manager.updated[-1]
+    assert updated_id == service.subentry_id
+    assert payload["visible_device_ids"] == ("dev-1",)
 
 
 async def test_repairs_move_assigns_devices_to_selected_subentry() -> None:
