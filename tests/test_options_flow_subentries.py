@@ -186,6 +186,13 @@ class _HassStub:
         # The stand-down branch would then be unreachable and its mutation probe
         # meaningless.
         self.data: dict[str, Any] = {}
+        # ``tests/AGENTS.md`` point 8 asks for this and the file did not have it:
+        # ``entry_reload_gate.entry_reload_is_hopeless`` ends on
+        # ``domain in hass.config.components``, and where it cannot read that
+        # container it fails **closed** and calls every entry hopeless. Tests for
+        # a non-terminal but not-loaded entry would then measure the terminal
+        # branch instead of their own.
+        self.config = SimpleNamespace(components={config_flow.DOMAIN})
 
     @classmethod
     async def create(cls, entry: _EntryStub) -> _HassStub:
@@ -295,6 +302,133 @@ async def test_settings_stands_down_but_still_writes_the_options(
         "were saved without scheduling a reload" in record.message
         for record in caplog.records
     )
+
+
+async def _settled_settings_state(
+    user_input: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any], str]:
+    """Return the options, subentry data and title a settings submit leaves behind.
+
+    Used to build the *unchanged* starting point for the two tests below. Taken
+    from a throwaway entry with its own hass double on purpose: submitting twice
+    against one double would leave the shared reload latch claimed from the first
+    run, and the second run would then stand down as a foreign owner -- passing
+    for the wrong reason and proving nothing about the change detection.
+    """
+
+    entry = _EntryStub()
+    entry.add_subentry(key=TRACKER_SUBENTRY_KEY, title="Core")
+    flow = await _build_flow(entry)
+    result = await flow.async_step_settings(dict(user_input))
+    assert result["type"] == "create_entry"
+    manager = flow.hass.config_entries  # type: ignore[assignment]
+    _, subentry_payload = manager.updated[-1]
+    subentry = next(iter(entry.subentries.values()))
+    return dict(result["data"]), dict(subentry_payload), subentry.title
+
+
+async def test_settings_skips_the_reload_when_nothing_changed() -> None:
+    """Confirming the form without an edit must not tear the entry down.
+
+    This reproduces what the step inherited, it does not refine it: the core
+    scheduled on ``async_update_entry(...) and automatic_reload``, and
+    ``async_update_entry`` returns ``False`` for an unchanged payload
+    (``OptionsFlowManager.async_finish_flow``, cores 2026.1.3 and 2026.2.3).
+    An unconditional claim would make a no-op save remove every entity of the
+    account and repeat the whole setup, and would hold the single-owner latch
+    while doing it -- which is why the latch is asserted free at the end rather
+    than only the recorders being empty.
+    """
+
+    user_input = {
+        "subentry": TRACKER_SUBENTRY_KEY,
+        OPT_MAP_VIEW_TOKEN_EXPIRATION: True,
+        OPT_CONTRIBUTOR_MODE: "high_traffic",
+    }
+    options, subentry_data, subentry_title = await _settled_settings_state(user_input)
+
+    entry = _EntryStub()
+    subentry = entry.add_subentry(key=TRACKER_SUBENTRY_KEY, title=subentry_title)
+    subentry.data = MappingProxyType(dict(subentry_data))
+    entry.options = options
+    flow = await _build_flow(entry)
+
+    result = await flow.async_step_settings(dict(user_input))
+
+    assert result["type"] == "create_entry"
+    assert dict(result["data"]) == options
+    manager = flow.hass.config_entries  # type: ignore[assignment]
+    # Both sides (``tests/AGENTS.md`` rule 8): neither the scheduling nor the
+    # awaited variant may fire.
+    assert manager.scheduled_reloads == []
+    assert manager.reloads == []
+    # The latch was never taken, so a reload another owner brings is unaffected.
+    assert _latch_is_free(flow.hass, entry.entry_id) is True
+
+
+async def test_settings_schedules_the_reload_for_a_subentry_only_change() -> None:
+    """A write that lands only on the subentry still owes a reload.
+
+    The options comparison cannot see it: the payload is identical, but
+    ``_async_update_feature_group_subentry`` synchronises a stale
+    ``entry_title`` onto the subentry. Without the second arm of the condition
+    the change would be written and never take effect, which is the exact
+    damage class this PR exists to close.
+
+    ``group_key`` would be the other candidate and is deliberately *not* used:
+    dropping it also drops the subentry from ``_subentry_choice_map``, so the
+    step would abort with ``invalid_subentry`` and the test would exercise the
+    error path instead of the change detection (measured, not assumed).
+    """
+
+    user_input = {
+        "subentry": TRACKER_SUBENTRY_KEY,
+        OPT_MAP_VIEW_TOKEN_EXPIRATION: True,
+    }
+    options, subentry_data, subentry_title = await _settled_settings_state(user_input)
+    assert subentry_data["entry_title"] != "Stale title"
+    subentry_data["entry_title"] = "Stale title"
+
+    entry = _EntryStub()
+    subentry = entry.add_subentry(key=TRACKER_SUBENTRY_KEY, title=subentry_title)
+    subentry.data = MappingProxyType(dict(subentry_data))
+    entry.options = options
+    flow = await _build_flow(entry)
+
+    result = await flow.async_step_settings(dict(user_input))
+
+    assert result["type"] == "create_entry"
+    assert dict(result["data"]) == options
+    manager = flow.hass.config_entries  # type: ignore[assignment]
+    assert manager.updated[-1][1]["entry_title"] == entry.title
+    assert manager.scheduled_reloads == [entry.entry_id]
+    assert manager.reloads == []
+
+
+async def test_settings_reloads_for_an_entry_without_any_subentry() -> None:
+    """With no subentry to write to, the options arm has to carry the decision.
+
+    An entry without subentries still offers a choice: `_gather_subentry_options`
+    synthesises a `core_tracking` option whose `subentry` is ``None``, and
+    `_async_update_feature_group_subentry` returns early for it. The subentry arm
+    is therefore always ``False`` here, and a reload must still be scheduled
+    because the options did change -- the early return must not be mistaken for
+    "nothing happened".
+    """
+
+    entry = _EntryStub()
+    assert entry.subentries == {}
+    flow = await _build_flow(entry)
+
+    result = await flow.async_step_settings(
+        {"subentry": "core_tracking", OPT_MAP_VIEW_TOKEN_EXPIRATION: True}
+    )
+
+    assert result["type"] == "create_entry"
+    manager = flow.hass.config_entries  # type: ignore[assignment]
+    assert manager.updated == []
+    assert manager.scheduled_reloads == [entry.entry_id]
+    assert manager.reloads == []
 
 
 async def test_visibility_assigns_devices_to_target_subentry() -> None:
