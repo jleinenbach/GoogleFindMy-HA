@@ -3166,6 +3166,74 @@ def _entry_reload_is_hopeless(
     return state in _TERMINAL_ENTRY_RELOAD_STATES
 
 
+def _falsy_reload_left_the_latch_behind(
+    hass: HomeAssistant, entry_id: str, entry: Any | None = None
+) -> bool:
+    """Whether a falsy ``async_reload`` result means no release point ran.
+
+    ``async_reload`` reports **at least four** different outcomes with the same
+    falsy value, and they do not all mean the same thing for the latch:
+
+    * the **unload failed** -- our ``async_unload_entry`` ran and its ``finally``
+      handed the latch back already;
+    * the **entry setup returned ``False``** -- our ``async_setup_entry`` ran and
+      its head handed the latch back already;
+    * the **component could not be set up at all** -- the reload took the
+      ``entry.domain not in hass.config.components`` short circuit, so neither of
+      our lifecycle hooks ran and the claim is still held;
+    * ``ConfigEntry.async_setup`` **bailed before reaching our hook** and left
+      the entry unloaded, which the manager reports as ``entry.state is not
+      LOADED``, hence falsy. Two of its exits are unambiguous: an **ignored**
+      entry (``if self.source == SOURCE_IGNORE or self.disabled_by: return``, the
+      very first statement) and a **failed migration**
+      (``MIGRATION_ERROR``). In both the domain stays among the loaded
+      components, so the component check alone would misread them as released.
+
+    Treating the first two as dead ends would discard a claim someone else may
+    have taken in the meantime, which is the very double reload this latch
+    exists to prevent, and it would blame the credentials for a reload that
+    actually happened.
+
+    ``SETUP_ERROR`` is deliberately **not** on the list: our own
+    ``async_setup_entry`` reaches that state too, after its head has already
+    released the latch, so the state cannot tell the two apart. ``disabled_by``
+    is not on it either, for the same reason: with a falsy result it means the
+    unload ran and failed, and that path released. Both stay residual rather
+    than risking a release of somebody else's claim.
+
+    Fails towards releasing, like everything else about this latch: where the
+    component list or the entry cannot be read, one reload too many beats a
+    promise nobody redeems. ``entry`` may be passed when the caller already holds
+    the object, which keeps the answer from depending on whether a given manager
+    happens to offer ``async_get_entry``.
+
+    Callers must only ask this once they know the result is falsy. It is the one
+    truth about that question for the paths that consult it; a second, private
+    answer would drift.
+    """
+
+    if entry is None:
+        entry = _resolve_config_entry(hass, entry_id)
+
+    # Unambiguous proof that ``ConfigEntry.async_setup`` never reached our hook.
+    if getattr(entry, "source", None) == getattr(
+        config_entries, "SOURCE_IGNORE", "ignore"
+    ):
+        return True
+    # ``ConfigEntryState`` as imported at the top of this module, not
+    # ``config_entries.ConfigEntryState``: the two are different objects under
+    # the test stub, and ``_TERMINAL_ENTRY_RELOAD_STATES`` uses this one.
+    migration_error = getattr(ConfigEntryState, "MIGRATION_ERROR", None)
+    if migration_error is not None and getattr(entry, "state", None) == migration_error:
+        return True
+
+    domain = getattr(entry, "domain", None) if entry is not None else None
+    components = getattr(getattr(hass, "config", None), "components", None)
+    if domain is not None and components is not None and domain in components:
+        return False
+    return True
+
+
 def _schedule_claimed_reload(hass: HomeAssistant, entry_id: str) -> bool:
     """Schedule the one reload of ``entry_id`` and report whether it was ours.
 
@@ -3187,10 +3255,13 @@ def _schedule_claimed_reload(hass: HomeAssistant, entry_id: str) -> bool:
 
     It is deliberately **not** the only claimant in this module. Three paths
     still take ``_claim_entry_reload`` and call ``async_reload`` themselves: the
-    discovery unique-id guard, ``_async_reload_entry_after_reconfigure`` and
-    ``_finalize_success``. Only the first two bypass the hopeless-state gate
-    below; ``_finalize_success`` runs its own copy of that check before its
-    claim, so counting it among the unguarded ones would misread it.
+    non-interactive discovery update, ``_async_reload_entry_after_reconfigure``
+    and ``_finalize_success``. All three run the same hopeless-state check
+    before their claim, so none of them bypasses the gate below. What still
+    differs is what they do with the *result*: the discovery update evaluates it
+    and hands the latch back at a dead end, the credentials finalizer registers a
+    done callback, and the reconfigure path delegates a falsy result to the core
+    scheduler instead of releasing.
     Routing them here is a separate change with its own regression surface;
     until then a latch they leak also blocks the steps routed here, so do not
     read this docstring as "every path in this flow". Order matters twice: the
@@ -3305,23 +3376,10 @@ def _release_claim_when_reload_fails(
                 return
             if reloaded:
                 return
-            # Falsy has three causes, and two of them already passed a release
-            # point: a failed unload runs our ``async_unload_entry`` whose
-            # ``finally`` hands the latch back, and a setup that returns False
-            # ran our ``async_setup_entry`` whose head does the same. Treating
-            # those as dead ends would discard a claim someone else may have
-            # taken in the meantime -- the very double reload this latch
-            # prevents -- and would blame the credentials for a reload that
-            # actually happened. Only the third cause leaves the latch behind:
-            # the component itself could not be set up, so our entry setup never
-            # ran. That one is visible from the outside.
-            # Fails towards releasing, like everything else about this latch:
-            # where the component list or the entry cannot be read, one reload
-            # too many beats a promise nobody redeems.
-            entry = _resolve_config_entry(hass, entry_id)
-            domain = getattr(entry, "domain", None) if entry is not None else None
-            components = getattr(getattr(hass, "config", None), "components", None)
-            if domain is not None and components is not None and domain in components:
+            # Falsy has three causes and only one of them leaves the latch
+            # behind; the shared helper carries that distinction, so the direct
+            # reload paths and this callback cannot drift apart on it.
+            if not _falsy_reload_left_the_latch_behind(hass, entry_id):
                 return
             failure = True
         # Warned about, not whispered: the flow has already told the user that
@@ -5039,8 +5097,26 @@ class ConfigFlow(
             # The write above already notified the update listener, which reloads
             # for the changed credentials. Whichever side gets the latch reloads;
             # the other stands down instead of unloading the entry twice in a row.
+            #
+            # Ask first whether a reload can reach a setup at all. For a disabled
+            # or ignored entry, and for a terminal state, ``async_reload`` returns
+            # a truthy unload result without ever calling ``async_setup``, so no
+            # release point fires and the claim would be stranded. The result
+            # cannot tell that case from a reload that landed, which is why the
+            # question belongs *before* the claim. No data is lost: the write has
+            # already landed and the next setup reads ``entry.data`` afresh.
             reload_task: Any = None
-            if _claim_entry_reload(hass, existing_entry.entry_id):
+            if _entry_reload_is_hopeless(hass, existing_entry.entry_id, existing_entry):
+                _LOGGER.warning(
+                    "Not reloading entry %s after a discovery update (state=%s, "
+                    "disabled_by=%s, source=%s); the credentials are stored and "
+                    "take effect the next time the entry is set up successfully",
+                    existing_entry.entry_id,
+                    getattr(existing_entry, "state", None),
+                    getattr(existing_entry, "disabled_by", None),
+                    getattr(existing_entry, "source", None),
+                )
+            elif _claim_entry_reload(hass, existing_entry.entry_id):
                 reload_task = hass.config_entries.async_reload(existing_entry.entry_id)
 
             if inspect.isawaitable(reload_task):
@@ -5048,7 +5124,7 @@ class ConfigFlow(
 
                 async def _reload_and_normalize() -> None:
                     try:
-                        await reload_coro
+                        reloaded = await reload_coro
                     except BaseException:
                         # The claim above is a promise to reload. If the reload
                         # never lands -- ``OperationNotAllowed`` for an entry in
@@ -5058,6 +5134,30 @@ class ConfigFlow(
                         # of this entry.
                         _discard_entry_reload(hass, existing_entry.entry_id)
                         raise
+                    else:
+                        # No exception is not the same as "reloaded":
+                        # ``async_reload`` reports a failed unload, a setup that
+                        # returned ``False`` and a component it could not set up
+                        # by *returning* falsy rather than by raising. Only the
+                        # last of the three leaves the claim behind, and the
+                        # shared helper is what knows the difference -- deciding
+                        # it here as well would be a second truth that drifts.
+                        # No retry is scheduled, deliberately and unlike
+                        # reconfigure: this step ends in an abort anyway, a
+                        # reload pushed against a setup that just failed would
+                        # loop, and the next setup reads ``entry.data`` afresh.
+                        if not reloaded and _falsy_reload_left_the_latch_behind(
+                            hass, existing_entry.entry_id, existing_entry
+                        ):
+                            _LOGGER.warning(
+                                "Reload of entry %s after a discovery update "
+                                "ended without reloading; its new credentials "
+                                "stay ineffective until the entry is reloaded. "
+                                "Releasing the latch so a later write can "
+                                "schedule one",
+                                existing_entry.entry_id,
+                            )
+                            _discard_entry_reload(hass, existing_entry.entry_id)
                     finally:
                         _normalize_tracking_lists()
 
@@ -5925,9 +6025,20 @@ class ConfigFlow(
             would suppress every later reload of this entry.
 
             Only at *dead ends*, though, and only while this path still owns the
-            promise. A failed hand-off to the reload manager is no dead end: the
-            deferred retry below still follows. A *successful* one is not one
-            either, and it is the sharper case: the core task it created will
+            promise. A failed hand-off is a dead end exactly where nothing
+            follows it, which is the three result-driven hand-offs; each of them
+            reaches this helper through ``_give_up_after_a_falsy_reload``, which
+            first asks whether the latch can still be ours -- a falsy reload
+            result may mean one of our lifecycle hooks already released it. The
+            one exception is the hand-off in the ``OperationNotAllowed`` clause:
+            the deferred retry below still follows it, so a refusal there is not
+            the end of the path and is deliberately left unchecked. The dead ends
+            that carry no result (exception, cancellation, an unarmable retry, a
+            task handle that reports no outcome) call this helper *directly*:
+            there is no result to classify, so the unconditional release is the
+            only safe direction. A *successful*
+            hand-off is no dead end either, and it is the sharper case: the core
+            task it created will
             reach the unload that releases the latch anyway, so releasing here
             as well would leave the entry unlatched while its reload is still on
             its way, and the next claimant would queue a second teardown. If
@@ -5944,6 +6055,47 @@ class ConfigFlow(
                 )
                 return
             _discard_entry_reload(self.hass, entry_for_update.entry_id)
+
+        def _give_up_after_a_falsy_reload() -> None:
+            """Give the latch back only if it can still be ours.
+
+            The three dead ends that follow a **falsy reload result** differ from
+            every other dead end on this path: there a reload actually ran, and
+            how it ended decides who holds the latch now. Two of the falsy
+            outcomes mean one of our lifecycle hooks already handed the latch
+            back -- a failed unload releases at ``async_unload_entry``, a failed
+            setup at the head of ``async_setup_entry`` -- so between that release
+            and this line another writer may have claimed it. Releasing blindly
+            would discard *their* promise, and the next caller would queue the
+            second teardown this latch exists to prevent. Since
+            ``discard_pending_entry_reload`` is a bare ``set.discard`` with no
+            notion of ownership, that release cannot tell whose claim it drops.
+
+            So ask the one shared classifier instead of guessing, the same one
+            the discovery update and ``_release_claim_when_reload_fails``
+            consult; a second, private answer here would drift from theirs. It
+            fails towards releasing, which is the right direction: where the
+            entry or the component list cannot be read, one reload too many
+            beats a promise nobody redeems.
+
+            Only for falsy *results*. The exception, cancellation and
+            arming-failure dead ends keep releasing unconditionally: there no
+            result exists, the post-reload state proves nothing, and a latch left
+            behind would swallow every later reload of this entry for good.
+            """
+
+            if not _falsy_reload_left_the_latch_behind(
+                self.hass, entry_for_update.entry_id, entry_for_update
+            ):
+                _LOGGER.debug(
+                    (
+                        "Reload of entry %s returned falsy after a lifecycle "
+                        "release; leaving the latch to whoever holds it now"
+                    ),
+                    entry_for_update.entry_id,
+                )
+                return
+            _give_up_on_reload()
 
         def _schedule_reload_via_manager(reason: str) -> bool:
             """Hand the reload to the core scheduler; report whether it took it."""
@@ -6026,7 +6178,14 @@ class ConfigFlow(
             _log_failed_reload(task_result, deferred=True)
 
             if task_result is False:
-                _schedule_reload_via_manager("reload_returned_false_deferred_task")
+                # A refused hand-off is the end of this path: nothing else
+                # follows the deferred task, so the promise has to go back --
+                # but only if it is still ours to give (see
+                # ``_give_up_after_a_falsy_reload``).
+                if not _schedule_reload_via_manager(
+                    "reload_returned_false_deferred_task"
+                ):
+                    _give_up_after_a_falsy_reload()
 
         async def _async_call_reload() -> Any:
             reload_result = self.hass.config_entries.async_reload(
@@ -6036,6 +6195,34 @@ class ConfigFlow(
                 reload_result = await reload_result
 
             return reload_result
+
+        # Ask first whether a reload can reach a setup at all, for the same
+        # reason as the discovery update above: a disabled or ignored entry, and
+        # an entry in a terminal state, makes ``async_reload`` return a truthy
+        # unload result without calling ``async_setup``, and no release point
+        # fires. Standing down here costs nothing -- the reconfigured data is
+        # already written and the next setup reads it afresh -- while claiming
+        # would strand the promise.
+        #
+        # This narrows the window, it does not close it: the entry can be
+        # disabled *between* this check and the reload, because
+        # ``async_set_disabled_by`` sets the field before it reloads and the
+        # flow-abort it triggers filters on ``SOURCE_REAUTH``. Closing that
+        # remainder needs a latch that knows its owner, which this one does not;
+        # see the runtime-patterns contract.
+        if _entry_reload_is_hopeless(
+            self.hass, entry_for_update.entry_id, entry_for_update
+        ):
+            _LOGGER.warning(
+                "Not reloading entry %s after a reconfigure (state=%s, "
+                "disabled_by=%s, source=%s); the reconfigured data is stored and "
+                "takes effect the next time the entry is set up successfully",
+                entry_for_update.entry_id,
+                getattr(entry_for_update, "state", None),
+                getattr(entry_for_update, "disabled_by", None),
+                getattr(entry_for_update, "source", None),
+            )
+            return
 
         # One owner for the reload: the entry update this helper follows notifies
         # the credential update listener, and a reconfigure rewrites exactly the
@@ -6083,6 +6270,12 @@ class ConfigFlow(
                         task = create_task(reload_result_inner)
                         if _handle_reports_its_outcome(task):
                             task.add_done_callback(_log_task_result)
+                        else:
+                            # The docstring above promises to stand down together
+                            # with the callback. Without it nobody watches how the
+                            # reload ends, so a task that ends without reloading
+                            # would keep the promise open for good.
+                            _give_up_on_reload()
                         return
 
                     loop = getattr(self.hass, "loop", None)
@@ -6093,6 +6286,8 @@ class ConfigFlow(
                         )
                         if _handle_reports_its_outcome(task):
                             task.add_done_callback(_log_task_result)
+                        else:
+                            _give_up_on_reload()
                         return
 
                     if inspect.iscoroutine(reload_result_inner):
@@ -6110,7 +6305,13 @@ class ConfigFlow(
                 _log_failed_reload(reload_result_inner, deferred=True)
 
                 if reload_result_inner is False:
-                    _schedule_reload_via_manager("reload_returned_false_deferred")
+                    # Last chance on this path: the deferred retry has already
+                    # run, so a refused hand-off leaves nobody to reload. Still
+                    # only release a claim that can still be ours.
+                    if not _schedule_reload_via_manager(
+                        "reload_returned_false_deferred"
+                    ):
+                        _give_up_after_a_falsy_reload()
 
             # Inside a handler: an exception raised here is NOT caught by the
             # sibling ``except BaseException`` below (Python does not consult
@@ -6136,7 +6337,14 @@ class ConfigFlow(
         _log_failed_reload(reload_result, deferred=False)
 
         if reload_result is False:
-            _schedule_reload_via_manager("reload_returned_false")
+            # End of this path. If the core scheduler refuses the hand-off there
+            # is no deferred retry behind it, so keeping the claim would strand
+            # the promise. (The ``operation_not_allowed`` hand-off above is
+            # deliberately unchecked: the deferred retry still follows it, which
+            # is why ``_give_up_on_reload`` calls a refused hand-off "no dead
+            # end" there.)
+            if not _schedule_reload_via_manager("reload_returned_false"):
+                _give_up_after_a_falsy_reload()
 
     # ------------------ Reauthentication ------------------
     async def async_step_reauth(self, entry_data: dict[str, Any]) -> FlowResult:

@@ -2421,11 +2421,12 @@ class GoogleFindMyDomainData(TypedDict, total=False):
     # locations and subentry repairs claim it as well: they schedule through the
     # config flow's single owner, and unlike a credential write they have no
     # fallback, because the credential update listener returns early on an
-    # unchanged fingerprint. What stays out is every reload a caller issues
-    # directly via ``async_reload`` (the discovery unique-id guard and the
-    # reconfigure path) -- those still claim the latch by hand and bypass the
-    # flow's state gate. The credentials finalizer also claims by hand, but runs
-    # that same state check itself before it does, so it is not among them. Released as soon as
+    # unchanged fingerprint. Callers that issue the reload themselves via
+    # ``async_reload`` (the non-interactive discovery update, the reconfigure
+    # path and the credentials finalizer) claim the latch by hand rather than
+    # through the config flow's scheduling helper, but all three run the same
+    # hopeless-state check before they do, so none of them bypasses it.
+    # Released as soon as
     # the reload arrives (unload, and setup for an entry that was not loaded), and
     # given back by a claimant whose scheduling call failed, so a genuinely later
     # change reloads again.
