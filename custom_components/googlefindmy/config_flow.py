@@ -1239,6 +1239,42 @@ class _SubentryOption:
         return getattr(self.subentry, "subentry_id", None)
 
 
+# Feature groups that never hold device assignments. The invariant is older
+# than this checkpoint: ``ServiceSubentryFlowHandler._visible_device_ids`` and
+# ``HubSubentryFlowHandler._visible_device_ids`` both return ``()`` unconditionally,
+# ``_async_sync_feature_subentries`` builds its ``service_payload`` without the
+# key while ``tracker_payload`` keeps the stored ids, and
+# ``tests/test_config_flow_subentry_sync.py`` asserts that absence. On the
+# reading side ``coordinator/subentry.py::_refresh_subentry_index`` forces
+# ``visible_device_ids`` back to ``()`` for the service key on every refresh.
+# Offering such a group as an assignment target therefore offers an action that
+# cannot take effect.
+_NON_DEVICE_SUBENTRY_KEYS = frozenset({SERVICE_SUBENTRY_KEY})
+_NON_DEVICE_SUBENTRY_TYPES = frozenset({SUBENTRY_TYPE_SERVICE, SUBENTRY_TYPE_HUB})
+
+
+def _accepts_device_assignment(option: _SubentryOption) -> bool:
+    """Return whether ``option`` may hold ``visible_device_ids``.
+
+    Both axes are read on purpose, and the type axis is not redundant.
+    ``ConfigEntrySubEntryManager._refresh_from_entry`` derives the canonical key
+    primarily from ``subentry_type`` and keeps a diverging stored ``group_key``
+    as an alias, which ``agents/config_flow/AGENTS.md`` requires under
+    ``Subentry alias handling``. A predicate comparing only the key would let
+    through a legacy subentry that stores an e-mail-like ``group_key`` while
+    being typed ``service``.
+
+    A synthesised option without a backing subentry (the ``core_tracking``
+    fallback of ``_gather_subentry_options``) carries no type and is accepted;
+    it is the tracker group, which is precisely the one that holds devices.
+    """
+
+    if option.key in _NON_DEVICE_SUBENTRY_KEYS:
+        return False
+    subentry_type = getattr(option.subentry, "subentry_type", None)
+    return subentry_type not in _NON_DEVICE_SUBENTRY_TYPES
+
+
 _FIELD_SUBENTRY = "subentry"
 _FIELD_REPAIR_TARGET = "target_subentry"
 _FIELD_REPAIR_DELETE = "delete_subentry"
@@ -7620,6 +7656,44 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin, _ContainerLoginMixi
         option_map = {opt.key: opt for opt in options}
         return label_map, option_map
 
+    def _device_target_choice_map(
+        self,
+    ) -> tuple[dict[str, str], dict[str, _SubentryOption]]:
+        """Return the subentry choices that can actually hold device assignments.
+
+        Deliberately a second helper rather than a filter inside
+        ``_subentry_choice_map``: that one has six callers, and only the three
+        that assign devices may narrow their choices. ``async_step_settings``
+        and ``async_step_credentials`` legitimately target the service group,
+        and ``async_step_repairs`` only asks whether *any* subentry exists, so a
+        shared filter could send an entry whose sole subentry is the service
+        group into ``repairs_no_subentries``.
+        """
+
+        options = [
+            option
+            for option in self._gather_subentry_options()
+            if _accepts_device_assignment(option)
+        ]
+        if not options:
+            # Same fallback as ``_gather_subentry_options``, for the same
+            # reason: an entry whose only subentries are non-device groups
+            # would otherwise hand ``vol.In`` an empty mapping, which renders a
+            # form the user cannot submit.
+            title = getattr(self.config_entry, "title", None) or "Core tracking"
+            options = [
+                _SubentryOption(
+                    key=TRACKER_SUBENTRY_KEY,
+                    label=str(title),
+                    subentry=None,
+                    visible_device_ids=(),
+                )
+            ]
+
+        label_map = {opt.key: opt.label for opt in options}
+        option_map = {opt.key: opt for opt in options}
+        return label_map, option_map
+
     @staticmethod
     def _default_subentry_key(choices: dict[str, str]) -> str:
         """Return the default subentry key for UI defaults."""
@@ -7769,6 +7843,30 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin, _ContainerLoginMixi
 
         changed: set[str] = set()
         options = self._gather_subentry_options()
+
+        # Authoritative checkpoint for the invariant described at
+        # ``_NON_DEVICE_SUBENTRY_KEYS``. Four places already write it -- both
+        # ``_visible_device_ids`` overrides, the ``service_payload`` of
+        # ``_async_sync_feature_subentries``, and the assertion in
+        # ``tests/test_config_flow_subentry_sync.py`` -- and this function was
+        # the single writer able to break it. The guard sits here rather than in
+        # each calling step because this is where every assignment passes,
+        # including any future caller.
+        #
+        # Standing down instead of stripping the ids: the request cannot take
+        # effect, so changing nothing is safer than unassigning the devices from
+        # the group that legitimately holds them.
+        target_option = next(
+            (option for option in options if option.key == target_key), None
+        )
+        if target_option is not None and not _accepts_device_assignment(target_option):
+            _LOGGER.warning(
+                "Refusing to assign %d device(s) to subentry %r: this feature group "
+                "never carries device visibility",
+                len(device_ids),
+                target_key,
+            )
+            return set()
 
         for option in options:
             subentry = option.subentry
@@ -8501,7 +8599,7 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin, _ContainerLoginMixi
                     name_obj = meta.get("name")
                 choices[dev_id] = dev_id if not isinstance(name_obj, str) else name_obj
 
-        subentry_choices, _ = self._subentry_choice_map()
+        subentry_choices, _ = self._device_target_choice_map()
         default_subentry = self._default_subentry_key(subentry_choices)
 
         schema = vol.Schema(
@@ -8653,7 +8751,7 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin, _ContainerLoginMixi
             self.hass, self.config_entry
         )
 
-        subentry_choices, _ = self._subentry_choice_map()
+        subentry_choices, _ = self._device_target_choice_map()
         if not subentry_choices:
             return self.async_abort(reason="repairs_no_subentries")
 
@@ -8738,7 +8836,13 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin, _ContainerLoginMixi
             self.hass, self.config_entry
         )
 
+        # Two maps on purpose, and only one of them is narrowed. What may be
+        # *deleted* is a different question from what may *receive* devices: a
+        # service subentry stays removable (the core repair path recreates a
+        # missing one), while it must not be offered as the fallback target,
+        # because the devices moved there would go nowhere.
         subentry_choices, option_map = self._subentry_choice_map()
+        fallback_choices, _ = self._device_target_choice_map()
         removable_choices = {
             key: label
             for key, label in subentry_choices.items()
@@ -8752,8 +8856,8 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin, _ContainerLoginMixi
                 vol.Required(_FIELD_REPAIR_DELETE): vol.In(removable_choices),
                 vol.Required(
                     _FIELD_REPAIR_FALLBACK,
-                    default=self._default_subentry_key(subentry_choices),
-                ): vol.In(subentry_choices),
+                    default=self._default_subentry_key(fallback_choices),
+                ): vol.In(fallback_choices),
             }
         )
 
@@ -8764,7 +8868,7 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin, _ContainerLoginMixi
 
             if target_key not in removable_choices:
                 errors[_FIELD_REPAIR_DELETE] = "invalid_subentry"
-            if fallback_key not in subentry_choices or fallback_key == target_key:
+            if fallback_key not in fallback_choices or fallback_key == target_key:
                 errors[_FIELD_REPAIR_FALLBACK] = "invalid_subentry"
 
             if errors:
@@ -8786,7 +8890,7 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin, _ContainerLoginMixi
 
             placeholders = {
                 "subentry": subentry_choices[target_key],
-                "fallback": subentry_choices[fallback_key],
+                "fallback": fallback_choices[fallback_key],
                 "count": str(len(devices)),
             }
 

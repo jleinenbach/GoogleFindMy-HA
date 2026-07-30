@@ -496,25 +496,31 @@ async def test_visibility_assigns_devices_to_target_subentry() -> None:
     assert manager.reloads == []
 
 
-async def test_visibility_offers_and_uses_the_service_subentry_as_target() -> None:
-    """Characterisation: today the service subentry is a selectable device target.
+async def test_visibility_neither_offers_nor_accepts_the_service_subentry() -> None:
+    """The service group is gone from the target list, and submitting it fails.
 
-    Recorded before the fix so the change is visible as a diff rather than as a
-    claim. Both halves matter and are asserted together: the form *offers* the
-    key, and the sink *writes* device ids into that subentry. A later fix that
-    only hid the option while leaving the sink writable would still flip the
-    first assertion and keep the second, which is exactly the half-fix this
-    pairing is meant to expose.
+    This is the inversion of the characterisation recorded before the fix: back
+    then the form offered the key *and* the sink wrote device ids into it. Both
+    halves are asserted here for the same reason they were asserted then. A fix
+    that only hid the option while leaving the submission path writable would
+    flip the first assertion and keep the second, which is exactly the half-fix
+    this pairing exists to catch.
 
-    The write is a dead end for the user: ``coordinator/subentry.py`` forces
+    Why the write was a dead end: ``coordinator/subentry.py`` forces
     ``visible_device_ids`` back to ``()`` for the service key on every index
-    refresh, so the device gets no entity from that subentry -- see
-    ``test_service_subentry_visibility_is_cleared_by_the_setup_roundtrip``.
+    refresh, and the next entry setup clears the stored value a second time --
+    see ``test_service_subentry_visibility_is_cleared_by_the_setup_roundtrip``
+    in ``test_options_flow_registry_updates.py``.
+
+    Both reload directions are asserted (``tests/AGENTS.md`` rule 8): a refused
+    submission writes nothing and therefore claims no reload either. Leaving
+    that open would let a future change tear the entry down for an action it
+    just rejected.
     """
 
     entry = _EntryStub()
     entry.add_subentry(key=TRACKER_SUBENTRY_KEY, title="Core")
-    service = entry.add_subentry(
+    entry.add_subentry(
         key=SERVICE_SUBENTRY_KEY,
         title="Service",
         subentry_type=SUBENTRY_TYPE_SERVICE,
@@ -524,17 +530,234 @@ async def test_visibility_offers_and_uses_the_service_subentry_as_target() -> No
     flow = await _build_flow(entry)
 
     form = await flow.async_step_visibility()
-    assert SERVICE_SUBENTRY_KEY in _offered_keys(form, "subentry")
+    offered = _offered_keys(form, "subentry")
+    assert SERVICE_SUBENTRY_KEY not in offered
+    assert TRACKER_SUBENTRY_KEY in offered
 
     result = await flow.async_step_visibility(
         {"subentry": SERVICE_SUBENTRY_KEY, "unignore_devices": ["dev-1"]}
     )
 
+    assert result["type"] == "form"
+    assert result["errors"] == {"subentry": "invalid_subentry"}
+    manager = flow.hass.config_entries  # type: ignore[assignment]
+    assert manager.updated == []
+    assert manager.scheduled_reloads == []
+    assert manager.reloads == []
+
+
+async def test_visibility_still_assigns_and_reloads_for_a_device_group() -> None:
+    """The narrowing must not cost the legitimate target its assignment.
+
+    The companion to the test above: hiding the service group is only correct
+    if the tracker group still works end to end. Both sides again -- the write
+    lands, and the reload claim introduced by PR #1228 is still taken, because
+    a device returning from the ignore list has no entity until a reload
+    rebuilds the platform known-sets.
+    """
+
+    entry = _EntryStub()
+    core = entry.add_subentry(key=TRACKER_SUBENTRY_KEY, title="Core")
+    entry.add_subentry(
+        key=SERVICE_SUBENTRY_KEY,
+        title="Service",
+        subentry_type=SUBENTRY_TYPE_SERVICE,
+    )
+    entry.options = {OPT_IGNORED_DEVICES: {"dev-1": {"name": "Device 1"}}}
+
+    flow = await _build_flow(entry)
+
+    result = await flow.async_step_visibility(
+        {"subentry": TRACKER_SUBENTRY_KEY, "unignore_devices": ["dev-1"]}
+    )
+    await asyncio.sleep(0)
+
     assert result["type"] == "create_entry"
     manager = flow.hass.config_entries  # type: ignore[assignment]
-    updated_id, payload = manager.updated[-1]
-    assert updated_id == service.subentry_id
-    assert payload["visible_device_ids"] == ("dev-1",)
+    updated = {sid: payload for sid, payload in manager.updated}
+    assert tuple(updated[core.subentry_id]["visible_device_ids"]) == ("dev-1",)
+    assert manager.scheduled_reloads == [entry.entry_id]
+    assert manager.reloads == []
+
+
+async def test_repairs_move_does_not_offer_the_service_subentry() -> None:
+    """Second of the three assignment steps: the move target list is narrowed."""
+
+    entry = _EntryStub()
+    entry.add_subentry(key=TRACKER_SUBENTRY_KEY, title="Core")
+    entry.add_subentry(
+        key=SERVICE_SUBENTRY_KEY,
+        title="Service",
+        subentry_type=SUBENTRY_TYPE_SERVICE,
+    )
+
+    flow = await _build_flow(entry)
+
+    form = await flow.async_step_repairs_move()
+    offered = _offered_keys(form, "target_subentry")
+    assert SERVICE_SUBENTRY_KEY not in offered
+    assert TRACKER_SUBENTRY_KEY in offered
+
+
+async def test_repairs_delete_narrows_the_fallback_but_not_the_deletion() -> None:
+    """Third assignment step, and the one place where the two lists differ.
+
+    What may be *deleted* is a different question from what may *receive*
+    devices. The service group stays removable -- the core repair path recreates
+    a missing one, and taking that away would be an unrelated product decision
+    (veto point ``V-3-T`` of the plan) -- while it must not be offered as the
+    fallback that inherits the deleted group's devices.
+    """
+
+    entry = _EntryStub()
+    entry.add_subentry(key=TRACKER_SUBENTRY_KEY, title="Core")
+    entry.add_subentry(key="second", title="Second")
+    entry.add_subentry(
+        key=SERVICE_SUBENTRY_KEY,
+        title="Service",
+        subentry_type=SUBENTRY_TYPE_SERVICE,
+    )
+
+    flow = await _build_flow(entry)
+
+    form = await flow.async_step_repairs_delete()
+    assert SERVICE_SUBENTRY_KEY not in _offered_keys(form, "fallback_subentry")
+    assert SERVICE_SUBENTRY_KEY in _offered_keys(form, "delete_subentry")
+
+
+async def test_the_three_non_assigning_steps_keep_the_service_subentry() -> None:
+    """The narrowing stops at the three steps that assign devices.
+
+    ``_subentry_choice_map`` has six callers. Filtering inside it would have
+    been the smaller diff and the larger mistake: ``async_step_settings`` and
+    ``async_step_credentials`` legitimately target the service group, and
+    ``async_step_repairs`` only asks whether *any* subentry exists, so a shared
+    filter could send an entry whose sole subentry is the service group into
+    ``repairs_no_subentries``. All three are checked here, the last one in its
+    worst case.
+    """
+
+    entry = _EntryStub()
+    entry.add_subentry(key=TRACKER_SUBENTRY_KEY, title="Core")
+    entry.add_subentry(
+        key=SERVICE_SUBENTRY_KEY,
+        title="Service",
+        subentry_type=SUBENTRY_TYPE_SERVICE,
+    )
+    flow = await _build_flow(entry)
+
+    settings_form = await flow.async_step_settings()
+    assert SERVICE_SUBENTRY_KEY in _offered_keys(settings_form, "subentry")
+
+    credentials_form = await flow.async_step_credentials()
+    assert SERVICE_SUBENTRY_KEY in _offered_keys(credentials_form, "subentry")
+
+    service_only = _EntryStub()
+    service_only.add_subentry(
+        key=SERVICE_SUBENTRY_KEY,
+        title="Service",
+        subentry_type=SUBENTRY_TYPE_SERVICE,
+    )
+    service_only_flow = await _build_flow(service_only)
+
+    menu = await service_only_flow.async_step_repairs()
+    assert menu["type"] == "menu"
+
+
+async def test_the_sink_refuses_a_service_target_on_a_direct_call() -> None:
+    """The guard sits at the data-flow chokepoint, not only in the forms.
+
+    The forms can no longer produce this call, so any occurrence is a caller
+    bug. It is still worth pinning: ``_async_assign_devices_to_subentry`` is
+    the single writer able to break an invariant that four other places already
+    keep, and a fourth caller added later would inherit the protection without
+    knowing about it.
+
+    Standing down rather than stripping the ids elsewhere is asserted too: the
+    tracker group keeps what it legitimately holds.
+    """
+
+    entry = _EntryStub()
+    core = entry.add_subentry(
+        key=TRACKER_SUBENTRY_KEY, title="Core", visible_device_ids=["dev-1"]
+    )
+    entry.add_subentry(
+        key=SERVICE_SUBENTRY_KEY,
+        title="Service",
+        subentry_type=SUBENTRY_TYPE_SERVICE,
+    )
+    flow = await _build_flow(entry)
+
+    changed = await flow._async_assign_devices_to_subentry(
+        entry,  # type: ignore[arg-type]
+        SERVICE_SUBENTRY_KEY,
+        ["dev-1"],
+    )
+
+    assert SERVICE_SUBENTRY_KEY not in changed
+    assert changed == set()
+    manager = flow.hass.config_entries  # type: ignore[assignment]
+    assert manager.updated == []
+    # The device stays where it legitimately was.
+    assert tuple(core.data["visible_device_ids"]) == ("dev-1",)
+
+
+async def test_a_legacy_subentry_typed_service_is_excluded_by_its_type() -> None:
+    """The key alone does not carry the proof, so the type is read as well.
+
+    ``ConfigEntrySubEntryManager._refresh_from_entry`` derives the canonical key
+    primarily from ``subentry_type`` and keeps a diverging stored ``group_key``
+    as an alias, which ``agents/config_flow/AGENTS.md`` requires under
+    ``Subentry alias handling``. A predicate comparing only the key would let
+    this subentry through in all three steps.
+    """
+
+    entry = _EntryStub()
+    entry.add_subentry(key=TRACKER_SUBENTRY_KEY, title="Core")
+    entry.add_subentry(key="second", title="Second")
+    entry.add_subentry(
+        key="owner@example.com",
+        title="Legacy Service",
+        subentry_type=SUBENTRY_TYPE_SERVICE,
+    )
+    entry.options = {OPT_IGNORED_DEVICES: {"dev-1": {"name": "Device 1"}}}
+
+    flow = await _build_flow(entry)
+
+    visibility = await flow.async_step_visibility()
+    move = await flow.async_step_repairs_move()
+    delete = await flow.async_step_repairs_delete()
+
+    assert "owner@example.com" not in _offered_keys(visibility, "subentry")
+    assert "owner@example.com" not in _offered_keys(move, "target_subentry")
+    assert "owner@example.com" not in _offered_keys(delete, "fallback_subentry")
+
+
+async def test_an_entry_with_only_a_service_group_still_offers_a_target() -> None:
+    """The empty arm of the narrowing is exercised, not merely assumed.
+
+    Filtering an entry whose only subentry is a service group would leave
+    ``vol.In`` with an empty mapping, which renders a form the user cannot
+    submit. The fallback mirrors the one ``_gather_subentry_options`` already
+    applies for an entry without any subentry (invariant LC-1: a set operation
+    needs its clear counterpart spelled out).
+    """
+
+    entry = _EntryStub()
+    entry.add_subentry(
+        key=SERVICE_SUBENTRY_KEY,
+        title="Service",
+        subentry_type=SUBENTRY_TYPE_SERVICE,
+    )
+    entry.options = {OPT_IGNORED_DEVICES: {"dev-1": {"name": "Device 1"}}}
+
+    flow = await _build_flow(entry)
+
+    form = await flow.async_step_visibility()
+    offered = _offered_keys(form, "subentry")
+
+    assert offered == {TRACKER_SUBENTRY_KEY}
+    assert SERVICE_SUBENTRY_KEY not in offered
 
 
 async def test_repairs_move_assigns_devices_to_selected_subentry() -> None:
