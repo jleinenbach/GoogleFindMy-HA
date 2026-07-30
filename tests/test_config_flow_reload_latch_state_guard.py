@@ -33,7 +33,7 @@ from typing import Any
 import pytest
 from homeassistant.config_entries import ConfigEntryState
 
-from custom_components.googlefindmy import config_flow
+from custom_components.googlefindmy import config_flow, entry_reload_gate
 from tests.helpers.config_entries_stub import make_config_entry
 
 
@@ -262,7 +262,7 @@ def test_every_terminal_state_name_resolved() -> None:
     the predicate on a real ``make_config_entry`` entry.
     """
 
-    assert len(config_flow._TERMINAL_ENTRY_RELOAD_STATES) == 2, (
+    assert len(entry_reload_gate.TERMINAL_ENTRY_RELOAD_STATES) == 2, (
         "a name that no longer resolves drops out of the set; the gate then "
         "quietly stops guarding"
     )
@@ -281,7 +281,7 @@ def test_every_terminal_state_name_resolved() -> None:
 
     for name in ("SETUP_IN_PROGRESS", "UNLOAD_IN_PROGRESS"):
         transient = getattr(ConfigEntryState, name)
-        assert transient not in config_flow._TERMINAL_ENTRY_RELOAD_STATES, (
+        assert transient not in entry_reload_gate.TERMINAL_ENTRY_RELOAD_STATES, (
             f"{name} is resolvable on the same symbol and is left out on purpose"
         )
 
