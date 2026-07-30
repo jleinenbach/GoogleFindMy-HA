@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import logging
 from dataclasses import dataclass
 from types import MappingProxyType, SimpleNamespace
 from typing import Any
@@ -228,6 +229,72 @@ async def test_settings_updates_feature_flags_for_selected_subentry() -> None:
     _, payload = manager.updated[-1]
     assert payload["feature_flags"][OPT_MAP_VIEW_TOKEN_EXPIRATION] is True
     assert payload["feature_flags"][OPT_CONTRIBUTOR_MODE] == "high_traffic"
+
+
+async def test_settings_schedules_the_reload_its_options_need() -> None:
+    """The settings step asks for its own reload, through the owner latch.
+
+    These options are read at setup time, so they only take effect after a
+    reload. The step used to inherit one from ``OptionsFlowWithReload``; that
+    base is gone (the core refuses it next to an update listener), so the
+    reload has to be requested explicitly. Without this test the step would
+    save its options and quietly do nothing until the next restart.
+
+    The update listener is not a substitute: it reloads only for
+    credential-relevant keys, and this form writes none.
+    """
+
+    entry = _EntryStub()
+    entry.add_subentry(key=TRACKER_SUBENTRY_KEY, title="Core")
+    flow = await _build_flow(entry)
+
+    result = await flow.async_step_settings(
+        {
+            "subentry": TRACKER_SUBENTRY_KEY,
+            OPT_MAP_VIEW_TOKEN_EXPIRATION: True,
+        }
+    )
+
+    assert result["type"] == "create_entry"
+    manager = flow.hass.config_entries  # type: ignore[assignment]
+    assert manager.scheduled_reloads == [entry.entry_id]
+
+
+async def test_settings_stands_down_but_still_writes_the_options(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A foreign owner costs the reload, never the write.
+
+    The settings form is the one step whose options would otherwise be lost:
+    standing down must leave the entry unchanged in every other respect, so the
+    reload that owner is bringing carries this write too. The log assertion is
+    what makes the stand-down branch itself measured rather than merely
+    executed -- without it, ignoring the return value would look the same.
+    """
+
+    caplog.set_level(logging.DEBUG, logger=config_flow._LOGGER.name)
+    entry = _EntryStub()
+    entry.add_subentry(key=TRACKER_SUBENTRY_KEY, title="Core")
+    flow = await _build_flow(entry)
+    _claim_latch(flow.hass, entry.entry_id)
+
+    result = await flow.async_step_settings(
+        {
+            "subentry": TRACKER_SUBENTRY_KEY,
+            OPT_MAP_VIEW_TOKEN_EXPIRATION: True,
+        }
+    )
+
+    assert result["type"] == "create_entry"
+    manager = flow.hass.config_entries  # type: ignore[assignment]
+    assert manager.scheduled_reloads == []
+    assert manager.reloads == []
+    _, payload = manager.updated[-1]
+    assert payload["feature_flags"][OPT_MAP_VIEW_TOKEN_EXPIRATION] is True
+    assert any(
+        "were saved without scheduling a reload" in record.message
+        for record in caplog.records
+    )
 
 
 async def test_visibility_assigns_devices_to_target_subentry() -> None:
