@@ -301,7 +301,7 @@
       },
       "visibility": {
         "title": "Gerätesichtbarkeit",
-        "description": "Stelle zuvor ignorierte Geräte wieder her, damit sie erneut sichtbar sind. Wähle ein oder mehrere Geräte aus und speichere.",
+        "description": "Stelle zuvor ignorierte Geräte wieder her, damit sie erneut sichtbar sind. Wähle ein oder mehrere Geräte aus und speichere. Ein ignoriertes Gerät wird samt seinen Entitäten aus Home Assistant entfernt. Beim Wiederherstellen wird die Integration deshalb neu geladen, um sie neu anzulegen; währenddessen sind alle Entitäten dieses Kontos kurz nicht verfügbar.",
         "data": {
           "unignore_devices": "Geräte wiederherstellen",
           "subentry": "Funktionsgruppe"

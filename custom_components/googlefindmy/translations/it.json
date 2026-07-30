@@ -301,7 +301,7 @@
       },
       "visibility": {
         "title": "Visibilità dei dispositivi",
-        "description": "Ripristina i dispositivi precedentemente ignorati per renderli di nuovo visibili. Seleziona uno o più dispositivi e salva.",
+        "description": "Ripristina i dispositivi precedentemente ignorati per renderli di nuovo visibili. Seleziona uno o più dispositivi e salva. Ignorare un dispositivo lo rimuove da Home Assistant insieme alle sue entità. Ripristinarlo ricarica quindi l'integrazione per ricrearle; nel frattempo tutte le entità di questo account sono brevemente non disponibili.",
         "data": {
           "unignore_devices": "Ripristina dispositivi",
           "subentry": "Gruppo di funzionalità"

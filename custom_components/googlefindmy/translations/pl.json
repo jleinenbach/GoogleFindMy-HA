@@ -301,7 +301,7 @@
       },
       "visibility": {
         "title": "Widoczność urządzeń",
-        "description": "Przywróć wcześniej ignorowane urządzenia, aby znów były widoczne. Wybierz jedno lub więcej urządzeń i zapisz.",
+        "description": "Przywróć wcześniej ignorowane urządzenia, aby znów były widoczne. Wybierz jedno lub więcej urządzeń i zapisz. Zignorowanie urządzenia usuwa je wraz z jego encjami z Home Assistant. Przywrócenie powoduje więc ponowne załadowanie integracji, aby je odtworzyć; w tym czasie wszystkie encje tego konta są przez chwilę niedostępne.",
         "data": {
           "unignore_devices": "Przywróć urządzenia",
           "subentry": "Grupa funkcji"

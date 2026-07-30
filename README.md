@@ -218,7 +218,7 @@ Accessible via the ⚙️ cogwheel button on the main Google Find My Device Inte
 
 | **Option** | **Default** | **Units** | **Description** |
 | :---: | :---: | :---: | --- |
-| `ignored_devices` | none | - | Devices hidden from tracking. Use **Manage ignored devices** to restore them. |
+| `ignored_devices` | none | - | Devices removed from tracking. Ignoring a device deletes it and its entities from the registries, so restoring it through **Manage ignored devices** reloads the integration to rebuild them. |
 | `location_poll_interval` | 300 | seconds | How often the integration runs a poll cycle for all devices. |
 | `device_poll_delay` | 5 | seconds | How much time to wait between polling devices during a poll cycle. |
 | `min_poll_interval` | 60 | seconds | Hard lower bound between poll cycles and the manual locate cooldown. |
