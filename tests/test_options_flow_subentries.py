@@ -1019,6 +1019,123 @@ async def test_an_entry_with_only_a_service_group_still_offers_a_target() -> Non
     assert manager.scheduled_reloads == [entry.entry_id]
 
 
+async def test_the_synthesised_fallback_never_borrows_a_key_in_use() -> None:
+    """The fallback must not take the identity of a group it filtered out.
+
+    An entry whose only subentry is typed ``service`` while storing the legacy
+    ``group_key`` ``core_tracking`` is removed from the target list by its
+    type, and the fallback used to offer *that* key back. The sink resolves a
+    key against the **unfiltered** set, so it found the real, non-assignable
+    subentry and refused the write.
+
+    Asserted on the identity, not on a literal: the point is that no real
+    option holds the offered key, not which substitute the helper picked.
+    """
+
+    entry = _EntryStub()
+    entry.add_subentry(
+        key=TRACKER_SUBENTRY_KEY,
+        title="Legacy service",
+        subentry_type=SUBENTRY_TYPE_SERVICE,
+        visible_device_ids=["dev-1"],
+    )
+    flow = await _build_flow(entry)
+
+    choices, option_map = flow._device_target_choice_map()
+    (offered_key,) = choices
+    stored_keys = {opt.key for opt in flow._gather_subentry_options()}
+
+    assert option_map[offered_key].subentry is None
+    assert offered_key not in stored_keys
+
+
+async def test_the_fallback_key_search_is_total_across_several_holders() -> None:
+    """One substitute is not enough, so the search walks until it is free.
+
+    A second subentry may store the very substitute the first one is displaced
+    to. A fixed number of attempts would hand out a borrowed key again, one
+    step further out, which is the same defect the search removes.
+    """
+
+    entry = _EntryStub()
+    for index, key in enumerate(
+        (TRACKER_SUBENTRY_KEY, f"{TRACKER_SUBENTRY_KEY}_2", f"{TRACKER_SUBENTRY_KEY}_3")
+    ):
+        entry.add_subentry(
+            key=key,
+            title=f"Legacy service {index}",
+            subentry_type=SUBENTRY_TYPE_SERVICE,
+            identity=f"legacy-{index}",
+        )
+    flow = await _build_flow(entry)
+
+    choices, _ = flow._device_target_choice_map()
+    (offered_key,) = choices
+
+    assert offered_key not in {opt.key for opt in flow._gather_subentry_options()}
+
+
+async def test_repairs_move_refuses_an_entry_without_a_real_destination() -> None:
+    """A move needs a destination, and saying otherwise was the defect.
+
+    Without a backing subentry the assignment writes nothing, ``changed``
+    stays empty, and the step used to abort on ``subentry_move_success`` --
+    a success message for a move that could not happen. The synthesised
+    fallback is therefore not a candidate here, mirroring the
+    ``real_fallback_keys`` line ``async_step_repairs_delete`` already draws
+    for its own fallback field. The abort string already exists, so no
+    translation key is added.
+    """
+
+    entry = _EntryStub()
+    legacy = entry.add_subentry(
+        key=TRACKER_SUBENTRY_KEY,
+        title="Legacy service",
+        subentry_type=SUBENTRY_TYPE_SERVICE,
+        visible_device_ids=["dev-1"],
+    )
+    flow = await _build_flow(entry)
+
+    result = await flow.async_step_repairs_move()
+
+    assert result["type"] == "abort"
+    assert result["reason"] == "repairs_no_subentries"
+    # The devices stay where they were: no strip, no loss.
+    assert tuple(legacy.data["visible_device_ids"]) == ("dev-1",)
+    manager = flow.hass.config_entries  # type: ignore[assignment]
+    assert manager.updated == []
+
+
+async def test_the_sink_stands_down_when_no_option_carries_the_target() -> None:
+    """Without a destination the loop must not run at all.
+
+    Its ``else`` branch strips the ids from every group that holds them. With
+    a real target that is the second half of a move; without one it is a loss
+    -- and it would be reported as a success, because a strip fills
+    ``changed``.
+    """
+
+    entry = _EntryStub()
+    legacy = entry.add_subentry(
+        key=TRACKER_SUBENTRY_KEY,
+        title="Legacy service",
+        subentry_type=SUBENTRY_TYPE_SERVICE,
+        visible_device_ids=["dev-1"],
+    )
+    flow = await _build_flow(entry)
+
+    changed = await flow._async_assign_devices_to_subentry(
+        entry,  # type: ignore[arg-type]
+        "a-key-no-option-carries",
+        ["dev-1"],
+    )
+
+    assert changed == set()
+    assert tuple(legacy.data["visible_device_ids"]) == ("dev-1",)
+    manager = flow.hass.config_entries  # type: ignore[assignment]
+    assert manager.updated == []
+
+
 async def test_repairs_delete_stays_submittable_in_the_common_two_group_shape() -> None:
     """Narrowing the fallback must re-derive what is deletable, not just filter.
 

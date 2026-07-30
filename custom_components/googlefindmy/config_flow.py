@@ -60,7 +60,7 @@ import re
 import sys
 import time
 from collections import Counter
-from collections.abc import Awaitable, Callable, Mapping, MutableMapping
+from collections.abc import Awaitable, Callable, Container, Mapping, MutableMapping
 from collections.abc import Iterable as CollIterable
 from collections.abc import Mapping as CollMapping
 from contextlib import suppress
@@ -1248,10 +1248,44 @@ class _SubentryOption:
 # ``tests/test_config_flow_subentry_sync.py`` asserts that absence. On the
 # reading side ``coordinator/subentry.py::_refresh_subentry_index`` forces
 # ``visible_device_ids`` back to ``()`` for the service key on every refresh.
-# Offering such a group as an assignment target therefore offers an action that
-# cannot take effect.
+#
+# How far that carries, stated because an earlier version of this note said
+# more than the code holds. The reading side tests the **key** only
+# (``group_key == SERVICE_SUBENTRY_KEY``), so for a subentry typed ``service``
+# that stores a diverging key the coordinator does *not* clear the ids;
+# measured. The type axis below is therefore not justified by "the write is
+# erased on the next refresh" but by the manager, which canonicalises
+# primarily by type and keeps the stored key as an alias: a group offered
+# under an alias is one the manager may move out from under the assignment.
+# The two axes thus rest on different grounds, and only the key axis is
+# enforced by the reading side.
 _NON_DEVICE_SUBENTRY_KEYS = frozenset({SERVICE_SUBENTRY_KEY})
 _NON_DEVICE_SUBENTRY_TYPES = frozenset({SUBENTRY_TYPE_SERVICE, SUBENTRY_TYPE_HUB})
+
+
+def _unclaimed_fallback_key(taken: Container[str]) -> str:
+    """Return a tracker-group key no existing option already holds.
+
+    The synthesised fallback of ``_device_target_choice_map`` used to take
+    ``TRACKER_SUBENTRY_KEY`` unconditionally. That borrows an identity: an
+    entry whose only subentry is typed ``service`` while storing the legacy
+    ``group_key`` ``core_tracking`` is filtered out of the target list, and the
+    fallback then offered *its* key. ``_async_assign_devices_to_subentry``
+    resolves the key against the **unfiltered** set, found that real subentry,
+    refused the write, and ``async_step_repairs_move`` reported
+    ``subentry_move_success`` for a move that never happened.
+
+    The search is total rather than a single alternative: a second subentry may
+    store the very substitute the first one is displaced to, so a fixed number
+    of attempts is not enough. ``taken`` is finite, so the loop terminates.
+    """
+
+    if TRACKER_SUBENTRY_KEY not in taken:
+        return TRACKER_SUBENTRY_KEY
+    suffix = 2
+    while f"{TRACKER_SUBENTRY_KEY}_{suffix}" in taken:
+        suffix += 1
+    return f"{TRACKER_SUBENTRY_KEY}_{suffix}"
 
 
 def _accepts_device_assignment(option: _SubentryOption) -> bool:
@@ -7710,20 +7744,28 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin, _ContainerLoginMixi
         because deletability is not assignability.
         """
 
+        all_options = self._gather_subentry_options()
         options = [
-            option
-            for option in self._gather_subentry_options()
-            if _accepts_device_assignment(option)
+            option for option in all_options if _accepts_device_assignment(option)
         ]
         if not options:
             # Same fallback as ``_gather_subentry_options``, for the same
             # reason: an entry whose only subentries are non-device groups
             # would otherwise hand ``vol.In`` an empty mapping, which renders a
             # form the user cannot submit.
+            #
+            # The key is taken from ``_unclaimed_fallback_key`` rather than
+            # being ``TRACKER_SUBENTRY_KEY`` outright, and the difference is
+            # not cosmetic: the two ``if not options:`` guards look alike but
+            # test different sets. The one in ``_gather_subentry_options``
+            # fires on the *unfiltered* list, so nothing exists that could hold
+            # the key. This one fires on the *filtered* list while the
+            # unfiltered one may well be non-empty, which is where a borrowed
+            # identity becomes possible.
             title = getattr(self.config_entry, "title", None) or "Core tracking"
             options = [
                 _SubentryOption(
-                    key=TRACKER_SUBENTRY_KEY,
+                    key=_unclaimed_fallback_key({option.key for option in all_options}),
                     label=str(title),
                     subentry=None,
                     visible_device_ids=(),
@@ -7916,6 +7958,19 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin, _ContainerLoginMixi
                 len(device_ids),
                 target_key,
             )
+            return set()
+
+        # No option carries the key at all. Inside this module the synthesised
+        # fallback of ``_device_target_choice_map`` is what produces that shape;
+        # a direct caller passing an unknown key produces it too, which is why
+        # the check sits here and not in the steps. A
+        # move needs a destination, so the loop below must not run: its
+        # ``else`` branch would strip the ids from every group that holds them
+        # and put them nowhere. That is not the requested move, it is a loss,
+        # and it would be reported as a success, because a strip fills
+        # ``changed``. Standing down keeps the ids where they legitimately are
+        # and leaves ``changed`` empty, which is what the callers read.
+        if target_option is None:
             return set()
 
         for option in options:
@@ -8806,7 +8861,29 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin, _ContainerLoginMixi
             self.hass, self.config_entry
         )
 
-        subentry_choices, _ = self._device_target_choice_map()
+        # A move needs a real destination, so the synthesised fallback is not a
+        # candidate here. ``async_step_repairs_delete`` already draws that line
+        # for its own fallback field through ``real_fallback_keys``; this is the
+        # same rule, applied to the target field.
+        #
+        # Dropping it rather than letting it through is what keeps the report
+        # honest. Without a backing subentry the assignment writes nothing, so
+        # ``changed`` stays empty and the step below aborts with
+        # ``subentry_move_success`` -- a success message for a move that could
+        # not happen. Aborting on ``repairs_no_subentries`` instead says the
+        # truth about such an entry with a string that already exists, so no
+        # translation key is added.
+        #
+        # ``async_step_visibility`` deliberately keeps the fallback: there the
+        # user's request is to leave the ignore list, which the option write and
+        # the reload carry on their own, and an id no subentry claims is merged
+        # into the tracker group by ``coordinator/subentry.py``.
+        raw_choices, target_option_map = self._device_target_choice_map()
+        subentry_choices = {
+            key: label
+            for key, label in raw_choices.items()
+            if target_option_map[key].subentry is not None
+        }
         if not subentry_choices:
             return self.async_abort(reason="repairs_no_subentries")
 
