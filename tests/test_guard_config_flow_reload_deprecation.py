@@ -11,7 +11,13 @@ runtime), so the config flow must not reload:
 * no unconditional ``async_update_and_abort`` call, which is the tempting
   replacement but exists only from HA 2025.11.0 while ``hacs.json`` declares
   2025.9.1 as the minimum (there the method lives on ``ConfigSubentryFlow``
-  alone).
+  alone),
+* and no ``OptionsFlowWithReload`` base for the options flow. That fourth shape
+  is inherited rather than called, which is why the three call-site checks
+  above could not see it, and it is the one that actually bit: for
+  ``OptionsFlowWithReload`` the core does not wait for 2026.12 but raises
+  ``ValueError`` today, in ``OptionsFlowManager.async_finish_flow``, *before*
+  the options are written.
 
 A runtime test cannot catch the last point: the suite runs a newer Home
 Assistant than the declared minimum, so an unconditional call would pass
@@ -107,4 +113,44 @@ def test_the_declared_minimum_is_still_the_one_this_guard_assumes() -> None:
     assert '"homeassistant": "2025.9.1"' in hacs, (
         "the declared minimum changed; re-check whether "
         "ConfigFlow.async_update_and_abort is now available everywhere"
+    )
+
+
+def test_the_options_flow_base_is_not_the_reloading_one() -> None:
+    """The fourth shape of the same combination, and the one that bit.
+
+    ``OptionsFlowWithReload`` is not a call, so none of the checks above could
+    see it: it is inherited. With an update listener registered,
+    ``OptionsFlowManager.async_finish_flow`` raises ``ValueError`` *before* it
+    writes the options, so every options submission on a loaded entry fails and
+    persists nothing.
+
+    Checked on the class rather than on the assignment, so that setting
+    ``automatic_reload`` by hand is caught as well.
+    """
+
+    from custom_components.googlefindmy import config_flow
+
+    assert not getattr(config_flow.OptionsFlowHandler, "automatic_reload", False), (
+        "OptionsFlowHandler carries an automatic reload while the integration "
+        "registers a config entry update listener; the core refuses that pair "
+        "before it writes the options"
+    )
+
+
+def test_the_update_listener_this_guard_assumes_is_still_registered() -> None:
+    """Positive control for the whole file.
+
+    Every check here rests on the integration having an update listener; the
+    core allows a reloading flow for an entry that has none. Without this the
+    file could stay green while guarding nothing.
+    """
+
+    init_source = (
+        _REPO_ROOT / "custom_components" / "googlefindmy" / "__init__.py"
+    ).read_text(encoding="utf-8")
+
+    assert "add_update_listener(" in init_source, (
+        "no update listener is registered any more; every assumption in this "
+        "file has to be re-checked before the guards are relaxed"
     )

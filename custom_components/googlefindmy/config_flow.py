@@ -1204,13 +1204,21 @@ class _OptionsFlowMixin:
     async def _async_clear_cached_aas_token(self, entry: ConfigEntry) -> None: ...
 
 
-if hasattr(config_entries, "OptionsFlowWithReload"):
-    OptionsFlowBase = cast(
-        type[config_entries.OptionsFlow],
-        getattr(config_entries, "OptionsFlowWithReload"),
-    )
-else:
-    OptionsFlowBase = cast(type[config_entries.OptionsFlow], config_entries.OptionsFlow)
+# Deliberately the plain base, never ``OptionsFlowWithReload``. This
+# integration registers a config entry update listener in ``async_setup_entry``
+# (the live watch-path refresh, which also carries the credential reload), and
+# Home Assistant forbids that combination: ``OptionsFlowManager`` raises
+# ``ValueError("Config entry update listeners should not be used with
+# OptionsFlowWithReload")`` *before* it writes the options, so with the reloading
+# base every options submission on a loaded entry would fail and persist
+# nothing. Upstream deprecated the pairing in 2026.6 and turns it into an error
+# in 2026.12, but for this one shape it already raises today (verified in cores
+# 2026.1.3 and 2026.2.3). Beyond that the automatic reload is a reload owner that
+# cannot take ``claim_pending_entry_reload``, so it would tear the entry down
+# next to a claimed reload -- exactly what the single-owner contract in
+# ``agents/runtime_patterns/AGENTS.md`` exists to prevent. Steps that need a
+# reload therefore ask for one explicitly, through ``_schedule_claimed_reload``.
+OptionsFlowBase = cast(type[config_entries.OptionsFlow], config_entries.OptionsFlow)
 
 
 @dataclass(slots=True)
@@ -7453,8 +7461,10 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin, _ContainerLoginMixi
     Notes:
         - Device inclusion/exclusion is controlled by HA's device enable/disable.
           We no longer present a `tracked_devices` multi-select here.
-        - Returning `async_create_entry` with the new options triggers a reload
-          automatically when using `OptionsFlowWithReload` (if available).
+        - Returning `async_create_entry` writes the options and nothing else.
+          There is no automatic reload here on purpose (see `OptionsFlowBase`):
+          a step that needs one asks for it through `_schedule_claimed_reload`,
+          so every reload of this entry passes the single owner latch.
     """
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
@@ -8379,6 +8389,24 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin, _ContainerLoginMixi
                         entry, subentry_option, new_options
                     )
 
+                # These options are read at setup time (poll interval, map view,
+                # feature groups), so they need a reload to take effect. Until
+                # the update listener arrived this step inherited one from
+                # ``OptionsFlowWithReload``; now that the base is plain, it asks
+                # for its own, through the same owner latch as its siblings. The
+                # listener does not cover it: it reloads only when
+                # credential-relevant keys changed, and this form writes none.
+                # Ordering is safe for the reason spelled out in
+                # ``async_step_visibility``: the unload half runs first and never
+                # reads ``entry.options``.
+                if not _schedule_claimed_reload(self.hass, entry.entry_id):
+                    _LOGGER.debug(
+                        "Settings for entry %s were saved without scheduling a "
+                        "reload; another owner holds the reload, or the entry "
+                        "has no usable lever",
+                        entry.entry_id,
+                    )
+
                 return self.async_create_entry(title="", data=new_options)
 
         return self.async_show_form(
@@ -8485,7 +8513,11 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin, _ContainerLoginMixi
                 # in the platform teardown, which yields; by the time it runs, the
                 # step has returned and ``OptionsFlowManager.async_finish_flow`` has
                 # written the options through ``async_update_entry`` (that path
-                # itself holds no suspension point). So the invariant is: *some*
+                # itself holds no suspension point). It gets that far only because
+                # this handler does not inherit from ``OptionsFlowWithReload``: with
+                # that base and an update listener registered, the manager raises
+                # before the write and this scheduled reload would tear the entry
+                # down for a restore that never lands. So the invariant is: *some*
                 # real await must remain in the unload path. Were the parent unload
                 # ever to return synchronously for a loaded entry, the setup half
                 # would read the options this step has not written yet and the
