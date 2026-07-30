@@ -8475,8 +8475,9 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin, _ContainerLoginMixi
                 # ``async_schedule_reload`` only creates a task, and the path from
                 # this return to ``OptionsFlowManager.async_finish_flow``, where
                 # ``async_update_entry`` writes them, holds no suspension point
-                # (checked against core 2026.2.3). The reload therefore reads the
-                # options this step just wrote, not the ones it replaced.
+                # (checked against core 2026.1.3 and 2026.2.3). The reload
+                # therefore reads the options this step just wrote, not the ones
+                # it replaced.
                 _schedule_claimed_reload(self.hass, entry.entry_id)
 
             return self.async_create_entry(title="", data=new_options)
