@@ -1204,13 +1204,21 @@ class _OptionsFlowMixin:
     async def _async_clear_cached_aas_token(self, entry: ConfigEntry) -> None: ...
 
 
-if hasattr(config_entries, "OptionsFlowWithReload"):
-    OptionsFlowBase = cast(
-        type[config_entries.OptionsFlow],
-        getattr(config_entries, "OptionsFlowWithReload"),
-    )
-else:
-    OptionsFlowBase = cast(type[config_entries.OptionsFlow], config_entries.OptionsFlow)
+# Deliberately the plain base, never ``OptionsFlowWithReload``. This
+# integration registers a config entry update listener in ``async_setup_entry``
+# (the live watch-path refresh, which also carries the credential reload), and
+# Home Assistant forbids that combination: ``OptionsFlowManager`` raises
+# ``ValueError("Config entry update listeners should not be used with
+# OptionsFlowWithReload")`` *before* it writes the options, so with the reloading
+# base every options submission on a loaded entry would fail and persist
+# nothing. Upstream deprecated the pairing in 2026.6 and turns it into an error
+# in 2026.12, but for this one shape it already raises today (verified in cores
+# 2026.1.3 and 2026.2.3). Beyond that the automatic reload is a reload owner that
+# cannot take ``claim_pending_entry_reload``, so it would tear the entry down
+# next to a claimed reload -- exactly what the single-owner contract in
+# ``agents/runtime_patterns/AGENTS.md`` exists to prevent. Steps that need a
+# reload therefore ask for one explicitly, through ``_schedule_claimed_reload``.
+OptionsFlowBase = cast(type[config_entries.OptionsFlow], config_entries.OptionsFlow)
 
 
 @dataclass(slots=True)
@@ -3055,9 +3063,12 @@ def _schedule_claimed_reload(hass: HomeAssistant, entry_id: str) -> bool:
     """Schedule the one reload of ``entry_id`` and report whether it was ours.
 
     Single owner for the paths that route through it, which is no longer only
-    the credential paths: the semantic-location and subentry repair steps go
-    through here too. Their fallbacks differ, and the difference decides what a
-    stand-down actually costs. The credential update listener is a fallback for
+    the credential paths: the semantic-location, subentry repair and device
+    visibility steps go through here too. Their fallbacks differ, and the
+    difference decides what a stand-down actually costs. Visibility is the one
+    with no fallback at all: un-ignoring a device reverses a registry removal,
+    and the monotone per-setup known-sets in the platforms mean no poll rebuilds
+    the entity. A stand-down there costs the whole thing, not a half. The credential update listener is a fallback for
     neither of them, because it returns early on an unchanged fingerprint. The
     semantic steps have a stronger one in its place: ``_apply_semantic_mapping``
     reads ``entry.options`` live on every payload, and ``async_update_entry``
@@ -7450,8 +7461,10 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin, _ContainerLoginMixi
     Notes:
         - Device inclusion/exclusion is controlled by HA's device enable/disable.
           We no longer present a `tracked_devices` multi-select here.
-        - Returning `async_create_entry` with the new options triggers a reload
-          automatically when using `OptionsFlowWithReload` (if available).
+        - Returning `async_create_entry` writes the options and nothing else.
+          There is no automatic reload here on purpose (see `OptionsFlowBase`):
+          a step that needs one asks for it through `_schedule_claimed_reload`,
+          so every reload of this entry passes the single owner latch.
     """
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
@@ -7620,12 +7633,28 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin, _ContainerLoginMixi
         entry: ConfigEntry,
         subentry_option: _SubentryOption,
         options_payload: Mapping[str, Any],
-    ) -> None:
-        """Update feature group metadata on the selected subentry."""
+    ) -> bool:
+        """Update feature group metadata on the selected subentry.
+
+        Returns whether the write actually changes the subentry, mirroring
+        ``ConfigEntries.async_update_subentry``, which compares ``data``,
+        ``title`` and ``unique_id`` and returns ``False`` when none of them
+        moved (read in cores 2026.1.3 and 2026.2.3; identical in both).
+
+        The verdict is formed *here* rather than taken from the manager's
+        return value, for two independent reasons. ``_async_update_subentry``
+        is shared by five call sites and swallows that value, so plumbing it
+        through would widen this change into all of them; and the manager
+        doubles under ``tests/`` return ``None``, so a caller that trusted the
+        result would read "unchanged" for every write and skip the reload it
+        owes. ``async_step_settings`` needs the answer to decide whether a
+        reload is owed at all, which is why the ``None`` this helper used to
+        return was not enough.
+        """
 
         subentry = subentry_option.subentry
         if subentry is None:
-            return
+            return False
 
         data = dict(getattr(subentry, "data", {}) or {})
         data.setdefault("group_key", subentry_option.key)
@@ -7665,6 +7694,15 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin, _ContainerLoginMixi
                 "entry_title"
             )
 
+        title = getattr(subentry, "title", None) or data.get("entry_title")
+        # ``unique_id`` is handed back unchanged, so it can never be what makes
+        # the difference; it stays in the call because the manager compares it
+        # too and leaving it out would blank the field.
+        changed = (
+            dict(getattr(subentry, "data", {}) or {}) != data
+            or getattr(subentry, "title", None) != title
+        )
+
         update_helper = cast(
             Callable[..., Awaitable[None] | None], ConfigFlow._async_update_subentry
         )
@@ -7673,11 +7711,12 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin, _ContainerLoginMixi
             entry,
             subentry,
             data=data,
-            title=getattr(subentry, "title", None) or data.get("entry_title"),
+            title=title,
             unique_id=getattr(subentry, "unique_id", None),
         )
         if inspect.isawaitable(result):
             await result
+        return changed
 
     async def _async_refresh_subentry_entry_title(
         self, entry: ConfigEntry, subentry_option: _SubentryOption
@@ -8371,9 +8410,58 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin, _ContainerLoginMixi
                 new_options[OPT_OPTIONS_SCHEMA_VERSION] = 2
 
                 subentry_option = option_map.get(selected_key)
+                subentry_changed = False
                 if subentry_option is not None:
-                    await self._async_update_feature_group_subentry(
+                    subentry_changed = await self._async_update_feature_group_subentry(
                         entry, subentry_option, new_options
+                    )
+
+                # These options are read at setup time (poll interval, map view,
+                # feature groups), so they need a reload to take effect. Until
+                # the update listener arrived this step inherited one from
+                # ``OptionsFlowWithReload``; now that the base is plain, it asks
+                # for its own, through the same owner latch as its siblings. The
+                # listener does not cover it: it reloads only when
+                # credential-relevant keys changed, and this form writes none.
+                # Ordering is safe for the reason spelled out in
+                # ``async_step_visibility``: the unload half runs first and never
+                # reads ``entry.options``.
+                #
+                # Only for a write that changes something, though, and that is
+                # not a refinement of the inherited behaviour but a copy of it:
+                # ``OptionsFlowManager.async_finish_flow`` scheduled on
+                # ``async_update_entry(entry, options=result["data"]) and
+                # automatic_reload``, and ``async_update_entry`` returns ``False``
+                # for an unchanged payload. Probed against the real manager in
+                # core 2026.1.3 and read in 2026.2.3: an identical payload
+                # schedules nothing, a changed one schedules once. Claiming
+                # unconditionally would turn confirming the form without an edit
+                # into a full teardown of every entity of the account, and would
+                # hold the single-owner latch while doing it.
+                #
+                # Two arms, because one comparison cannot see both writes this
+                # step performs. The options arm mirrors the core's own test
+                # (``entry.options != result["data"]``; ``new_options`` *is* that
+                # payload, and ``MappingProxyType`` compares by content, so the
+                # ``dict()`` is for mypy, not for semantics). The subentry arm
+                # covers what that comparison is blind to: a write that lands
+                # only on the subentry, such as a first ``group_key``, a
+                # synchronised ``entry_title``, or the feature flags moving to a
+                # different subentry because the dropdown changed while every
+                # option stayed as it was.
+                options_changed = dict(entry.options) != new_options
+                if not (options_changed or subentry_changed):
+                    _LOGGER.debug(
+                        "Settings for entry %s were confirmed without a change; "
+                        "no reload owed",
+                        entry.entry_id,
+                    )
+                elif not _schedule_claimed_reload(self.hass, entry.entry_id):
+                    _LOGGER.debug(
+                        "Settings for entry %s were saved without scheduling a "
+                        "reload; another owner holds the reload, or the entry "
+                        "has no usable lever",
+                        entry.entry_id,
                     )
 
                 return self.async_create_entry(title="", data=new_options)
@@ -8452,6 +8540,85 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin, _ContainerLoginMixi
                 await self._async_assign_devices_to_subentry(
                     entry, selected_key, to_restore
                 )
+                # Unignoring is not unhiding. When the device was ignored,
+                # ``async_remove_config_entry_device`` returned True, so Home
+                # Assistant dropped the device and its entities from the
+                # registries; putting the id back into the options does not bring
+                # them back. The platform listeners do run on the next poll, but
+                # each of them guards on monotone known-sets that are built once
+                # per setup and never lose an entry (``device_tracker`` alone
+                # keeps two, ``known_ids`` and ``added_unique_ids``; ``sensor``,
+                # ``binary_sensor`` and ``button`` keep their own), so
+                # ``_build_entities`` sees the id, hits a ``continue`` and creates
+                # nothing. Measured, not assumed: removing either guard on its own
+                # leaves the characterisation test green, only removing both turns
+                # it red. Only a reload rebuilds the sets
+                # from empty, which is why the docstring of
+                # ``_verify_pending_registry_entries`` calls it the only lever that
+                # helps here. Routing through the single owner keeps a reload that
+                # is already on its way from turning into two.
+                #
+                # The claim happens before ``async_create_entry`` stores the
+                # options, and what makes that safe is narrower than it looks.
+                # ``async_schedule_reload`` does **not** merely queue a task:
+                # ``hass.async_create_task`` defaults to ``eager_start=True``, so
+                # ``async_reload`` runs synchronously up to its first real
+                # suspension, and the *unload* half is therefore already under way
+                # before this step returns. That half does not read
+                # ``entry.options``, so it is harmless. The *setup* half is the one
+                # that reads them, and it sits behind the ``await asyncio.gather``
+                # in the platform teardown, which yields; by the time it runs, the
+                # step has returned and ``OptionsFlowManager.async_finish_flow`` has
+                # written the options through ``async_update_entry`` (that path
+                # itself holds no suspension point). It gets that far only because
+                # this handler does not inherit from ``OptionsFlowWithReload``: with
+                # that base and an update listener registered, the manager raises
+                # before the write and this scheduled reload would tear the entry
+                # down for a restore that never lands. So the invariant is: *some*
+                # real await must remain in the unload path. Were the parent unload
+                # ever to return synchronously for a loaded entry, the setup half
+                # would read the options this step has not written yet and the
+                # restore would be silently lost. Measured against core 2026.1.3
+                # and 2026.2.3; a core bump puts the question again.
+                #
+                # Named residual, deliberately **not** closed here: the argument
+                # above is scoped to a *loaded* entry, and it has to be.
+                # ``ConfigEntry.async_unload`` returns at
+                # ``if self.state is not ConfigEntryState.LOADED: ... return True``
+                # for every other state, without running our
+                # ``async_unload_entry`` and therefore without that suspension
+                # (measured in both cores). Whether the setup half then reaches an
+                # ``entry.options`` read before its own first suspension is **not
+                # measured**, so whether this actually loses a write on a
+                # ``SETUP_ERROR`` or ``SETUP_RETRY`` entry is open. If it does, it
+                # is a property of all four steps that route through
+                # ``_schedule_claimed_reload`` from a flow, not of this one, and a
+                # not-loaded entry would lose nothing by standing down, because its
+                # next setup reads the newly written options by itself. Fixing it
+                # at one site only would be the punctual fix this repo's
+                # error-class discipline forbids.
+                if not _schedule_claimed_reload(self.hass, entry.entry_id):
+                    # Falsy covers two situations the helper cannot tell apart for
+                    # us, and neither of them leaks the latch (it returns before
+                    # its claim in both). Either another owner already holds the
+                    # reload, in which case that reload carries this write too and
+                    # nothing is lost, or there is no usable lever: a terminal
+                    # entry, or a core without ``async_schedule_reload``. The
+                    # second case costs the whole thing here rather than a half,
+                    # because the restored devices have no entity to fall back on.
+                    # A warning rather than an abort reason, precisely because the
+                    # two cases are indistinguishable from here; the credential
+                    # path can report ``credentials_saved_not_reloaded`` because it
+                    # runs the state check itself and knows which case it is in.
+                    _LOGGER.warning(
+                        "Restored %d device(s) from the ignore list for entry %s, "
+                        "but no reload was scheduled by this step. If another "
+                        "reload is already on its way the devices come back with "
+                        "it; otherwise they stay without entities until the entry "
+                        "is set up again",
+                        len(to_restore),
+                        entry.entry_id,
+                    )
 
             return self.async_create_entry(title="", data=new_options)
 
@@ -8550,10 +8717,12 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin, _ContainerLoginMixi
             # What waits for a reload is the entity-to-subentry binding, which
             # platform setup hands out. If the holder ends in one of the dead
             # ends that release the latch without reloading, that half waits for
-            # the next reload. Weigh it against the fact that
-            # ``async_step_visibility`` performs the same assignment with no
-            # reload at all: the two steps disagree, and that disagreement is
-            # older than this latch.
+            # the next reload. ``async_step_visibility`` performs the same
+            # assignment and now takes the same claim, so all three assignment
+            # sites agree; what still differs is the price of standing down. There
+            # it is the whole thing, because a device coming back from the ignore
+            # list has no entity at all until a reload rebuilds the platform
+            # known-sets. Here it is that one half.
             _schedule_claimed_reload(self.hass, self.config_entry.entry_id)
             return self.async_abort(
                 reason="subentry_move_success", description_placeholders=placeholders

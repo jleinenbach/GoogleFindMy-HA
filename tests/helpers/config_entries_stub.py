@@ -238,7 +238,21 @@ def install_config_entries_stubs(target: ModuleType) -> None:
             return schema
 
     class OptionsFlowWithReload(OptionsFlow):
-        """Placeholder inheriting OptionsFlow behaviour."""
+        """Stand-in for the reloading options-flow base.
+
+        ``automatic_reload`` mirrors the real core attribute so this double
+        stays faithful to the contract it stands in for: it is the flag
+        ``OptionsFlowManager.async_finish_flow`` reads before it refuses to
+        write options for an entry that also has update listeners.
+
+        Not load-bearing for the guard in
+        ``test_config_flow_reload_latch_state_guard`` -- that one reaches the
+        real ``homeassistant.config_entries`` and stays sharp without this
+        attribute (measured). It is here so a test that *does* land on the stub
+        cannot read a falsy default and conclude the pairing is allowed.
+        """
+
+        automatic_reload: bool = True
 
     class ConfigSubentry:
         """Simple ConfigSubentry stand-in used by unit tests."""

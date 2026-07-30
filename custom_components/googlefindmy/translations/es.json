@@ -301,7 +301,7 @@
       },
       "visibility": {
         "title": "Visibilidad de dispositivos",
-        "description": "Restaura dispositivos previamente ignorados para que vuelvan a ser visibles. Selecciona uno o varios dispositivos y guarda.",
+        "description": "Restaura dispositivos previamente ignorados para que vuelvan a ser visibles. Selecciona uno o varios dispositivos y guarda. Ignorar un dispositivo lo elimina de Home Assistant junto con sus entidades. Por eso, al restaurarlo se recarga la integración para volver a crearlas; mientras tanto, todas las entidades de esta cuenta no están disponibles durante unos instantes.",
         "data": {
           "unignore_devices": "Restaurar dispositivos",
           "subentry": "Grupo de funciones"

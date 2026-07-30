@@ -301,7 +301,7 @@
       },
       "visibility": {
         "title": "Device Visibility",
-        "description": "Restore previously ignored devices to make them visible again. Select one or more devices to restore and save.",
+        "description": "Restore previously ignored devices to make them visible again. Select one or more devices to restore and save. Ignoring a device removes it and its entities from Home Assistant, so restoring it reloads the integration to recreate them; all entities of this account are briefly unavailable while that runs.",
         "data": {
           "unignore_devices": "Devices to restore",
           "subentry": "Feature group"

@@ -301,7 +301,7 @@
       },
       "visibility": {
         "title": "Apparaatzichtbaarheid",
-        "description": "Herstel eerder genegeerde apparaten om ze weer zichtbaar te maken. Selecteer een of meer apparaten om te herstellen en op te slaan.",
+        "description": "Herstel eerder genegeerde apparaten om ze weer zichtbaar te maken. Selecteer een of meer apparaten om te herstellen en op te slaan. Als je een apparaat negeert, wordt het samen met zijn entiteiten uit Home Assistant verwijderd. Bij het herstellen wordt de integratie daarom opnieuw geladen om ze opnieuw aan te maken; ondertussen zijn alle entiteiten van dit account korte tijd niet beschikbaar.",
         "data": {
           "unignore_devices": "Apparaten om te herstellen",
           "subentry": "Functiegroep"
