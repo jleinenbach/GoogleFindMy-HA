@@ -399,6 +399,57 @@ async def test_a_later_listener_run_is_not_treated_as_a_barrier(
 
 
 @pytest.mark.asyncio
+async def test_a_returning_tracker_gets_no_entity_back_without_a_reload(
+    probe_timer: _ProbeTimer,
+    deterministic_config_subentry_id: Callable[[Any, str, str | None], str],
+) -> None:
+    """Characterisation: polling alone never brings a removed tracker back.
+
+    This is the measured reason why ``async_step_visibility`` schedules a reload.
+    Ignoring a device is a removal, not a hide: ``async_remove_config_entry_device``
+    returns True, so Home Assistant drops the device and its entities from the
+    registries. Un-ignoring it puts the id back into the snapshot, and this
+    listener does run for it again -- but the per-setup known-sets never forget an
+    id, so ``_build_entities`` skips it and no entity is created. Only a reload
+    starts those sets from empty.
+
+    Two sets guard this, not one: ``known_ids`` per device id and
+    ``added_unique_ids`` per entity unique id. Removing either on its own leaves
+    this test green (measured), because the other still catches the repeat; both
+    have to go for it to turn red. The test therefore pins the *property*, that a
+    known tracker is never rebuilt, and not one particular guard, which is what a
+    characterisation test should do.
+
+    Should this ever change (an id dropped from the sets, a rebuilt listener),
+    this test goes red, and the comment at the call site in ``config_flow.py``
+    that cites it has to be revisited: the reload may then be avoidable.
+    """
+
+    del probe_timer, deterministic_config_subentry_id
+
+    device_tracker = _device_tracker_module()
+    hass = _HassStub()
+    added: list[list[Any]] = []
+    coordinator, _entry = await _set_up_platform(
+        device_tracker, hass, registry_hit=True, added=added
+    )
+
+    assert added and len(added[0]) == 2
+    built_before = sum(len(batch) for batch in added)
+
+    # The user ignores the device: the poll filter drops it from the snapshot.
+    coordinator._devices = []
+    coordinator.listeners[0]()
+
+    # ... and takes it back on the visibility page: same id, same snapshot as
+    # before, and the listener notices the change.
+    coordinator._devices = [{"id": "tracker-1", "name": "Tracker"}]
+    coordinator.listeners[0]()
+
+    assert sum(len(batch) for batch in added) == built_before
+
+
+@pytest.mark.asyncio
 async def test_the_probe_reloads_once_when_the_entities_never_registered(
     probe_timer: _ProbeTimer,
     deterministic_config_subentry_id: Callable[[Any, str, str | None], str],

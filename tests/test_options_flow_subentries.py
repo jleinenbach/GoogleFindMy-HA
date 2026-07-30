@@ -250,6 +250,73 @@ async def test_visibility_assigns_devices_to_target_subentry() -> None:
     updated_id, payload = manager.updated[-1]
     assert updated_id == sub.subentry_id
     assert payload["visible_device_ids"] == ("dev-1",)
+    # Assert both sides (``tests/AGENTS.md`` rule 8): the step routes through
+    # ``_schedule_claimed_reload`` like its two sibling assignment sites, so the
+    # scheduling side has to be claimed and the direct side has to stay empty.
+    # Unignoring without a reload leaves the device without any entity, because
+    # the platform known-sets never drop an id -- see the comment at the call
+    # site and the platform-level characterisation in
+    # ``test_device_tracker_scanner.py``.
+    assert manager.scheduled_reloads == [entry.entry_id]
+    assert manager.reloads == []
+
+
+async def test_visibility_without_a_selection_does_not_schedule_a_reload() -> None:
+    """Test I: closing the form without restoring anything must stay inert.
+
+    The claim sits inside ``if to_restore:`` for this reason. Pulled in front of
+    it, every visit to the visibility page that the user simply confirms would
+    reload the entry, and a claim that no assignment justifies would still occupy
+    the single owner for the duration of that reload.
+    """
+
+    entry = _EntryStub()
+    entry.add_subentry(key=TRACKER_SUBENTRY_KEY, title="Core")
+    entry.options = {OPT_IGNORED_DEVICES: {"dev-1": {"name": "Device 1"}}}
+
+    flow = await _build_flow(entry)
+    result = await flow.async_step_visibility(
+        {"subentry": TRACKER_SUBENTRY_KEY, "unignore_devices": []}
+    )
+    await asyncio.sleep(0)
+
+    assert result["type"] == "create_entry"
+    manager = flow.hass.config_entries  # type: ignore[assignment]
+    assert manager.scheduled_reloads == []
+    assert manager.reloads == []
+    assert _latch_is_free(flow.hass, entry.entry_id) is True
+
+
+async def test_a_hopeless_entry_stops_the_visibility_step_from_claiming() -> None:
+    """Test J: the state gate is reachable from the visibility step too.
+
+    Test H does this for the repair path. The visibility step took its claim
+    later and would otherwise be the one assignment site whose gate nobody
+    measures: a terminal entry has no setup coming that would hand the latch
+    back, so a claim taken here would swallow every later reload of this entry.
+    The last two assertions guard against "fixing" a red gate by skipping the
+    user's change as well -- standing down is about the reload, never about the
+    assignment.
+    """
+
+    entry = _EntryStub()
+    entry.state = ConfigEntryState.MIGRATION_ERROR
+    sub = entry.add_subentry(key=TRACKER_SUBENTRY_KEY, title="Core")
+    entry.options = {OPT_IGNORED_DEVICES: {"dev-1": {"name": "Device 1"}}}
+
+    flow = await _build_flow(entry)
+    result = await flow.async_step_visibility(
+        {"subentry": TRACKER_SUBENTRY_KEY, "unignore_devices": ["dev-1"]}
+    )
+    await asyncio.sleep(0)
+
+    manager = flow.hass.config_entries  # type: ignore[assignment]
+    assert manager.scheduled_reloads == []
+    assert _latch_is_free(flow.hass, entry.entry_id) is True
+    assert result["type"] == "create_entry"
+    updated_id, payload = manager.updated[-1]
+    assert updated_id == sub.subentry_id
+    assert payload["visible_device_ids"] == ("dev-1",)
 
 
 async def test_repairs_move_assigns_devices_to_selected_subentry() -> None:

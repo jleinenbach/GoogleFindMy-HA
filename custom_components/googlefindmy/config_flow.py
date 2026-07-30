@@ -8452,6 +8452,32 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin, _ContainerLoginMixi
                 await self._async_assign_devices_to_subentry(
                     entry, selected_key, to_restore
                 )
+                # Unignoring is not unhiding. When the device was ignored,
+                # ``async_remove_config_entry_device`` returned True, so Home
+                # Assistant dropped the device and its entities from the
+                # registries; putting the id back into the options does not bring
+                # them back. The platform listeners do run on the next poll, but
+                # each of them guards on monotone known-sets that are built once
+                # per setup and never lose an entry (``device_tracker`` alone
+                # keeps two, ``known_ids`` and ``added_unique_ids``; ``sensor``,
+                # ``binary_sensor`` and ``button`` keep their own), so
+                # ``_build_entities`` sees the id, hits a ``continue`` and creates
+                # nothing. Measured, not assumed: removing either guard on its own
+                # leaves the characterisation test green, only removing both turns
+                # it red. Only a reload rebuilds the sets
+                # from empty, which is why the docstring of
+                # ``_verify_pending_registry_entries`` calls it the only lever that
+                # helps here. Routing through the single owner keeps a reload that
+                # is already on its way from turning into two.
+                #
+                # The claim happens before ``async_create_entry`` stores the
+                # options, and that ordering is safe rather than lucky:
+                # ``async_schedule_reload`` only creates a task, and the path from
+                # this return to ``OptionsFlowManager.async_finish_flow``, where
+                # ``async_update_entry`` writes them, holds no suspension point
+                # (checked against core 2026.2.3). The reload therefore reads the
+                # options this step just wrote, not the ones it replaced.
+                _schedule_claimed_reload(self.hass, entry.entry_id)
 
             return self.async_create_entry(title="", data=new_options)
 
@@ -8550,10 +8576,12 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin, _ContainerLoginMixi
             # What waits for a reload is the entity-to-subentry binding, which
             # platform setup hands out. If the holder ends in one of the dead
             # ends that release the latch without reloading, that half waits for
-            # the next reload. Weigh it against the fact that
-            # ``async_step_visibility`` performs the same assignment with no
-            # reload at all: the two steps disagree, and that disagreement is
-            # older than this latch.
+            # the next reload. ``async_step_visibility`` performs the same
+            # assignment and now takes the same claim, so all three assignment
+            # sites agree; what still differs is the price of standing down. There
+            # it is the whole thing, because a device coming back from the ignore
+            # list has no entity at all until a reload rebuilds the platform
+            # known-sets. Here it is that one half.
             _schedule_claimed_reload(self.hass, self.config_entry.entry_id)
             return self.async_abort(
                 reason="subentry_move_success", description_placeholders=placeholders
