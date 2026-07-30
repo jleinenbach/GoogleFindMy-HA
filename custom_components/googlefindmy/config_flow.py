@@ -7633,12 +7633,28 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin, _ContainerLoginMixi
         entry: ConfigEntry,
         subentry_option: _SubentryOption,
         options_payload: Mapping[str, Any],
-    ) -> None:
-        """Update feature group metadata on the selected subentry."""
+    ) -> bool:
+        """Update feature group metadata on the selected subentry.
+
+        Returns whether the write actually changes the subentry, mirroring
+        ``ConfigEntries.async_update_subentry``, which compares ``data``,
+        ``title`` and ``unique_id`` and returns ``False`` when none of them
+        moved (read in cores 2026.1.3 and 2026.2.3; identical in both).
+
+        The verdict is formed *here* rather than taken from the manager's
+        return value, for two independent reasons. ``_async_update_subentry``
+        is shared by five call sites and swallows that value, so plumbing it
+        through would widen this change into all of them; and the manager
+        doubles under ``tests/`` return ``None``, so a caller that trusted the
+        result would read "unchanged" for every write and skip the reload it
+        owes. ``async_step_settings`` needs the answer to decide whether a
+        reload is owed at all, which is why the ``None`` this helper used to
+        return was not enough.
+        """
 
         subentry = subentry_option.subentry
         if subentry is None:
-            return
+            return False
 
         data = dict(getattr(subentry, "data", {}) or {})
         data.setdefault("group_key", subentry_option.key)
@@ -7678,6 +7694,15 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin, _ContainerLoginMixi
                 "entry_title"
             )
 
+        title = getattr(subentry, "title", None) or data.get("entry_title")
+        # ``unique_id`` is handed back unchanged, so it can never be what makes
+        # the difference; it stays in the call because the manager compares it
+        # too and leaving it out would blank the field.
+        changed = (
+            dict(getattr(subentry, "data", {}) or {}) != data
+            or getattr(subentry, "title", None) != title
+        )
+
         update_helper = cast(
             Callable[..., Awaitable[None] | None], ConfigFlow._async_update_subentry
         )
@@ -7686,11 +7711,12 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin, _ContainerLoginMixi
             entry,
             subentry,
             data=data,
-            title=getattr(subentry, "title", None) or data.get("entry_title"),
+            title=title,
             unique_id=getattr(subentry, "unique_id", None),
         )
         if inspect.isawaitable(result):
             await result
+        return changed
 
     async def _async_refresh_subentry_entry_title(
         self, entry: ConfigEntry, subentry_option: _SubentryOption
@@ -8384,8 +8410,9 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin, _ContainerLoginMixi
                 new_options[OPT_OPTIONS_SCHEMA_VERSION] = 2
 
                 subentry_option = option_map.get(selected_key)
+                subentry_changed = False
                 if subentry_option is not None:
-                    await self._async_update_feature_group_subentry(
+                    subentry_changed = await self._async_update_feature_group_subentry(
                         entry, subentry_option, new_options
                     )
 
@@ -8399,7 +8426,37 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin, _ContainerLoginMixi
                 # Ordering is safe for the reason spelled out in
                 # ``async_step_visibility``: the unload half runs first and never
                 # reads ``entry.options``.
-                if not _schedule_claimed_reload(self.hass, entry.entry_id):
+                #
+                # Only for a write that changes something, though, and that is
+                # not a refinement of the inherited behaviour but a copy of it:
+                # ``OptionsFlowManager.async_finish_flow`` scheduled on
+                # ``async_update_entry(entry, options=result["data"]) and
+                # automatic_reload``, and ``async_update_entry`` returns ``False``
+                # for an unchanged payload. Probed against the real manager in
+                # core 2026.1.3 and read in 2026.2.3: an identical payload
+                # schedules nothing, a changed one schedules once. Claiming
+                # unconditionally would turn confirming the form without an edit
+                # into a full teardown of every entity of the account, and would
+                # hold the single-owner latch while doing it.
+                #
+                # Two arms, because one comparison cannot see both writes this
+                # step performs. The options arm mirrors the core's own test
+                # (``entry.options != result["data"]``; ``new_options`` *is* that
+                # payload, and ``MappingProxyType`` compares by content, so the
+                # ``dict()`` is for mypy, not for semantics). The subentry arm
+                # covers what that comparison is blind to: a write that lands
+                # only on the subentry, such as a first ``group_key``, a
+                # synchronised ``entry_title``, or the feature flags moving to a
+                # different subentry because the dropdown changed while every
+                # option stayed as it was.
+                options_changed = dict(entry.options) != new_options
+                if not (options_changed or subentry_changed):
+                    _LOGGER.debug(
+                        "Settings for entry %s were confirmed without a change; "
+                        "no reload owed",
+                        entry.entry_id,
+                    )
+                elif not _schedule_claimed_reload(self.hass, entry.entry_id):
                     _LOGGER.debug(
                         "Settings for entry %s were saved without scheduling a "
                         "reload; another owner holds the reload, or the entry "
@@ -8523,6 +8580,23 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin, _ContainerLoginMixi
                 # would read the options this step has not written yet and the
                 # restore would be silently lost. Measured against core 2026.1.3
                 # and 2026.2.3; a core bump puts the question again.
+                #
+                # Named residual, deliberately **not** closed here: the argument
+                # above is scoped to a *loaded* entry, and it has to be.
+                # ``ConfigEntry.async_unload`` returns at
+                # ``if self.state is not ConfigEntryState.LOADED: ... return True``
+                # for every other state, without running our
+                # ``async_unload_entry`` and therefore without that suspension
+                # (measured in both cores). Whether the setup half then reaches an
+                # ``entry.options`` read before its own first suspension is **not
+                # measured**, so whether this actually loses a write on a
+                # ``SETUP_ERROR`` or ``SETUP_RETRY`` entry is open. If it does, it
+                # is a property of all four steps that route through
+                # ``_schedule_claimed_reload`` from a flow, not of this one, and a
+                # not-loaded entry would lose nothing by standing down, because its
+                # next setup reads the newly written options by itself. Fixing it
+                # at one site only would be the punctual fix this repo's
+                # error-class discipline forbids.
                 if not _schedule_claimed_reload(self.hass, entry.entry_id):
                     # Falsy covers two situations the helper cannot tell apart for
                     # us, and neither of them leaks the latch (it returns before
