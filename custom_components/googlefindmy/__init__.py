@@ -2425,7 +2425,11 @@ class GoogleFindMyDomainData(TypedDict, total=False):
     # ``async_reload`` (the non-interactive discovery update, the reconfigure
     # path and the credentials finalizer) claim the latch by hand rather than
     # through the config flow's scheduling helper, but all three run the same
-    # hopeless-state check before they do, so none of them bypasses it.
+    # hopeless-state check before they do, so none of them bypasses it. The
+    # tracker registry self-heal in ``device_tracker`` runs it too, which is why
+    # that check lives in ``entry_reload_gate`` beside this field rather than in
+    # the config flow: it is the one claimant whose grace timer outlives a
+    # failed unload.
     # Released as soon as
     # the reload arrives (unload, and setup for an entry that was not loaded), and
     # given back by a claimant whose scheduling call failed, so a genuinely later
@@ -9115,11 +9119,14 @@ async def async_unload_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
         # change made after this point can schedule the next one. Deliberately in
         # ``finally`` and not at the head of this function: the whole platform
         # teardown runs in between, and it is the longest stretch of the reload.
-        # A latch released before it lets the state-blind schedulers -- the
-        # credential-writing config flows and the tracker registry probe, which
-        # unlike the update listener do not inspect ``entry.state`` -- claim it
-        # again and queue a second reload, even though the replacement setup that
-        # is already coming will read the newest ``entry.data`` anyway. Releasing
+        # A latch released before it lets the schedulers that do not wait for
+        # ``LOADED`` -- the credential-writing config flows and the tracker
+        # registry probe -- claim it again and queue a second reload, even though
+        # the replacement setup that is already coming will read the newest
+        # ``entry.data`` anyway. They do consult ``entry.state`` by now, through
+        # ``entry_reload_gate``, but only for the *terminal* states:
+        # ``UNLOAD_IN_PROGRESS`` is deliberately not one of them, so the reason
+        # for releasing late is unchanged and has to stay that way. Releasing
         # here also covers a failed unload, where no setup half follows that could
         # release it, and an unload that is not part of a reload at all: the entry
         # keeps no latch it would never hand back.
