@@ -259,8 +259,9 @@ are installed. **Review this checklist on every single change under
    subentry repairs, device visibility (`async_step_visibility`, whose reload
    is the only thing that gets an un-ignored device its entity back) and
    settings (`async_step_settings`, which asks for its own reload since the
-   handler stopped inheriting one from `OptionsFlowWithReload`) schedule
-   their reload through
+   handler stopped inheriting one from `OptionsFlowWithReload`, and asks only
+   when the submission actually changes the options or the selected subentry)
+   schedule their reload through
    `config_flow._schedule_claimed_reload`, so their manager doubles must expose
    a **synchronous** `async_schedule_reload` recorder (the core method is a
    `@callback`, an `async def` here would make the production call site look
@@ -286,6 +287,15 @@ are installed. **Review this checklist on every single change under
    `entry_reload_gate.TERMINAL_ENTRY_RELOAD_STATES` is a `frozenset[ConfigEntryState]`: a string
    never matches, so a test meaning to exercise a terminal state has to pass the
    enum member rather than its value.
+   One trap is worth naming for the *unchanged* case of `async_step_settings`,
+   because it goes green for the wrong reason rather than failing: submitting the
+   same form twice against one hass double leaves the shared latch claimed from
+   the first run, so the second stands down as a foreign owner and proves nothing
+   about the change detection. Derive the settled state on a throwaway entry,
+   build a fresh entry and double from it, and assert the latch is still free
+   (`_latch_is_free`) next to the two empty recorders — that assertion is what
+   separates "never claimed" from "claimed and then not scheduled", so it is the
+   guard for this trap rather than a separate rule.
 
 9. **Direct-reload result doubles** — two paths evaluate the reload *result*,
    not only exceptions, and both ask
