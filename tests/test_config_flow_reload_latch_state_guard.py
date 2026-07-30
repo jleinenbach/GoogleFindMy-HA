@@ -250,22 +250,17 @@ def test_a_string_valued_state_is_compared_correctly() -> None:
     )
 
 
-def test_every_terminal_state_name_resolved() -> None:
-    """T-M11: the set did not silently run empty, and every member really matches.
+def test_the_flow_reaches_the_same_verdict_for_every_terminal_state() -> None:
+    """T-M11: the set's members really match the entries this flow sees.
 
-    Two assertions, and the second is the load-bearing one. Resolving the names
-    is fail-open by design: an upstream rename shrinks the set rather than
-    breaking the flow, and without this test that shrinking would go unnoticed.
-    But a set of two symbols is worthless if the entries the code actually sees
-    never equal them -- that is exactly how an earlier draft of this guard stayed
-    green while its sibling tests were red. So each member is fed back through
-    the predicate on a real ``make_config_entry`` entry.
+    The set itself, its size and the deliberate absence of the transient states
+    are pinned once, in ``tests/test_entry_reload_gate.py`` where the set lives.
+    What has to be pinned *here* is the other half: a set of two symbols is
+    worthless if the entries reaching this flow never equal them -- that is
+    exactly how an earlier draft of this guard stayed green while its sibling
+    tests were red. So each member is fed back through the flow's predicate on a
+    real ``make_config_entry`` entry.
     """
-
-    assert len(config_flow._TERMINAL_ENTRY_RELOAD_STATES) == 2, (
-        "a name that no longer resolves drops out of the set; the gate then "
-        "quietly stops guarding"
-    )
 
     for name in ("MIGRATION_ERROR", "FAILED_UNLOAD"):
         value = getattr(ConfigEntryState, name)
@@ -275,14 +270,8 @@ def test_every_terminal_state_name_resolved() -> None:
             _hass_with_latch(entries), entry.entry_id
         ), (
             f"an entry whose state is {value!r} is not recognised as terminal; "
-            "the set is built in the production module and has to resolve in the "
+            "the set is built in the gate module and has to resolve in the "
             "same world the entries live in"
-        )
-
-    for name in ("SETUP_IN_PROGRESS", "UNLOAD_IN_PROGRESS"):
-        transient = getattr(ConfigEntryState, name)
-        assert transient not in config_flow._TERMINAL_ENTRY_RELOAD_STATES, (
-            f"{name} is resolvable on the same symbol and is left out on purpose"
         )
 
 

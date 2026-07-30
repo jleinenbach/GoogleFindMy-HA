@@ -126,6 +126,16 @@ Refer to the canonical tracker registry guidance in
 [`custom_components/googlefindmy/agents/runtime_patterns/AGENTS.md#tracker-registry-gating`](../custom_components/googlefindmy/agents/runtime_patterns/AGENTS.md#tracker-registry-gating).
 Keep new tests aligned with that runtime contract instead of duplicating wording here.
 
+One consequence belongs here, because it is a property of the *doubles*: the
+self-heal probe asks `entry_reload_gate.entry_reload_is_hopeless` before either
+latch, and it passes the `ConfigEntry` it already holds. `_HassStub` in
+`tests/test_device_tracker_scanner.py` therefore carries **no**
+`async_get_entry` on purpose — its absence is what pins that the gate reaches a
+verdict without an entry manager. A test that means to exercise the gate sets
+`state` (as a `ConfigEntryState` member, not its string value) or `disabled_by`
+on that entry; leaving both at the factory defaults lets the gate answer "not
+hopeless" and the test exercises nothing.
+
 ### CoordinatorEntity stub overrides
 
 The suite replaces `homeassistant.helpers.update_coordinator.CoordinatorEntity`
@@ -262,20 +272,20 @@ are installed. **Review this checklist on every single change under
    therefore makes every successful reload look like a dead end, hands the
    latch back, and silently defeats the coalescing such tests assert.
    Entry stubs used by those tests must
-   also carry `state`, `source` and `disabled_by`: `_entry_reload_is_hopeless`
+   also carry `state`, `source` and `disabled_by`: `entry_reload_gate.entry_reload_is_hopeless`
    reads all three via `getattr(..., None)` and fails open, so a stub without
    them lets the state gate answer "not hopeless" unconditionally and a test
    that claims to exercise the gate exercises nothing. Use the submodule form
    `from homeassistant.config_entries import ConfigEntryState`, which is the
    module world the production comparison lives in. Note that
    `make_config_entry` defaults `state` to the **string** `"loaded"` while
-   `_TERMINAL_ENTRY_RELOAD_STATES` is a `frozenset[ConfigEntryState]`: a string
+   `entry_reload_gate.TERMINAL_ENTRY_RELOAD_STATES` is a `frozenset[ConfigEntryState]`: a string
    never matches, so a test meaning to exercise a terminal state has to pass the
    enum member rather than its value.
 
 9. **Direct-reload result doubles** — two paths evaluate the reload *result*,
    not only exceptions, and both ask
-   `config_flow._falsy_reload_left_the_latch_behind` what a falsy result means:
+   `entry_reload_gate.falsy_reload_left_the_latch_behind` what a falsy result means (the config flow imports it under its former private name, so `config_flow._falsy_reload_left_the_latch_behind` still resolves and existing tests keep reaching it there):
    the non-interactive discovery update inline after its `await`, and
    **reconfigure** where its hand-off to the core scheduler was refused
    (`_give_up_after_a_falsy_reload`). The rule below therefore applies to
