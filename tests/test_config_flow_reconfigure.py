@@ -1020,9 +1020,7 @@ async def test_reconfigure_uses_the_loop_when_hass_cannot_create_tasks(
 
 
 @pytest.mark.asyncio
-async def test_reconfigure_gives_the_latch_back_when_the_hand_off_is_refused(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_reconfigure_gives_the_latch_back_when_the_hand_off_is_refused() -> None:
     """A refused hand-off at the end of the path is a dead end like any other.
 
     When the direct reload returns ``False``, this path asks the core scheduler
@@ -1234,4 +1232,258 @@ async def test_reconfigure_gives_the_latch_back_when_the_deferred_task_hand_off_
     assert manager.calls == 2, "the deferred retry has to have run"
     assert _latch_is_free(flow.hass, entry.entry_id), (
         "the deferred task ended without a reload and nobody took over"
+    )
+
+
+@pytest.mark.asyncio
+async def test_reconfigure_gives_the_latch_back_when_the_task_handle_cannot_report(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A handle that cannot report its outcome is a dead end, not a hand-off.
+
+    ``_handle_reports_its_outcome`` promises to stand down together with the
+    callback when the handle carries neither ``add_done_callback`` nor
+    ``cancelled``. Without that, the reload runs but nobody watches how it ends,
+    and a task that ends without reloading keeps the promise open for the life of
+    the process.
+    """
+
+    entry = make_config_entry(
+        entry_id="entry-mute-handle",
+        title="Find My",
+        subentries={},
+        runtime_data=SimpleNamespace(),
+        state="loaded",
+        source="user",
+        disabled_by=None,
+    )
+    entry.data[CONF_GOOGLE_EMAIL] = "existing@example.com"
+
+    closed: list[str] = []
+
+    class _ConfigEntries:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def async_reload(self, entry_id: str) -> Any:
+            self.calls += 1
+            if self.calls == 1:
+                raise config_flow.OperationNotAllowed()
+
+            async def _retry() -> bool:
+                return True
+
+            return _retry()
+
+        def async_get_entry(self, entry_id: str) -> Any:
+            return entry if entry_id == entry.entry_id else None
+
+    manager = _ConfigEntries()
+    flow = _reconfigure_flow_with_latch(entry, manager)
+
+    def _mute_create_task(coro: Any, *, name: str | None = None) -> Any:
+        # A handle without the future protocol: the reload is under way, but its
+        # outcome is unobservable from here.
+        closed.append("scheduled")
+        task = asyncio.ensure_future(coro)
+        return SimpleNamespace(_task=task)
+
+    flow.hass.async_create_task = _mute_create_task  # type: ignore[attr-defined]
+
+    def _immediate_call_later(
+        _hass: Any, _delay: Any, callback: Callable[[Any], None]
+    ) -> None:
+        callback(None)
+
+    monkeypatch.setattr(config_flow, "async_call_later", _immediate_call_later)
+
+    await flow._async_reload_entry_after_reconfigure(entry)  # type: ignore[attr-defined]
+    await asyncio.sleep(0)
+
+    assert closed == ["scheduled"], "the deferred retry has to have been scheduled"
+    assert _latch_is_free(flow.hass, entry.entry_id), (
+        "nobody can observe how this reload ends, so the promise must not stay open"
+    )
+
+
+@pytest.mark.asyncio
+async def test_reconfigure_gives_the_latch_back_when_the_loop_handle_cannot_report(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The loop fallback needs the same stand-down as the task path.
+
+    Where ``hass`` carries no ``async_create_task``, the deferred retry goes
+    through ``loop.create_task``. A handle from there that cannot report its
+    outcome is the same dead end, and the fallback must not be the one branch
+    that keeps the promise open.
+    """
+
+    entry = make_config_entry(
+        entry_id="entry-mute-loop",
+        title="Find My",
+        subentries={},
+        runtime_data=SimpleNamespace(),
+        state="loaded",
+        source="user",
+        disabled_by=None,
+    )
+    entry.data[CONF_GOOGLE_EMAIL] = "existing@example.com"
+
+    scheduled: list[str] = []
+
+    class _ConfigEntries:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def async_reload(self, entry_id: str) -> Any:
+            self.calls += 1
+            if self.calls == 1:
+                raise config_flow.OperationNotAllowed()
+
+            async def _retry() -> bool:
+                return True
+
+            return _retry()
+
+        def async_get_entry(self, entry_id: str) -> Any:
+            return entry if entry_id == entry.entry_id else None
+
+    manager = _ConfigEntries()
+    flow = _reconfigure_flow_with_latch(entry, manager)
+
+    class _Loop:
+        def create_task(self, coro: Any, *, name: str | None = None) -> Any:
+            scheduled.append(name or "unnamed")
+            task = asyncio.ensure_future(coro)
+            # Deliberately not the task itself: a handle without the future
+            # protocol is what this branch has to survive.
+            return SimpleNamespace(_task=task)
+
+    flow.hass.loop = _Loop()  # type: ignore[attr-defined]
+
+    def _immediate_call_later(
+        _hass: Any, _delay: Any, callback: Callable[[Any], None]
+    ) -> None:
+        callback(None)
+
+    monkeypatch.setattr(config_flow, "async_call_later", _immediate_call_later)
+
+    await flow._async_reload_entry_after_reconfigure(entry)  # type: ignore[attr-defined]
+    await asyncio.sleep(0)
+
+    assert scheduled, "the loop fallback has to have scheduled the retry"
+    assert _latch_is_free(flow.hass, entry.entry_id), (
+        "the loop fallback must stand down just like the task path"
+    )
+
+
+@pytest.mark.asyncio
+async def test_reconfigure_keeps_a_newer_claim_after_a_refused_hand_off() -> None:
+    """A refused hand-off must not discard somebody else's claim.
+
+    A falsy ``async_reload`` result has more than one cause, and two of them mean
+    one of our lifecycle hooks already handed the latch back: a failed unload
+    releases in ``async_unload_entry``, a failed setup at the head of
+    ``async_setup_entry``. Between that release and the refused hand-off another
+    writer can claim the latch. Releasing blindly there would discard *their*
+    promise, and the next caller would queue the second teardown this latch
+    exists to prevent -- ``discard_pending_entry_reload`` is a bare
+    ``set.discard`` and cannot tell whose claim it drops.
+
+    Modelled with the real integration helpers rather than a hand-rolled set, so
+    the test cannot drift from the latch it is about: the reload releases like the
+    unload half would and a stranger claims immediately afterwards.
+    """
+
+    entry = make_config_entry(
+        entry_id="entry-newer-claim",
+        title="Find My",
+        subentries={},
+        runtime_data=SimpleNamespace(),
+        state="loaded",
+        source="user",
+        disabled_by=None,
+    )
+    entry.data[CONF_GOOGLE_EMAIL] = "existing@example.com"
+
+    integration = config_flow.import_integration_package()
+
+    class _ConfigEntries:
+        """Falsy reload, no scheduler: the hand-off cannot be taken."""
+
+        def __init__(self) -> None:
+            self.reloads: list[str] = []
+            self.hass: Any = None
+
+        async def async_reload(self, entry_id: str) -> bool:
+            self.reloads.append(entry_id)
+            # What the unload half does on the way out, then a stranger.
+            integration.discard_pending_entry_reload(self.hass, entry_id)
+            assert integration.claim_pending_entry_reload(self.hass, entry_id), (
+                "the stranger has to get the latch for this test to mean anything"
+            )
+            return False
+
+        def async_get_entry(self, entry_id: str) -> Any:
+            return entry if entry_id == entry.entry_id else None
+
+    manager = _ConfigEntries()
+    flow = _reconfigure_flow_with_latch(entry, manager)
+    manager.hass = flow.hass
+    # The component is loaded, which is how the classifier sees that a release
+    # point ran: without it the answer falls back to "still ours" and releases.
+    flow.hass.config = SimpleNamespace(components={entry.domain})  # type: ignore[attr-defined]
+
+    await flow._async_reload_entry_after_reconfigure(entry)  # type: ignore[attr-defined]
+
+    assert manager.reloads == [entry.entry_id]
+    assert not _latch_is_free(flow.hass, entry.entry_id), (
+        "the stranger's claim must survive our refused hand-off"
+    )
+
+
+@pytest.mark.asyncio
+async def test_reconfigure_releases_when_no_release_point_ran() -> None:
+    """The counterpart: where no release point ran, the claim is still ours.
+
+    Same refused hand-off, but the component never came up, so neither our unload
+    nor our setup head fired and the latch is the one this path took. Keeping it
+    would swallow every later reload of the entry, so it has to go back. This is
+    the branch that proves the new check is a *classifier* and not a blanket
+    "never release".
+    """
+
+    entry = make_config_entry(
+        entry_id="entry-still-ours",
+        title="Find My",
+        subentries={},
+        runtime_data=SimpleNamespace(),
+        state="loaded",
+        source="user",
+        disabled_by=None,
+    )
+    entry.data[CONF_GOOGLE_EMAIL] = "existing@example.com"
+
+    class _ConfigEntries:
+        def __init__(self) -> None:
+            self.reloads: list[str] = []
+
+        async def async_reload(self, entry_id: str) -> bool:
+            self.reloads.append(entry_id)
+            return False
+
+        def async_get_entry(self, entry_id: str) -> Any:
+            return entry if entry_id == entry.entry_id else None
+
+    manager = _ConfigEntries()
+    flow = _reconfigure_flow_with_latch(entry, manager)
+    # Readable component list that does *not* contain the domain: proof that the
+    # reload took the "component could not be set up" short circuit.
+    flow.hass.config = SimpleNamespace(components={"persistent_notification"})  # type: ignore[attr-defined]
+
+    await flow._async_reload_entry_after_reconfigure(entry)  # type: ignore[attr-defined]
+
+    assert manager.reloads == [entry.entry_id]
+    assert _latch_is_free(flow.hass, entry.entry_id), (
+        "no release point ran, so the claim this path took must go back"
     )

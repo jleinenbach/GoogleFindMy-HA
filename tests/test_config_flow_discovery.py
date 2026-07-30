@@ -2642,3 +2642,80 @@ async def test_a_discovery_update_still_reloads_a_healthy_entry(
 
     assert result["type"] == "abort"
     assert hass.config_entries.reloaded == [entry.entry_id]
+
+
+def test_the_falsy_reload_classifier_knows_the_setups_that_never_ran() -> None:
+    """A falsy reload is only a dead end where none of our hooks ran.
+
+    Four outcomes share the same falsy value and they do not mean the same
+    thing. The component check alone gets two of them right and misreads the
+    fourth: ``ConfigEntry.async_setup`` can bail *before* our
+    ``async_setup_entry`` while the domain stays among the loaded components, so
+    the head discard never ran and the claim is still held. Two of those exits
+    are unambiguous and are treated as dead ends; ``SETUP_ERROR`` and a set
+    ``disabled_by`` are not, because our own hooks reach those states too after
+    having released the latch, and a release on a guess would drop somebody
+    else's claim.
+    """
+
+    hass = types.SimpleNamespace(
+        config=types.SimpleNamespace(components={config_flow.DOMAIN}),
+    )
+
+    def _entry(**fields: Any) -> Any:
+        base: dict[str, Any] = {
+            "entry_id": "entry-1",
+            "domain": config_flow.DOMAIN,
+            "source": "user",
+            "state": ConfigEntryState.LOADED,
+            "disabled_by": None,
+        }
+        base.update(fields)
+        return types.SimpleNamespace(**base)
+
+    # A lifecycle hook of ours ran and released: not a dead end.
+    assert (
+        config_flow._falsy_reload_left_the_latch_behind(hass, "entry-1", _entry())
+        is False
+    )
+
+    # The component itself could not be set up: nothing of ours ran.
+    empty = types.SimpleNamespace(config=types.SimpleNamespace(components=set()))
+    assert (
+        config_flow._falsy_reload_left_the_latch_behind(empty, "entry-1", _entry())
+        is True
+    )
+
+    # ``ConfigEntry.async_setup`` bails on its first statement for an ignored
+    # entry, so our setup never ran even though the component is loaded.
+    assert (
+        config_flow._falsy_reload_left_the_latch_behind(
+            hass, "entry-1", _entry(source="ignore")
+        )
+        is True
+    )
+
+    # A failed migration sets MIGRATION_ERROR and returns before our hook.
+    assert (
+        config_flow._falsy_reload_left_the_latch_behind(
+            hass, "entry-1", _entry(state=ConfigEntryState.MIGRATION_ERROR)
+        )
+        is True
+    )
+
+    # Deliberately residual: our own setup reaches SETUP_ERROR too, after its
+    # head released the latch, so this state proves nothing either way.
+    assert (
+        config_flow._falsy_reload_left_the_latch_behind(
+            hass, "entry-1", _entry(state=ConfigEntryState.SETUP_ERROR)
+        )
+        is False
+    )
+
+    # Fails open where the entry cannot be read at all.
+    assert (
+        config_flow._falsy_reload_left_the_latch_behind(
+            types.SimpleNamespace(), "entry-1", None
+        )
+        is True
+    )
