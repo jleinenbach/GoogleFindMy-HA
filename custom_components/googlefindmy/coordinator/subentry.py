@@ -19,6 +19,7 @@ from homeassistant.helpers import device_registry as dr
 
 from ..const import (
     DOMAIN,
+    NON_DEVICE_SUBENTRY_TYPES,
     SERVICE_FEATURE_PLATFORMS,
     SERVICE_SUBENTRY_KEY,
     SERVICE_SUBENTRY_TRANSLATION_KEY,
@@ -381,34 +382,55 @@ class SubentryOperations(_MixinBase):
                 # The repair detection above deliberately reads the *stored*
                 # key: which core groups exist on disk is what it answers.
                 # Everything below indexes runtime state, and there the
-                # ``subentry_type`` is authoritative -- the same rule
-                # ``ConfigEntrySubEntryManager`` applies when it canonicalises
-                # (`__init__.py`, ``_refresh_from_entry``). A service subentry
-                # that still stores a legacy or tracker key would otherwise
-                # occupy a device-bearing key here, overwrite the twin that
-                # legitimately owns it, and have visible ids written back to
-                # it. Tracker subentries keep their stored key, because
-                # several tracker groups with distinct keys are a supported
-                # shape (unlike in the manager, which folds them all onto
-                # ``TRACKER_SUBENTRY_KEY``).
+                # ``subentry_type`` is authoritative. The manager is *not*
+                # symmetric here, stated because assuming it were is what hides
+                # the third writer: ``_refresh_from_entry`` (`__init__.py`)
+                # canonicalises ``service`` and ``tracker`` by type but leaves
+                # ``hub`` on its stored key, so a legacy hub can still be
+                # ``managed_subentries["core_tracking"]``. Anyone reading a
+                # subentry out of that mapping by key has to apply the type
+                # check themselves; the visibility write-back in
+                # ``async_setup_entry`` does exactly that. The set is shared
+                # with the options flow rather than restated, so the side that
+                # refuses such a subentry as an assignment target and the side
+                # that indexes it cannot drift apart. ``hub`` belongs in it for
+                # the same reason ``service`` does: `HubSubentryFlowHandler`
+                # sets ``_group_key = SERVICE_SUBENTRY_KEY`` and the service
+                # feature platforms, so a hub *is* the service group under a
+                # second entry point. Either one still storing a legacy or
+                # tracker key would otherwise occupy a device-bearing key here,
+                # overwrite the twin that legitimately owns it, and have
+                # visible ids written back to it. Tracker subentries keep their
+                # stored key, because several tracker groups with distinct keys
+                # are a supported shape (unlike in the manager, which folds them
+                # all onto ``TRACKER_SUBENTRY_KEY``).
                 if (
-                    getattr(subentry, "subentry_type", None) == SUBENTRY_TYPE_SERVICE
+                    getattr(subentry, "subentry_type", None)
+                    in NON_DEVICE_SUBENTRY_TYPES
                     and group_key != SERVICE_SUBENTRY_KEY
                 ):
                     group_key = SERVICE_SUBENTRY_KEY
-                    # Whatever ids this subentry stores did not get there by a
+                    # Whatever ids such a subentry stores did not get there by a
                     # deliberate move onto the service group -- the flows never
-                    # offer a service-typed subentry as an assignment target
+                    # offer one as an assignment target
                     # (`_accepts_device_assignment` reads both axes). They are
-                    # the residue of the write-back that the mis-keyed twin
-                    # used to attract. Folding alone would strand them: the
-                    # service branch below forces the visible ids to empty
-                    # while ``stored_assigned_ids`` would still count them as
+                    # the residue of the write-back that a mis-keyed twin used
+                    # to attract. Folding alone would strand them: the service
+                    # branch below forces the visible ids to empty while
+                    # ``stored_assigned_ids`` would still count them as
                     # assigned, so the unassigned-device merge would not pull
                     # them into the tracker group and they would sit in no
                     # group at all. Dropping them from this *in-memory* view
                     # (the stored subentry is untouched) lets that merge
                     # reclaim them.
+                    #
+                    # The drop stays bound to the fold, deliberately. One that
+                    # already stores the canonical key is a different case: a
+                    # device sitting there may be a move the user made while
+                    # the service group was still an offered target, and
+                    # ``test_a_device_moved_to_the_service_subentry_is_left_alone``
+                    # pins that it must not be reclaimed. Only the *mis-keyed*
+                    # ids are residue.
                     data.pop("visible_device_ids", None)
                 identifier = _sanitize_subentry_identifier(subentry_id_raw)
 

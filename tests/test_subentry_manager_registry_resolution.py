@@ -13,7 +13,7 @@ from custom_components.googlefindmy import (
     ConfigEntrySubentryDefinition,
     ConfigEntrySubEntryManager,
 )
-from custom_components.googlefindmy.const import DOMAIN
+from custom_components.googlefindmy.const import DOMAIN, TRACKER_SUBENTRY_KEY
 from tests.helpers.homeassistant import (
     DeferredRegistryConfigEntriesManager,
     FakeConfigEntriesManager,
@@ -498,3 +498,66 @@ def test_the_canonical_service_key_is_not_captured_by_a_tracker_twin() -> None:
         "group into an unresolvable one"
     )
     assert resolved.subentry_id == "svc-subentry"
+
+
+@pytest.mark.parametrize("subentry_type", ["service", "hub"], ids=["service", "hub"])
+@pytest.mark.parametrize(
+    "stored_key", ["core_tracking", "owner@example.com", "service"]
+)
+def test_update_visible_device_ids_refuses_a_non_device_bearing_type(
+    subentry_type: str, stored_key: str
+) -> None:
+    """The manager must not store device ids on a service or hub subentry.
+
+    ``config_flow._accepts_device_assignment`` keeps the options flow from
+    offering such a group as an assignment target, but it lives in another
+    module and cannot see this call. Without a check here the invariant rested
+    entirely on every caller resolving to the right key, so a single caller
+    passing a key that resolves to a service or hub subentry wrote devices onto
+    the one group that must not hold any.
+
+    Deciding on the resolved subentry rather than on the key is what makes this
+    total, and the three stored keys reach it by three different routes. One
+    cell is deliberately *not* carried by this guard: a ``service``-typed
+    subentry storing ``core_tracking`` is canonicalised onto ``service``, and
+    the reserved-key rule stops ``core_tracking`` from aliasing anywhere, so
+    the lookup finds nothing and the method returns one line earlier. The
+    precondition below is what tells the two apart, so a cell cannot pass by
+    never reaching the guard at all.
+    """
+
+    entry = FakeConfigEntry(entry_id="parent-entry", domain=DOMAIN)
+    subentry = _AliasSubentry(
+        data={"group_key": stored_key},
+        subentry_type=subentry_type,
+        title="Non-device group",
+        unique_id="unique-non-device",
+        subentry_id="non-device-subentry",
+    )
+    entry.subentries[subentry.subentry_id] = subentry
+
+    hass = FakeHass(config_entries=_CapturingConfigEntries(entry))
+    manager = ConfigEntrySubEntryManager(hass, entry)  # type: ignore[arg-type]
+
+    resolved = manager._resolve_key(stored_key)
+    reaches_the_guard = (
+        resolved is not None and manager._managed.get(resolved) is subentry
+    )
+    carried_by_the_reserved_key_rule = (
+        subentry_type == "service" and stored_key == TRACKER_SUBENTRY_KEY
+    )
+    assert reaches_the_guard is not carried_by_the_reserved_key_rule, (
+        "precondition: every cell except the reserved-key one must actually "
+        "reach the guard, otherwise a passing assertion proves nothing"
+    )
+
+    manager.update_visible_device_ids(stored_key, ["device-1"])
+
+    assert hass.config_entries.writes == [], (
+        f"a {subentry_type!r} subentry must never receive visible_device_ids, "
+        f"whatever key it stores (here {stored_key!r})"
+    )
+    stored = entry.subentries[subentry.subentry_id]
+    assert "visible_device_ids" not in stored.data, (
+        "and the stored payload must be left untouched, not merely the write log"
+    )

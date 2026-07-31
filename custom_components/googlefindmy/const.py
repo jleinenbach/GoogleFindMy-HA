@@ -64,6 +64,13 @@ DATA_SUBENTRY_KEY: str = "subentry_key"
 SUBENTRY_TYPE_SERVICE: str = "service"
 SUBENTRY_TYPE_HUB: str = "hub"
 SUBENTRY_TYPE_TRACKER: str = "tracker"
+# Subentry types that never carry ``visible_device_ids``. Both the options
+# flow (which refuses them as assignment targets) and the runtime index
+# (which folds them onto the service key and drops their stored ids) read
+# this set, so the writing and the reading side cannot drift apart.
+NON_DEVICE_SUBENTRY_TYPES: frozenset[str] = frozenset(
+    {SUBENTRY_TYPE_SERVICE, SUBENTRY_TYPE_HUB}
+)
 SERVICE_SUBENTRY_TRANSLATION_KEY: str = SERVICE_SUBENTRY_KEY
 TRACKER_SUBENTRY_TRANSLATION_KEY: str = TRACKER_SUBENTRY_KEY
 
@@ -739,6 +746,7 @@ __all__ = [
     "SUBENTRY_TYPE_SERVICE",
     "SUBENTRY_TYPE_HUB",
     "SUBENTRY_TYPE_TRACKER",
+    "NON_DEVICE_SUBENTRY_TYPES",
     "service_device_identifier",
     "CONF_OAUTH_TOKEN",
     "DATA_AAS_TOKEN",

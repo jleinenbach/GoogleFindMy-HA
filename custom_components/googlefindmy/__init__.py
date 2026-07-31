@@ -181,6 +181,7 @@ from .const import (
     ISSUE_MULTIPLE_CONFIG_ENTRIES,
     ISSUE_RESTART_REQUIRED_KEY,
     LEGACY_SERVICE_IDENTIFIER,
+    NON_DEVICE_SUBENTRY_TYPES,
     OPT_ALLOW_HISTORY_FALLBACK,
     OPT_CONTRIBUTOR_MODE,
     OPT_DELETE_CACHES_ON_REMOVE,
@@ -1816,6 +1817,27 @@ class ConfigEntrySubEntryManager:
 
         subentry = self._managed.get(resolved_key)
         if subentry is None:
+            return
+
+        if getattr(subentry, "subentry_type", None) in NON_DEVICE_SUBENTRY_TYPES:
+            # This is the writing-side mirror of
+            # ``config_flow._accepts_device_assignment``. That predicate keeps
+            # the options flow from ever *offering* a service or hub group as
+            # an assignment target, but it lives in another module and cannot
+            # see this call. Deciding here, on the resolved subentry rather
+            # than on the key, closes the **key** axis: whichever key the
+            # caller passed and whatever the alias table made of it, a subentry
+            # of a known non-device-bearing type is never written to. The type
+            # axis stays fail-open by design, and that is stated rather than
+            # implied: a subentry with no ``subentry_type`` or an unknown one
+            # passes, mirroring ``_accepts_device_assignment``, which likewise
+            # accepts the typeless synthesised fallback. In Home Assistant
+            # ``subentry_type`` is a required field, so this is the inert
+            # direction. The caller in
+            # ``coordinator/subentry.py`` already folds such subentries onto
+            # the service key, so today this is a second barrier rather than
+            # the only one -- which is the point, because a future caller
+            # would otherwise be unguarded.
             return
 
         normalized = tuple(
@@ -8067,6 +8089,20 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
                 group_key
             )
             if managed_subentry is None:
+                continue
+
+            if (
+                getattr(managed_subentry, "subentry_type", None)
+                in NON_DEVICE_SUBENTRY_TYPES
+            ):
+                # This loop calls ``async_update_subentry`` directly, so the
+                # guard inside ``update_visible_device_ids`` does not cover it.
+                # It matters because the manager canonicalises ``service`` and
+                # ``tracker`` by type but leaves ``hub`` on its stored key: a
+                # legacy hub storing ``core_tracking`` therefore *is*
+                # ``managed_subentries["core_tracking"]`` whenever it is
+                # iterated first, and the tracker group's ids would be written
+                # onto it. Measured against the real manager, not assumed.
                 continue
 
             desired_visible_ids = _extract_visible_ids(subentry_meta)

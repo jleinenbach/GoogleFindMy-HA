@@ -12,6 +12,7 @@ from homeassistant.helpers import device_registry as dr
 from custom_components.googlefindmy.const import (
     DOMAIN,
     SERVICE_SUBENTRY_KEY,
+    SUBENTRY_TYPE_HUB,
     SUBENTRY_TYPE_SERVICE,
     SUBENTRY_TYPE_TRACKER,
     TRACKER_SUBENTRY_KEY,
@@ -558,12 +559,18 @@ def test_a_service_twin_does_not_occupy_the_tracker_key_in_the_index() -> None:
 
 
 def _service_twin_coordinator(
-    entry_id: str, *, service_specs: list[tuple[str, str, list[str]]]
+    entry_id: str,
+    *,
+    service_specs: list[tuple[str, str | None, list[str]]],
+    subentry_type: str = SUBENTRY_TYPE_SERVICE,
 ) -> tuple[GoogleFindMyCoordinator, object, _ManagerStub]:
-    """Return a coordinator with one real tracker plus the given service twins.
+    """Return a coordinator with one real tracker plus the given twins.
 
     ``service_specs`` holds ``(subentry_id, stored_group_key, visible ids)``
-    for each service-typed subentry.
+    for each twin; a ``stored_group_key`` of ``None`` stores no ``group_key``
+    at all, which is the shape that falls back to the subentry id.
+    ``subentry_type`` selects the twin's type, so the same fixture serves the
+    ``service`` and the ``hub`` axis.
     """
 
     tracker_subentry = ConfigSubentry(
@@ -580,12 +587,14 @@ def _service_twin_coordinator(
     )
     subentries = {tracker_subentry.subentry_id: tracker_subentry}
     for subentry_id, stored_key, visible in service_specs:
-        payload: dict[str, object] = {"group_key": stored_key}
+        payload: dict[str, object] = {}
+        if stored_key is not None:
+            payload["group_key"] = stored_key
         if visible:
             payload["visible_device_ids"] = list(visible)
         service_subentry = ConfigSubentry(
             data=MappingProxyType(payload),
-            subentry_type=SUBENTRY_TYPE_SERVICE,
+            subentry_type=subentry_type,
             title="Service",
             unique_id=f"{entry_id}-{subentry_id}",
             subentry_id=subentry_id,
@@ -697,4 +706,70 @@ def test_the_canonically_keyed_service_subentry_wins_regardless_of_order(
     assert service_meta.config_subentry_id == canonical_id, (
         "the subentry that already stored the canonical key must describe the "
         "service group, whichever order the entry yields"
+    )
+
+
+@pytest.mark.parametrize(
+    "stored_key", [TRACKER_SUBENTRY_KEY, "owner@example.com", None]
+)
+@pytest.mark.parametrize("hub_first", [True, False])
+def test_a_hub_typed_subentry_never_bears_devices(
+    stored_key: str | None, hub_first: bool
+) -> None:
+    """A ``hub``-typed subentry must not hold or attract device ids.
+
+    ``HubSubentryFlowHandler`` sets ``_group_key = SERVICE_SUBENTRY_KEY`` and
+    the service feature platforms, so a hub *is* the service group under a
+    second entry point, and the options flow already refuses it as an
+    assignment target (``_NON_DEVICE_SUBENTRY_TYPES``). The runtime index used
+    to fold only ``service``, so a hub left over from an early migration kept a
+    device-bearing slot and had visible ids written back onto it.
+
+    The three key shapes take different routes, and the damage differs with
+    them: ``core_tracking`` collides with the real tracker and *additionally*
+    overwrote its metadata, while an email-style key and a missing key (which
+    falls back to the subentry id) open a group of their own and only attracted
+    the write-back. The order axis therefore carries weight for
+    ``core_tracking`` alone; for the other two shapes both orders exercise the
+    same path, and they are parametrised for uniformity, not as evidence.
+    """
+
+    entry_id = f"entry-hub-{stored_key or 'nokey'}-{int(hub_first)}"
+    hub_id = f"{entry_id}-legacy-hub"
+    coordinator, entry, manager = _service_twin_coordinator(
+        entry_id,
+        service_specs=[(hub_id, stored_key, ["device-2"])],
+        subentry_type=SUBENTRY_TYPE_HUB,
+    )
+    if hub_first:
+        # ``entry.subentries`` yields insertion order, and the collapse used to
+        # depend on it: rebuild the mapping with the hub in front.
+        subentries = entry.subentries
+        reordered = {hub_id: subentries[hub_id]}
+        reordered.update(
+            {key: value for key, value in subentries.items() if key != hub_id}
+        )
+        subentries.clear()
+        subentries.update(reordered)
+
+    coordinator._refresh_subentry_index(skip_repair=True)
+
+    tracker_meta = coordinator.get_subentry_metadata(key=TRACKER_SUBENTRY_KEY)
+    assert tracker_meta is not None
+    assert tracker_meta.config_subentry_id == _stable_subentry_id(
+        entry_id, TRACKER_SUBENTRY_KEY
+    ), "the tracker key must keep describing the real tracker, not the hub"
+
+    for key, ids in manager.calls:
+        if not ids:
+            continue
+        owner = coordinator.get_subentry_metadata(key=key)
+        assert getattr(owner, "config_subentry_id", None) != hub_id, (
+            f"device ids were written back through key {key!r}, which describes "
+            "the hub subentry"
+        )
+
+    assert "device-2" in tracker_meta.visible_device_ids, (
+        "and the ids the hub had accumulated must be reclaimed by the tracker "
+        "rather than stranded in no group at all"
     )

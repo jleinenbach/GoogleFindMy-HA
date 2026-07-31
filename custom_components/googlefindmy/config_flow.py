@@ -138,6 +138,7 @@ from .const import (
     DEFAULT_STALE_THRESHOLD,
     # Core domain & credential keys
     DOMAIN,
+    NON_DEVICE_SUBENTRY_TYPES,
     OPT_CONTRIBUTOR_MODE,
     OPT_DELETE_CACHES_ON_REMOVE,
     OPT_DEVICE_POLL_DELAY,
@@ -1249,18 +1250,20 @@ class _SubentryOption:
 # reading side ``coordinator/subentry.py::_refresh_subentry_index`` forces
 # ``visible_device_ids`` back to ``()`` for the service key on every refresh.
 #
-# How far that carries, stated because an earlier version of this note said
-# more than the code holds. The reading side tests the **key** only
-# (``group_key == SERVICE_SUBENTRY_KEY``), so for a subentry typed ``service``
-# that stores a diverging key the coordinator does *not* clear the ids;
-# measured. The type axis below is therefore not justified by "the write is
-# erased on the next refresh" but by the manager, which canonicalises
+# How far that carries. An earlier version of this note said the reading side
+# tested the **key** only, so that a subentry typed ``service`` storing a
+# diverging key kept its ids. That is no longer true: the reading side folds
+# every type in ``NON_DEVICE_SUBENTRY_TYPES`` onto the service key before the
+# branch runs, so both axes are now enforced on both sides. The type axis is
+# still the one that carries the argument, because the manager canonicalises
 # primarily by type and keeps the stored key as an alias: a group offered
 # under an alias is one the manager may move out from under the assignment.
-# The two axes thus rest on different grounds, and only the key axis is
-# enforced by the reading side.
 _NON_DEVICE_SUBENTRY_KEYS = frozenset({SERVICE_SUBENTRY_KEY})
-_NON_DEVICE_SUBENTRY_TYPES = frozenset({SUBENTRY_TYPE_SERVICE, SUBENTRY_TYPE_HUB})
+# The type axis is shared with the reading side rather than restated here:
+# ``coordinator/subentry.py`` folds exactly these types onto the service key
+# and drops their mis-keyed stored ids, so a type added on one side cannot be
+# forgotten on the other.
+_NON_DEVICE_SUBENTRY_TYPES = NON_DEVICE_SUBENTRY_TYPES
 
 
 def _unclaimed_fallback_key(taken: Container[str]) -> str:

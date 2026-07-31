@@ -19,6 +19,7 @@ from custom_components.googlefindmy.const import (
     OPT_IGNORED_DEVICES,
     OPT_MAP_VIEW_TOKEN_EXPIRATION,
     SERVICE_SUBENTRY_KEY,
+    SUBENTRY_TYPE_HUB,
     SUBENTRY_TYPE_SERVICE,
     SUBENTRY_TYPE_TRACKER,
     TRACKER_SUBENTRY_KEY,
@@ -1488,3 +1489,32 @@ async def test_a_hopeless_entry_stops_the_visibility_step_from_claiming(
         record.levelname == "WARNING" and "no reload was scheduled" in record.message
         for record in caplog.records
     )
+
+
+async def test_a_hub_typed_group_is_not_offered_as_a_device_target() -> None:
+    """The hub type is excluded from assignment targets, not just the service one.
+
+    ``_NON_DEVICE_SUBENTRY_TYPES`` is now shared with the runtime index rather
+    than restated here, so a type dropped on one side would silently reappear
+    as an assignable target on the other. This pins the hub half of that set:
+    without it only ``service`` was covered by a test, and the coupling could
+    regress unnoticed.
+    """
+
+    entry = _EntryStub()
+    entry.add_subentry(
+        key=TRACKER_SUBENTRY_KEY,
+        title="Legacy hub",
+        subentry_type=SUBENTRY_TYPE_HUB,
+        visible_device_ids=["dev-1"],
+    )
+    flow = await _build_flow(entry)
+
+    choices, option_map = flow._device_target_choice_map()
+    (offered_key,) = choices
+
+    assert option_map[offered_key].subentry is None, (
+        "a hub-typed group must not be an assignment target, so the only "
+        "offered key has to be the synthesised fallback"
+    )
+    assert offered_key not in {opt.key for opt in flow._gather_subentry_options()}
