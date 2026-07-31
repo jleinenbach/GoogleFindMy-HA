@@ -9231,7 +9231,19 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin, _ContainerLoginMixi
                                                 updated_data.pop(DATA_AAS_TOKEN, None)
                                             return await _finalize_success(updated_data)
                     except Exception as err2:  # noqa: BLE001
-                        if _is_multi_entry_guard_error(err2):
+                        # The deferral rebuilds the payload from the bundle, so
+                        # it only applies to a bundle submission. ``has_secrets``
+                        # is the guard, not a mere key check: it also rules out
+                        # an empty string, which would reach ``json.loads`` and
+                        # raise there instead. Both credential branches call
+                        # ``_finalize_success`` inside this ``try``, so a guard
+                        # error can arrive from a token-only submission too;
+                        # that one falls through to the error mapping below.
+                        # Defence in depth rather than a live user path: the
+                        # token field is commented out of both schema branches
+                        # and the flow manager rejects extra keys, so today
+                        # only a direct call produces that shape.
+                        if _is_multi_entry_guard_error(err2) and has_secrets:
                             entry = self.config_entry
                             parsed = normalize_secrets_bundle(
                                 json.loads(user_input["new_secrets_json"])
