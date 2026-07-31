@@ -1261,8 +1261,10 @@ class _SubentryOption:
 _NON_DEVICE_SUBENTRY_KEYS = frozenset({SERVICE_SUBENTRY_KEY})
 # The type axis is shared with the reading side rather than restated here:
 # ``coordinator/subentry.py`` folds exactly these types onto the service key
-# and drops their mis-keyed stored ids, so a type added on one side cannot be
-# forgotten on the other.
+# and drops their mis-keyed ids from its in-memory view, so a type added on
+# one side cannot be forgotten on the other. The drop does not reach storage:
+# the stored subentry keeps those ids, which is what makes the re-homing
+# reversible.
 _NON_DEVICE_SUBENTRY_TYPES = NON_DEVICE_SUBENTRY_TYPES
 
 

@@ -343,10 +343,15 @@ def test_a_device_the_account_gained_joins_the_tracker_allowlist() -> None:
 def test_a_device_moved_to_the_service_subentry_is_left_alone() -> None:
     """The merge must not undo a user's move and persist the device elsewhere.
 
-    The service subentry is a selectable target in the repair-move, repair-delete
-    and visibility steps, but its *metadata* visible ids are forced to empty. Going
-    by the metadata would therefore call such a device unassigned, pull it into the
-    tracker, and the manager write-back would make that permanent.
+    The service subentry was a selectable target in the repair-move, repair-delete
+    and visibility steps until ``e8114585``, and its *metadata* visible ids are
+    forced to empty. Going by the metadata would therefore call such a device
+    unassigned, pull it into the tracker, and the manager write-back would make
+    that permanent. The subentry here stores the **canonical** service key, which
+    is what separates this case from
+    ``test_devices_parked_on_a_mis_keyed_service_twin_are_reclaimed``: there the
+    ids are write-back residue and are deliberately reclaimed. Both cases are
+    pinned, so neither fix can quietly take the other's ground.
     """
 
     tracker_id, moved_id = "tracker-own", "tracker-moved-to-service"
@@ -641,8 +646,10 @@ def _service_twin_coordinator(
 def test_devices_parked_on_a_mis_keyed_service_twin_are_reclaimed() -> None:
     """Folding the twin must not strand the ids it accumulated.
 
-    The twin only holds those ids because it used to attract the write-back;
-    the flows never offer a service-typed subentry as an assignment target.
+    The twin only holds those ids because it attracts the write-back: the
+    key-only resolvers in ``config_flow.py`` steer it there without consulting
+    the type, while ``_accepts_device_assignment`` keeps it out of every choice
+    list a user can pick from.
     Counting them as assigned would keep the unassigned-device merge away from
     them while the service branch forces the visible ids to empty, leaving the
     devices in no group at all.
@@ -671,6 +678,53 @@ def test_devices_parked_on_a_mis_keyed_service_twin_are_reclaimed() -> None:
     service_meta = coordinator.get_subentry_metadata(key=SERVICE_SUBENTRY_KEY)
     assert service_meta is not None
     assert service_meta.visible_device_ids == ()
+
+
+def test_folding_a_mis_keyed_twin_writes_nothing_back_to_it() -> None:
+    """The reclaim is a re-homing, not a deletion.
+
+    Reading the drop as "the assignment is undone" is the misreading this test
+    exists to foreclose. That the device reappears under the tracker is pinned
+    by ``test_devices_parked_on_a_mis_keyed_service_twin_are_reclaimed``. What
+    that neighbour does not say is the half that makes the drop reversible:
+    the ids leave the *in-memory* view only, and the stored subentry keeps
+    them, so a later migration can still see what the twin held.
+
+    This is a forward guard rather than a regression test for a fixed bug.
+    Its reach was measured, not assumed, and it is narrower than "any write
+    added to ``_refresh_subentry_index``": the mutation it kills is one that
+    reaches the *stored* mapping, either by mutating the shared list in place
+    (``dict(...)`` copies shallowly) or by writing through the subentry
+    attribute. It does **not** kill a residue cleanup routed through
+    ``manager.update_visible_device_ids``; dropping the service-key ``continue``
+    in the manager loop leaves every test here green because the loop never
+    receives that key: ``manager_visible`` is only filled under
+    ``group_key != SERVICE_SUBENTRY_KEY`` (and under the tracker key), so the
+    ``continue`` guards a branch that no current caller reaches. A call that
+    *did* fire would additionally be invisible here, since the manager is a
+    recorder in this fixture. That channel is guarded on the production side
+    instead, by the type check in ``update_visible_device_ids`` itself.
+
+    Only the ``service`` type is exercised. The fold treats both non-device
+    types alike, and the ``hub`` axis is covered by
+    ``test_a_hub_typed_subentry_never_bears_devices`` (which asserts against
+    the manager calls, not against storage).
+    """
+
+    entry_id = "entry-nowrite"
+    twin_id = "legacy-twin-id"
+    coordinator, entry, _manager = _service_twin_coordinator(
+        entry_id,
+        service_specs=[(twin_id, TRACKER_SUBENTRY_KEY, ["device-2"])],
+        subentry_type=SUBENTRY_TYPE_SERVICE,
+    )
+
+    coordinator._refresh_subentry_index(skip_repair=True)
+
+    twin = entry.subentries[twin_id]
+    assert list(twin.data.get("visible_device_ids") or []) == ["device-2"], (
+        "the drop works on the in-memory copy; the stored subentry keeps its ids"
+    )
 
 
 @pytest.mark.parametrize("canonical_first", [True, False])

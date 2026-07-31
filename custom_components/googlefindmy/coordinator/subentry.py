@@ -411,11 +411,24 @@ class SubentryOperations(_MixinBase):
                 ):
                     group_key = SERVICE_SUBENTRY_KEY
                     # Whatever ids such a subentry stores did not get there by a
-                    # deliberate move onto the service group -- the flows never
-                    # offer one as an assignment target
-                    # (`_accepts_device_assignment` reads both axes). They are
-                    # the residue of the write-back that a mis-keyed twin used
-                    # to attract. Folding alone would strand them: the service
+                    # deliberate move onto the service group.
+                    # `_accepts_device_assignment` refuses one as an assignment
+                    # target on either axis, so the options flow cannot produce
+                    # such a move. What *can* reach storage is the write-back a
+                    # mis-keyed twin attracts, and neither route to it consults
+                    # the subentry type. The sync in
+                    # `_async_sync_feature_subentries` looks
+                    # the tracker group up in its context map and, finding
+                    # nothing, falls back to a scan for the stored ``group_key``
+                    # that takes the first match in iteration order, while
+                    # `_BaseSubentryFlow._resolve_existing` prefers the flow's
+                    # own ``subentry`` and otherwise falls back to the same
+                    # key scan. Neither route checks the type on either of its
+                    # branches. A hub storing ``core_tracking`` can therefore be
+                    # handed the tracker's visible ids. Those ids are the
+                    # residue, and that verdict rests on this mechanism rather
+                    # than on any claim about which targets older releases
+                    # offered. Folding alone would strand them: the service
                     # branch below forces the visible ids to empty while
                     # ``stored_assigned_ids`` would still count them as
                     # assigned, so the unassigned-device merge would not pull

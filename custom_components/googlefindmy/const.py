@@ -64,10 +64,15 @@ DATA_SUBENTRY_KEY: str = "subentry_key"
 SUBENTRY_TYPE_SERVICE: str = "service"
 SUBENTRY_TYPE_HUB: str = "hub"
 SUBENTRY_TYPE_TRACKER: str = "tracker"
-# Subentry types that never carry ``visible_device_ids``. Both the options
-# flow (which refuses them as assignment targets) and the runtime index
-# (which folds them onto the service key and drops their stored ids) read
-# this set, so the writing and the reading side cannot drift apart.
+# Subentry types that never carry ``visible_device_ids``. Four sites read this
+# set, so the offering, the indexing and the writing side cannot drift apart:
+# the options flow refuses them as assignment targets
+# (``config_flow._accepts_device_assignment``); the runtime index folds them
+# onto the service key and drops their ids from its *in-memory* view, leaving
+# the stored subentry alone (``coordinator/subentry.py``); and two write sinks
+# refuse them, the manager's ``update_visible_device_ids`` and the
+# visibility write-back in ``async_setup_entry``, which bypasses the manager
+# and therefore needs its own guard (both in ``__init__.py``).
 NON_DEVICE_SUBENTRY_TYPES: frozenset[str] = frozenset(
     {SUBENTRY_TYPE_SERVICE, SUBENTRY_TYPE_HUB}
 )
