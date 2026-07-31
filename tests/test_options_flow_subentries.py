@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
+from collections.abc import Mapping
 from dataclasses import dataclass
 from types import MappingProxyType, SimpleNamespace
 from typing import Any
@@ -74,7 +75,7 @@ class _ManagerStub:
 
     def async_remove_subentry(self, entry: _EntryStub, subentry_id: str) -> bool:  # noqa: FBT001
         assert entry is self.entry
-        entry.subentries.pop(subentry_id, None)
+        entry.discard_subentry(subentry_id)
         self.removed.append(subentry_id)
         return True
 
@@ -134,7 +135,22 @@ class _EntryStub:
         self.title = "Entry Title"
         self.data: dict[str, Any] = {}
         self.options: dict[str, Any] = {}
-        self.subentries: dict[str, ConfigSubentry] = {}
+        # Home Assistant hands ``ConfigEntry.subentries`` out as a
+        # ``MappingProxyType`` and never as a ``dict``
+        # (``config_entries.py``: ``_setter(self, "subentries",
+        # MappingProxyType(subentries))``). A stub exposing a plain ``dict``
+        # here is not a harmless simplification: it makes an
+        # ``isinstance(..., dict)`` guard in production pass in the test world
+        # and skip every subentry in the real one, which is how the options
+        # flow's subentry selection stayed dead for nine months while this file
+        # was green. The mutable store below stays reachable for the two
+        # writers that mirror the core's own -- ``add_subentry`` and
+        # ``discard_subentry`` -- so what the flow gets to see is the read-only
+        # view and nothing else.
+        self._subentry_store: dict[str, ConfigSubentry] = {}
+        self.subentries: Mapping[str, ConfigSubentry] = MappingProxyType(
+            self._subentry_store
+        )
         self.runtime_data = SimpleNamespace(coordinator=SimpleNamespace(data=[]))
         # The three fields the reload gate in ``_schedule_claimed_reload``
         # reads. Without them every ``getattr(entry, ..., None)`` in
@@ -193,8 +209,28 @@ class _EntryStub:
             subentry_id=_stable_subentry_id(self.entry_id, slug),
             translation_key=key,
         )
-        self.subentries[subentry.subentry_id] = subentry
+        self._subentry_store[subentry.subentry_id] = subentry
         return subentry
+
+    def discard_subentry(self, subentry_id: str) -> None:
+        """Remove a subentry through the store rather than through the view.
+
+        Kept on the entry rather than done inline in ``_ManagerStub`` because
+        ``self.subentries`` is a read-only view, and a double that could delete
+        straight through it would be modelling an entry Home Assistant does not
+        hand out.
+
+        Two divergences from ``ConfigEntries.async_remove_subentry``, named so
+        this is not mistaken for a replica. The core raises ``UnknownSubEntry``
+        for an id it does not hold while this discards silently, and the core
+        rebuilds the mapping into a fresh ``MappingProxyType`` while this
+        mutates the shared store in place -- so a reference to
+        ``entry.subentries`` taken before a removal stays live here and would be
+        a stale snapshot against the core. Both are the lenient direction; a
+        test that needs either behaviour cannot use this double.
+        """
+
+        self._subentry_store.pop(subentry_id, None)
 
 
 class _HassStub:
@@ -258,6 +294,100 @@ def _offered_keys(result: dict[str, Any], field: str) -> set[str]:
             raise AssertionError(f"field {field!r} is not a vol.In selector")
         return set(container)
     raise AssertionError(f"field {field!r} not present in the shown form")
+
+
+async def test_subentry_options_are_gathered_from_the_real_read_only_mapping() -> None:
+    """The ground every other test in this file stands on.
+
+    Home Assistant exposes ``ConfigEntry.subentries`` as a ``MappingProxyType``,
+    not as a ``dict``. That distinction is not cosmetic here: production reaches
+    the subentries through an ``isinstance`` guard, and a guard narrowed to
+    ``dict`` passes every test in this file while skipping every subentry a real
+    user has. It did exactly that from 2025-10-27 until this commit, which is
+    why the check runs against a genuine ``ConfigEntry`` rather than against the
+    local stub -- a stub asserted against itself could only ever confirm its own
+    shape.
+
+    The identity assertion is the load-bearing one, and two of the assertions
+    below are deliberately *not*: when the guard skips everything,
+    ``_gather_subentry_options`` appends a synthetic option that carries
+    ``TRACKER_SUBENTRY_KEY`` and is likewise exactly one, so neither
+    ``option.key`` nor ``len(options)`` can tell the two paths apart. They are
+    kept as context, not as evidence. What separates the paths is that the
+    synthetic option has no backing subentry, so ``subentry_id`` is the cell
+    that has to be checked, and the label -- the subentry's title rather than
+    the entry's -- is checked next to it because it is what the user reads.
+    Measured rather than reasoned: with the guard narrowed back to ``dict``,
+    this test fails on the ``subentry_id`` line, not before it.
+
+    Reaching the genuine class takes a detour that is worth naming, because it
+    is the second reason the suite was blind here. ``tests/conftest.py`` puts a
+    synthetic ``homeassistant.config_entries`` into ``sys.modules``, so the
+    ``from homeassistant.config_entries import ...`` form at the top of this
+    file resolves to the stub -- whose ``ConfigEntry`` is a bare placeholder
+    without subentries. The parent package still carries the real submodule as
+    an attribute, so the ``import ... as`` form below reaches it (measured: the
+    two disagree, one reports the installed file, the other reports no file).
+    Both imports are function-local as a consequence, which incidentally keeps
+    the rest of this file independent of an optional plugin.
+    """
+
+    import homeassistant.config_entries as real_config_entries
+
+    if not hasattr(real_config_entries, "ConfigSubentryData"):  # pragma: no cover
+        pytest.fail(
+            "The real homeassistant package must be importable for this test: "
+            "it grounds the stub's subentry mapping in the core's own shape, "
+            "and the suite's config_entries stub cannot stand in for it.",
+            pytrace=False,
+        )
+    try:
+        from pytest_homeassistant_custom_component.common import MockConfigEntry
+    except ModuleNotFoundError:  # pragma: no cover - environment guard
+        pytest.fail(
+            "pytest-homeassistant-custom-component must be installed alongside "
+            "homeassistant; see tests/AGENTS.md on the stub pairing.",
+            pytrace=False,
+        )
+
+    real_entry = MockConfigEntry(
+        domain=config_flow.DOMAIN,
+        # Distinct from the subentry title below, so the fallback option (which
+        # labels itself with the *entry* title) cannot be mistaken for the real
+        # one.
+        title="Account title",
+        subentries_data=[
+            real_config_entries.ConfigSubentryData(
+                data={"group_key": TRACKER_SUBENTRY_KEY},
+                subentry_type=SUBENTRY_TYPE_TRACKER,
+                title="Subentry title",
+                unique_id=None,
+            )
+        ],
+    )
+
+    # Asserted in both directions: ``Mapping`` alone would also hold for a
+    # ``dict``, and it is the negative half that pins the core's actual shape.
+    assert isinstance(real_entry.subentries, Mapping)
+    assert not isinstance(real_entry.subentries, dict)
+
+    # Built through this file's own helper and then pointed at the real entry:
+    # the plumbing an options flow needs is beside the point here, the shape of
+    # the entry it reads is the whole point.
+    flow = await _build_flow(_EntryStub())
+    flow.config_entry = real_entry  # type: ignore[attr-defined]
+
+    options = flow._gather_subentry_options()
+
+    assert len(options) == 1
+    (option,) = options
+    assert option.subentry_id == next(iter(real_entry.subentries))
+    assert option.label == "Subentry title"
+    assert option.key == TRACKER_SUBENTRY_KEY
+
+    # The stub the rest of this file builds on carries the same shape, so those
+    # tests exercise the production guard instead of a friendlier stand-in.
+    assert not isinstance(_EntryStub().subentries, dict)
 
 
 async def test_settings_updates_feature_flags_for_selected_subentry() -> None:

@@ -7636,7 +7636,7 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin, _ContainerLoginMixi
         key_counts: Counter[str] = Counter()
 
         subentries = getattr(entry, "subentries", None)
-        if isinstance(subentries, dict):
+        if isinstance(subentries, Mapping):
             for subentry in subentries.values():
                 data = dict(getattr(subentry, "data", {}) or {})
                 raw_key = data.get("group_key")
