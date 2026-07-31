@@ -2949,12 +2949,16 @@ def _interpret_reauth_choice(
             return None, None, "invalid_token"
         return "secrets", parsed, None
 
-    # Manual token path disabled: broken manual reauth entry remains hidden until fixed.
-    # if not (
-    #     _token_plausible(token_raw) and not _disqualifies_for_persistence(token_raw)
-    # ):
-    #     return None, None, "invalid_token"
-
+    # The manual *reauth* token path is gone, not hidden (see
+    # agents/config_flow/AGENTS.md); the initial-setup and options surfaces are
+    # still merely hidden. ``_REAUTH_FIELD_TOKEN`` is still read above so that a
+    # submission carrying both halves is rejected instead of letting the bundle
+    # half win. For a token-only submission the outcome is the same either way:
+    # it ends here with ``choose_one``, and without the read it would end at the
+    # exclusivity check above with the same key. That half of the read is
+    # inertia, not protection. Either way it is a rejection and not a path: no
+    # ``return`` in this function can produce ``"manual"``, which is what
+    # ``test_manual_reauth_removal_guard.py`` pins.
     return None, None, "choose_one"
 
 
@@ -6365,14 +6369,12 @@ class ConfigFlow(
                     vol.Optional(_REAUTH_FIELD_SECRETS): selector(
                         {"text": {"multiline": True}}
                     ),
-                    # vol.Optional(_REAUTH_FIELD_TOKEN): str,  # Disabled: manual reauth token path is intentionally hidden until fixed.
                 }
             )
         else:
             schema = vol.Schema(
                 {
                     vol.Optional(_REAUTH_FIELD_SECRETS): str,
-                    # vol.Optional(_REAUTH_FIELD_TOKEN): str,  # Disabled: manual reauth token path is intentionally hidden until fixed.
                 }
             )
 
@@ -6385,52 +6387,7 @@ class ConfigFlow(
                     errors["base"] = err
             else:
                 try:
-                    if method == "manual":
-                        token = str(payload)
-                        try:
-                            chosen = await async_pick_working_token(
-                                self.hass,
-                                fixed_email,
-                                [("manual", token)],
-                            )
-                        except (DependencyNotReady, ImportError) as exc:
-                            _register_dependency_error(errors, exc)
-                        else:
-                            if not chosen:
-                                _log_token_validation_failure(
-                                    email=fixed_email,
-                                    candidates=[("manual", token)],
-                                )
-                                errors["base"] = "cannot_connect"
-                            else:
-                                if _disqualifies_for_persistence(chosen):
-                                    _LOGGER.warning(
-                                        "Reauth: token looks like a JWT; persisting anyway due to validation."
-                                    )
-                                updated_data = {
-                                    **entry.data,
-                                    DATA_AUTH_METHOD: _AUTH_METHOD_INDIVIDUAL,
-                                    CONF_OAUTH_TOKEN: chosen,
-                                }
-                                if isinstance(chosen, str) and chosen.startswith(
-                                    "aas_et/"
-                                ):
-                                    updated_data[DATA_AAS_TOKEN] = chosen
-                                else:
-                                    updated_data.pop(DATA_AAS_TOKEN, None)
-                                updated_data.pop(DATA_SECRET_BUNDLE, None)
-                                await self._async_clear_cached_aas_token(entry)
-                                success_reason = self.context.get(
-                                    "reauth_success_reason_override",
-                                    "reauth_successful",
-                                )
-                                return self._async_update_entry_and_abort(
-                                    entry=entry,
-                                    data=updated_data,
-                                    reason=success_reason,
-                                )
-
-                    elif method == "secrets":
+                    if method == "secrets":
                         if not isinstance(payload, Mapping):
                             errors["base"] = "invalid_token"
                         else:
@@ -6535,24 +6492,6 @@ class ConfigFlow(
                 except Exception as err2:  # noqa: BLE001
                     if _is_multi_entry_guard_error(err2):
                         # Defer: accept first candidate and reload
-                        if method == "manual":
-                            manual_token = str(payload)
-                            updated_data = {
-                                **entry.data,
-                                DATA_AUTH_METHOD: _AUTH_METHOD_INDIVIDUAL,
-                                CONF_OAUTH_TOKEN: manual_token,
-                            }
-                            if manual_token.startswith("aas_et/"):
-                                updated_data[DATA_AAS_TOKEN] = manual_token
-                            else:
-                                updated_data.pop(DATA_AAS_TOKEN, None)
-                            updated_data.pop(DATA_SECRET_BUNDLE, None)
-                            await self._async_clear_cached_aas_token(entry)
-                            return self._async_update_entry_and_abort(
-                                entry=entry,
-                                data=updated_data,
-                                reason="reauth_successful",
-                            )
                         if method == "secrets" and isinstance(payload, Mapping):
                             # Normalize once and gate on the SAME object that is
                             # persisted, so the single-key gate and the stored
@@ -6596,7 +6535,12 @@ class ConfigFlow(
         )
 
     async def _async_clear_cached_aas_token(self, entry: ConfigEntry) -> None:
-        """Best-effort removal of the cached AAS token for a manual reauth entry."""
+        """Best-effort removal of the cached AAS token when credentials are replaced.
+
+        Called from the ``secrets.json`` reauth branches and from the options-flow
+        credential refresher, so the stale AAS token cannot outlive the OAuth token
+        it was minted from.
+        """
 
         cache = self._get_entry_cache(entry)
         if cache is None:
