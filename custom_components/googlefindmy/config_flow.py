@@ -138,6 +138,7 @@ from .const import (
     DEFAULT_STALE_THRESHOLD,
     # Core domain & credential keys
     DOMAIN,
+    LITERAL_CORE_KEY_OWNER,
     NON_DEVICE_SUBENTRY_TYPES,
     OPT_CONTRIBUTOR_MODE,
     OPT_DELETE_CACHES_ON_REMOVE,
@@ -1375,17 +1376,13 @@ def _canonical_core_key_of(subentry: Any) -> str | None:
     return None
 
 
-_LITERAL_CORE_KEY_OWNER: dict[str, str] = {
-    SERVICE_SUBENTRY_KEY: SUBENTRY_TYPE_SERVICE,
-    TRACKER_SUBENTRY_KEY: SUBENTRY_TYPE_TRACKER,
-}
-"""The type that *literally* owns each core key, as opposed to folding onto it.
+_LITERAL_CORE_KEY_OWNER = LITERAL_CORE_KEY_OWNER
+"""Module-local alias of the shared literal-owner table (``const.py``).
 
-``hub`` folds onto ``SERVICE_SUBENTRY_KEY`` for the assignment predicate and the
-runtime index, but the entity platforms match ``subentry_type == "service"``
-literally (``known_ids_for_subentry_type``), so the two are not
-interchangeable. Where both answer for the same key, this table decides which
-one keeps it.
+The definition moved to ``const.py`` when the runtime index needed the same
+ranking: a slot won here and lost there is precisely the drift a single
+definition prevents. Only the name is kept local, so the call sites below read
+unchanged.
 """
 
 

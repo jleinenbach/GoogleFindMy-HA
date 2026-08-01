@@ -19,6 +19,7 @@ from homeassistant.helpers import device_registry as dr
 
 from ..const import (
     DOMAIN,
+    LITERAL_CORE_KEY_OWNER,
     NON_DEVICE_SUBENTRY_TYPES,
     SERVICE_FEATURE_PLATFORMS,
     SERVICE_SUBENTRY_KEY,
@@ -370,7 +371,12 @@ class SubentryOperations(_MixinBase):
         service_provisional_seen = False
         tracker_provisional_seen = False
 
-        raw_entries: list[tuple[str, str | None, dict[str, Any], str | None]] = []
+        # The trailing ``subentry_type`` is carried through unfolded: the fold
+        # below rewrites ``group_key`` but the type is what ranks two subentries
+        # that end up on the same core key, so it must survive the rewrite.
+        raw_entries: list[
+            tuple[str, str | None, dict[str, Any], str | None, str | None]
+        ] = []
         core_group_keys_present: set[str] = set()
         if entry and getattr(entry, "subentries", None):
             for subentry in entry.subentries.values():
@@ -477,6 +483,7 @@ class SubentryOperations(_MixinBase):
                         identifier,
                         data,
                         getattr(subentry, "title", None),
+                        getattr(subentry, "subentry_type", None),
                     )
                 )
 
@@ -499,6 +506,7 @@ class SubentryOperations(_MixinBase):
                         "feature_flags": {},
                     },
                     getattr(entry, "title", None),
+                    None,
                 )
             )
 
@@ -615,7 +623,12 @@ class SubentryOperations(_MixinBase):
                 }
             )
 
-        for group_key, subentry_id, data, title in raw_entries:
+        # Rank of whichever subentry currently describes the service group, so a
+        # later one can only take the slot by ranking strictly better. ``None``
+        # means the slot is still free.
+        service_slot_rank: tuple[int, int, bool, str] | None = None
+
+        for group_key, subentry_id, data, title, subentry_type in raw_entries:
             raw_features = data.get("features")
             if isinstance(raw_features, (list, tuple, set)):
                 normalized_features = tuple(
@@ -730,19 +743,90 @@ class SubentryOperations(_MixinBase):
                     )
                 )
 
-            if (
-                group_key == SERVICE_SUBENTRY_KEY
-                and SERVICE_SUBENTRY_KEY in metadata
-                and data.get("group_key") != SERVICE_SUBENTRY_KEY
-            ):
-                # Two service-typed subentries can coexist: the repair path
-                # creates a canonically keyed one while a mis-keyed twin from
-                # an early migration is still on disk. Both fold onto this key,
-                # so without a tie-break the surviving description would depend
-                # on the order ``entry.subentries`` happens to yield. The one
-                # that already stored the canonical key wins, mirroring
-                # ``ConfigEntrySubEntryManager._select_preferred_managed``.
-                continue
+            if group_key == SERVICE_SUBENTRY_KEY:
+                # Several subentries can answer for this one key, and without a
+                # rank the surviving description depends on the order
+                # ``entry.subentries`` happens to yield. Three shapes reach it:
+                # the repair path creates a canonically keyed service subentry
+                # while a mis-keyed twin from an early migration is still on
+                # disk; a ``hub`` stores this key *by design*
+                # (``HubSubentryFlowHandler._group_key``), a shape the config
+                # flow now deliberately preserves instead of sweeping it; and a
+                # ``tracker`` parked on this key survives the same sweep (pinned
+                # by ``test_a_tracker_parked_on_the_service_key_is_not_swept_up``)
+                # and competes here, where it wins on the exact field. Naming
+                # only the first two would understate the rank's job by one.
+                #
+                # The ordering criteria are the ones
+                # ``config_flow._resolve_existing`` applies, and they have to
+                # agree: a slot won there and lost here would rebind the service
+                # device to a subentry the platforms do not select. An exact
+                # stored-key match beats a folded twin (there expressed as
+                # ``pool = exact or folded`` rather than as a rank field, same
+                # effect), the type that *literally* owns the key beats one that
+                # merely folds onto it (the entity platforms match
+                # ``subentry_type == "service"`` literally, via
+                # ``known_ids_for_subentry_type``), and only among equals does
+                # the lowest identifier decide, where the value is arbitrary and
+                # stability is the whole point. Ranking only the first two would
+                # leave exactly the order-dependence this replaces.
+                #
+                # Three differences are deliberate rather than overlooked, and
+                # saying "field for field" here would paper over all of them.
+                # The flow additionally prefers its seeded candidate, a notion
+                # this pass has no equivalent of; it gates candidates through
+                # ``_may_answer_for``, so a ``tracker`` storing this key is
+                # excluded there while it competes here and wins on the exact
+                # field; and it sorts on the *raw* ``subentry_id`` where this
+                # pass sorts on the sanitised, provisional-filtered one, which
+                # is why the missing-id field exists here and has no counterpart
+                # there. The second asymmetry is unchanged by this commit
+                # (measured against ``bf3a36aa`` in both iteration orders) and
+                # belongs to ``PLAN_GFMY_ALIAS_TYPE_AXIS`` with the rest of the
+                # fold; the third can only diverge for an id shape no production
+                # site in ``custom_components/`` creates.
+                candidate_rank = (
+                    0 if data.get("group_key") == SERVICE_SUBENTRY_KEY else 1,
+                    (
+                        0
+                        if subentry_type
+                        == LITERAL_CORE_KEY_OWNER.get(SERVICE_SUBENTRY_KEY)
+                        else 1
+                    ),
+                    # ``subentry_id`` here is the *sanitised and
+                    # provisional-filtered* identifier, so it can be ``None``
+                    # for a subentry that has one on disk. Ordering by
+                    # ``subentry_id or ""`` alone would sort those *below* every
+                    # real identifier and hand them the slot deterministically,
+                    # passing over the subentry that carries the registry
+                    # bindings. What the group is left with then differs by
+                    # route, and only one of the two ends in a placeholder: a
+                    # *blank* id lets the stable-id block at the end of this
+                    # method substitute ``{entry_id}-service-subentry``, while a
+                    # *provisional* one sets ``service_provisional_seen``, which
+                    # that same block honours by skipping the key, so the group
+                    # keeps ``config_subentry_id=None`` and
+                    # ``registry.py::_is_real_service_subentry`` resolves it via
+                    # ``entry.service_subentry_id``. Both are wrong for the same
+                    # reason, so missing sorts last either way.
+                    subentry_id is None,
+                    subentry_id or "",
+                )
+                if (
+                    service_slot_rank is not None
+                    and candidate_rank >= service_slot_rank
+                ):
+                    continue
+                # Displacing a weaker holder needs no cleanup, and that is a
+                # property of this loop rather than a general one: only
+                # ``metadata`` is keyed per subentry, ``manager_visible`` is
+                # never filled for this key at all, and
+                # ``feature_map``/``default_key`` are keyed by group. The one
+                # deliberate exception is ``stored_assigned_ids``, which is
+                # filled above the rank and therefore also counts the loser's
+                # ids; that is what keeps the unassigned-device merge from
+                # reclaiming a device the user moved, and it is unchanged here.
+                service_slot_rank = candidate_rank
 
             metadata[group_key] = SubentryMetadata(
                 key=group_key,

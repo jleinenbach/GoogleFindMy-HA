@@ -829,3 +829,229 @@ def test_a_hub_typed_subentry_never_bears_devices(
         "and the ids the hub had accumulated must be reclaimed by the tracker "
         "rather than stranded in no group at all"
     )
+
+
+@pytest.mark.parametrize("hub_first", [True, False])
+def test_a_literal_service_subentry_outranks_a_hub_storing_the_same_key(
+    hub_first: bool,
+) -> None:
+    """A preserved hub must not take the service slot from the real service.
+
+    ``HubSubentryFlowHandler._group_key`` is ``SERVICE_SUBENTRY_KEY``, so a hub
+    stores that key *literally*, not by folding onto it. The exact-key tie-break
+    below the fold therefore does not separate the two, and whichever the entry
+    yielded last used to describe the service group. That is not cosmetic: the
+    registry coordinator heals the service device linkage from this metadata,
+    while the entity platforms select on ``subentry_type == "service"``
+    literally (``known_ids_for_subentry_type``), so a hub in the slot rebinds
+    the device away from the subentry the platforms actually use.
+
+    The shape is one the config flow now deliberately preserves rather than
+    deletes: ``_async_cleanup_stale_subentries`` skips a hub that lost the
+    service slot instead of sweeping it, which is what makes the collision
+    reachable at runtime in the first place. Both iteration orders are asserted
+    because the defect was order-dependent.
+    """
+
+    entry_id = f"entry-service-plus-hub-{int(hub_first)}"
+    service_id = f"{entry_id}-real-service"
+    hub_id = f"{entry_id}-preserved-hub"
+    coordinator, entry, _manager = _service_twin_coordinator(
+        entry_id, service_specs=[(service_id, SERVICE_SUBENTRY_KEY, [])]
+    )
+    hub_subentry = ConfigSubentry(
+        # The hub carries ids on purpose: this is the one shape
+        # ``test_a_hub_typed_subentry_never_bears_devices`` cannot cover,
+        # because all of its ``stored_key`` values *fold* (and folding drops
+        # the ids so the merge reclaims them), whereas the canonical key does
+        # not fold. What happens to them is asserted below.
+        data=MappingProxyType(
+            {
+                "group_key": SERVICE_SUBENTRY_KEY,
+                "visible_device_ids": ["device-2"],
+            }
+        ),
+        subentry_type=SUBENTRY_TYPE_HUB,
+        title="Google Find Hub Service",
+        unique_id=f"{entry_id}-hub",
+        subentry_id=hub_id,
+    )
+
+    # ``entry.subentries`` yields insertion order; rebuild it so both orders
+    # are exercised, mirroring the neighbouring hub test.
+    subentries = entry.subentries
+    ordered: dict[str, ConfigSubentry] = {}
+    if hub_first:
+        ordered[hub_id] = hub_subentry
+    ordered.update(subentries)
+    if not hub_first:
+        ordered[hub_id] = hub_subentry
+    subentries.clear()
+    subentries.update(ordered)
+
+    coordinator._refresh_subentry_index(skip_repair=True)
+
+    service_meta = coordinator.get_subentry_metadata(key=SERVICE_SUBENTRY_KEY)
+    assert service_meta is not None
+    assert service_meta.config_subentry_id == service_id, (
+        "the subentry whose type literally owns the service key must describe "
+        "the service group, whichever order the entry yields; a hub merely "
+        "shares the key"
+    )
+
+    # The loser's ids are a named limit, not an assertion of correctness, and
+    # this assertion does *not* discriminate the rank: it holds whichever
+    # subentry wins the slot (measured, by neutralising the owner field). It
+    # falls only for a fold mutation, which already kills
+    # ``test_a_device_moved_to_the_service_subentry_is_left_alone``. It is kept
+    # anyway, at the site where the shape is constructed, because that test
+    # constructs a different one and nothing else records here that the ids
+    # reach neither group: they count into ``stored_assigned_ids``, so the
+    # unassigned-device merge treats them as already assigned, while the service
+    # branch keeps the metadata empty. Measured identical at ``bf3a36aa``, so
+    # the rank neither causes nor fixes it; only *which* subentry holds the slot
+    # changed. Closing it in ``PLAN_GFMY_ALIAS_TYPE_AXIS`` has to come past
+    # here.
+    tracker_meta = coordinator.get_subentry_metadata(key=TRACKER_SUBENTRY_KEY)
+    assert tracker_meta is not None
+    assert "device-2" not in tracker_meta.visible_device_ids, (
+        "ids stored on the *canonical* service key are not reclaimed, unlike "
+        "the mis-keyed ones the fold drops; changing that is a decision of its "
+        "own, because it cannot be told apart from a move the user made"
+    )
+
+
+@pytest.mark.parametrize("higher_id_first", [True, False])
+def test_two_equally_ranked_service_subentries_resolve_by_identifier(
+    higher_id_first: bool,
+) -> None:
+    """Among equals the identifier decides, so the slot stops depending on order.
+
+    Two ``service``-typed subentries can both store the canonical key -- a
+    second repair pass is enough -- and then neither the exact-key nor the
+    literal-owner component of the rank separates them. Without the third
+    component the surviving description would again be whichever the entry
+    happened to yield last, which is the very defect the rank replaces.
+
+    The identifier's *value* is arbitrary; only its stability matters, so this
+    pins that both orders agree, not which of the two is preferable. The
+    fixture deliberately names the lower identifier ``a-`` and the higher
+    ``z-`` so the expectation cannot be read out of the insertion order.
+
+    Only the ``True`` case carries evidence, and saying so keeps the
+    parametrisation from overstating itself: with the lower identifier
+    inserted first it already holds the slot as the incumbent, so
+    neutralising the identifier field leaves that case green. The ``False``
+    case is coverage of the symmetric path, not a second measurement.
+    """
+
+    entry_id = f"entry-two-equal-services-{int(higher_id_first)}"
+    lower_id = f"{entry_id}-a-first-repair"
+    higher_id = f"{entry_id}-z-second-repair"
+    specs = [
+        (lower_id, SERVICE_SUBENTRY_KEY, []),
+        (higher_id, SERVICE_SUBENTRY_KEY, []),
+    ]
+    if higher_id_first:
+        specs.reverse()
+
+    coordinator, _entry, _manager = _service_twin_coordinator(
+        entry_id, service_specs=specs
+    )
+
+    coordinator._refresh_subentry_index(skip_repair=True)
+
+    service_meta = coordinator.get_subentry_metadata(key=SERVICE_SUBENTRY_KEY)
+    assert service_meta is not None
+    assert service_meta.config_subentry_id == lower_id, (
+        "two candidates of equal rank must resolve to the same subentry in "
+        "either order; the lowest identifier is the arbitrary but stable choice"
+    )
+
+
+@pytest.mark.parametrize("identifier_less_first", [True, False])
+def test_a_subentry_without_a_usable_identifier_loses_the_service_slot(
+    identifier_less_first: bool,
+) -> None:
+    """A missing identifier must rank last, not first.
+
+    The identifier the rank sees is the *sanitised and provisional-filtered*
+    one, not ``subentry.subentry_id``: an empty or non-string id becomes
+    ``None`` (``sanitize_subentry_identifier``), and so does a
+    ``-provisional`` id that does not match the entry's stable one
+    (``filter_provisional_identifier``). Ordering such a candidate by
+    ``subentry_id or ""`` would sort it *below* every real identifier, so it
+    would win the slot deterministically. Measured, the resulting metadata does
+    not carry ``None``: the stable-id block near the end of
+    ``_refresh_subentry_index`` substitutes a synthesised
+    ``{entry_id}-service-subentry`` placeholder. That substitution is what makes
+    the defect quiet -- the group ends up described by a stand-in while the real
+    subentry, the one the registry bindings hang off, is passed over -- and it
+    is worse than the order-dependence the rank replaces, because it is
+    deterministic rather than occasional.
+
+    Only the missing-identifier half is asserted here. The provisional half
+    reaches the same code path through the same variable, and no production
+    site in ``custom_components/`` was found that creates a ``-provisional``
+    subentry id, so it is deliberately left unpinned rather than pinned
+    against a shape that may not exist.
+    """
+
+    entry_id = f"entry-idless-service-{int(identifier_less_first)}"
+    real_id = f"{entry_id}-real-service"
+    specs = [
+        (real_id, SERVICE_SUBENTRY_KEY, []),
+        ("   ", SERVICE_SUBENTRY_KEY, []),
+    ]
+    if identifier_less_first:
+        specs.reverse()
+
+    coordinator, _entry, _manager = _service_twin_coordinator(
+        entry_id, service_specs=specs
+    )
+
+    coordinator._refresh_subentry_index(skip_repair=True)
+
+    service_meta = coordinator.get_subentry_metadata(key=SERVICE_SUBENTRY_KEY)
+    assert service_meta is not None
+    assert service_meta.config_subentry_id == real_id, (
+        "a subentry whose identifier sanitises to None must rank last; "
+        "otherwise it takes the slot and the group loses its identifier"
+    )
+
+
+def test_the_literal_owner_table_is_one_object_shared_by_both_ranking_sides() -> None:
+    """Pin the shared owner table that the two ranking sides depend on.
+
+    The reading side's owner field reads
+    ``LITERAL_CORE_KEY_OWNER.get(SERVICE_SUBENTRY_KEY)``, and for the service
+    key that lookup is *value-identical* to the literal ``"service"``: the key
+    constant and the type constant happen to carry the same string. A behaviour
+    test therefore cannot tell the shared table apart from a hard-coded literal,
+    which is exactly what makes the table's purpose untestable through the
+    index alone. This pins the two properties the move to ``const.py`` was made
+    for: both mappings are the *same object*, and each key maps to the type
+    that literally owns it. The tracker row is the one that carries real
+    information, since ``TRACKER_SUBENTRY_KEY`` and ``SUBENTRY_TYPE_TRACKER``
+    differ in value.
+
+    What this does *not* pin, said plainly rather than left to be discovered:
+    replacing the lookup at the ranking site with the literal ``"service"``
+    still passes, because the two constants are value-equal today. This test
+    is the tripwire for the day they stop being, not a guard against a
+    hard-coded literal. Killing mutations: making the flow hold a private
+    ``dict`` copy, and mapping the tracker key to the wrong owner.
+    """
+
+    from custom_components.googlefindmy import config_flow as _config_flow
+    from custom_components.googlefindmy import const as _const
+    from custom_components.googlefindmy.coordinator import subentry as _subentry
+
+    assert _config_flow._LITERAL_CORE_KEY_OWNER is _const.LITERAL_CORE_KEY_OWNER, (
+        "the config flow must rank against the shared table, not a private copy"
+    )
+    assert _subentry.LITERAL_CORE_KEY_OWNER is _const.LITERAL_CORE_KEY_OWNER, (
+        "the runtime index must rank against the shared table, not a private copy"
+    )
+    assert _const.LITERAL_CORE_KEY_OWNER[SERVICE_SUBENTRY_KEY] == SUBENTRY_TYPE_SERVICE
+    assert _const.LITERAL_CORE_KEY_OWNER[TRACKER_SUBENTRY_KEY] == SUBENTRY_TYPE_TRACKER
