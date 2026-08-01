@@ -415,17 +415,18 @@ class SubentryOperations(_MixinBase):
                     # `_accepts_device_assignment` refuses one as an assignment
                     # target on either axis, so the options flow cannot produce
                     # such a move. What *can* reach storage is the write-back a
-                    # mis-keyed twin attracts, and neither route to it consults
-                    # the subentry type. The sync in
-                    # `_async_sync_feature_subentries` looks
-                    # the tracker group up in its context map and, finding
-                    # nothing, falls back to a scan for the stored ``group_key``
-                    # that takes the first match in iteration order, while
-                    # `_BaseSubentryFlow._resolve_existing` prefers the flow's
-                    # own ``subentry`` and otherwise falls back to the same
-                    # key scan. Neither route checks the type on either of its
-                    # branches. A hub storing ``core_tracking`` can therefore be
-                    # handed the tracker's visible ids. Those ids are the
+                    # mis-keyed twin attracts. One of the two routes to it has
+                    # since been closed: the sync in
+                    # `_async_sync_feature_subentries` now resolves through
+                    # `_canonical_core_key_of` on both of its branches, so it no
+                    # longer hands a hub storing ``core_tracking`` the tracker
+                    # payload. `_BaseSubentryFlow._resolve_existing` still
+                    # prefers the flow's own ``subentry`` and otherwise falls
+                    # back to a scan on the stored ``group_key`` alone, without
+                    # consulting the type, and that route remains open. One open
+                    # route is enough for the residue to exist, and the ids
+                    # already in storage predate the closure either way. Those
+                    # ids are the
                     # residue, and that verdict rests on this mechanism rather
                     # than on any claim about which targets older releases
                     # offered. Folding alone would strand them: the service

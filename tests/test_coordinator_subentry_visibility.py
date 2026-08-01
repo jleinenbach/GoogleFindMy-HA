@@ -647,9 +647,11 @@ def test_devices_parked_on_a_mis_keyed_service_twin_are_reclaimed() -> None:
     """Folding the twin must not strand the ids it accumulated.
 
     The twin only holds those ids because it attracts the write-back: the
-    key-only resolvers in ``config_flow.py`` steer it there without consulting
+    remaining key-only resolver in ``config_flow.py``
+    (``_BaseSubentryFlow._resolve_existing``) steers it there without consulting
     the type, while ``_accepts_device_assignment`` keeps it out of every choice
-    list a user can pick from.
+    list a user can pick from. The feature sync no longer does so, and the ids
+    a release before that fix wrote are exactly the residue meant here.
     Counting them as assigned would keep the unassigned-device merge away from
     them while the service branch forces the visible ids to empty, leaving the
     devices in no group at all.

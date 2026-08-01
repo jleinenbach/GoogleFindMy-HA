@@ -1311,8 +1311,82 @@ def _accepts_device_assignment(option: _SubentryOption) -> bool:
 
     if option.key in _NON_DEVICE_SUBENTRY_KEYS:
         return False
-    subentry_type = getattr(option.subentry, "subentry_type", None)
+    return _subentry_type_accepts_devices(option.subentry)
+
+
+def _subentry_type_accepts_devices(subentry: Any) -> bool:
+    """Return whether ``subentry``'s *type* permits ``visible_device_ids``.
+
+    Extracted from :func:`_accepts_device_assignment` rather than restated,
+    because ``_async_sync_feature_subentries`` needs the same axis on the
+    writing side and ``const.NON_DEVICE_SUBENTRY_TYPES`` exists precisely so
+    the offering, indexing and writing sites cannot drift apart. Keeping one
+    comparison against the set is the point; a second one would reintroduce the
+    drift the shared set was created to prevent.
+
+    ``None`` (an option without a backing subentry, or a double that does not
+    model the attribute) is accepted, which is the caller's existing
+    convention: only a *known* non-device type disqualifies.
+    """
+
+    subentry_type = getattr(subentry, "subentry_type", None)
     return subentry_type not in _NON_DEVICE_SUBENTRY_TYPES
+
+
+def _canonical_core_key_of(subentry: Any) -> str | None:
+    """Return the core group key ``subentry``'s *type* claims, or ``None``.
+
+    This is the writing side of the fold the reading side already performs:
+    ``coordinator/subentry.py`` indexes every type in
+    ``NON_DEVICE_SUBENTRY_TYPES`` under ``SERVICE_SUBENTRY_KEY`` whatever the
+    subentry stores, and ``HubSubentryFlowHandler._group_key`` is that same key,
+    so a ``hub`` *is* the service group under a second entry point.
+
+    The two directions are **not** symmetric, and reading them as if they were
+    is the mistake this docstring exists to prevent. A non-device type folds
+    unconditionally, because ``SERVICE_SUBENTRY_KEY`` is the only key such a
+    type may ever answer for. A ``tracker`` type folds *only* when it stores the
+    service key, because several tracker groups with distinct keys are a
+    supported shape: ``coordinator/subentry.py`` says so in as many words and
+    leaves tracker subentries on their stored key. Folding every tracker onto
+    ``TRACKER_SUBENTRY_KEY`` would hand a legacy per-account group (``group_key
+    = "owner@example.com"``) to the core tracker sync, which then overwrites its
+    title and identity: a data defect introduced by the very axis meant to
+    prevent one. Only the service-keyed tracker is a genuine mis-key, since
+    ``_accepts_device_assignment`` and the reading side both reserve that key
+    for the service group.
+
+    ``None`` means the type does not decide and the stored ``group_key`` keeps
+    deciding, which covers an untyped legacy subentry, a tracker on its own key
+    and any type outside the pair. Callers must treat that as "no objection",
+    not as "no match".
+    """
+
+    subentry_type = getattr(subentry, "subentry_type", None)
+    if subentry_type is None:
+        return None
+    if not _subentry_type_accepts_devices(subentry):
+        return SERVICE_SUBENTRY_KEY
+    if subentry_type == SUBENTRY_TYPE_TRACKER:
+        data = getattr(subentry, "data", {}) or {}
+        if data.get("group_key") == SERVICE_SUBENTRY_KEY:
+            return TRACKER_SUBENTRY_KEY
+        return None
+    return None
+
+
+_LITERAL_CORE_KEY_OWNER: dict[str, str] = {
+    SERVICE_SUBENTRY_KEY: SUBENTRY_TYPE_SERVICE,
+    TRACKER_SUBENTRY_KEY: SUBENTRY_TYPE_TRACKER,
+}
+"""The type that *literally* owns each core key, as opposed to folding onto it.
+
+``hub`` folds onto ``SERVICE_SUBENTRY_KEY`` for the assignment predicate and the
+runtime index, but the entity platforms match ``subentry_type == "service"``
+literally (``known_ids_for_subentry_type``), so the two are not
+interchangeable. Where both answer for the same key, this table decides which
+one keeps it.
+"""
 
 
 _FIELD_SUBENTRY = "subentry"
@@ -6763,6 +6837,19 @@ class ConfigFlow(
                 for group_key, managed_subentry in managed.managed_subentries.items():
                     target_key = group_key
                     if target_key not in mapping:
+                        # Deliberately NOT ``_canonical_core_key_of`` here, and
+                        # the reason is measured rather than assumed. A legacy
+                        # per-account tracker group is adopted as the core
+                        # tracking group on this path, but the fold that does it
+                        # is ``ConfigEntrySubEntryManager``'s: it keys every
+                        # tracker-typed subentry under ``TRACKER_SUBENTRY_KEY``,
+                        # so such a group arrives here already named
+                        # ``core_tracking`` and never reaches this branch.
+                        # Rewriting this branch therefore does not fix that
+                        # defect; it would only let a legacy ``hub`` win the
+                        # service slot ahead of a real service subentry,
+                        # depending on manager iteration order. The manager fold
+                        # is where that defect lives and where it gets fixed.
                         subentry_type = getattr(managed_subentry, "subentry_type", None)
                         if subentry_type == SUBENTRY_TYPE_SERVICE:
                             target_key = SERVICE_SUBENTRY_KEY
@@ -6912,17 +6999,169 @@ class ConfigFlow(
             defaults=defaults,
         )
 
+        def _may_answer_for(candidate: Any, key: str) -> bool:
+            """Return whether ``candidate`` may be resolved as the ``key`` group."""
+
+            canonical = _canonical_core_key_of(candidate)
+            return canonical is None or canonical == key
+
         def _resolve_existing(key: str) -> ConfigSubentry | None:
+            """Return the subentry that is the ``key`` group, type axis included.
+
+            Resolving by stored ``group_key`` alone handed the tracker group to
+            a ``service``- or ``hub``-typed twin that still stores
+            ``core_tracking``, which then received ``tracker_payload`` and, via
+            the ``if not tracker_visible`` fallback below, every probed device
+            id. The mirror direction lost data: a ``tracker``-typed subentry
+            storing the service key was overwritten with the id-less
+            ``service_payload``. The axis therefore guards **both** branches,
+            the seeded context map and the fallback scan, because the migration
+            path only reaches the second and the reconfigure path decides in the
+            first.
+
+            Within the scan, an exact stored-key match wins over a folded legacy
+            twin. That ordering is load-bearing rather than cosmetic: where a
+            real service subentry and a mis-keyed twin both answer for the
+            service group, preferring the exact match leaves the twin untouched
+            instead of rewriting a stored identity nobody asked to change.
+
+            Both exits are ordered, and neither ordering is decoration. Two
+            candidates can reach the *same* exit: two folded twins with no exact
+            match, or a ``service``- and a ``hub``-typed subentry both storing
+            the service key, which is a shape the module itself produces because
+            ``HubSubentryFlowHandler._group_key`` is ``SERVICE_SUBENTRY_KEY``.
+            Taking whichever came first let the iteration order of
+            ``entry.subentries`` decide which one is written and which one the
+            cleanup then treats as a leftover. Measured, that turned an
+            ``AbortFlow`` at the previous commit into a silent
+            ``async_remove_subentry`` of the **canonical service group**, device
+            and entity registry bindings included: a dead flow traded for a data
+            defect, which is the exact trade ``_claim_unique_id`` below exists
+            to prevent.
+
+            The tie-break is therefore substantive before it is stable: the type
+            that *literally* owns the key wins over one that only folds onto it.
+            ``coordinator/subentry.py`` records why that distinction is real,
+            the entity platforms match ``subentry_type == "service"`` literally,
+            so a hub is the service group for the assignment predicate and the
+            index but not for them. Only among equals does the lowest
+            ``subentry_id`` decide; that value is arbitrary, and stability is
+            all that is asked of it.
+
+            The seed is a *tie-break inside* that ranking, not a precedence in
+            front of it, and the difference is measured rather than tidy. A
+            context map written by an earlier run names a specific subentry, and
+            honouring it is what keeps a single flow from re-homing the group
+            between two of its own steps, so among candidates of equal rank the
+            seeded one still wins. But the seeder resolves through the runtime
+            manager, which folds *every* tracker-typed subentry onto
+            ``TRACKER_SUBENTRY_KEY`` and has no type axis at all. It can
+            therefore name a subentry that does not carry the key in either
+            pool: a legacy per-account tracker group, or a ``hub`` sitting
+            beside the canonical ``service`` subentry. Ranking such a seed ahead
+            of the pool let it be rewritten onto the core key, displaced the
+            canonical group's identity through ``_claim_unique_id`` and left
+            that group out of the context map, so the cleanup swept it, device
+            and entity registry bindings included. Measured against the previous
+            commit, which raised ``AbortFlow`` and kept both groups: a dead flow
+            traded for a data defect, in the direction ``_claim_unique_id``
+            exists to prevent.
+
+            A seed therefore only decides among candidates that qualify for the
+            key. It still decides alone when no candidate does, which is the
+            case a map naming a not-yet-keyed group depends on.
+            """
+
+            def _is_literal_owner(candidate: ConfigSubentry) -> bool:
+                literal = _LITERAL_CORE_KEY_OWNER.get(key)
+                return (
+                    literal is not None
+                    and getattr(candidate, "subentry_type", None) == literal
+                )
+
+            seeded: ConfigSubentry | None = None
             existing_id = context_map.get(key)
-            subentry_obj: ConfigSubentry | None = None
             if isinstance(existing_id, str):
-                subentry_obj = entry.subentries.get(existing_id)
-            if subentry_obj is None:
-                for candidate in entry.subentries.values():
-                    if candidate.data.get("group_key") == key:
-                        subentry_obj = candidate
-                        break
-            return subentry_obj
+                candidate = entry.subentries.get(existing_id)
+                if candidate is not None and _may_answer_for(candidate, key):
+                    seeded = candidate
+            exact: list[ConfigSubentry] = []
+            folded: list[ConfigSubentry] = []
+            for candidate in entry.subentries.values():
+                if not _may_answer_for(candidate, key):
+                    continue
+                data = getattr(candidate, "data", {}) or {}
+                if data.get("group_key") == key:
+                    exact.append(candidate)
+                elif _canonical_core_key_of(candidate) == key:
+                    folded.append(candidate)
+            pool = exact or folded
+            if not pool:
+                return seeded
+            return min(
+                pool,
+                key=lambda item: (
+                    not _is_literal_owner(item),
+                    item is not seeded,
+                    str(getattr(item, "subentry_id", "")),
+                ),
+            )
+
+        async def _claim_unique_id(desired: str, target: ConfigSubentry | None) -> None:
+            """Free ``desired`` by displacing whichever subentry else holds it.
+
+            The type axis above turns an update into a create wherever a twin
+            stops answering for a core key, and a create is exactly where
+            ``ConfigEntries.async_add_subentry`` calls
+            ``_raise_if_subentry_unique_id_exists`` unconditionally; the update
+            calls it whenever the id actually changes. Both raise
+            ``AbortFlow("already_configured")``, and the reconfigure entry point
+            has no ``try`` around this helper, so an unhandled collision would
+            trade a data defect for a dead flow.
+
+            The canonical id stays with the canonical group and the *legacy
+            holder* is the one displaced, not the newcomer. That direction is
+            not a preference: five sites outside this flow build their subentry
+            definitions with ``f"{entry_id}-{key}"`` and reconcile against it
+            (``__init__.py`` and ``coordinator/subentry.py``), so a core group
+            carrying a derived id would collide with the runtime manager on the
+            next sync and be resolved by its type-blind adoption path instead.
+
+            The substitute is searched until it is free, for the same reason
+            ``_unclaimed_fallback_key`` searches: a third subentry may hold the
+            very substitute the first is displaced to. ``entry.subentries`` is
+            finite, so it terminates.
+            """
+
+            holder: ConfigSubentry | None = None
+            for candidate in entry.subentries.values():
+                if candidate is target:
+                    continue
+                if getattr(candidate, "unique_id", None) == desired:
+                    holder = candidate
+                    break
+            if holder is None:
+                return
+
+            taken = {
+                getattr(other, "unique_id", None)
+                for other in entry.subentries.values()
+                if other is not holder
+            }
+            replacement = f"{desired}-legacy"
+            suffix = 2
+            while replacement in taken:
+                replacement = f"{desired}-legacy-{suffix}"
+                suffix += 1
+
+            await type(self)._async_update_subentry(
+                self,
+                entry,
+                holder,
+                data=dict(getattr(holder, "data", {}) or {}),
+                title=str(getattr(holder, "title", "") or ""),
+                unique_id=replacement,
+            )
 
         def _existing_visible(subentry_obj: ConfigSubentry | None) -> tuple[str, ...]:
             if subentry_obj is None:
@@ -6968,6 +7207,7 @@ class ConfigFlow(
             tracker_key, getattr(tracker_subentry, "subentry_id", None)
         )
 
+        await _claim_unique_id(service_unique_id, service_subentry)
         if service_subentry is None:
             created_service = await type(self)._async_create_subentry(
                 self,
@@ -6993,6 +7233,7 @@ class ConfigFlow(
             context_map[service_key] = service_subentry.subentry_id
 
         tracker_subentry = _resolve_existing(tracker_key)
+        await _claim_unique_id(tracker_unique_id, tracker_subentry)
         if tracker_subentry is None:
             created_tracker = await type(self)._async_create_subentry(
                 self,
@@ -7047,8 +7288,40 @@ class ConfigFlow(
                 continue
             data = getattr(subentry, "data", {}) or {}
             group_key = data.get("group_key")
-            if isinstance(group_key, str) and group_key in allowed_keys:
-                stale_ids.append(subentry_id)
+            if not isinstance(group_key, str) or group_key not in allowed_keys:
+                continue
+            subentry_type = getattr(subentry, "subentry_type", None)
+            if subentry_type is not None and subentry_type != (
+                _LITERAL_CORE_KEY_OWNER.get(group_key)
+            ):
+                # Only the type that *literally* owns a core key can be a
+                # leftover copy of that core group; every other type sitting on
+                # the key is a group of its own, and removing it takes its
+                # device and entity registry bindings with it
+                # (``async_remove_subentry`` clears both).
+                #
+                # Before the sync resolver read ``subentry_type``, such a
+                # subentry was resolved by its stored key and therefore landed
+                # in ``context_map`` -- unless a same-keyed sibling took the
+                # slot -- which kept it out of this list by accident. The
+                # resolver may now leave one alone deliberately, so the axis has
+                # to be stated here too, and stated as *ownership* rather than
+                # as "the type names a different key": a ``hub`` writes
+                # ``SERVICE_SUBENTRY_KEY`` by design
+                # (``HubSubentryFlowHandler._group_key``), so beside a real
+                # service subentry it is not mis-keyed at all, yet the
+                # literal-owner rank makes it the deterministic loser.
+                #
+                # ``.get`` cannot miss today: ``allowed_keys`` above is exactly
+                # the key set of ``_LITERAL_CORE_KEY_OWNER``. It is written
+                # defensively rather than indexed, so that widening one of the
+                # two sets fails towards skipping. An untyped subentry is *not*
+                # covered by this guard: ``_canonical_core_key_of`` treats a
+                # missing type as "the stored key keeps deciding", which makes
+                # such a subentry a candidate copy of the core group it stores,
+                # and sweeping stale legacy copies is what this pass is for.
+                continue
+            stale_ids.append(subentry_id)
 
         if not stale_ids:
             return
