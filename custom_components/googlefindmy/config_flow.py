@@ -1232,6 +1232,20 @@ class _SubentryOption:
     label: str
     subentry: ConfigSubentry | None
     visible_device_ids: tuple[str, ...]
+    #: The ``group_key`` the subentry actually stores, or ``None`` for a
+    #: synthesised option and for a subentry that stores none.
+    #:
+    #: Separate from ``key`` because the two answer different questions and
+    #: only one of them survives a collision: ``_gather_subentry_options``
+    #: rewrites ``key`` to the ``subentry_id`` of every option as soon as one
+    #: key is duplicated, which is what makes the keys injective and is
+    #: deliberate. ``key`` is therefore an *identity* and carries no meaning
+    #: after such a rewrite, while ``_accepts_device_assignment`` needs the
+    #: stored key's *meaning* (is it the reserved service key?). Reading
+    #: ``key`` for that question is what let a legacy ``tracker`` storing
+    #: ``SERVICE_SUBENTRY_KEY`` become an assignable target the moment any
+    #: duplicate existed elsewhere in the entry.
+    stored_key: str | None = None
 
     @property
     def subentry_id(self) -> str | None:
@@ -1284,6 +1298,14 @@ def _unclaimed_fallback_key(taken: Container[str]) -> str:
     The search is total rather than a single alternative: a second subentry may
     store the very substitute the first one is displaced to, so a fixed number
     of attempts is not enough. ``taken`` is finite, so the loop terminates.
+
+    ``taken`` must carry **both** axes, and the caller is what makes that true.
+    Passing only ``option.key`` was correct until the collision rewrite in
+    ``_gather_subentry_options`` turned every key into a ``subentry_id``: the
+    set then holds no stored ``group_key`` at all and this helper hands back
+    ``core_tracking`` while a real subentry stores it, which is the borrow the
+    whole function exists to prevent. Pinned by
+    ``::test_the_synthesised_fallback_does_not_borrow_a_rewritten_key``.
     """
 
     if TRACKER_SUBENTRY_KEY not in taken:
@@ -1308,9 +1330,18 @@ def _accepts_device_assignment(option: _SubentryOption) -> bool:
     A synthesised option without a backing subentry (the ``core_tracking``
     fallback of ``_gather_subentry_options``) carries no type and is accepted;
     it is the tracker group, which is precisely the one that holds devices.
+
+    The key axis reads ``stored_key``, not ``key``. ``key`` is an identity that
+    ``_gather_subentry_options`` rewrites to the ``subentry_id`` whenever any
+    two options collide, so asking it a question about *meaning* answered
+    correctly only on entries that happened to have no duplicate. ``stored_key``
+    is ``None`` exactly where there is no stored key to judge -- a synthesised
+    option, or a subentry that stores none -- and there ``key`` is the
+    ``subentry_id`` or the tracker key, neither of which is reserved, so the
+    fallback preserves the previous answer instead of inventing one.
     """
 
-    if option.key in _NON_DEVICE_SUBENTRY_KEYS:
+    if (option.stored_key or option.key) in _NON_DEVICE_SUBENTRY_KEYS:
         return False
     return _subentry_type_accepts_devices(option.subentry)
 
@@ -7857,9 +7888,12 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin, _ContainerLoginMixi
                 data = dict(getattr(subentry, "data", {}) or {})
                 raw_key = data.get("group_key")
                 if isinstance(raw_key, str) and raw_key.strip():
-                    key = raw_key.strip()
+                    stored_key: str | None = raw_key.strip()
                 else:
-                    key = str(getattr(subentry, "subentry_id", TRACKER_SUBENTRY_KEY))
+                    stored_key = None
+                key = stored_key or str(
+                    getattr(subentry, "subentry_id", TRACKER_SUBENTRY_KEY)
+                )
                 label = (
                     getattr(subentry, "title", None)
                     or data.get("entry_title")
@@ -7882,6 +7916,7 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin, _ContainerLoginMixi
                         label=str(label),
                         subentry=subentry,
                         visible_device_ids=visible,
+                        stored_key=stored_key,
                     )
                 )
                 key_counts[key] += 1
@@ -7984,7 +8019,10 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin, _ContainerLoginMixi
             title = getattr(self.config_entry, "title", None) or "Core tracking"
             options = [
                 _SubentryOption(
-                    key=_unclaimed_fallback_key({option.key for option in all_options}),
+                    key=_unclaimed_fallback_key(
+                        {option.key for option in all_options}
+                        | {opt.stored_key for opt in all_options if opt.stored_key}
+                    ),
                     label=str(title),
                     subentry=None,
                     visible_device_ids=(),
@@ -7996,12 +8034,99 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin, _ContainerLoginMixi
         return label_map, option_map
 
     @staticmethod
-    def _default_subentry_key(choices: dict[str, str]) -> str:
-        """Return the default subentry key for UI defaults."""
+    def _default_subentry_key(
+        choices: dict[str, str],
+        option_map: Mapping[str, _SubentryOption],
+    ) -> str:
+        """Return the key of the group a form should preselect.
 
-        if "core_tracking" in choices:
-            return "core_tracking"
-        return next(iter(choices), "core_tracking")
+        This asks ``key`` a question about *meaning* -- "which of these is the
+        tracker group?" -- and is therefore the second site that the collision
+        rewrite in ``_gather_subentry_options`` silently disarms, the first
+        being ``_accepts_device_assignment``. Once any two options collide,
+        every key becomes a ``subentry_id``, a literal membership test can no
+        longer match, and the helper preselects whichever group happens to sort
+        first by label. A user who submits ``async_step_repairs_move`` without
+        touching the target field then writes the devices to that group.
+
+        ``option_map`` is how the caller supplies the meaning the key lost, and
+        it is required rather than optional: every one of the five call sites
+        obtains it from the same choice map it passes as ``choices``, so an
+        optional parameter would only have kept a branch alive that nothing
+        reaches, and a future caller who forgot the map would silently get the
+        pre-fix behaviour back on *both* axes.
+
+        The type axis is asked as well, because a key comparison alone is the
+        very check ``agents/config_flow/AGENTS.md`` forbids: the alias rule
+        lets a ``service``-typed subentry keep the tracker key. **What the
+        axis buys here is an identity proxy, not damage prevention**, and the
+        distinction is worth stating because an earlier version of this
+        docstring got it wrong. It argued that preselecting such a group sends
+        feature-flag writes to something that cannot hold devices -- but the
+        contract two paragraphs down names the service group as a legitimate
+        target of exactly these two steps, so writing there is not the harm.
+        The harm is that the key no longer identifies the tracker group and
+        ``_accepts_device_assignment`` is the closest stand-in left: a group
+        wearing the tracker key while refusing devices is, whatever else it
+        is, not the tracker group the form means to offer first.
+
+        **The second loop is bound to that case rather than run
+        unconditionally**, and the boundary is the load-bearing part. Preferring
+        any device-accepting option also fires on an ordinary legacy entry --
+        an email-keyed tracker group beside a real service group, nothing
+        parked -- where the pre-fix answer was ``next(iter(choices))``. That
+        moved the preselection of ``async_step_settings`` and
+        ``async_step_credentials`` away from the service group they
+        legitimately target, for every such installation and in both label
+        orders. Measured, and pinned by
+        ``::test_the_preselection_is_unchanged_where_nothing_is_parked``.
+
+        **Only two of the five call sites can reach that loop at all**, which
+        bounds what it is worth rather than justifying its removal:
+        ``async_step_settings`` and ``async_step_credentials`` pass the
+        unfiltered ``_subentry_choice_map``, while ``async_step_visibility``,
+        ``async_step_repairs_move`` and ``async_step_repairs_delete`` pass
+        ``_device_target_choice_map``, whose filter is ``_accepts_device_
+        assignment`` itself -- a parked group never arrives there. The loop is
+        kept for the two that do, not written for all five.
+
+        A key with no option behind it is skipped in **both** loops. The two
+        used to disagree, the first skipping and the second returning it, so
+        an unjudgeable choice outranked every judgeable one; ``choices`` and
+        ``option_map`` come from one call today, which makes this a guard
+        rather than a live path (``::test_a_choice_without_an_option_never_
+        wins_the_preselection``).
+
+        The tracker group is *recognised* on the key axis alone; only the
+        refusal is two-axis. A legacy tracker on an email-style key is
+        therefore not recognised here, exactly as before this change, and
+        closing that belongs with the rest of the alias work in
+        ``PLAN_GFMY_ALIAS_TYPE_AXIS``.
+
+        The synthesised fallback of ``_device_target_choice_map`` stores
+        nothing, so ``stored_key or key`` is its (possibly suffixed) key; it
+        wins the first loop only when it *is* the tracker key, and it accepts
+        devices, so the answer is the same either way.
+        """
+
+        parked_on_the_tracker_key = False
+        for key in choices:
+            option = option_map.get(key)
+            if option is None:
+                continue
+            if (option.stored_key or option.key) != TRACKER_SUBENTRY_KEY:
+                continue
+            if _accepts_device_assignment(option):
+                return key
+            parked_on_the_tracker_key = True
+        if parked_on_the_tracker_key:
+            for key in choices:
+                option = option_map.get(key)
+                if option is None:
+                    continue
+                if _accepts_device_assignment(option):
+                    return key
+        return next(iter(choices), TRACKER_SUBENTRY_KEY)
 
     async def _async_update_feature_group_subentry(
         self,
@@ -8700,7 +8825,7 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin, _ContainerLoginMixi
             )
 
         choices, option_map = self._subentry_choice_map()
-        default_subentry = self._default_subentry_key(choices)
+        default_subentry = self._default_subentry_key(choices, option_map)
 
         fields: dict[Any, Any] = {
             vol.Required(_FIELD_SUBENTRY, default=default_subentry): vol.In(choices)
@@ -8928,8 +9053,10 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin, _ContainerLoginMixi
                     name_obj = meta.get("name")
                 choices[dev_id] = dev_id if not isinstance(name_obj, str) else name_obj
 
-        subentry_choices, _ = self._device_target_choice_map()
-        default_subentry = self._default_subentry_key(subentry_choices)
+        subentry_choices, subentry_option_map = self._device_target_choice_map()
+        default_subentry = self._default_subentry_key(
+            subentry_choices, subentry_option_map
+        )
 
         schema = vol.Schema(
             {
@@ -9097,16 +9224,24 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin, _ContainerLoginMixi
         # user's request is to leave the ignore list, which the option write and
         # the reload carry on their own, and an id no subentry claims is merged
         # into the tracker group by ``coordinator/subentry.py``.
-        raw_choices, target_option_map = self._device_target_choice_map()
-        subentry_choices = {
-            key: label
-            for key, label in raw_choices.items()
-            if target_option_map[key].subentry is not None
+        raw_choices, raw_option_map = self._device_target_choice_map()
+        # Filter the labels and the options together. Handing the *unfiltered*
+        # map to a helper that receives the filtered labels is harmless only
+        # while every branch of that helper iterates ``choices``; the step
+        # drops the synthesised fallback on purpose, so a future branch that
+        # walked the map instead would hand it back as the preselection.
+        subentry_options = {
+            key: raw_option_map[key]
+            for key in raw_choices
+            if raw_option_map[key].subentry is not None
         }
+        subentry_choices = {key: raw_choices[key] for key in subentry_options}
         if not subentry_choices:
             return self.async_abort(reason="repairs_no_subentries")
 
-        default_subentry = self._default_subentry_key(subentry_choices)
+        default_subentry = self._default_subentry_key(
+            subentry_choices, subentry_options
+        )
         device_choices = self._device_choice_map()
 
         schema = vol.Schema(
@@ -9225,7 +9360,9 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin, _ContainerLoginMixi
                 vol.Required(_FIELD_REPAIR_DELETE): vol.In(removable_choices),
                 vol.Required(
                     _FIELD_REPAIR_FALLBACK,
-                    default=self._default_subentry_key(fallback_choices),
+                    default=self._default_subentry_key(
+                        fallback_choices, fallback_option_map
+                    ),
                 ): vol.In(fallback_choices),
             }
         )
@@ -9291,7 +9428,7 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin, _ContainerLoginMixi
         errors: dict[str, str] = {}
 
         subentry_choices, option_map = self._subentry_choice_map()
-        default_subentry = self._default_subentry_key(subentry_choices)
+        default_subentry = self._default_subentry_key(subentry_choices, option_map)
 
         if selector is not None:
             schema = vol.Schema(

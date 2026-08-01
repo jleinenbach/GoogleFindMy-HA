@@ -1648,3 +1648,425 @@ async def test_a_hub_typed_group_is_not_offered_as_a_device_target() -> None:
         "offered key has to be the synthesised fallback"
     )
     assert offered_key not in {opt.key for opt in flow._gather_subentry_options()}
+
+
+@pytest.mark.parametrize(
+    "parked_first", [True, False], ids=["parked_first", "twin_first"]
+)
+async def test_a_tracker_parked_on_the_service_key_is_not_offered_as_a_target(
+    parked_first: bool,
+) -> None:
+    """The reserved-key axis survives the collision rewrite of ``option.key``.
+
+    ``_gather_subentry_options`` rewrites *every* option key to its
+    ``subentry_id`` as soon as one key is duplicated, which is what makes the
+    keys injective. That rewrite turns ``key`` into an identity and strips its
+    meaning, so a predicate that keeps reading it for meaning silently stops
+    working: a legacy ``tracker`` storing ``SERVICE_SUBENTRY_KEY`` no longer
+    matches ``_NON_DEVICE_SUBENTRY_KEYS`` and is offered as an independently
+    assignable target, while ``coordinator/subentry.py`` still indexes it under
+    the stored service key and forces its visible ids to ``()``. The user picks
+    it, the flow reports success, and the devices land in no group -- the exact
+    failure ``e8114585`` closed.
+
+    The duplicate is supplied by the *real* service subentry, so the shape is
+    the one a legacy entry actually has rather than a contrived pair.
+
+    The second iteration order does *not* discriminate today and is not claimed
+    to: ``_gather_subentry_options`` ends in ``options.sort`` by label, and both
+    the duplicate count and the all-or-nothing rewrite are order-invariant, so
+    the two parameters produce byte-identical option lists. It is kept as cheap
+    insurance for the day that sort changes, which is the same reason the
+    neighbouring resolver tests carry it -- named here so nobody reads a
+    measurement into it.
+    """
+
+    entry = _EntryStub()
+    parked_args = {
+        "key": SERVICE_SUBENTRY_KEY,
+        "title": "Legacy parked tracker",
+        "subentry_type": SUBENTRY_TYPE_TRACKER,
+        "visible_device_ids": ["dev-parked"],
+        "identity": "parked",
+    }
+    twin_args = {
+        "key": SERVICE_SUBENTRY_KEY,
+        "title": "Service",
+        "subentry_type": SUBENTRY_TYPE_SERVICE,
+        "identity": "service-twin",
+    }
+    if parked_first:
+        parked = entry.add_subentry(**parked_args)
+        entry.add_subentry(**twin_args)
+    else:
+        entry.add_subentry(**twin_args)
+        parked = entry.add_subentry(**parked_args)
+    entry.add_subentry(
+        key=TRACKER_SUBENTRY_KEY,
+        title="Core tracking",
+        subentry_type=SUBENTRY_TYPE_TRACKER,
+        visible_device_ids=["dev-1"],
+        identity="canonical",
+    )
+    flow = await _build_flow(entry)
+
+    # Precondition, asserted rather than assumed: without the duplicate the
+    # rewrite does not run and the key axis would refuse the parked subentry
+    # for the wrong reason, leaving this test green on a broken predicate.
+    assert {opt.key for opt in flow._gather_subentry_options()} == {
+        opt.subentry_id for opt in flow._gather_subentry_options()
+    }, "the collision rewrite must have run, otherwise this pins nothing"
+
+    choices, option_map = flow._device_target_choice_map()
+
+    assert parked.subentry_id not in {
+        option.subentry_id for option in option_map.values()
+    }, (
+        "a tracker-typed subentry storing the reserved service key must not be "
+        "offered as a device target, whatever the rewrite did to its key"
+    )
+    # The other half: the canonical tracker stays offered, so the fix refuses
+    # the parked subentry rather than emptying the form.
+    assert any(
+        option.subentry is not None
+        and option.subentry.data.get("group_key") == TRACKER_SUBENTRY_KEY
+        for option in option_map.values()
+    )
+
+    # The sink is the second, independent barrier and reads the same predicate.
+    parked_key = next(
+        opt.key
+        for opt in flow._gather_subentry_options()
+        if opt.subentry_id == parked.subentry_id
+    )
+    assert parked_key not in choices
+    changed = await flow._async_assign_devices_to_subentry(entry, parked_key, ["dev-1"])
+    assert changed == set(), (
+        "even a direct call naming the parked subentry must stand down rather "
+        "than write ids the runtime index will drop"
+    )
+
+
+async def test_an_option_without_a_stored_key_is_still_judged_by_its_key() -> None:
+    """The ``stored_key`` fallback in the key axis is a guard, not decoration.
+
+    ``_gather_subentry_options`` cannot currently produce an option that has no
+    ``stored_key`` while carrying the reserved key: the synthesised fallbacks
+    use a tracker key and a subentry without a stored ``group_key`` falls back
+    to its ``subentry_id``. The fallback therefore killed no test on its own,
+    which by this module's own standard makes it decorative unless pinned. It
+    is kept rather than dropped because ``_accepts_device_assignment`` is the
+    checkpoint the assignment sink consults as well, and the dataclass already
+    has three construction sites; a fourth one that fills ``key`` and forgets
+    ``stored_key`` is the shape this guard is for. This test is that pin: it
+    constructs the option directly, which is the only way to reach the branch.
+    """
+
+    option = config_flow._SubentryOption(
+        key=SERVICE_SUBENTRY_KEY,
+        label="Hand-built option",
+        subentry=None,
+        visible_device_ids=(),
+    )
+
+    assert config_flow._accepts_device_assignment(option) is False
+
+
+async def test_the_preselected_group_survives_the_collision_rewrite() -> None:
+    """``_default_subentry_key`` is the second reader that asks ``key`` for meaning.
+
+    It answers "which group should the form preselect" with a membership test
+    for the tracker key. After the collision rewrite no key equals it any more,
+    so the helper falls through to ``next(iter(choices))`` and preselects
+    whichever group sorts first by label. A user who opens "move devices",
+    picks devices and submits without touching the target field then writes
+    them to that group instead of the tracker one.
+
+    Same class as the predicate above and introduced by the same commit
+    (``7c799592``), so it is fixed here rather than deferred: the fix that
+    leaves a sibling site of its own error class broken is the anti-pattern.
+    The alias collision is supplied by two tracker groups sharing one legacy
+    ``group_key``, which is the shape the alias rule explicitly permits.
+    """
+
+    entry = _EntryStub()
+    entry.add_subentry(
+        key=TRACKER_SUBENTRY_KEY,
+        title="Zulu core tracking",
+        subentry_type=SUBENTRY_TYPE_TRACKER,
+        visible_device_ids=["dev-1"],
+        identity="canonical",
+    )
+    for suffix in ("one", "two"):
+        entry.add_subentry(
+            key="alias@example.com",
+            title=f"Alpha legacy {suffix}",
+            subentry_type=SUBENTRY_TYPE_TRACKER,
+            visible_device_ids=[],
+            identity=f"legacy-{suffix}",
+        )
+    flow = await _build_flow(entry)
+
+    options = flow._gather_subentry_options()
+    assert {opt.key for opt in options} == {opt.subentry_id for opt in options}, (
+        "the collision rewrite must have run, otherwise this pins nothing"
+    )
+
+    choices, option_map = flow._device_target_choice_map()
+    default_key = flow._default_subentry_key(choices, option_map)
+
+    assert option_map[default_key].stored_key == TRACKER_SUBENTRY_KEY, (
+        "the preselected group must still be the tracker group, whatever the "
+        "rewrite did to its key"
+    )
+    # The label ordering is what would win if the helper fell through, so this
+    # asserts the fix rather than an accident of the fixture.
+    assert default_key != next(iter(choices))
+
+
+@pytest.mark.parametrize("collides", [False, True], ids=["plain", "collision"])
+async def test_the_preselected_group_is_judged_on_both_axes(collides: bool) -> None:
+    """The preselection must not fall for a non-device type on the tracker key.
+
+    ``agents/config_flow/AGENTS.md`` forbids the hand-written key comparison
+    this helper used to be, because the alias rule lets a legacy subentry keep
+    a stored ``group_key`` that disagrees with its type. The fix for the
+    collision rewrite replaced one key-only question with another one: the
+    loop asked ``stored_key == TRACKER_SUBENTRY_KEY`` and nothing about the
+    type, so a ``service``-typed subentry parked on the tracker key wins the
+    preselection over the group that actually holds devices.
+
+    Both callers that pass the *unfiltered* ``_subentry_choice_map`` reach it
+    (``async_step_settings`` and ``async_step_credentials``), so a user who
+    submits either form without touching the group selector writes feature
+    flags or refreshes the entry title on a subentry that cannot hold devices.
+
+    The two cases have different provenance and are pinned together because
+    one fix answers both:
+
+    ``plain``
+        pre-existing. Without a collision the old body's literal test
+        ``TRACKER_SUBENTRY_KEY in choices`` matched the parked subentry just
+        as the new loop does. Fixing only the loop would move the same wrong
+        answer one branch down.
+    ``collision``
+        introduced here. After the rewrite no key equals the literal any
+        more, so the old body fell through to label order -- wrong by
+        accident. The loop makes it wrong deterministically, which is worse.
+    """
+
+    entry = _EntryStub()
+    entry.add_subentry(
+        key=TRACKER_SUBENTRY_KEY,
+        title="Alpha parked service",
+        subentry_type=SUBENTRY_TYPE_SERVICE,
+        visible_device_ids=[],
+        identity="parked-service",
+    )
+    entry.add_subentry(
+        key="alias@example.com",
+        title="Zulu real tracker",
+        subentry_type=SUBENTRY_TYPE_TRACKER,
+        visible_device_ids=["dev-1"],
+        identity="real-tracker",
+    )
+    if collides:
+        entry.add_subentry(
+            key="alias@example.com",
+            title="Yankee real tracker twin",
+            subentry_type=SUBENTRY_TYPE_TRACKER,
+            visible_device_ids=[],
+            identity="real-tracker-twin",
+        )
+    flow = await _build_flow(entry)
+
+    options = flow._gather_subentry_options()
+    rewritten = {opt.key for opt in options} == {opt.subentry_id for opt in options}
+    assert rewritten is collides, (
+        "the fixture must produce the rewrite exactly in the collision case, "
+        "otherwise the parametrisation pins the same branch twice"
+    )
+
+    choices, option_map = flow._subentry_choice_map()
+    default_key = flow._default_subentry_key(choices, option_map)
+
+    preselected = option_map.get(default_key)
+    assert preselected is not None, "the preselection must name a real option"
+    assert config_flow._accepts_device_assignment(preselected), (
+        "the preselected group must be able to hold devices; a service-typed "
+        "subentry parked on the tracker key must not win on the key axis alone"
+    )
+
+
+@pytest.mark.parametrize(
+    ("tracker_key", "service_title"),
+    [("owner@example.com", "Alpha service"), ("owner@example.com", "Zulu service")],
+    ids=["service-sorts-first", "service-sorts-last"],
+)
+async def test_the_preselection_is_unchanged_where_nothing_is_parked(
+    tracker_key: str, service_title: str
+) -> None:
+    """The both-axes guard must not move the default where it had no work to do.
+
+    ``async_step_settings`` and ``async_step_credentials`` pass the
+    *unfiltered* ``_subentry_choice_map`` and legitimately target the service
+    group (``agents/config_flow/AGENTS.md``). The first repair for the parked
+    subentry preferred any device-accepting option in its final branch, which
+    also fires on an ordinary legacy entry -- a tracker group on an
+    email-style key beside a real service group, where nothing is parked at
+    all. There the old body answered ``next(iter(choices))``, so the fix
+    silently moved the preselection of both steps away from the service group
+    for every such installation. Measured: ``'service'`` before, the tracker
+    key after, in both label orders.
+
+    Narrowing the branch to the case it was written for restores that.
+
+    Only ``service-sorts-first`` measures the fix; the other case is cheap
+    insurance rather than a second measurement, and is labelled as such
+    because an undeclared decorative case is the defect this file keeps
+    finding. Where the tracker label sorts first, ``next(iter(choices))`` and
+    "the first device-accepting option" name the same group, so the case stays
+    green even with the branch run unconditionally. It is kept because the old
+    answer came from label order, so a future change to the sort would move
+    which of the two carries the measurement.
+    """
+
+    entry = _EntryStub()
+    entry.add_subentry(
+        key=tracker_key,
+        title="Middle devices",
+        subentry_type=SUBENTRY_TYPE_TRACKER,
+        visible_device_ids=["dev-1"],
+        identity="legacy-tracker",
+    )
+    entry.add_subentry(
+        key=SERVICE_SUBENTRY_KEY,
+        title=service_title,
+        subentry_type=SUBENTRY_TYPE_SERVICE,
+        visible_device_ids=[],
+        identity="service",
+    )
+    flow = await _build_flow(entry)
+
+    choices, option_map = flow._subentry_choice_map()
+    assert not any(
+        (opt.stored_key or opt.key) == TRACKER_SUBENTRY_KEY
+        for opt in option_map.values()
+    ), "the fixture must contain no candidate on the tracker key, else it pins nothing"
+
+    assert flow._default_subentry_key(choices, option_map) == next(iter(choices)), (
+        "with nothing parked on the tracker key the preselection must stay the "
+        "one the step had before the guard existed"
+    )
+
+
+async def test_a_choice_without_an_option_never_wins_the_preselection() -> None:
+    """The two loops of ``_default_subentry_key`` must fail in the same direction.
+
+    Both look the key up in ``option_map`` and both can come back empty, but
+    they used to disagree about what that means: the first treated a missing
+    option as "cannot judge, skip", the second as "cannot judge, take it".
+    A key with no option behind it therefore beat every group that had one,
+    including the device-accepting group the second loop exists to find.
+
+    No caller can produce the shape today -- all five build ``choices`` from
+    the same map they pass as ``option_map`` -- so this constructs the
+    mismatch directly, the way
+    ``::test_an_option_without_a_stored_key_is_still_judged_by_its_key``
+    reaches the other unreachable guard. The branch is kept rather than
+    dropped because it is the cheaper half of a pair: as long as the first
+    loop guards, the second must guard too, or the guard reads as a decision
+    where it is an inability.
+    """
+
+    entry = _EntryStub()
+    entry.add_subentry(
+        key=TRACKER_SUBENTRY_KEY,
+        title="Alpha parked service",
+        subentry_type=SUBENTRY_TYPE_SERVICE,
+        visible_device_ids=[],
+        identity="parked-service",
+    )
+    entry.add_subentry(
+        key="alias@example.com",
+        title="Zulu real tracker",
+        subentry_type=SUBENTRY_TYPE_TRACKER,
+        visible_device_ids=["dev-1"],
+        identity="real-tracker",
+    )
+    flow = await _build_flow(entry)
+
+    real_choices, option_map = flow._subentry_choice_map()
+    # The ghost sorts first so the second loop meets it before the group it
+    # should answer with; otherwise the assertion would hold by accident.
+    choices = {"ghost-key": "A group with no option", **real_choices}
+    assert "ghost-key" not in option_map
+    assert any(
+        (opt.stored_key or opt.key) == TRACKER_SUBENTRY_KEY
+        and not config_flow._accepts_device_assignment(opt)
+        for opt in option_map.values()
+    ), (
+        "the fixture must park a non-device group on the tracker key, else the second loop never runs"
+    )
+
+    default_key = flow._default_subentry_key(choices, option_map)
+
+    assert default_key != "ghost-key", (
+        "a choice the helper cannot judge must not be preferred over one it can"
+    )
+    preselected = option_map.get(default_key)
+    assert preselected is not None and config_flow._accepts_device_assignment(
+        preselected
+    ), "the preselection must still name the group that can hold devices"
+
+
+async def test_the_synthesised_fallback_does_not_borrow_a_rewritten_key() -> None:
+    """``_unclaimed_fallback_key`` is the third reader the rewrite disarms.
+
+    Its docstring promises a key "no existing option already holds", and the
+    call site feeds it ``{option.key for option in all_options}``. Once any
+    two options collide, every one of those keys is a ``subentry_id``, so the
+    set it searches no longer contains a single stored ``group_key`` and the
+    fallback happily takes ``core_tracking`` back from a subentry that stores
+    it. Same class and same introducing commit (``7c799592``) as the predicate
+    and the preselection, which is why it is closed here rather than deferred.
+
+    The shape is two ``service``-typed subentries parked on the tracker key:
+    both are filtered out of the target list, so the fallback is synthesised,
+    and their duplicate key triggers the rewrite. Measured without the fix:
+    the fallback offers ``core_tracking`` while a real subentry stores it;
+    with a single such subentry it correctly steps aside to
+    ``core_tracking_2``, which is the answer this test pins for both.
+
+    No live loss follows today, because ``_async_assign_devices_to_subentry``
+    resolves by option identity rather than by key and stands down; that is
+    the second half of the repair this helper belongs to, and it is exactly
+    why the borrow must not be left to it alone.
+    """
+
+    entry = _EntryStub()
+    for identity in ("parked-one", "parked-two"):
+        entry.add_subentry(
+            key=TRACKER_SUBENTRY_KEY,
+            title=f"Parked {identity}",
+            subentry_type=SUBENTRY_TYPE_SERVICE,
+            visible_device_ids=[],
+            identity=identity,
+        )
+    flow = await _build_flow(entry)
+
+    all_options = flow._gather_subentry_options()
+    assert {opt.key for opt in all_options} == {
+        opt.subentry_id for opt in all_options
+    }, "the collision rewrite must have run, otherwise this pins nothing"
+    stored = {opt.stored_key for opt in all_options if opt.stored_key}
+    assert stored == {TRACKER_SUBENTRY_KEY}
+
+    _choices, option_map = flow._device_target_choice_map()
+    synthesised = [key for key, opt in option_map.items() if opt.subentry is None]
+    assert synthesised, "no real option accepts devices, so one must be synthesised"
+
+    assert not stored.intersection(synthesised), (
+        "the synthesised fallback must not take a key a real subentry stores, "
+        "whatever the rewrite did to that subentry's identity"
+    )
