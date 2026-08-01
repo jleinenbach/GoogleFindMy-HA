@@ -181,6 +181,7 @@ from .const import (
     ISSUE_MULTIPLE_CONFIG_ENTRIES,
     ISSUE_RESTART_REQUIRED_KEY,
     LEGACY_SERVICE_IDENTIFIER,
+    NON_DEVICE_SUBENTRY_TYPES,
     OPT_ALLOW_HISTORY_FALLBACK,
     OPT_CONTRIBUTOR_MODE,
     OPT_DELETE_CACHES_ON_REMOVE,
@@ -1125,6 +1126,7 @@ class ConfigEntrySubEntryManager:
         "_hass",
         "_key_field",
         "_key_aliases",
+        "_key_aliases_ambiguous",
         "_managed",
         "_managed_by_subentry_id",
         "_visibility_update_task",
@@ -1143,6 +1145,7 @@ class ConfigEntrySubEntryManager:
         self._key_field = key_field
         self._default_subentry_type = default_subentry_type
         self._key_aliases: dict[str, str] = {}
+        self._key_aliases_ambiguous: set[str] = set()
         self._managed: dict[str, ConfigSubentry] = {}
         self._managed_by_subentry_id: dict[str, str] = {}
         self._cleanup: dict[str, CleanupCallback | None] = {}
@@ -1473,12 +1476,46 @@ class ConfigEntrySubEntryManager:
 
         return resolved
 
+    def _register_key_alias(self, key: str, canonical_key: str) -> None:
+        """Record ``key -> canonical_key`` unless the mapping is ambiguous.
+
+        Two subentries of different types can carry the same stored key, for
+        instance a service and a tracker subentry that both kept a legacy
+        owner key from an early migration. Their canonical identities differ,
+        so the alias has no single answer. Resolving it to whichever subentry
+        happened to be iterated first would silently write to an arbitrary one
+        of the two, so such a key resolves to nothing instead: ``get`` and
+        ``update_visible_device_ids`` then miss and stay inert rather than hit
+        the wrong subentry. The ambiguity is recorded rather than merely
+        dropped, so a third subentry carrying the same key cannot re-establish
+        the mapping later in the same pass.
+        """
+
+        if key in self._key_aliases_ambiguous:
+            return
+
+        existing = self._key_aliases.get(key)
+        if existing is None:
+            self._key_aliases[key] = canonical_key
+            return
+        if existing != canonical_key:
+            self._key_aliases.pop(key, None)
+            self._key_aliases_ambiguous.add(key)
+
+    def _resolve_key(self, key: str) -> str | None:
+        """Return the canonical key for ``key``, or ``None`` when ambiguous."""
+
+        if key in self._key_aliases_ambiguous:
+            return None
+        return self._key_aliases.get(key, key)
+
     def _refresh_from_entry(self) -> None:
         """Populate managed mapping from the config entry."""
 
         self._managed.clear()
         self._managed_by_subentry_id.clear()
         self._key_aliases.clear()
+        self._key_aliases_ambiguous.clear()
         subentries = getattr(self._entry, "subentries", None)
         if not isinstance(subentries, Mapping):
             return
@@ -1515,13 +1552,25 @@ class ConfigEntrySubEntryManager:
             if canonical_key is None:
                 canonical_key = self._default_subentry_type
 
-            if (
-                isinstance(key, str)
-                and key
-                and isinstance(canonical_key, str)
-                and canonical_key != key
-            ):
-                self._key_aliases.setdefault(key, canonical_key)
+            if isinstance(key, str) and key and isinstance(canonical_key, str):
+                if canonical_key == key:
+                    # A subentry whose canonical identity *is* the stored key
+                    # claims that key too. Recording the claim is what lets a
+                    # later foreign alias be recognised as a conflict instead
+                    # of taking the key uncontested: a ``hub``-typed subentry
+                    # canonicalises onto its own stored key and would
+                    # otherwise never register, leaving a service twin free to
+                    # capture it.
+                    self._register_key_alias(key, canonical_key)
+                elif key not in (SERVICE_SUBENTRY_KEY, TRACKER_SUBENTRY_KEY):
+                    # A core key already names a group of its own, so it must
+                    # never stand in for a different one. A service subentry
+                    # that still stores the legacy ``core_tracking`` key would
+                    # otherwise register ``core_tracking -> service`` and route
+                    # every write meant for the tracker group onto the service
+                    # twin, which is precisely the group that must not hold
+                    # devices.
+                    self._register_key_alias(key, canonical_key)
 
             existing = self._managed.get(canonical_key)
             preferred = (
@@ -1752,17 +1801,43 @@ class ConfigEntrySubEntryManager:
     def get(self, key: str) -> ConfigSubentry | None:
         """Return the managed subentry for a key when present."""
 
-        return self._managed.get(self._key_aliases.get(key, key))
+        resolved_key = self._resolve_key(key)
+        if resolved_key is None:
+            return None
+        return self._managed.get(resolved_key)
 
     def update_visible_device_ids(
         self, key: str, visible_device_ids: Sequence[str]
     ) -> None:
         """Update the visible device identifiers stored in a subentry."""
 
-        resolved_key = self._key_aliases.get(key, key)
+        resolved_key = self._resolve_key(key)
+        if resolved_key is None:
+            return
 
         subentry = self._managed.get(resolved_key)
         if subentry is None:
+            return
+
+        if getattr(subentry, "subentry_type", None) in NON_DEVICE_SUBENTRY_TYPES:
+            # This is the writing-side mirror of
+            # ``config_flow._accepts_device_assignment``. That predicate keeps
+            # the options flow from ever *offering* a service or hub group as
+            # an assignment target, but it lives in another module and cannot
+            # see this call. Deciding here, on the resolved subentry rather
+            # than on the key, closes the **key** axis: whichever key the
+            # caller passed and whatever the alias table made of it, a subentry
+            # of a known non-device-bearing type is never written to. The type
+            # axis stays fail-open by design, and that is stated rather than
+            # implied: a subentry with no ``subentry_type`` or an unknown one
+            # passes, mirroring ``_accepts_device_assignment``, which likewise
+            # accepts the typeless synthesised fallback. In Home Assistant
+            # ``subentry_type`` is a required field, so this is the inert
+            # direction. The caller in
+            # ``coordinator/subentry.py`` already folds such subentries onto
+            # the service key, so today this is a second barrier rather than
+            # the only one -- which is the point, because a future caller
+            # would otherwise be unguarded.
             return
 
         normalized = tuple(
@@ -8014,6 +8089,20 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
                 group_key
             )
             if managed_subentry is None:
+                continue
+
+            if (
+                getattr(managed_subentry, "subentry_type", None)
+                in NON_DEVICE_SUBENTRY_TYPES
+            ):
+                # This loop calls ``async_update_subentry`` directly, so the
+                # guard inside ``update_visible_device_ids`` does not cover it.
+                # It matters because the manager canonicalises ``service`` and
+                # ``tracker`` by type but leaves ``hub`` on its stored key: a
+                # legacy hub storing ``core_tracking`` therefore *is*
+                # ``managed_subentries["core_tracking"]`` whenever it is
+                # iterated first, and the tracker group's ids would be written
+                # onto it. Measured against the real manager, not assumed.
                 continue
 
             desired_visible_ids = _extract_visible_ids(subentry_meta)

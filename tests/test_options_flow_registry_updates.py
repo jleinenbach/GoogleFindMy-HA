@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Mapping
 from types import MappingProxyType, SimpleNamespace
 from typing import Any
 
@@ -130,14 +131,14 @@ class _ManagerWithRegistries:
 
     def async_add_subentry(self, entry: _EntryStub, subentry: ConfigSubentry) -> None:
         assert entry is self._entry
-        entry.subentries[subentry.subentry_id] = subentry
+        entry.put_subentry(subentry)
         visible = tuple(subentry.data.get("visible_device_ids", ()))
         self.entity_registry.apply(subentry.subentry_id, visible)
         self.device_registry.apply(subentry.subentry_id, visible)
 
     def async_remove_subentry(self, entry: _EntryStub, subentry_id: str) -> bool:  # noqa: FBT001
         assert entry is self._entry
-        removed = entry.subentries.pop(subentry_id, None)
+        removed = entry.discard_subentry(subentry_id)
         if removed is None:
             return False
         self.entity_registry.remove_for_subentry(subentry_id)
@@ -233,7 +234,17 @@ class _EntryStub:
         self.title = "Find My"
         self.data: dict[str, Any] = {}
         self.options: dict[str, Any] = {}
-        self.subentries: dict[str, ConfigSubentry] = {}
+        # Read-only like the core's, for the reason spelled out in
+        # ``tests/AGENTS.md`` point 10: this module reaches
+        # ``_gather_subentry_options`` through the repair steps, so a plain
+        # ``dict`` here would go on accepting an ``isinstance(..., dict)`` guard
+        # that is false for every real entry. Measured: with such a guard back
+        # in place and this stub still a ``dict``, all six tests in this file
+        # pass while the selection is dead in production.
+        self._subentry_store: dict[str, ConfigSubentry] = {}
+        self.subentries: Mapping[str, ConfigSubentry] = MappingProxyType(
+            self._subentry_store
+        )
         self.runtime_data = SimpleNamespace(coordinator=SimpleNamespace(data=[]))
         # ``_entry_reload_is_hopeless`` reads these three through
         # ``getattr(..., None)`` and fails open, so a stub without them lets the
@@ -260,8 +271,25 @@ class _EntryStub:
             unique_id=f"{self.entry_id}-{key}",
             subentry_id=_stable_subentry_id(self.entry_id, key),
         )
-        self.subentries[subentry.subentry_id] = subentry
+        self._subentry_store[subentry.subentry_id] = subentry
         return subentry
+
+    def put_subentry(self, subentry: ConfigSubentry) -> None:
+        """Insert a subentry through the store; see ``discard_subentry``."""
+
+        self._subentry_store[subentry.subentry_id] = subentry
+
+    def discard_subentry(self, subentry_id: str) -> ConfigSubentry | None:
+        """Remove a subentry through the store rather than through the view.
+
+        Returns the removed subentry so the manager double can keep reporting
+        the core's ``bool``. Same lenience as the twin helper in
+        ``tests/test_options_flow_subentries.py``: the core raises
+        ``UnknownSubEntry`` for an unknown id and rebuilds the mapping, this
+        discards silently and mutates the shared store in place.
+        """
+
+        return self._subentry_store.pop(subentry_id, None)
 
 
 def _build_flow(entry: _EntryStub, hass: _HassStub) -> config_flow.OptionsFlowHandler:
@@ -466,6 +494,83 @@ async def test_coordinator_propagates_visible_devices_to_registries() -> None:
     assert secondary_metadata.visible_device_ids == ("dev-2",)
 
 
+async def test_service_subentry_visibility_is_cleared_by_the_setup_roundtrip() -> None:
+    """A stale device assignment on the service subentry does not survive setup.
+
+    This is the measurement behind requirement A-11 of
+    ``PLAN_GFMY_VISIBILITY_TARGET_FILTER``: is a wrong assignment written by the
+    options flow *permanent*, which would force a migration step, or does the
+    next entry setup clear it on its own? The chain that should clear it is a
+    read across three modules, so it is measured here rather than argued.
+
+    Both halves are asserted (``tests/AGENTS.md`` rule 8): the service subentry
+    loses the id, and the tracker subentry gains it. Asserting only the first
+    would also pass if the id vanished altogether, which is a different and
+    worse outcome for the user.
+    """
+
+    entry = _EntryStub()
+    entity_registry = _RegistryTracker()
+    device_registry = _RegistryTracker()
+    hass = await _HassStub.create(entry, entity_registry, device_registry)
+
+    subentry_manager = ConfigEntrySubEntryManager(hass, entry)
+    core_definition = ConfigEntrySubentryDefinition(
+        key=TRACKER_SUBENTRY_KEY,
+        title="Core",
+        data={"features": ["device_tracker"]},
+    )
+    service_definition = ConfigEntrySubentryDefinition(
+        key=SERVICE_SUBENTRY_KEY,
+        title="Service",
+        data={"features": list(SERVICE_FEATURE_PLATFORMS)},
+        subentry_type=SUBENTRY_TYPE_SERVICE,
+    )
+    await subentry_manager.async_sync([core_definition, service_definition])
+
+    service_subentry = subentry_manager.get(SERVICE_SUBENTRY_KEY)
+    assert service_subentry is not None
+
+    # Reproduce what the options flow writes today: device ids stored on the
+    # service subentry. Written through the manager stub rather than by calling
+    # the flow, so this test stays valid once the flow can no longer produce it.
+    stale = dict(service_subentry.data)
+    stale["visible_device_ids"] = ("dev-1",)
+    hass.config_entries.async_update_subentry(
+        entry,
+        service_subentry,
+        data=stale,
+        title=service_subentry.title,
+        unique_id=service_subentry.unique_id,
+    )
+    assert tuple(
+        subentry_manager.get(SERVICE_SUBENTRY_KEY).data.get("visible_device_ids", ())
+    ) == ("dev-1",)
+
+    # The next entry setup runs the very same sync again.
+    await subentry_manager.async_sync([core_definition, service_definition])
+
+    service_after = subentry_manager.get(SERVICE_SUBENTRY_KEY)
+    core_after = subentry_manager.get(TRACKER_SUBENTRY_KEY)
+    assert service_after is not None
+    assert core_after is not None
+    assert tuple(service_after.data.get("visible_device_ids", ())) == ()
+
+    coordinator = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
+    _prepare_coordinator_baseline(coordinator, hass, entry)
+    coordinator.data = [{"device_id": "dev-1", "name": "Device 1"}]
+    coordinator._enabled_poll_device_ids = {"dev-1"}
+    coordinator.attach_subentry_manager(subentry_manager)
+    coordinator._refresh_subentry_index(coordinator.data)
+
+    service_metadata = coordinator.get_subentry_metadata(key=SERVICE_SUBENTRY_KEY)
+    tracker_metadata = coordinator.get_subentry_metadata(key=TRACKER_SUBENTRY_KEY)
+    assert service_metadata is not None
+    assert tracker_metadata is not None
+    assert service_metadata.visible_device_ids == ()
+    assert "dev-1" in tracker_metadata.visible_device_ids
+
+
 async def test_coordinator_default_features_map_to_core_group() -> None:
     """Default feature list should expose lowercase domains and map to core group."""
 
@@ -531,7 +636,7 @@ async def test_options_settings_repairs_missing_service_subentry() -> None:  # n
 
     service_subentry = subentry_manager.get(SERVICE_SUBENTRY_KEY)
     assert service_subentry is not None
-    entry.subentries.pop(service_subentry.subentry_id, None)
+    entry.discard_subentry(service_subentry.subentry_id)
     subentry_manager._refresh_from_entry()
     coordinator._refresh_subentry_index()
 

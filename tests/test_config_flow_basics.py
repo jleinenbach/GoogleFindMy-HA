@@ -721,8 +721,13 @@ class TestInterpretReauthChoice:
         assert (method, data, err) == (None, None, "invalid_token")
 
     def test_token_only_path_falls_through_to_choose_one(self) -> None:
-        # The manual reauth token path is intentionally disabled — falls through
-        # to "choose_one" until re-enabled.
+        # The manual reauth token path was removed, not merely disabled (see
+        # agents/config_flow/AGENTS.md and tests/test_manual_reauth_removal_guard.py).
+        # The field is still read, but for this shape the read changes nothing:
+        # without it the same submission would end at the exclusivity check with
+        # the same "choose_one". The read is load-bearing only when both halves
+        # arrive at once, where it stops the bundle half from winning. Reviving
+        # the path needs an amendment to that contract, not a re-enable.
         method, data, err = cf._interpret_reauth_choice(
             {"secrets_json": "", "new_oauth_token": "a" * 32}
         )

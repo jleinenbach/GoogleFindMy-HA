@@ -12,6 +12,7 @@ from homeassistant.helpers import device_registry as dr
 from custom_components.googlefindmy.const import (
     DOMAIN,
     SERVICE_SUBENTRY_KEY,
+    SUBENTRY_TYPE_HUB,
     SUBENTRY_TYPE_SERVICE,
     SUBENTRY_TYPE_TRACKER,
     TRACKER_SUBENTRY_KEY,
@@ -342,10 +343,15 @@ def test_a_device_the_account_gained_joins_the_tracker_allowlist() -> None:
 def test_a_device_moved_to_the_service_subentry_is_left_alone() -> None:
     """The merge must not undo a user's move and persist the device elsewhere.
 
-    The service subentry is a selectable target in the repair-move, repair-delete
-    and visibility steps, but its *metadata* visible ids are forced to empty. Going
-    by the metadata would therefore call such a device unassigned, pull it into the
-    tracker, and the manager write-back would make that permanent.
+    The service subentry was a selectable target in the repair-move, repair-delete
+    and visibility steps until ``e8114585``, and its *metadata* visible ids are
+    forced to empty. Going by the metadata would therefore call such a device
+    unassigned, pull it into the tracker, and the manager write-back would make
+    that permanent. The subentry here stores the **canonical** service key, which
+    is what separates this case from
+    ``test_devices_parked_on_a_mis_keyed_service_twin_are_reclaimed``: there the
+    ids are write-back residue and are deliberately reclaimed. Both cases are
+    pinned, so neither fix can quietly take the other's ground.
     """
 
     tracker_id, moved_id = "tracker-own", "tracker-moved-to-service"
@@ -456,3 +462,596 @@ def test_the_merge_converges_and_stops_writing() -> None:
         "with both ids already stored the merge adds nothing, so the write-back "
         "cannot drift"
     )
+
+
+def test_a_service_twin_does_not_occupy_the_tracker_key_in_the_index() -> None:
+    """A service subentry storing a tracker key must not displace the tracker.
+
+    Early migrations left service subentries carrying ``core_tracking`` in
+    their stored ``group_key``. The runtime index used to key purely off that
+    stored value, so the service twin took the tracker's slot: the tracker's
+    metadata was overwritten, the service was described by a synthesised
+    placeholder pointing at a subentry that does not exist, and the visible
+    ids were written back through the tracker key onto the service twin.
+    """
+
+    entry_id = "entry-service-twin"
+    tracker_id = _stable_subentry_id(entry_id, TRACKER_SUBENTRY_KEY)
+    # Deliberately NOT the id the synthesised service placeholder would carry,
+    # so a placeholder cannot masquerade as the real subentry below.
+    service_id = f"{entry_id}-legacy-service"
+
+    tracker_subentry = ConfigSubentry(
+        data=MappingProxyType(
+            {
+                "group_key": TRACKER_SUBENTRY_KEY,
+                "visible_device_ids": ["device-1"],
+            }
+        ),
+        subentry_type=SUBENTRY_TYPE_TRACKER,
+        title="Trackers",
+        unique_id=f"{entry_id}-trackers",
+        subentry_id=tracker_id,
+    )
+    service_subentry = ConfigSubentry(
+        data=MappingProxyType({"group_key": TRACKER_SUBENTRY_KEY}),
+        subentry_type=SUBENTRY_TYPE_SERVICE,
+        title="Service",
+        unique_id=f"{entry_id}-service",
+        subentry_id=service_id,
+    )
+
+    # The service twin is inserted last on purpose: keyed by the stored value
+    # it would be the surviving writer for ``core_tracking``.
+    entry = make_config_entry(
+        entry_id=entry_id,
+        title="Google Find My",
+        subentries={
+            tracker_subentry.subentry_id: tracker_subentry,
+            service_subentry.subentry_id: service_subentry,
+        },
+    )
+
+    hass_stub = SimpleNamespace(
+        loop=SimpleNamespace(call_soon_threadsafe=lambda *args, **kwargs: None),
+        data={DOMAIN: {}},
+    )
+    coordinator = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
+    coordinator.hass = hass_stub  # type: ignore[assignment]
+    coordinator.config_entry = entry  # type: ignore[attr-defined]
+    entry.runtime_data = SimpleNamespace(coordinator=coordinator)
+    coordinator.data = [{"id": "device-1", "name": "Tracker One"}]
+    coordinator._enabled_poll_device_ids = {"device-1"}
+    coordinator.allow_history_fallback = False
+    coordinator.device_poll_delay = 30
+    coordinator.min_poll_interval = 60
+    coordinator.location_poll_interval = 120
+    coordinator._subentry_metadata = {}
+    coordinator._subentry_snapshots = {}
+    coordinator._feature_to_subentry = {}
+    coordinator._default_subentry_key_value = None
+    coordinator._subentry_manager = _ManagerStub()
+    coordinator._pending_subentry_repair = None
+    coordinator._skip_repair_during_reload_refresh = False
+    coordinator._reload_repair_skip_pending_release = False
+    coordinator._warned_bad_identifier_devices = set()
+    coordinator._diag = SimpleNamespace(
+        add_warning=lambda **kwargs: None,
+        remove_warning=lambda *args, **kwargs: None,
+    )
+
+    coordinator._refresh_subentry_index(skip_repair=True)
+
+    tracker_meta = coordinator.get_subentry_metadata(key=TRACKER_SUBENTRY_KEY)
+    assert tracker_meta is not None
+    assert tracker_meta.config_subentry_id == tracker_id, (
+        "the tracker key must still describe the tracker subentry, not the "
+        "service twin that stored the same key"
+    )
+    assert tracker_meta.visible_device_ids == ("device-1",)
+
+    service_meta = coordinator.get_subentry_metadata(key=SERVICE_SUBENTRY_KEY)
+    assert service_meta is not None
+    assert service_meta.config_subentry_id == service_id, (
+        "the service key must describe the real service subentry rather than a "
+        "synthesised placeholder"
+    )
+    assert service_meta.visible_device_ids == ()
+
+    manager_stub = coordinator._subentry_manager
+    assert isinstance(manager_stub, _ManagerStub)
+    assert manager_stub.calls == [(TRACKER_SUBENTRY_KEY, ("device-1",))]
+
+
+def _service_twin_coordinator(
+    entry_id: str,
+    *,
+    service_specs: list[tuple[str, str | None, list[str]]],
+    subentry_type: str = SUBENTRY_TYPE_SERVICE,
+) -> tuple[GoogleFindMyCoordinator, object, _ManagerStub]:
+    """Return a coordinator with one real tracker plus the given twins.
+
+    ``service_specs`` holds ``(subentry_id, stored_group_key, visible ids)``
+    for each twin; a ``stored_group_key`` of ``None`` stores no ``group_key``
+    at all, which is the shape that falls back to the subentry id.
+    ``subentry_type`` selects the twin's type, so the same fixture serves the
+    ``service`` and the ``hub`` axis.
+    """
+
+    tracker_subentry = ConfigSubentry(
+        data=MappingProxyType(
+            {
+                "group_key": TRACKER_SUBENTRY_KEY,
+                "visible_device_ids": ["device-1"],
+            }
+        ),
+        subentry_type=SUBENTRY_TYPE_TRACKER,
+        title="Trackers",
+        unique_id=f"{entry_id}-trackers",
+        subentry_id=_stable_subentry_id(entry_id, TRACKER_SUBENTRY_KEY),
+    )
+    subentries = {tracker_subentry.subentry_id: tracker_subentry}
+    for subentry_id, stored_key, visible in service_specs:
+        payload: dict[str, object] = {}
+        if stored_key is not None:
+            payload["group_key"] = stored_key
+        if visible:
+            payload["visible_device_ids"] = list(visible)
+        service_subentry = ConfigSubentry(
+            data=MappingProxyType(payload),
+            subentry_type=subentry_type,
+            title="Service",
+            unique_id=f"{entry_id}-{subentry_id}",
+            subentry_id=subentry_id,
+        )
+        subentries[service_subentry.subentry_id] = service_subentry
+
+    entry = make_config_entry(
+        entry_id=entry_id, title="Google Find My", subentries=subentries
+    )
+    hass_stub = SimpleNamespace(
+        loop=SimpleNamespace(call_soon_threadsafe=lambda *args, **kwargs: None),
+        data={DOMAIN: {}},
+    )
+    coordinator = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
+    coordinator.hass = hass_stub  # type: ignore[assignment]
+    coordinator.config_entry = entry  # type: ignore[attr-defined]
+    entry.runtime_data = SimpleNamespace(coordinator=coordinator)
+    coordinator.data = [
+        {"id": "device-1", "name": "Tracker One"},
+        {"id": "device-2", "name": "Tracker Two"},
+    ]
+    coordinator._enabled_poll_device_ids = {"device-1", "device-2"}
+    coordinator.allow_history_fallback = False
+    coordinator.device_poll_delay = 30
+    coordinator.min_poll_interval = 60
+    coordinator.location_poll_interval = 120
+    coordinator._subentry_metadata = {}
+    coordinator._subentry_snapshots = {}
+    coordinator._feature_to_subentry = {}
+    coordinator._default_subentry_key_value = None
+    manager_stub = _ManagerStub()
+    coordinator._subentry_manager = manager_stub
+    coordinator._pending_subentry_repair = None
+    coordinator._skip_repair_during_reload_refresh = False
+    coordinator._reload_repair_skip_pending_release = False
+    coordinator._warned_bad_identifier_devices = set()
+    coordinator._diag = SimpleNamespace(
+        add_warning=lambda **kwargs: None,
+        remove_warning=lambda *args, **kwargs: None,
+    )
+    return coordinator, entry, manager_stub
+
+
+def test_devices_parked_on_a_mis_keyed_service_twin_are_reclaimed() -> None:
+    """Folding the twin must not strand the ids it accumulated.
+
+    The twin only holds those ids because it attracts the write-back: the
+    remaining key-only resolver in ``config_flow.py``
+    (``_BaseSubentryFlow._resolve_existing``) steers it there without consulting
+    the type, while ``_accepts_device_assignment`` keeps it out of every choice
+    list a user can pick from. The feature sync no longer does so, and the ids
+    a release before that fix wrote are exactly the residue meant here.
+    Counting them as assigned would keep the unassigned-device merge away from
+    them while the service branch forces the visible ids to empty, leaving the
+    devices in no group at all.
+    """
+
+    entry_id = "entry-reclaim"
+    coordinator, _entry, _manager = _service_twin_coordinator(
+        entry_id,
+        service_specs=[("legacy-service-id", TRACKER_SUBENTRY_KEY, ["device-2"])],
+    )
+
+    coordinator._refresh_subentry_index(skip_repair=True)
+
+    visible_anywhere = {
+        device_id
+        for meta in coordinator._subentry_metadata.values()
+        for device_id in meta.visible_device_ids
+    }
+    assert "device-2" in visible_anywhere, (
+        "a device parked on the mis-keyed twin must not disappear from every "
+        "group when that twin is folded onto the service key"
+    )
+    tracker_meta = coordinator.get_subentry_metadata(key=TRACKER_SUBENTRY_KEY)
+    assert tracker_meta is not None
+    assert tracker_meta.visible_device_ids == ("device-1", "device-2")
+    service_meta = coordinator.get_subentry_metadata(key=SERVICE_SUBENTRY_KEY)
+    assert service_meta is not None
+    assert service_meta.visible_device_ids == ()
+
+
+def test_folding_a_mis_keyed_twin_writes_nothing_back_to_it() -> None:
+    """The reclaim is a re-homing, not a deletion.
+
+    Reading the drop as "the assignment is undone" is the misreading this test
+    exists to foreclose. That the device reappears under the tracker is pinned
+    by ``test_devices_parked_on_a_mis_keyed_service_twin_are_reclaimed``. What
+    that neighbour does not say is the half that makes the drop reversible:
+    the ids leave the *in-memory* view only, and the stored subentry keeps
+    them, so a later migration can still see what the twin held.
+
+    This is a forward guard rather than a regression test for a fixed bug.
+    Its reach was measured, not assumed, and it is narrower than "any write
+    added to ``_refresh_subentry_index``": the mutation it kills is one that
+    reaches the *stored* mapping, either by mutating the shared list in place
+    (``dict(...)`` copies shallowly) or by writing through the subentry
+    attribute. It does **not** kill a residue cleanup routed through
+    ``manager.update_visible_device_ids``; dropping the service-key ``continue``
+    in the manager loop leaves every test here green because the loop never
+    receives that key: ``manager_visible`` is only filled under
+    ``group_key != SERVICE_SUBENTRY_KEY`` (and under the tracker key), so the
+    ``continue`` guards a branch that no current caller reaches. A call that
+    *did* fire would additionally be invisible here, since the manager is a
+    recorder in this fixture. That channel is guarded on the production side
+    instead, by the type check in ``update_visible_device_ids`` itself.
+
+    Only the ``service`` type is exercised. The fold treats both non-device
+    types alike, and the ``hub`` axis is covered by
+    ``test_a_hub_typed_subentry_never_bears_devices`` (which asserts against
+    the manager calls, not against storage).
+    """
+
+    entry_id = "entry-nowrite"
+    twin_id = "legacy-twin-id"
+    coordinator, entry, _manager = _service_twin_coordinator(
+        entry_id,
+        service_specs=[(twin_id, TRACKER_SUBENTRY_KEY, ["device-2"])],
+        subentry_type=SUBENTRY_TYPE_SERVICE,
+    )
+
+    coordinator._refresh_subentry_index(skip_repair=True)
+
+    twin = entry.subentries[twin_id]
+    assert list(twin.data.get("visible_device_ids") or []) == ["device-2"], (
+        "the drop works on the in-memory copy; the stored subentry keeps its ids"
+    )
+
+
+@pytest.mark.parametrize("canonical_first", [True, False])
+def test_the_canonically_keyed_service_subentry_wins_regardless_of_order(
+    canonical_first: bool,
+) -> None:
+    """Two service-typed subentries fold onto one key, so the winner is fixed.
+
+    The repair path creates a canonically keyed service subentry while a
+    mis-keyed twin is still on disk. Without a tie-break the surviving
+    description would depend on the order ``entry.subentries`` yields, and the
+    service device could be bound to the leftover.
+    """
+
+    entry_id = "entry-two-services"
+    canonical_id = f"{entry_id}-real-service"
+    legacy_id = f"{entry_id}-legacy-service"
+    specs = [
+        (canonical_id, SERVICE_SUBENTRY_KEY, []),
+        (legacy_id, "owner@example.com", []),
+    ]
+    if not canonical_first:
+        specs.reverse()
+
+    coordinator, _entry, _manager = _service_twin_coordinator(
+        entry_id, service_specs=specs
+    )
+
+    coordinator._refresh_subentry_index(skip_repair=True)
+
+    service_meta = coordinator.get_subentry_metadata(key=SERVICE_SUBENTRY_KEY)
+    assert service_meta is not None
+    assert service_meta.config_subentry_id == canonical_id, (
+        "the subentry that already stored the canonical key must describe the "
+        "service group, whichever order the entry yields"
+    )
+
+
+@pytest.mark.parametrize(
+    "stored_key", [TRACKER_SUBENTRY_KEY, "owner@example.com", None]
+)
+@pytest.mark.parametrize("hub_first", [True, False])
+def test_a_hub_typed_subentry_never_bears_devices(
+    stored_key: str | None, hub_first: bool
+) -> None:
+    """A ``hub``-typed subentry must not hold or attract device ids.
+
+    ``HubSubentryFlowHandler`` sets ``_group_key = SERVICE_SUBENTRY_KEY`` and
+    the service feature platforms, so a hub *is* the service group under a
+    second entry point, and the options flow already refuses it as an
+    assignment target (``_NON_DEVICE_SUBENTRY_TYPES``). The runtime index used
+    to fold only ``service``, so a hub left over from an early migration kept a
+    device-bearing slot and had visible ids written back onto it.
+
+    The three key shapes take different routes, and the damage differs with
+    them: ``core_tracking`` collides with the real tracker and *additionally*
+    overwrote its metadata, while an email-style key and a missing key (which
+    falls back to the subentry id) open a group of their own and only attracted
+    the write-back. The order axis therefore carries weight for
+    ``core_tracking`` alone; for the other two shapes both orders exercise the
+    same path, and they are parametrised for uniformity, not as evidence.
+    """
+
+    entry_id = f"entry-hub-{stored_key or 'nokey'}-{int(hub_first)}"
+    hub_id = f"{entry_id}-legacy-hub"
+    coordinator, entry, manager = _service_twin_coordinator(
+        entry_id,
+        service_specs=[(hub_id, stored_key, ["device-2"])],
+        subentry_type=SUBENTRY_TYPE_HUB,
+    )
+    if hub_first:
+        # ``entry.subentries`` yields insertion order, and the collapse used to
+        # depend on it: rebuild the mapping with the hub in front.
+        subentries = entry.subentries
+        reordered = {hub_id: subentries[hub_id]}
+        reordered.update(
+            {key: value for key, value in subentries.items() if key != hub_id}
+        )
+        subentries.clear()
+        subentries.update(reordered)
+
+    coordinator._refresh_subentry_index(skip_repair=True)
+
+    tracker_meta = coordinator.get_subentry_metadata(key=TRACKER_SUBENTRY_KEY)
+    assert tracker_meta is not None
+    assert tracker_meta.config_subentry_id == _stable_subentry_id(
+        entry_id, TRACKER_SUBENTRY_KEY
+    ), "the tracker key must keep describing the real tracker, not the hub"
+
+    for key, ids in manager.calls:
+        if not ids:
+            continue
+        owner = coordinator.get_subentry_metadata(key=key)
+        assert getattr(owner, "config_subentry_id", None) != hub_id, (
+            f"device ids were written back through key {key!r}, which describes "
+            "the hub subentry"
+        )
+
+    assert "device-2" in tracker_meta.visible_device_ids, (
+        "and the ids the hub had accumulated must be reclaimed by the tracker "
+        "rather than stranded in no group at all"
+    )
+
+
+@pytest.mark.parametrize("hub_first", [True, False])
+def test_a_literal_service_subentry_outranks_a_hub_storing_the_same_key(
+    hub_first: bool,
+) -> None:
+    """A preserved hub must not take the service slot from the real service.
+
+    ``HubSubentryFlowHandler._group_key`` is ``SERVICE_SUBENTRY_KEY``, so a hub
+    stores that key *literally*, not by folding onto it. The exact-key tie-break
+    below the fold therefore does not separate the two, and whichever the entry
+    yielded last used to describe the service group. That is not cosmetic: the
+    registry coordinator heals the service device linkage from this metadata,
+    while the entity platforms select on ``subentry_type == "service"``
+    literally (``known_ids_for_subentry_type``), so a hub in the slot rebinds
+    the device away from the subentry the platforms actually use.
+
+    The shape is one the config flow now deliberately preserves rather than
+    deletes: ``_async_cleanup_stale_subentries`` skips a hub that lost the
+    service slot instead of sweeping it, which is what makes the collision
+    reachable at runtime in the first place. Both iteration orders are asserted
+    because the defect was order-dependent.
+    """
+
+    entry_id = f"entry-service-plus-hub-{int(hub_first)}"
+    service_id = f"{entry_id}-real-service"
+    hub_id = f"{entry_id}-preserved-hub"
+    coordinator, entry, _manager = _service_twin_coordinator(
+        entry_id, service_specs=[(service_id, SERVICE_SUBENTRY_KEY, [])]
+    )
+    hub_subentry = ConfigSubentry(
+        # The hub carries ids on purpose: this is the one shape
+        # ``test_a_hub_typed_subentry_never_bears_devices`` cannot cover,
+        # because all of its ``stored_key`` values *fold* (and folding drops
+        # the ids so the merge reclaims them), whereas the canonical key does
+        # not fold. What happens to them is asserted below.
+        data=MappingProxyType(
+            {
+                "group_key": SERVICE_SUBENTRY_KEY,
+                "visible_device_ids": ["device-2"],
+            }
+        ),
+        subentry_type=SUBENTRY_TYPE_HUB,
+        title="Google Find Hub Service",
+        unique_id=f"{entry_id}-hub",
+        subentry_id=hub_id,
+    )
+
+    # ``entry.subentries`` yields insertion order; rebuild it so both orders
+    # are exercised, mirroring the neighbouring hub test.
+    subentries = entry.subentries
+    ordered: dict[str, ConfigSubentry] = {}
+    if hub_first:
+        ordered[hub_id] = hub_subentry
+    ordered.update(subentries)
+    if not hub_first:
+        ordered[hub_id] = hub_subentry
+    subentries.clear()
+    subentries.update(ordered)
+
+    coordinator._refresh_subentry_index(skip_repair=True)
+
+    service_meta = coordinator.get_subentry_metadata(key=SERVICE_SUBENTRY_KEY)
+    assert service_meta is not None
+    assert service_meta.config_subentry_id == service_id, (
+        "the subentry whose type literally owns the service key must describe "
+        "the service group, whichever order the entry yields; a hub merely "
+        "shares the key"
+    )
+
+    # The loser's ids are a named limit, not an assertion of correctness, and
+    # this assertion does *not* discriminate the rank: it holds whichever
+    # subentry wins the slot (measured, by neutralising the owner field). It
+    # falls only for a fold mutation, which already kills
+    # ``test_a_device_moved_to_the_service_subentry_is_left_alone``. It is kept
+    # anyway, at the site where the shape is constructed, because that test
+    # constructs a different one and nothing else records here that the ids
+    # reach neither group: they count into ``stored_assigned_ids``, so the
+    # unassigned-device merge treats them as already assigned, while the service
+    # branch keeps the metadata empty. Measured identical at ``bf3a36aa``, so
+    # the rank neither causes nor fixes it; only *which* subentry holds the slot
+    # changed. Closing it in ``PLAN_GFMY_ALIAS_TYPE_AXIS`` has to come past
+    # here.
+    tracker_meta = coordinator.get_subentry_metadata(key=TRACKER_SUBENTRY_KEY)
+    assert tracker_meta is not None
+    assert "device-2" not in tracker_meta.visible_device_ids, (
+        "ids stored on the *canonical* service key are not reclaimed, unlike "
+        "the mis-keyed ones the fold drops; changing that is a decision of its "
+        "own, because it cannot be told apart from a move the user made"
+    )
+
+
+@pytest.mark.parametrize("higher_id_first", [True, False])
+def test_two_equally_ranked_service_subentries_resolve_by_identifier(
+    higher_id_first: bool,
+) -> None:
+    """Among equals the identifier decides, so the slot stops depending on order.
+
+    Two ``service``-typed subentries can both store the canonical key -- a
+    second repair pass is enough -- and then neither the exact-key nor the
+    literal-owner component of the rank separates them. Without the third
+    component the surviving description would again be whichever the entry
+    happened to yield last, which is the very defect the rank replaces.
+
+    The identifier's *value* is arbitrary; only its stability matters, so this
+    pins that both orders agree, not which of the two is preferable. The
+    fixture deliberately names the lower identifier ``a-`` and the higher
+    ``z-`` so the expectation cannot be read out of the insertion order.
+
+    Only the ``True`` case carries evidence, and saying so keeps the
+    parametrisation from overstating itself: with the lower identifier
+    inserted first it already holds the slot as the incumbent, so
+    neutralising the identifier field leaves that case green. The ``False``
+    case is coverage of the symmetric path, not a second measurement.
+    """
+
+    entry_id = f"entry-two-equal-services-{int(higher_id_first)}"
+    lower_id = f"{entry_id}-a-first-repair"
+    higher_id = f"{entry_id}-z-second-repair"
+    specs = [
+        (lower_id, SERVICE_SUBENTRY_KEY, []),
+        (higher_id, SERVICE_SUBENTRY_KEY, []),
+    ]
+    if higher_id_first:
+        specs.reverse()
+
+    coordinator, _entry, _manager = _service_twin_coordinator(
+        entry_id, service_specs=specs
+    )
+
+    coordinator._refresh_subentry_index(skip_repair=True)
+
+    service_meta = coordinator.get_subentry_metadata(key=SERVICE_SUBENTRY_KEY)
+    assert service_meta is not None
+    assert service_meta.config_subentry_id == lower_id, (
+        "two candidates of equal rank must resolve to the same subentry in "
+        "either order; the lowest identifier is the arbitrary but stable choice"
+    )
+
+
+@pytest.mark.parametrize("identifier_less_first", [True, False])
+def test_a_subentry_without_a_usable_identifier_loses_the_service_slot(
+    identifier_less_first: bool,
+) -> None:
+    """A missing identifier must rank last, not first.
+
+    The identifier the rank sees is the *sanitised and provisional-filtered*
+    one, not ``subentry.subentry_id``: an empty or non-string id becomes
+    ``None`` (``sanitize_subentry_identifier``), and so does a
+    ``-provisional`` id that does not match the entry's stable one
+    (``filter_provisional_identifier``). Ordering such a candidate by
+    ``subentry_id or ""`` would sort it *below* every real identifier, so it
+    would win the slot deterministically. Measured, the resulting metadata does
+    not carry ``None``: the stable-id block near the end of
+    ``_refresh_subentry_index`` substitutes a synthesised
+    ``{entry_id}-service-subentry`` placeholder. That substitution is what makes
+    the defect quiet -- the group ends up described by a stand-in while the real
+    subentry, the one the registry bindings hang off, is passed over -- and it
+    is worse than the order-dependence the rank replaces, because it is
+    deterministic rather than occasional.
+
+    Only the missing-identifier half is asserted here. The provisional half
+    reaches the same code path through the same variable, and no production
+    site in ``custom_components/`` was found that creates a ``-provisional``
+    subentry id, so it is deliberately left unpinned rather than pinned
+    against a shape that may not exist.
+    """
+
+    entry_id = f"entry-idless-service-{int(identifier_less_first)}"
+    real_id = f"{entry_id}-real-service"
+    specs = [
+        (real_id, SERVICE_SUBENTRY_KEY, []),
+        ("   ", SERVICE_SUBENTRY_KEY, []),
+    ]
+    if identifier_less_first:
+        specs.reverse()
+
+    coordinator, _entry, _manager = _service_twin_coordinator(
+        entry_id, service_specs=specs
+    )
+
+    coordinator._refresh_subentry_index(skip_repair=True)
+
+    service_meta = coordinator.get_subentry_metadata(key=SERVICE_SUBENTRY_KEY)
+    assert service_meta is not None
+    assert service_meta.config_subentry_id == real_id, (
+        "a subentry whose identifier sanitises to None must rank last; "
+        "otherwise it takes the slot and the group loses its identifier"
+    )
+
+
+def test_the_literal_owner_table_is_one_object_shared_by_both_ranking_sides() -> None:
+    """Pin the shared owner table that the two ranking sides depend on.
+
+    The reading side's owner field reads
+    ``LITERAL_CORE_KEY_OWNER.get(SERVICE_SUBENTRY_KEY)``, and for the service
+    key that lookup is *value-identical* to the literal ``"service"``: the key
+    constant and the type constant happen to carry the same string. A behaviour
+    test therefore cannot tell the shared table apart from a hard-coded literal,
+    which is exactly what makes the table's purpose untestable through the
+    index alone. This pins the two properties the move to ``const.py`` was made
+    for: both mappings are the *same object*, and each key maps to the type
+    that literally owns it. The tracker row is the one that carries real
+    information, since ``TRACKER_SUBENTRY_KEY`` and ``SUBENTRY_TYPE_TRACKER``
+    differ in value.
+
+    What this does *not* pin, said plainly rather than left to be discovered:
+    replacing the lookup at the ranking site with the literal ``"service"``
+    still passes, because the two constants are value-equal today. This test
+    is the tripwire for the day they stop being, not a guard against a
+    hard-coded literal. Killing mutations: making the flow hold a private
+    ``dict`` copy, and mapping the tracker key to the wrong owner.
+    """
+
+    from custom_components.googlefindmy import config_flow as _config_flow
+    from custom_components.googlefindmy import const as _const
+    from custom_components.googlefindmy.coordinator import subentry as _subentry
+
+    assert _config_flow._LITERAL_CORE_KEY_OWNER is _const.LITERAL_CORE_KEY_OWNER, (
+        "the config flow must rank against the shared table, not a private copy"
+    )
+    assert _subentry.LITERAL_CORE_KEY_OWNER is _const.LITERAL_CORE_KEY_OWNER, (
+        "the runtime index must rank against the shared table, not a private copy"
+    )
+    assert _const.LITERAL_CORE_KEY_OWNER[SERVICE_SUBENTRY_KEY] == SUBENTRY_TYPE_SERVICE
+    assert _const.LITERAL_CORE_KEY_OWNER[TRACKER_SUBENTRY_KEY] == SUBENTRY_TYPE_TRACKER

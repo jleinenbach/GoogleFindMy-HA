@@ -35,6 +35,7 @@ from custom_components.googlefindmy.const import (
     OPT_SEMANTIC_LOCATIONS,
     SERVICE_FEATURE_PLATFORMS,
     SERVICE_SUBENTRY_KEY,
+    SUBENTRY_TYPE_HUB,
     SUBENTRY_TYPE_SERVICE,
     SUBENTRY_TYPE_TRACKER,
     TRACKER_FEATURE_PLATFORMS,
@@ -58,6 +59,98 @@ def _stable_subentry_id(entry_id: str, key: str) -> str:
     """Return a deterministic config_subentry_id for the given entry/key pair."""
 
     return f"{entry_id}-{key}-subentry"
+
+
+def _subentry_store(entry: SimpleNamespace) -> dict[str, ConfigSubentry]:
+    """Return the mutable subentry store behind ``entry.subentries``.
+
+    Home Assistant hands ``ConfigEntry.subentries`` out as a
+    ``MappingProxyType``; ``tests/AGENTS.md`` ("Read-only mapping attributes on
+    entry doubles") therefore asks a double that models the attribute to expose
+    the read-only view and keep the mutable store private. Doubles built by
+    :func:`_entry_with_subentries` do exactly that and carry the store on
+    ``_subentry_store``; the older doubles in this module still hand out a bare
+    ``dict``, which is its own store. Writing through this helper keeps both
+    shapes working, so the read-only view can be adopted per test instead of in
+    one sweep over the file.
+    """
+
+    store = getattr(entry, "_subentry_store", None)
+    if store is not None:
+        return cast(dict[str, ConfigSubentry], store)
+    return cast(dict[str, ConfigSubentry], entry.subentries)
+
+
+def _entry_with_subentries(
+    *subentries: ConfigSubentry, entry_id: str = "entry-1"
+) -> SimpleNamespace:
+    """Return an entry double whose ``subentries`` mirrors the core's shape.
+
+    The read-only view is not cosmetic here: a production guard narrowed to
+    ``dict`` is true for a plain-``dict`` double and false for every real entry,
+    so the double would hide exactly the class of defect this module tests for.
+    """
+
+    store = {subentry.subentry_id: subentry for subentry in subentries}
+    entry = make_config_entry(
+        entry_id=entry_id,
+        title="Find My",
+        subentries=MappingProxyType(store),
+        runtime_data=SimpleNamespace(),
+    )
+    entry._subentry_store = store
+    return entry
+
+
+def _legacy_twin(
+    entry_id: str,
+    *,
+    subentry_type: str,
+    group_key: str,
+    visible_device_ids: tuple[str, ...] = (),
+    unique_id: str | None = None,
+) -> ConfigSubentry:
+    """Return a subentry whose stored ``group_key`` diverges from its type."""
+
+    data: dict[str, Any] = {"group_key": group_key, "feature_flags": {}}
+    if visible_device_ids:
+        data["visible_device_ids"] = list(visible_device_ids)
+    return ConfigSubentry(
+        data=MappingProxyType(data),
+        subentry_type=subentry_type,
+        title="Legacy group",
+        unique_id=unique_id if unique_id is not None else f"{entry_id}-{group_key}",
+        subentry_id=_stable_subentry_id(entry_id, f"{subentry_type}-{group_key}"),
+    )
+
+
+async def _run_sync(
+    flow: config_flow.ConfigFlow,
+    entry: SimpleNamespace,
+    context_map: dict[str, str | None],
+) -> None:
+    """Drive ``_async_sync_feature_subentries`` with the module's usual payload."""
+
+    await flow._async_sync_feature_subentries(  # type: ignore[attr-defined]
+        entry,
+        options_payload={
+            OPT_MAP_VIEW_TOKEN_EXPIRATION: False,
+            OPT_GOOGLE_HOME_FILTER_ENABLED: False,
+            OPT_ENABLE_STATS_ENTITIES: True,
+        },
+        defaults={
+            OPT_GOOGLE_HOME_FILTER_ENABLED: DEFAULT_GOOGLE_HOME_FILTER_ENABLED,
+            OPT_ENABLE_STATS_ENTITIES: DEFAULT_ENABLE_STATS_ENTITIES,
+        },
+        context_map=context_map,
+    )
+
+
+def _stored_visible(subentry: ConfigSubentry) -> tuple[str, ...]:
+    """Return the ``visible_device_ids`` a subentry ended up carrying."""
+
+    raw = dict(subentry.data).get("visible_device_ids") or ()
+    return tuple(raw)
 
 
 class _ConfigEntriesManagerStub(ConfigEntriesDomainUniqueIdLookupMixin):
@@ -143,7 +236,7 @@ class _ConfigEntriesManagerStub(ConfigEntriesDomainUniqueIdLookupMixin):
                 if existing.unique_id == subentry.unique_id:
                     raise data_entry_flow.AbortFlow("already_configured")
 
-        entry.subentries[subentry.subentry_id] = subentry
+        _subentry_store(entry)[subentry.subentry_id] = subentry
         self.created.append(
             {
                 "data": dict(subentry.data),
@@ -196,7 +289,7 @@ class _ConfigEntriesManagerStub(ConfigEntriesDomainUniqueIdLookupMixin):
         self, entry: SimpleNamespace, *, subentry_id: str
     ) -> bool:
         assert entry is self._entry
-        removed = self._entry.subentries.pop(subentry_id, None)
+        removed = _subentry_store(self._entry).pop(subentry_id, None)
         if removed is None:
             return False
         self.removed.append(subentry_id)
@@ -1010,4 +1103,794 @@ async def test_soft_migrate_data_to_options_copies_semantic_locations() -> None:
     assert entry.options[OPT_SEMANTIC_LOCATIONS] == semantic_locations
     assert hass.config_entries.updated[-1]["options"][OPT_SEMANTIC_LOCATIONS] == (
         semantic_locations
+    )
+
+
+def _context_map_for(
+    flow: config_flow.ConfigFlow, entry: SimpleNamespace, path: str
+) -> dict[str, str | None]:
+    """Return the context map the named entry path hands to the sync helper.
+
+    The two paths differ in what the resolver starts from, which is why every
+    assertion below runs on both: ``migration`` leaves the map empty
+    (``_ensure_subentry_context``), so only the fallback scan can match, while
+    ``reconfigure`` pre-seeds it (``_reset_reconfigure_subentry_context``), so
+    the first branch decides.
+    """
+
+    if path == "reconfigure":
+        return cast(
+            dict[str, "str | None"],
+            flow._reset_reconfigure_subentry_context(entry),  # type: ignore[attr-defined]
+        )
+    return cast(
+        dict[str, "str | None"],
+        flow._ensure_subentry_context(),  # type: ignore[attr-defined]
+    )
+
+
+def _subentry_of_type(
+    entry: SimpleNamespace, subentry_type: str, *, exclude: ConfigSubentry | None = None
+) -> ConfigSubentry | None:
+    """Return the first subentry of ``subentry_type``, ignoring ``exclude``."""
+
+    for candidate in entry.subentries.values():
+        if candidate is exclude:
+            continue
+        if candidate.subentry_type == subentry_type:
+            return candidate
+    return None
+
+
+def _double_writes(manager: Any) -> list[str]:
+    """Return subentry ids written twice under diverging group keys.
+
+    This is the reconfigure pathology in its observable form: the seeder can
+    register one object under both core keys, after which the service branch
+    writes it with the id-less service payload and the tracker branch writes
+    the very same object again, this time carrying devices.
+    """
+
+    seen: dict[str, set[str]] = {}
+    for record in manager.updated:
+        keys = seen.setdefault(record["config_subentry_id"], set())
+        keys.add(str(record["data"].get("group_key")))
+    return [subentry_id for subentry_id, keys in seen.items() if len(keys) > 1]
+
+
+@pytest.mark.parametrize("twin_type", [SUBENTRY_TYPE_SERVICE, SUBENTRY_TYPE_HUB])
+@pytest.mark.parametrize("path", ["migration", "reconfigure"])
+@pytest.mark.asyncio
+async def test_a_non_device_twin_storing_the_tracker_key_never_receives_devices(
+    twin_type: str, path: str
+) -> None:
+    """A ``service``/``hub`` twin storing ``core_tracking`` is not the tracker group.
+
+    ``NON_DEVICE_SUBENTRY_TYPES`` is the shared axis the offering side and the
+    reading side already enforce. Resolving by stored key alone let this twin
+    answer for the tracker group, and the ``if not tracker_visible`` fallback
+    then filled a previously clean twin with every probed device id.
+    """
+
+    entry = _entry_with_subentries()
+    twin = _legacy_twin(
+        entry.entry_id, subentry_type=twin_type, group_key=TRACKER_SUBENTRY_KEY
+    )
+    _subentry_store(entry)[twin.subentry_id] = twin
+
+    flow = _build_flow(entry)
+    await _run_sync(flow, entry, _context_map_for(flow, entry, path))
+
+    assert _stored_visible(twin) == (), (
+        f"a {twin_type}-typed subentry must never end up holding device ids"
+    )
+    assert dict(twin.data)["group_key"] == SERVICE_SUBENTRY_KEY, (
+        "the twin is folded onto the service key, mirroring the reading side"
+    )
+    tracker = _subentry_of_type(entry, SUBENTRY_TYPE_TRACKER, exclude=twin)
+    assert tracker is not None, "the tracker group must exist in its own right"
+    assert _stored_visible(tracker) == ("dev-1",), (
+        "the probed devices belong to the tracker group"
+    )
+    manager = flow.hass.config_entries  # type: ignore[attr-defined]
+    assert _double_writes(manager) == [], (
+        "no subentry may be written twice under diverging group keys"
+    )
+
+
+@pytest.mark.parametrize("path", ["migration", "reconfigure"])
+@pytest.mark.asyncio
+async def test_a_tracker_typed_subentry_storing_the_service_key_keeps_its_assignment(
+    path: str,
+) -> None:
+    """The mirror direction loses data instead of adding it, so it is pinned too.
+
+    A ``tracker``-typed subentry that stores the *service* key used to be
+    resolved as the service group and overwritten with the id-less service
+    payload, which dropped the assignment it held.
+
+    The seeded id sits deliberately **outside** the probe set
+    (``_available_devices`` holds only ``dev-1``). Seeding ``dev-1`` would make
+    the assertion pass under a resolver that empties the subentry and refills it
+    from the probe, which is precisely the failure mode this pins against; only
+    an id the probe cannot reproduce tells "kept" apart from "restored".
+    """
+
+    entry = _entry_with_subentries()
+    twin = _legacy_twin(
+        entry.entry_id,
+        subentry_type=SUBENTRY_TYPE_TRACKER,
+        group_key=SERVICE_SUBENTRY_KEY,
+        visible_device_ids=("dev-legacy",),
+    )
+    _subentry_store(entry)[twin.subentry_id] = twin
+
+    flow = _build_flow(entry)
+    await _run_sync(flow, entry, _context_map_for(flow, entry, path))
+
+    assert _stored_visible(twin) == ("dev-legacy",), (
+        "a tracker-typed subentry must not lose its assignment to key drift"
+    )
+    assert dict(twin.data)["group_key"] == TRACKER_SUBENTRY_KEY, (
+        "the twin answers for the tracker group, which is what its type says"
+    )
+    service = _subentry_of_type(entry, SUBENTRY_TYPE_SERVICE, exclude=twin)
+    assert service is not None, "the service group must exist in its own right"
+    assert _stored_visible(service) == ()
+
+
+@pytest.mark.asyncio
+async def test_folding_a_twin_does_not_abort_on_the_unique_id_it_leaves_behind() -> (
+    None
+):
+    """The type axis turns an update into a create, and a create can collide.
+
+    With a real service subentry present, the exact stored key wins and the
+    ``hub`` twin is left alone -- keeping the ``{entry_id}-core_tracking``
+    unique id that the tracker group is about to be created under.
+    ``ConfigEntries.async_add_subentry`` raises ``AbortFlow`` on that
+    collision, and the reconfigure path has no ``try`` around the sync, so an
+    unhandled collision would trade a data defect for a dead flow.
+    """
+
+    entry = _entry_with_subentries()
+    service = ConfigSubentry(
+        data=MappingProxyType({"group_key": SERVICE_SUBENTRY_KEY, "feature_flags": {}}),
+        subentry_type=SUBENTRY_TYPE_SERVICE,
+        title="Google Find Hub Service",
+        unique_id=f"{entry.entry_id}-{SERVICE_SUBENTRY_KEY}",
+        subentry_id=_stable_subentry_id(entry.entry_id, SERVICE_SUBENTRY_KEY),
+    )
+    twin = _legacy_twin(
+        entry.entry_id,
+        subentry_type=SUBENTRY_TYPE_HUB,
+        group_key=TRACKER_SUBENTRY_KEY,
+    )
+    assert twin.unique_id == f"{entry.entry_id}-{TRACKER_SUBENTRY_KEY}", (
+        "the collision under test has to be the one the tracker create wants"
+    )
+    store = _subentry_store(entry)
+    store[service.subentry_id] = service
+    store[twin.subentry_id] = twin
+
+    flow = _build_flow(entry)
+    await _run_sync(flow, entry, _context_map_for(flow, entry, "migration"))
+
+    assert _stored_visible(twin) == (), "the hub twin still holds no devices"
+    tracker = _subentry_of_type(entry, SUBENTRY_TYPE_TRACKER)
+    assert tracker is not None, "the tracker group is created despite the collision"
+    assert tracker.unique_id == f"{entry.entry_id}-{TRACKER_SUBENTRY_KEY}", (
+        "the canonical id belongs to the canonical group: five sites outside "
+        "this flow reconcile against exactly that spelling"
+    )
+    assert twin.unique_id == f"{entry.entry_id}-{TRACKER_SUBENTRY_KEY}-legacy", (
+        "the legacy holder is the one displaced, and deterministically so"
+    )
+    assert _stored_visible(tracker) == ("dev-1",)
+
+
+@pytest.mark.asyncio
+async def test_a_left_alone_twin_is_not_swept_up_as_a_stale_core_group() -> None:
+    """The cleanup classified by stored key alone, which the type axis broke.
+
+    Before the sync resolver read ``subentry_type``, a mis-keyed twin was always
+    resolved by its stored key and therefore always ended up in ``context_map``,
+    which kept it out of the stale list by accident. Once a real service
+    subentry can win the exact-key match, the twin is left alone -- and
+    ``async_remove_subentry`` would clear its device and entity registry
+    bindings along with it.
+    """
+
+    entry = _entry_with_subentries()
+    service = ConfigSubentry(
+        data=MappingProxyType({"group_key": SERVICE_SUBENTRY_KEY, "feature_flags": {}}),
+        subentry_type=SUBENTRY_TYPE_SERVICE,
+        title="Google Find Hub Service",
+        unique_id=f"{entry.entry_id}-{SERVICE_SUBENTRY_KEY}",
+        subentry_id=_stable_subentry_id(entry.entry_id, SERVICE_SUBENTRY_KEY),
+    )
+    twin = _legacy_twin(
+        entry.entry_id,
+        subentry_type=SUBENTRY_TYPE_HUB,
+        group_key=TRACKER_SUBENTRY_KEY,
+    )
+    store = _subentry_store(entry)
+    store[service.subentry_id] = service
+    store[twin.subentry_id] = twin
+
+    flow = _build_flow(entry)
+    context_map = _context_map_for(flow, entry, "migration")
+    await _run_sync(flow, entry, context_map)
+    await flow._async_cleanup_stale_subentries(entry, context_map)  # type: ignore[attr-defined]
+
+    manager = flow.hass.config_entries  # type: ignore[attr-defined]
+    assert twin.subentry_id not in manager.removed, (
+        "a mis-keyed twin is not a leftover copy of a core group"
+    )
+    assert twin.subentry_id in entry.subentries
+
+
+@pytest.mark.asyncio
+async def test_a_hub_losing_the_service_slot_is_not_swept_up_either() -> None:
+    """The twin above is mis-keyed; this one stores the very key it loses.
+
+    A ``hub`` writes ``SERVICE_SUBENTRY_KEY`` by design
+    (``HubSubentryFlowHandler._group_key``), so beside a real service subentry
+    it is not mis-keyed at all -- and the literal-owner rank makes it the
+    *deterministic* loser of the resolver, where taking whichever came first
+    used to leave the outcome open. Classifying by stored key alone therefore
+    hands it to ``async_remove_subentry``, which clears its device and entity
+    registry bindings: the silent deletion this change exists to prevent, only
+    with the hub as the victim instead of the service group.
+
+    The rule the cleanup needs is not "does the type name a *different* core
+    key" but "does the type *literally own* the key it stores". Only the literal
+    owner can be a leftover copy of that core group; every other type sitting on
+    the key is a group of its own.
+    """
+
+    entry = _entry_with_subentries()
+    service = ConfigSubentry(
+        data=MappingProxyType({"group_key": SERVICE_SUBENTRY_KEY, "feature_flags": {}}),
+        subentry_type=SUBENTRY_TYPE_SERVICE,
+        title="Google Find Hub Service",
+        unique_id=f"{entry.entry_id}-{SERVICE_SUBENTRY_KEY}",
+        subentry_id=_stable_subentry_id(entry.entry_id, SERVICE_SUBENTRY_KEY),
+    )
+    hub = _legacy_twin(
+        entry.entry_id,
+        subentry_type=SUBENTRY_TYPE_HUB,
+        group_key=SERVICE_SUBENTRY_KEY,
+        unique_id=f"{entry.entry_id}-hub-legacy",
+    )
+    store = _subentry_store(entry)
+    store[service.subentry_id] = service
+    store[hub.subentry_id] = hub
+
+    flow = _build_flow(entry)
+    context_map = _context_map_for(flow, entry, "migration")
+    await _run_sync(flow, entry, context_map)
+
+    assert context_map.get(SERVICE_SUBENTRY_KEY) == service.subentry_id, (
+        "the premise is that the literal owner wins the service slot"
+    )
+
+    await flow._async_cleanup_stale_subentries(entry, context_map)  # type: ignore[attr-defined]
+
+    manager = flow.hass.config_entries  # type: ignore[attr-defined]
+    assert hub.subentry_id not in manager.removed, (
+        "a hub that lost the service slot is a group of its own, not a leftover"
+    )
+    assert hub.subentry_id in entry.subentries
+
+
+@pytest.mark.parametrize("path", ["migration", "reconfigure"])
+@pytest.mark.asyncio
+async def test_a_tracker_parked_on_the_service_key_is_not_swept_up(
+    path: str,
+) -> None:
+    """The third non-owner cell: a ``tracker`` sitting on ``SERVICE_SUBENTRY_KEY``.
+
+    The two tests above pin ``hub`` on either core key. This one pins the
+    remaining combination, and it needs a third subentry to be reachable at all:
+    beside a real ``service`` *alone*, the tracker-typed subentry is adopted
+    into the tracker slot and re-keyed to ``TRACKER_SUBENTRY_KEY``, so it never
+    reaches the cleanup on the service key. Only once a canonical
+    ``tracker``/``TRACKER_SUBENTRY_KEY`` sibling wins that slot does the parked
+    one stay behind on a core key it does not own.
+
+    What is asserted is the ownership guard, not an endorsement of the parked
+    state: the runtime index in ``coordinator/subentry.py`` still folds by
+    stored key, so such a subentry keeps being indexed under the service key
+    (see ``agents/config_flow/AGENTS.md``). That read side is untouched by this
+    change -- byte-for-byte identical to ``b75bea42`` apart from comments -- and
+    belongs to the alias/type axis. What changes here is only *reachability*:
+    ``b75bea42`` resolved the collision by deleting one of the three (which of
+    them depended on iteration order), taking its device and entity registry
+    bindings along; leaving it in place is recoverable, deleting it is not.
+    """
+
+    entry = _entry_with_subentries()
+    store = _subentry_store(entry)
+    service = ConfigSubentry(
+        data=MappingProxyType({"group_key": SERVICE_SUBENTRY_KEY, "feature_flags": {}}),
+        subentry_type=SUBENTRY_TYPE_SERVICE,
+        title="Google Find Hub Service",
+        unique_id=f"{entry.entry_id}-{SERVICE_SUBENTRY_KEY}",
+        subentry_id=_stable_subentry_id(entry.entry_id, SERVICE_SUBENTRY_KEY),
+    )
+    canonical_tracker = ConfigSubentry(
+        data=MappingProxyType({"group_key": TRACKER_SUBENTRY_KEY, "feature_flags": {}}),
+        subentry_type=SUBENTRY_TYPE_TRACKER,
+        title="Core tracking",
+        unique_id=f"{entry.entry_id}-{TRACKER_SUBENTRY_KEY}",
+        subentry_id=_stable_subentry_id(entry.entry_id, TRACKER_SUBENTRY_KEY),
+    )
+    parked = _legacy_twin(
+        entry.entry_id,
+        subentry_type=SUBENTRY_TYPE_TRACKER,
+        group_key=SERVICE_SUBENTRY_KEY,
+        visible_device_ids=("dev-parked",),
+        unique_id=f"{entry.entry_id}-tracker-parked",
+    )
+    for subentry in (service, canonical_tracker, parked):
+        store[subentry.subentry_id] = subentry
+
+    flow = _build_flow(entry)
+    context_map = _context_map_for(flow, entry, path)
+    await _run_sync(flow, entry, context_map)
+
+    assert context_map.get(SERVICE_SUBENTRY_KEY) == service.subentry_id, (
+        "the premise is that the literal owner wins the service slot"
+    )
+    assert context_map.get(TRACKER_SUBENTRY_KEY) == canonical_tracker.subentry_id, (
+        "and that the canonical sibling wins the tracker slot, "
+        "which is what leaves the parked one behind"
+    )
+
+    await flow._async_cleanup_stale_subentries(entry, context_map)  # type: ignore[attr-defined]
+
+    manager = flow.hass.config_entries  # type: ignore[attr-defined]
+    assert parked.subentry_id not in manager.removed, (
+        "a tracker on the service key is a group of its own, not a leftover copy "
+        "of the service group"
+    )
+    assert parked.subentry_id in entry.subentries
+    assert _stored_visible(parked) == ("dev-parked",), (
+        "and its device assignment survives with it"
+    )
+
+
+@pytest.mark.asyncio
+async def test_an_untyped_leftover_on_a_core_key_is_still_removed() -> None:
+    """The guard's exclusion of untyped subentries is a decision, so it is pinned.
+
+    ``_canonical_core_key_of`` treats a missing ``subentry_type`` as "the stored
+    key keeps deciding", which makes such a subentry a candidate copy of the
+    core group it stores rather than a group of its own. Sweeping stale legacy
+    copies is what this pass exists for, so the ownership guard deliberately
+    stops short of the untyped case.
+
+    How reachable that case is, is *not* asserted here, and the distinction
+    matters for what this test proves: ``ConfigSubentry.subentry_type`` is a
+    required keyword-only ``str`` in the installed core, so ``None`` is a shape
+    this module's mutable stub allows and the core's dataclass does not. The
+    branch is therefore defensive, and this test pins the guard's boundary, not
+    a migration path.
+
+    Unchanged from ``b75bea42``: one of two same-keyed siblings dies there too.
+    What the type axis changes is only *which* one.
+    """
+
+    entry = _entry_with_subentries()
+    store = _subentry_store(entry)
+    tracker = ConfigSubentry(
+        data=MappingProxyType({"group_key": TRACKER_SUBENTRY_KEY, "feature_flags": {}}),
+        subentry_type=SUBENTRY_TYPE_TRACKER,
+        title="Core tracking",
+        unique_id=f"{entry.entry_id}-{TRACKER_SUBENTRY_KEY}",
+        subentry_id=_stable_subentry_id(entry.entry_id, TRACKER_SUBENTRY_KEY),
+    )
+    untyped = ConfigSubentry(
+        data=MappingProxyType({"group_key": TRACKER_SUBENTRY_KEY, "feature_flags": {}}),
+        subentry_type=None,
+        title="Legacy core tracking",
+        unique_id=f"{entry.entry_id}-{TRACKER_SUBENTRY_KEY}-legacy",
+        subentry_id="sub-untyped-legacy",
+    )
+    store[tracker.subentry_id] = tracker
+    store[untyped.subentry_id] = untyped
+
+    flow = _build_flow(entry)
+    context_map = _context_map_for(flow, entry, "migration")
+    await _run_sync(flow, entry, context_map)
+
+    assert context_map.get(TRACKER_SUBENTRY_KEY) == tracker.subentry_id, (
+        "the premise is that the typed sibling wins the tracker slot"
+    )
+
+    await flow._async_cleanup_stale_subentries(entry, context_map)  # type: ignore[attr-defined]
+
+    manager = flow.hass.config_entries  # type: ignore[attr-defined]
+    assert untyped.subentry_id in manager.removed, (
+        "an untyped leftover on a core key is a stale copy, not a foreign group"
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_genuinely_orphaned_core_group_is_still_removed() -> None:
+    """The negative case above needs its positive counterpart, or it proves nothing.
+
+    A guard that only ever refuses is indistinguishable from a guard that
+    disabled the cleanup outright. This pins the direction the type axis must
+    *not* have broken: a leftover subentry that stores a core key, whose type
+    agrees with that key and which no longer appears in ``context_map``, is
+    still swept up.
+    """
+
+    entry = _entry_with_subentries()
+    store = _subentry_store(entry)
+    duplicates = [
+        ConfigSubentry(
+            data=MappingProxyType(
+                {"group_key": TRACKER_SUBENTRY_KEY, "feature_flags": {}}
+            ),
+            subentry_type=SUBENTRY_TYPE_TRACKER,
+            title=f"Core tracking {suffix}",
+            unique_id=f"{entry.entry_id}-{TRACKER_SUBENTRY_KEY}-{suffix}",
+            subentry_id=f"sub-core-{suffix}",
+        )
+        for suffix in ("a", "b")
+    ]
+    for duplicate in duplicates:
+        store[duplicate.subentry_id] = duplicate
+
+    flow = _build_flow(entry)
+    context_map = _context_map_for(flow, entry, "migration")
+    await _run_sync(flow, entry, context_map)
+
+    claimed = set(context_map.values())
+    orphans = [item for item in duplicates if item.subentry_id not in claimed]
+    assert len(orphans) == 1, (
+        "the premise is that the sync claims one of the two and orphans the other"
+    )
+
+    await flow._async_cleanup_stale_subentries(entry, context_map)  # type: ignore[attr-defined]
+
+    manager = flow.hass.config_entries  # type: ignore[attr-defined]
+    assert orphans[0].subentry_id in manager.removed, (
+        "a core-keyed leftover whose type agrees with its key is still stale"
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_legacy_tracker_group_on_its_own_key_is_left_alone() -> None:
+    """Several tracker groups with distinct keys are a supported shape.
+
+    ``coordinator/subentry.py`` states this and leaves tracker subentries on
+    their stored key. A first version of the type axis folded *every* tracker
+    onto ``TRACKER_SUBENTRY_KEY``, so this per-account group was resolved as the
+    core tracker group and had its key, title and identity overwritten: the axis
+    meant to prevent a data defect producing one, one field level up. Only a
+    tracker storing the *service* key is a genuine mis-key.
+
+    Pinned on the **migration** path only, and that limit is a measurement, not
+    an oversight. On the reconfigure path the same group is adopted at
+    ``b75bea42`` too, i.e. before this axis existed, because
+    ``ConfigEntrySubEntryManager`` keys every tracker-typed subentry under
+    ``TRACKER_SUBENTRY_KEY`` and the seeder receives it already renamed. That
+    fold is a separate defect with its own blast radius (runtime index, manager
+    adoption) and is tracked as ``PLAN_GFMY_ALIAS_TYPE_AXIS``. Parametrising
+    this test over both paths would assert a fix this change does not make.
+    """
+
+    path = "migration"
+
+    entry = _entry_with_subentries()
+    legacy = ConfigSubentry(
+        data=MappingProxyType(
+            {
+                "group_key": "owner@example.com",
+                "feature_flags": {},
+                "visible_device_ids": ["dev-legacy"],
+            }
+        ),
+        subentry_type=SUBENTRY_TYPE_TRACKER,
+        title="Buero Tracker",
+        unique_id=f"{entry.entry_id}-owner@example.com",
+        subentry_id=_stable_subentry_id(entry.entry_id, "legacy-account-group"),
+    )
+    _subentry_store(entry)[legacy.subentry_id] = legacy
+
+    flow = _build_flow(entry)
+    await _run_sync(flow, entry, _context_map_for(flow, entry, path))
+
+    assert dict(legacy.data)["group_key"] == "owner@example.com", (
+        "a tracker group on its own key is not the core tracking group"
+    )
+    assert legacy.title == "Buero Tracker", "its title is the user's, not the sync's"
+    assert _stored_visible(legacy) == ("dev-legacy",), (
+        "and it keeps the devices assigned to it"
+    )
+
+
+@pytest.mark.parametrize("order", [("hub", "svc"), ("svc", "hub")])
+@pytest.mark.asyncio
+async def test_the_canonical_service_group_survives_a_hub_claiming_its_key(
+    order: tuple[str, str],
+) -> None:
+    """A literal ``service`` type beats a ``hub`` that merely folds onto the key.
+
+    ``HubSubentryFlowHandler._group_key`` is ``SERVICE_SUBENTRY_KEY``, so this
+    module itself produces a ``hub`` storing the service key. With a real
+    ``service`` subentry beside it, both reach the exact-match exit. Taking
+    whichever came first made the outcome depend on ``entry.subentries``
+    iteration order, and in one of the two orders it turned the ``AbortFlow`` of
+    the previous commit into a silent ``async_remove_subentry`` of the canonical
+    service group, registry bindings included.
+
+    Both orders are pinned, because a single order would pass on the very
+    implementation that decides by insertion order.
+    """
+
+    entry = _entry_with_subentries()
+    store = _subentry_store(entry)
+    made = {
+        "hub": ConfigSubentry(
+            data=MappingProxyType(
+                {"group_key": SERVICE_SUBENTRY_KEY, "feature_flags": {}}
+            ),
+            subentry_type=SUBENTRY_TYPE_HUB,
+            title="My Hub",
+            unique_id=f"{entry.entry_id}-hub-custom",
+            subentry_id="sub-hub",
+        ),
+        "svc": ConfigSubentry(
+            data=MappingProxyType(
+                {"group_key": SERVICE_SUBENTRY_KEY, "feature_flags": {}}
+            ),
+            subentry_type=SUBENTRY_TYPE_SERVICE,
+            title="Google Find Hub Service",
+            unique_id=f"{entry.entry_id}-{SERVICE_SUBENTRY_KEY}",
+            subentry_id="sub-service",
+        ),
+    }
+    for name in order:
+        store[made[name].subentry_id] = made[name]
+
+    flow = _build_flow(entry)
+    context_map = _context_map_for(flow, entry, "reconfigure")
+    await _run_sync(flow, entry, context_map)
+    await flow._async_cleanup_stale_subentries(entry, context_map)  # type: ignore[attr-defined]
+
+    manager = flow.hass.config_entries  # type: ignore[attr-defined]
+    assert "sub-service" not in manager.removed, (
+        "the canonical service group must never be the one removed"
+    )
+    assert made["svc"].unique_id == f"{entry.entry_id}-{SERVICE_SUBENTRY_KEY}", (
+        "and it keeps the canonical identity, whatever the insert order"
+    )
+
+
+@pytest.mark.parametrize("order", [("legacy", "canonical"), ("canonical", "legacy")])
+@pytest.mark.asyncio
+async def test_a_seed_that_does_not_carry_the_key_yields_to_the_stored_match(
+    order: tuple[str, str],
+) -> None:
+    """A seeded subentry that answers for a key it does not carry must not win.
+
+    The reconfigure seed is resolved by ``ConfigEntrySubEntryManager``, which
+    folds *every* tracker-typed subentry onto ``TRACKER_SUBENTRY_KEY`` and has
+    no type axis, so it can name a legacy per-account group while the canonical
+    core group sits right beside it. That legacy group is in neither pool here:
+    it stores a foreign key and ``_canonical_core_key_of`` folds a tracker only
+    off the *service* key. Letting the seed outrank a pool that does not contain
+    it made the sync rewrite the legacy group onto the core key, displaced the
+    canonical group's identity through ``_claim_unique_id`` and then swept it,
+    device and entity registry bindings included -- where the previous commit
+    raised ``AbortFlow`` and left both groups intact.
+
+    Both orders are pinned because the defect only showed in one of them, and a
+    single order would pass on the implementation that decides by insertion
+    order.
+    """
+
+    entry = _entry_with_subentries()
+    store = _subentry_store(entry)
+    made = {
+        "legacy": ConfigSubentry(
+            data=MappingProxyType(
+                {
+                    "group_key": "owner@example.com",
+                    "feature_flags": {},
+                    "visible_device_ids": ["dev-legacy"],
+                }
+            ),
+            subentry_type=SUBENTRY_TYPE_TRACKER,
+            title="Buero Tracker",
+            unique_id=f"{entry.entry_id}-owner@example.com",
+            subentry_id="sub-aaa-legacy",
+        ),
+        "canonical": ConfigSubentry(
+            data=MappingProxyType(
+                {
+                    "group_key": TRACKER_SUBENTRY_KEY,
+                    "feature_flags": {},
+                    "visible_device_ids": ["dev-1"],
+                }
+            ),
+            subentry_type=SUBENTRY_TYPE_TRACKER,
+            title="Google Find My devices",
+            unique_id=f"{entry.entry_id}-{TRACKER_SUBENTRY_KEY}",
+            subentry_id="sub-zzz-canonical",
+        ),
+    }
+    for name in order:
+        store[made[name].subentry_id] = made[name]
+    store["sub-service"] = ConfigSubentry(
+        data=MappingProxyType({"group_key": SERVICE_SUBENTRY_KEY, "feature_flags": {}}),
+        subentry_type=SUBENTRY_TYPE_SERVICE,
+        title="Google Find Hub Service",
+        unique_id=f"{entry.entry_id}-{SERVICE_SUBENTRY_KEY}",
+        subentry_id="sub-service",
+    )
+
+    flow = _build_flow(entry)
+    context_map = _context_map_for(flow, entry, "reconfigure")
+    await _run_sync(flow, entry, context_map)
+    await flow._async_cleanup_stale_subentries(entry, context_map)  # type: ignore[attr-defined]
+
+    manager = flow.hass.config_entries  # type: ignore[attr-defined]
+    assert "sub-zzz-canonical" not in manager.removed, (
+        "the canonical core group must never be the one removed"
+    )
+    assert made["canonical"].unique_id == f"{entry.entry_id}-{TRACKER_SUBENTRY_KEY}", (
+        "it keeps the canonical identity the five reconciling sites build"
+    )
+    assert _stored_visible(made["canonical"]) == ("dev-1",), (
+        "and the devices assigned to it survive, whatever the insert order"
+    )
+    assert dict(made["legacy"].data)["group_key"] == "owner@example.com", (
+        "while the legacy group stays on its own key, unadopted"
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_seed_still_decides_between_candidates_of_equal_rank() -> None:
+    """Among equals the seeded subentry wins, and that is not decoration.
+
+    The seed lost its precedence *in front of* the pool because it can name a
+    subentry that does not carry the key at all. Inside the pool it still ranks,
+    and it has to: a map written by an earlier step of the same flow names the
+    group that step wrote, and dropping to the lowest ``subentry_id`` instead
+    would re-home the group between two steps of one flow -- the stability the
+    map exists for.
+
+    Two same-typed twins on the core key are equal under both other ranks, so
+    only the seed can decide, and the map deliberately names the *higher* id:
+    without the tie-break the arbitrary ``subentry_id`` order would answer, and
+    this assertion would pass on a rule that is not there.
+    """
+
+    entry = _entry_with_subentries()
+    store = _subentry_store(entry)
+    for subentry_id, unique_suffix in (
+        ("sub-aaa-twin", f"{TRACKER_SUBENTRY_KEY}-alt"),
+        ("sub-zzz-seeded", TRACKER_SUBENTRY_KEY),
+    ):
+        store[subentry_id] = ConfigSubentry(
+            data=MappingProxyType(
+                {"group_key": TRACKER_SUBENTRY_KEY, "feature_flags": {}}
+            ),
+            subentry_type=SUBENTRY_TYPE_TRACKER,
+            title="Google Find My devices",
+            unique_id=f"{entry.entry_id}-{unique_suffix}",
+            subentry_id=subentry_id,
+        )
+
+    flow = _build_flow(entry)
+    context_map: dict[str, str | None] = {
+        TRACKER_SUBENTRY_KEY: "sub-zzz-seeded",
+        SERVICE_SUBENTRY_KEY: None,
+    }
+    await _run_sync(flow, entry, context_map)
+
+    assert context_map[TRACKER_SUBENTRY_KEY] == "sub-zzz-seeded", (
+        "the seeded twin keeps the slot, not the lexicographically first one"
+    )
+
+
+@pytest.mark.asyncio
+async def test_an_exact_stored_key_match_beats_a_folded_literal_owner() -> None:
+    """Exactness outranks the literal-owner rank, and that order is deliberate.
+
+    The two rules can disagree: a ``hub`` storing the service key is an exact
+    match but not the literal owner, while a ``service``-typed subentry on an
+    email-style key is the literal owner but only folds onto it. Ranking the
+    literal owner first would rewrite the key, title and identity of a stored
+    subentry nobody asked to change, which is the very cost the exact-match
+    preference exists to avoid. The pool is therefore ``exact or folded``, not
+    ``exact + folded``, and this test is what keeps that from being decoration.
+    """
+
+    entry = _entry_with_subentries()
+    store = _subentry_store(entry)
+    exact_hub = ConfigSubentry(
+        data=MappingProxyType({"group_key": SERVICE_SUBENTRY_KEY, "feature_flags": {}}),
+        subentry_type=SUBENTRY_TYPE_HUB,
+        title="My Hub",
+        unique_id=f"{entry.entry_id}-hub-custom",
+        subentry_id="sub-hub",
+    )
+    folded_service = ConfigSubentry(
+        data=MappingProxyType({"group_key": "owner@example.com", "feature_flags": {}}),
+        subentry_type=SUBENTRY_TYPE_SERVICE,
+        title="Buero Service",
+        unique_id=f"{entry.entry_id}-owner@example.com",
+        subentry_id="sub-aaa-folded",
+    )
+    store[exact_hub.subentry_id] = exact_hub
+    store[folded_service.subentry_id] = folded_service
+
+    flow = _build_flow(entry)
+    await _run_sync(flow, entry, _context_map_for(flow, entry, "migration"))
+
+    assert dict(exact_hub.data)["group_key"] == SERVICE_SUBENTRY_KEY, (
+        "the exact match is the one written, despite not being the literal owner"
+    )
+    assert dict(folded_service.data)["group_key"] == "owner@example.com", (
+        "and the folded literal owner keeps the stored identity it had"
+    )
+    assert folded_service.title == "Buero Service"
+
+
+@pytest.mark.asyncio
+async def test_two_folded_twins_resolve_deterministically() -> None:
+    """With no exact match, the iteration order must not pick the winner.
+
+    Two non-device twins both storing ``core_tracking`` fold onto the service
+    key. Whichever the scan returns inherits the canonical identity while the
+    other is left where it stands, so taking "the first" would make a
+    user-visible outcome depend on dict ordering. No ``-legacy`` displacement
+    happens here, deliberately stated because an earlier version of this
+    docstring claimed one: ``_claim_unique_id`` only renames a subentry that
+    holds the *desired* unique id, and two folded twins on their own ids hold
+    neither. What the loser actually keeps is its key, its title and its id.
+    The lowest ``subentry_id`` wins instead; the value is arbitrary, the
+    stability is the point.
+    """
+
+    async def _winner_for(order: tuple[str, str]) -> str | None:
+        entry = _entry_with_subentries()
+        store = _subentry_store(entry)
+        twins = {
+            suffix: ConfigSubentry(
+                data=MappingProxyType(
+                    {"group_key": TRACKER_SUBENTRY_KEY, "feature_flags": {}}
+                ),
+                subentry_type=SUBENTRY_TYPE_HUB,
+                title=f"Legacy hub {suffix}",
+                unique_id=f"{entry.entry_id}-hub-{suffix}",
+                subentry_id=f"sub-{suffix}",
+            )
+            for suffix in ("aaa", "zzz")
+        }
+        for suffix in order:
+            store[twins[suffix].subentry_id] = twins[suffix]
+
+        flow = _build_flow(entry)
+        await _run_sync(flow, entry, _context_map_for(flow, entry, "migration"))
+
+        canonical = f"{entry.entry_id}-{SERVICE_SUBENTRY_KEY}"
+        holders = [
+            subentry_id
+            for subentry_id, twin in twins.items()
+            if getattr(twin, "unique_id", None) == canonical
+        ]
+        return holders[0] if len(holders) == 1 else None
+
+    first = await _winner_for(("aaa", "zzz"))
+    second = await _winner_for(("zzz", "aaa"))
+    assert first == second == "aaa", (
+        "the folded winner is the lowest subentry_id, whatever the insert order"
     )

@@ -247,7 +247,13 @@ are installed. **Review this checklist on every single change under
 6. **Module guards** — validate that tests importing optional Home
    Assistant components continue to wrap those imports in
    `pytest.skip(..., allow_module_level=True)` guards so the suite
-   degrades gracefully when the plugin is absent.
+   degrades gracefully when the plugin is absent. One named exception, because
+   graceful degradation is the wrong default for it: a test whose *purpose* is
+   to ground a stub's shape in the real core (point 10) imports the plugin
+   inside the test body and fails loudly instead, since skipping it restores
+   exactly the blindness it exists to remove. Such a test is expected to be the
+   only casualty of a missing plugin in its module, which is why the import is
+   function-local rather than at module scope.
 7. **Cross-test symbol identity** — confirm
    `detect_coordinator_identity_leaks()` in `tests/conftest.py` still runs from
    `pytest_runtest_teardown` and that its reference is still frozen in
@@ -324,6 +330,38 @@ are installed. **Review this checklist on every single change under
    the closure at all, because production guards it with
    `inspect.isawaitable`. Two of the module's older doubles are synchronous for
    that reason and are not a template for these tests.
+
+10. **Read-only mapping attributes on entry doubles** — Home Assistant hands
+    `ConfigEntry.subentries`, `.data` and `.options` out as `MappingProxyType`,
+    never as a `dict`. An entry double that exposes a plain `dict` is therefore
+    not a harmless simplification: production narrowing an `isinstance` guard
+    to `dict` is false for every real entry and true for the double, so the
+    guard silently skips instead of failing, and the test stays green.
+    `config_flow._gather_subentry_options` carried exactly that guard from
+    2025-10-27 until it was fixed, and the symptom was not an exception but a
+    selection reduced to its synthetic fallback option, so no assignment could
+    persist. A double that models one of these attributes should expose the
+    read-only view and keep the mutable store private, with writes going
+    through methods that mirror the core's own
+    (`tests/test_options_flow_subentries.py::_EntryStub` shows the shape, but
+    only for `subentries`: its `data` and `options` are still plain dicts, so
+    copy the pattern rather than assuming the file already applies it
+    everywhere). `make_config_entry` does not model `subentries` at all,
+    so it is untouched by the fix, but its `data`/`options` are plain dicts and
+    the core's are not (measured: all three attributes come back as
+    `mappingproxy`). That divergence is deliberate and stays — the guarantee
+    documented above is about those fields never being `None`, which is what
+    `_opt()` and `entry.data.get(...)` rely on — but it is the same blind spot
+    one attribute over, so a production `isinstance(..., dict)` on `data` or
+    `options` would go unnoticed here too. A sweep at the time of writing found
+    no such guard, only the `subentries` one that was fixed and one unreachable
+    branch in `__init__.py`; treat a new one as a defect rather than as a style
+    question. One caveat when grounding such a shape against the core:
+    `conftest.py` installs a synthetic
+    `homeassistant.config_entries` in `sys.modules`, so the
+    `from homeassistant.config_entries import ...` form reaches the stub while
+    `import homeassistant.config_entries as ...` reaches the real submodule
+    through the package attribute.
 
 Treat this checklist as a living document: if a new helper or guard
 becomes necessary, add it here and verify each item before completing

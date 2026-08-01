@@ -654,3 +654,97 @@ def test_options_flow_secrets_reauth_guard_error_fallback_normalizes(
         await hass.drain_tasks()
 
     asyncio.run(_exercise())
+
+
+@pytest.mark.parametrize(
+    "bundle_field",
+    [
+        pytest.param({}, id="key-absent"),
+        pytest.param({"new_secrets_json": ""}, id="key-blank"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_options_flow_guard_error_without_a_bundle_reports_instead_of_crashing(
+    monkeypatch: pytest.MonkeyPatch,
+    bundle_field: dict[str, str],
+) -> None:
+    """A guard error without a bundle submission must report, not raise.
+
+    Both credential branches of ``async_step_credentials`` call
+    ``_finalize_success`` inside the same ``try``, so the multi-entry-guard
+    deferral can be entered from a submission that never carried a bundle.
+    Rebuilding the payload from ``new_secrets_json`` then raises out of the
+    ``except`` handler instead of reporting the error.
+
+    This is defence in depth, not a live user path. The token field is
+    commented out of both schema branches, ``vol.Schema`` defaults to
+    ``PREVENT_EXTRA``, and the flow manager validates ``user_input`` against
+    ``data_schema`` before the step sees it, so the shapes below cannot
+    arrive through the form. They can arrive through a direct call like this
+    one, and they would arrive through the form again the day the field is
+    re-enabled.
+
+    ``key-blank`` is the discriminating parameter: it is the only one that a
+    mere key-presence check would still fail, which is why the production
+    guard tests the *value* (``has_secrets``). ``key-absent`` is kept because
+    it fails differently (``KeyError`` rather than ``JSONDecodeError``) and
+    is the shape the original report described, not because it catches a
+    regression the blank case misses.
+    ``_count_supplied_credential_methods`` ignores blank fields, so both
+    forms pass the exclusivity gate as token-only submissions.
+
+    This uses the module-local ``_DummyEntry`` rather than the canonical
+    ``make_config_entry``: the step resolves its choices through
+    ``_subentry_choice_map``, and the factory does not model ``subentries``.
+    """
+
+    cache = _MemoryCache()
+    entry = _DummyEntry(
+        entry_id="entry-1",
+        data={
+            CONF_GOOGLE_EMAIL: "user@example.com",
+            CONF_OAUTH_TOKEN: "oauth-original-token-123456",
+        },
+        cache=cache,
+    )
+    hass = _DummyHass(entry, cache)
+
+    calls = {"n": 0}
+
+    def _always_guard(entry_: Any, *, data: dict[str, Any]) -> None:
+        calls["n"] += 1
+        raise RuntimeError("Multiple config entries active for this domain")
+
+    hass.config_entries.async_update_entry = _always_guard  # type: ignore[assignment]
+
+    flow = config_flow.OptionsFlowHandler()
+    flow.hass = hass  # type: ignore[assignment]
+    flow.config_entry = entry  # type: ignore[attr-defined]
+
+    async def _fake_pick(
+        hass: Any,
+        email: str,
+        candidates: list[tuple[str, str]],
+        *,
+        secrets_bundle: dict[str, Any] | None = None,
+    ) -> str | None:
+        return candidates[0][1] if candidates else None
+
+    monkeypatch.setattr(config_flow, "async_pick_working_token", _fake_pick)
+
+    result = await flow.async_step_credentials(
+        {
+            "new_oauth_token": "oauth-token-probe-123456",
+            "subentry": TRACKER_SUBENTRY_KEY,
+            **bundle_field,
+        }
+    )
+    if inspect.isawaitable(result):
+        result = await result
+
+    assert isinstance(result, dict)
+    assert result.get("type") == "form"
+    assert result.get("errors")
+    # The deferral was skipped, so no second write was attempted.
+    assert calls["n"] == 1
+    await hass.drain_tasks()

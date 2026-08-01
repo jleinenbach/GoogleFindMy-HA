@@ -1,5 +1,13 @@
 # tests/test_reauth_manual_token.py
-"""Regression tests for clearing cached AAS tokens during manual reauthentication."""
+"""Regression tests for clearing cached AAS tokens when credentials are replaced.
+
+Despite the file name this module does not exercise the reauth step: it never
+calls ``async_step_reauth_confirm``. It sets the cache state by hand and then
+pins that ``adm_token_retrieval`` mints a fresh ADM token from the new OAuth
+token once the cached AAS token is gone. That behaviour is independent of which
+credential form produced the new token, and it survived the removal of the
+manual reauth branch untouched.
+"""
 
 from __future__ import annotations
 
@@ -122,7 +130,7 @@ class _DummyHass:
 def test_manual_reauth_clears_cached_aas_and_mints_new_token(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """After manual reauth, cached AAS tokens must be cleared and a new ADM flow must use fresh OAuth."""
+    """A cleared AAS cache must force the next ADM flow to mint from fresh OAuth."""
 
     async def _exercise() -> None:
         cache = _MemoryCache()
@@ -148,7 +156,7 @@ def test_manual_reauth_clears_cached_aas_and_mints_new_token(
         flow.context = {"entry_id": entry.entry_id}
         assert flow._get_entry_cache(entry) is cache
 
-        # Simulate manual reauth clearing the cached AAS token.
+        # Simulate a credential replacement clearing the cached AAS token.
         await cache.async_set_cached_value(DATA_AAS_TOKEN, None)
         assert await cache.get(DATA_AAS_TOKEN) is None
 

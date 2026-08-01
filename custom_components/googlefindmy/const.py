@@ -11,6 +11,7 @@ import hashlib
 import math
 import time
 from collections.abc import Mapping, Sequence
+from types import MappingProxyType
 from typing import Final, Literal
 
 # --------------------------------------------------------------------------------------
@@ -64,6 +65,47 @@ DATA_SUBENTRY_KEY: str = "subentry_key"
 SUBENTRY_TYPE_SERVICE: str = "service"
 SUBENTRY_TYPE_HUB: str = "hub"
 SUBENTRY_TYPE_TRACKER: str = "tracker"
+# Subentry types that never carry ``visible_device_ids``. Five consumers depend
+# on this set -- through four literal ``in`` comparisons, because two of them
+# share one predicate -- so the offering, the indexing and the writing side
+# cannot drift apart:
+# the options flow refuses them as assignment targets
+# (``config_flow._accepts_device_assignment``); the feature sync refuses them
+# as write *targets* for the tracker group and folds them onto the service key
+# instead (``config_flow._canonical_core_key_of``); the runtime index folds
+# them the same way and drops their ids from its *in-memory* view, leaving the
+# stored subentry alone (``coordinator/subentry.py``); and two write sinks
+# refuse them, the manager's ``update_visible_device_ids`` and the
+# visibility write-back in ``async_setup_entry``, which bypasses the manager
+# and therefore needs its own guard (both in ``__init__.py``).
+NON_DEVICE_SUBENTRY_TYPES: frozenset[str] = frozenset(
+    {SUBENTRY_TYPE_SERVICE, SUBENTRY_TYPE_HUB}
+)
+# The type that *literally* owns each core key, as opposed to folding onto it.
+# ``hub`` folds onto ``SERVICE_SUBENTRY_KEY`` for the assignment predicate, the
+# feature sync and the runtime index, but the entity platforms match
+# ``subentry_type == "service"`` literally (``known_ids_for_subentry_type``), so
+# the two are not interchangeable. Where both answer for the same key, this
+# table decides which one keeps it, and it lives here rather than in one of the
+# consumers because the config flow (``_resolve_existing``, the stale-subentry
+# sweep) and the runtime index (``coordinator/subentry.py``) must rank the same
+# pair identically: a slot won on one side and lost on the other is exactly the
+# drift the shared set above exists to prevent. Sharing the *definition* is the
+# point; each consumer keeps its own reader. Two consumers, not all of them: a
+# third ranker, ``ConfigEntrySubEntryManager._candidate_score`` in
+# ``__init__.py``, resolves key collisions without looking at ``subentry_type``
+# at all and therefore does not read this table. That asymmetry is deliberate
+# for now and tracked in ``PLAN_GFMY_ALIAS_TYPE_AXIS``; it is named here so the
+# sentence above is not misread as "every site that ranks a key pair".
+# Read-only on purpose: unlike the plain ``dict`` constants elsewhere in this
+# module, this one is imported by two packages at once, and an in-place mutation
+# in either would silently reach the other.
+LITERAL_CORE_KEY_OWNER: Mapping[str, str] = MappingProxyType(
+    {
+        SERVICE_SUBENTRY_KEY: SUBENTRY_TYPE_SERVICE,
+        TRACKER_SUBENTRY_KEY: SUBENTRY_TYPE_TRACKER,
+    }
+)
 SERVICE_SUBENTRY_TRANSLATION_KEY: str = SERVICE_SUBENTRY_KEY
 TRACKER_SUBENTRY_TRANSLATION_KEY: str = TRACKER_SUBENTRY_KEY
 
@@ -739,6 +781,8 @@ __all__ = [
     "SUBENTRY_TYPE_SERVICE",
     "SUBENTRY_TYPE_HUB",
     "SUBENTRY_TYPE_TRACKER",
+    "NON_DEVICE_SUBENTRY_TYPES",
+    "LITERAL_CORE_KEY_OWNER",
     "service_device_identifier",
     "CONF_OAUTH_TOKEN",
     "DATA_AAS_TOKEN",

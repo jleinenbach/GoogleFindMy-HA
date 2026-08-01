@@ -59,7 +59,8 @@ import os
 import re
 import sys
 import time
-from collections.abc import Awaitable, Callable, Mapping, MutableMapping
+from collections import Counter
+from collections.abc import Awaitable, Callable, Container, Mapping, MutableMapping
 from collections.abc import Iterable as CollIterable
 from collections.abc import Mapping as CollMapping
 from contextlib import suppress
@@ -137,6 +138,8 @@ from .const import (
     DEFAULT_STALE_THRESHOLD,
     # Core domain & credential keys
     DOMAIN,
+    LITERAL_CORE_KEY_OWNER,
+    NON_DEVICE_SUBENTRY_TYPES,
     OPT_CONTRIBUTOR_MODE,
     OPT_DELETE_CACHES_ON_REMOVE,
     OPT_DEVICE_POLL_DELAY,
@@ -1229,6 +1232,20 @@ class _SubentryOption:
     label: str
     subentry: ConfigSubentry | None
     visible_device_ids: tuple[str, ...]
+    #: The ``group_key`` the subentry actually stores, or ``None`` for a
+    #: synthesised option and for a subentry that stores none.
+    #:
+    #: Separate from ``key`` because the two answer different questions and
+    #: only one of them survives a collision: ``_gather_subentry_options``
+    #: rewrites ``key`` to the ``subentry_id`` of every option as soon as one
+    #: key is duplicated, which is what makes the keys injective and is
+    #: deliberate. ``key`` is therefore an *identity* and carries no meaning
+    #: after such a rewrite, while ``_accepts_device_assignment`` needs the
+    #: stored key's *meaning* (is it the reserved service key?). Reading
+    #: ``key`` for that question is what let a legacy ``tracker`` storing
+    #: ``SERVICE_SUBENTRY_KEY`` become an assignable target the moment any
+    #: duplicate existed elsewhere in the entry.
+    stored_key: str | None = None
 
     @property
     def subentry_id(self) -> str | None:
@@ -1237,6 +1254,167 @@ class _SubentryOption:
         if self.subentry is None:
             return None
         return getattr(self.subentry, "subentry_id", None)
+
+
+# Feature groups that never hold device assignments. The invariant is older
+# than this checkpoint: ``ServiceSubentryFlowHandler._visible_device_ids`` and
+# ``HubSubentryFlowHandler._visible_device_ids`` both return ``()`` unconditionally,
+# ``_async_sync_feature_subentries`` builds its ``service_payload`` without the
+# key while ``tracker_payload`` keeps the stored ids, and
+# ``tests/test_config_flow_subentry_sync.py`` asserts that absence. On the
+# reading side ``coordinator/subentry.py::_refresh_subentry_index`` forces
+# ``visible_device_ids`` back to ``()`` for the service key on every refresh.
+#
+# How far that carries. An earlier version of this note said the reading side
+# tested the **key** only, so that a subentry typed ``service`` storing a
+# diverging key kept its ids. That is no longer true: the reading side folds
+# every type in ``NON_DEVICE_SUBENTRY_TYPES`` onto the service key before the
+# branch runs, so both axes are now enforced on both sides. The type axis is
+# still the one that carries the argument, because the manager canonicalises
+# primarily by type and keeps the stored key as an alias: a group offered
+# under an alias is one the manager may move out from under the assignment.
+_NON_DEVICE_SUBENTRY_KEYS = frozenset({SERVICE_SUBENTRY_KEY})
+# The type axis is shared with the reading side rather than restated here:
+# ``coordinator/subentry.py`` folds exactly these types onto the service key
+# and drops their mis-keyed ids from its in-memory view, so a type added on
+# one side cannot be forgotten on the other. The drop does not reach storage:
+# the stored subentry keeps those ids, which is what makes the re-homing
+# reversible.
+_NON_DEVICE_SUBENTRY_TYPES = NON_DEVICE_SUBENTRY_TYPES
+
+
+def _unclaimed_fallback_key(taken: Container[str]) -> str:
+    """Return a tracker-group key no existing option already holds.
+
+    The synthesised fallback of ``_device_target_choice_map`` used to take
+    ``TRACKER_SUBENTRY_KEY`` unconditionally. That borrows an identity: an
+    entry whose only subentry is typed ``service`` while storing the legacy
+    ``group_key`` ``core_tracking`` is filtered out of the target list, and the
+    fallback then offered *its* key. ``_async_assign_devices_to_subentry``
+    resolves the key against the **unfiltered** set, found that real subentry,
+    refused the write, and ``async_step_repairs_move`` reported
+    ``subentry_move_success`` for a move that never happened.
+
+    The search is total rather than a single alternative: a second subentry may
+    store the very substitute the first one is displaced to, so a fixed number
+    of attempts is not enough. ``taken`` is finite, so the loop terminates.
+
+    ``taken`` must carry **both** axes, and the caller is what makes that true.
+    Passing only ``option.key`` was correct until the collision rewrite in
+    ``_gather_subentry_options`` turned every key into a ``subentry_id``: the
+    set then holds no stored ``group_key`` at all and this helper hands back
+    ``core_tracking`` while a real subentry stores it, which is the borrow the
+    whole function exists to prevent. Pinned by
+    ``::test_the_synthesised_fallback_does_not_borrow_a_rewritten_key``.
+    """
+
+    if TRACKER_SUBENTRY_KEY not in taken:
+        return TRACKER_SUBENTRY_KEY
+    suffix = 2
+    while f"{TRACKER_SUBENTRY_KEY}_{suffix}" in taken:
+        suffix += 1
+    return f"{TRACKER_SUBENTRY_KEY}_{suffix}"
+
+
+def _accepts_device_assignment(option: _SubentryOption) -> bool:
+    """Return whether ``option`` may hold ``visible_device_ids``.
+
+    Both axes are read on purpose, and the type axis is not redundant.
+    ``ConfigEntrySubEntryManager._refresh_from_entry`` derives the canonical key
+    primarily from ``subentry_type`` and keeps a diverging stored ``group_key``
+    as an alias, which ``agents/config_flow/AGENTS.md`` requires under
+    ``Subentry alias handling``. A predicate comparing only the key would let
+    through a legacy subentry that stores an e-mail-like ``group_key`` while
+    being typed ``service``.
+
+    A synthesised option without a backing subentry (the ``core_tracking``
+    fallback of ``_gather_subentry_options``) carries no type and is accepted;
+    it is the tracker group, which is precisely the one that holds devices.
+
+    The key axis reads ``stored_key``, not ``key``. ``key`` is an identity that
+    ``_gather_subentry_options`` rewrites to the ``subentry_id`` whenever any
+    two options collide, so asking it a question about *meaning* answered
+    correctly only on entries that happened to have no duplicate. ``stored_key``
+    is ``None`` exactly where there is no stored key to judge -- a synthesised
+    option, or a subentry that stores none -- and there ``key`` is the
+    ``subentry_id`` or the tracker key, neither of which is reserved, so the
+    fallback preserves the previous answer instead of inventing one.
+    """
+
+    if (option.stored_key or option.key) in _NON_DEVICE_SUBENTRY_KEYS:
+        return False
+    return _subentry_type_accepts_devices(option.subentry)
+
+
+def _subentry_type_accepts_devices(subentry: Any) -> bool:
+    """Return whether ``subentry``'s *type* permits ``visible_device_ids``.
+
+    Extracted from :func:`_accepts_device_assignment` rather than restated,
+    because ``_async_sync_feature_subentries`` needs the same axis on the
+    writing side and ``const.NON_DEVICE_SUBENTRY_TYPES`` exists precisely so
+    the offering, indexing and writing sites cannot drift apart. Keeping one
+    comparison against the set is the point; a second one would reintroduce the
+    drift the shared set was created to prevent.
+
+    ``None`` (an option without a backing subentry, or a double that does not
+    model the attribute) is accepted, which is the caller's existing
+    convention: only a *known* non-device type disqualifies.
+    """
+
+    subentry_type = getattr(subentry, "subentry_type", None)
+    return subentry_type not in _NON_DEVICE_SUBENTRY_TYPES
+
+
+def _canonical_core_key_of(subentry: Any) -> str | None:
+    """Return the core group key ``subentry``'s *type* claims, or ``None``.
+
+    This is the writing side of the fold the reading side already performs:
+    ``coordinator/subentry.py`` indexes every type in
+    ``NON_DEVICE_SUBENTRY_TYPES`` under ``SERVICE_SUBENTRY_KEY`` whatever the
+    subentry stores, and ``HubSubentryFlowHandler._group_key`` is that same key,
+    so a ``hub`` *is* the service group under a second entry point.
+
+    The two directions are **not** symmetric, and reading them as if they were
+    is the mistake this docstring exists to prevent. A non-device type folds
+    unconditionally, because ``SERVICE_SUBENTRY_KEY`` is the only key such a
+    type may ever answer for. A ``tracker`` type folds *only* when it stores the
+    service key, because several tracker groups with distinct keys are a
+    supported shape: ``coordinator/subentry.py`` says so in as many words and
+    leaves tracker subentries on their stored key. Folding every tracker onto
+    ``TRACKER_SUBENTRY_KEY`` would hand a legacy per-account group (``group_key
+    = "owner@example.com"``) to the core tracker sync, which then overwrites its
+    title and identity: a data defect introduced by the very axis meant to
+    prevent one. Only the service-keyed tracker is a genuine mis-key, since
+    ``_accepts_device_assignment`` and the reading side both reserve that key
+    for the service group.
+
+    ``None`` means the type does not decide and the stored ``group_key`` keeps
+    deciding, which covers an untyped legacy subentry, a tracker on its own key
+    and any type outside the pair. Callers must treat that as "no objection",
+    not as "no match".
+    """
+
+    subentry_type = getattr(subentry, "subentry_type", None)
+    if subentry_type is None:
+        return None
+    if not _subentry_type_accepts_devices(subentry):
+        return SERVICE_SUBENTRY_KEY
+    if subentry_type == SUBENTRY_TYPE_TRACKER:
+        data = getattr(subentry, "data", {}) or {}
+        if data.get("group_key") == SERVICE_SUBENTRY_KEY:
+            return TRACKER_SUBENTRY_KEY
+        return None
+    return None
+
+
+_LITERAL_CORE_KEY_OWNER = LITERAL_CORE_KEY_OWNER
+"""Module-local alias of the shared literal-owner table (``const.py``).
+
+The definition moved to ``const.py`` when the runtime index needed the same
+ranking: a slot won here and lost there is precisely the drift a single
+definition prevents. Only the name is kept local, so the call sites below read
+unchanged.
+"""
 
 
 _FIELD_SUBENTRY = "subentry"
@@ -2873,12 +3051,16 @@ def _interpret_reauth_choice(
             return None, None, "invalid_token"
         return "secrets", parsed, None
 
-    # Manual token path disabled: broken manual reauth entry remains hidden until fixed.
-    # if not (
-    #     _token_plausible(token_raw) and not _disqualifies_for_persistence(token_raw)
-    # ):
-    #     return None, None, "invalid_token"
-
+    # The manual *reauth* token path is gone, not hidden (see
+    # agents/config_flow/AGENTS.md); the initial-setup and options surfaces are
+    # still merely hidden. ``_REAUTH_FIELD_TOKEN`` is still read above so that a
+    # submission carrying both halves is rejected instead of letting the bundle
+    # half win. For a token-only submission the outcome is the same either way:
+    # it ends here with ``choose_one``, and without the read it would end at the
+    # exclusivity check above with the same key. That half of the read is
+    # inertia, not protection. Either way it is a rejection and not a path: no
+    # ``return`` in this function can produce ``"manual"``, which is what
+    # ``test_manual_reauth_removal_guard.py`` pins.
     return None, None, "choose_one"
 
 
@@ -6289,14 +6471,12 @@ class ConfigFlow(
                     vol.Optional(_REAUTH_FIELD_SECRETS): selector(
                         {"text": {"multiline": True}}
                     ),
-                    # vol.Optional(_REAUTH_FIELD_TOKEN): str,  # Disabled: manual reauth token path is intentionally hidden until fixed.
                 }
             )
         else:
             schema = vol.Schema(
                 {
                     vol.Optional(_REAUTH_FIELD_SECRETS): str,
-                    # vol.Optional(_REAUTH_FIELD_TOKEN): str,  # Disabled: manual reauth token path is intentionally hidden until fixed.
                 }
             )
 
@@ -6309,52 +6489,7 @@ class ConfigFlow(
                     errors["base"] = err
             else:
                 try:
-                    if method == "manual":
-                        token = str(payload)
-                        try:
-                            chosen = await async_pick_working_token(
-                                self.hass,
-                                fixed_email,
-                                [("manual", token)],
-                            )
-                        except (DependencyNotReady, ImportError) as exc:
-                            _register_dependency_error(errors, exc)
-                        else:
-                            if not chosen:
-                                _log_token_validation_failure(
-                                    email=fixed_email,
-                                    candidates=[("manual", token)],
-                                )
-                                errors["base"] = "cannot_connect"
-                            else:
-                                if _disqualifies_for_persistence(chosen):
-                                    _LOGGER.warning(
-                                        "Reauth: token looks like a JWT; persisting anyway due to validation."
-                                    )
-                                updated_data = {
-                                    **entry.data,
-                                    DATA_AUTH_METHOD: _AUTH_METHOD_INDIVIDUAL,
-                                    CONF_OAUTH_TOKEN: chosen,
-                                }
-                                if isinstance(chosen, str) and chosen.startswith(
-                                    "aas_et/"
-                                ):
-                                    updated_data[DATA_AAS_TOKEN] = chosen
-                                else:
-                                    updated_data.pop(DATA_AAS_TOKEN, None)
-                                updated_data.pop(DATA_SECRET_BUNDLE, None)
-                                await self._async_clear_cached_aas_token(entry)
-                                success_reason = self.context.get(
-                                    "reauth_success_reason_override",
-                                    "reauth_successful",
-                                )
-                                return self._async_update_entry_and_abort(
-                                    entry=entry,
-                                    data=updated_data,
-                                    reason=success_reason,
-                                )
-
-                    elif method == "secrets":
+                    if method == "secrets":
                         if not isinstance(payload, Mapping):
                             errors["base"] = "invalid_token"
                         else:
@@ -6459,24 +6594,6 @@ class ConfigFlow(
                 except Exception as err2:  # noqa: BLE001
                     if _is_multi_entry_guard_error(err2):
                         # Defer: accept first candidate and reload
-                        if method == "manual":
-                            manual_token = str(payload)
-                            updated_data = {
-                                **entry.data,
-                                DATA_AUTH_METHOD: _AUTH_METHOD_INDIVIDUAL,
-                                CONF_OAUTH_TOKEN: manual_token,
-                            }
-                            if manual_token.startswith("aas_et/"):
-                                updated_data[DATA_AAS_TOKEN] = manual_token
-                            else:
-                                updated_data.pop(DATA_AAS_TOKEN, None)
-                            updated_data.pop(DATA_SECRET_BUNDLE, None)
-                            await self._async_clear_cached_aas_token(entry)
-                            return self._async_update_entry_and_abort(
-                                entry=entry,
-                                data=updated_data,
-                                reason="reauth_successful",
-                            )
                         if method == "secrets" and isinstance(payload, Mapping):
                             # Normalize once and gate on the SAME object that is
                             # persisted, so the single-key gate and the stored
@@ -6520,7 +6637,12 @@ class ConfigFlow(
         )
 
     async def _async_clear_cached_aas_token(self, entry: ConfigEntry) -> None:
-        """Best-effort removal of the cached AAS token for a manual reauth entry."""
+        """Best-effort removal of the cached AAS token when credentials are replaced.
+
+        Called from the ``secrets.json`` reauth branches and from the options-flow
+        credential refresher, so the stale AAS token cannot outlive the OAuth token
+        it was minted from.
+        """
 
         cache = self._get_entry_cache(entry)
         if cache is None:
@@ -6743,6 +6865,19 @@ class ConfigFlow(
                 for group_key, managed_subentry in managed.managed_subentries.items():
                     target_key = group_key
                     if target_key not in mapping:
+                        # Deliberately NOT ``_canonical_core_key_of`` here, and
+                        # the reason is measured rather than assumed. A legacy
+                        # per-account tracker group is adopted as the core
+                        # tracking group on this path, but the fold that does it
+                        # is ``ConfigEntrySubEntryManager``'s: it keys every
+                        # tracker-typed subentry under ``TRACKER_SUBENTRY_KEY``,
+                        # so such a group arrives here already named
+                        # ``core_tracking`` and never reaches this branch.
+                        # Rewriting this branch therefore does not fix that
+                        # defect; it would only let a legacy ``hub`` win the
+                        # service slot ahead of a real service subentry,
+                        # depending on manager iteration order. The manager fold
+                        # is where that defect lives and where it gets fixed.
                         subentry_type = getattr(managed_subentry, "subentry_type", None)
                         if subentry_type == SUBENTRY_TYPE_SERVICE:
                             target_key = SERVICE_SUBENTRY_KEY
@@ -6892,17 +7027,169 @@ class ConfigFlow(
             defaults=defaults,
         )
 
+        def _may_answer_for(candidate: Any, key: str) -> bool:
+            """Return whether ``candidate`` may be resolved as the ``key`` group."""
+
+            canonical = _canonical_core_key_of(candidate)
+            return canonical is None or canonical == key
+
         def _resolve_existing(key: str) -> ConfigSubentry | None:
+            """Return the subentry that is the ``key`` group, type axis included.
+
+            Resolving by stored ``group_key`` alone handed the tracker group to
+            a ``service``- or ``hub``-typed twin that still stores
+            ``core_tracking``, which then received ``tracker_payload`` and, via
+            the ``if not tracker_visible`` fallback below, every probed device
+            id. The mirror direction lost data: a ``tracker``-typed subentry
+            storing the service key was overwritten with the id-less
+            ``service_payload``. The axis therefore guards **both** branches,
+            the seeded context map and the fallback scan, because the migration
+            path only reaches the second and the reconfigure path decides in the
+            first.
+
+            Within the scan, an exact stored-key match wins over a folded legacy
+            twin. That ordering is load-bearing rather than cosmetic: where a
+            real service subentry and a mis-keyed twin both answer for the
+            service group, preferring the exact match leaves the twin untouched
+            instead of rewriting a stored identity nobody asked to change.
+
+            Both exits are ordered, and neither ordering is decoration. Two
+            candidates can reach the *same* exit: two folded twins with no exact
+            match, or a ``service``- and a ``hub``-typed subentry both storing
+            the service key, which is a shape the module itself produces because
+            ``HubSubentryFlowHandler._group_key`` is ``SERVICE_SUBENTRY_KEY``.
+            Taking whichever came first let the iteration order of
+            ``entry.subentries`` decide which one is written and which one the
+            cleanup then treats as a leftover. Measured, that turned an
+            ``AbortFlow`` at the previous commit into a silent
+            ``async_remove_subentry`` of the **canonical service group**, device
+            and entity registry bindings included: a dead flow traded for a data
+            defect, which is the exact trade ``_claim_unique_id`` below exists
+            to prevent.
+
+            The tie-break is therefore substantive before it is stable: the type
+            that *literally* owns the key wins over one that only folds onto it.
+            ``coordinator/subentry.py`` records why that distinction is real,
+            the entity platforms match ``subentry_type == "service"`` literally,
+            so a hub is the service group for the assignment predicate and the
+            index but not for them. Only among equals does the lowest
+            ``subentry_id`` decide; that value is arbitrary, and stability is
+            all that is asked of it.
+
+            The seed is a *tie-break inside* that ranking, not a precedence in
+            front of it, and the difference is measured rather than tidy. A
+            context map written by an earlier run names a specific subentry, and
+            honouring it is what keeps a single flow from re-homing the group
+            between two of its own steps, so among candidates of equal rank the
+            seeded one still wins. But the seeder resolves through the runtime
+            manager, which folds *every* tracker-typed subentry onto
+            ``TRACKER_SUBENTRY_KEY`` and has no type axis at all. It can
+            therefore name a subentry that does not carry the key in either
+            pool: a legacy per-account tracker group, or a ``hub`` sitting
+            beside the canonical ``service`` subentry. Ranking such a seed ahead
+            of the pool let it be rewritten onto the core key, displaced the
+            canonical group's identity through ``_claim_unique_id`` and left
+            that group out of the context map, so the cleanup swept it, device
+            and entity registry bindings included. Measured against the previous
+            commit, which raised ``AbortFlow`` and kept both groups: a dead flow
+            traded for a data defect, in the direction ``_claim_unique_id``
+            exists to prevent.
+
+            A seed therefore only decides among candidates that qualify for the
+            key. It still decides alone when no candidate does, which is the
+            case a map naming a not-yet-keyed group depends on.
+            """
+
+            def _is_literal_owner(candidate: ConfigSubentry) -> bool:
+                literal = _LITERAL_CORE_KEY_OWNER.get(key)
+                return (
+                    literal is not None
+                    and getattr(candidate, "subentry_type", None) == literal
+                )
+
+            seeded: ConfigSubentry | None = None
             existing_id = context_map.get(key)
-            subentry_obj: ConfigSubentry | None = None
             if isinstance(existing_id, str):
-                subentry_obj = entry.subentries.get(existing_id)
-            if subentry_obj is None:
-                for candidate in entry.subentries.values():
-                    if candidate.data.get("group_key") == key:
-                        subentry_obj = candidate
-                        break
-            return subentry_obj
+                candidate = entry.subentries.get(existing_id)
+                if candidate is not None and _may_answer_for(candidate, key):
+                    seeded = candidate
+            exact: list[ConfigSubentry] = []
+            folded: list[ConfigSubentry] = []
+            for candidate in entry.subentries.values():
+                if not _may_answer_for(candidate, key):
+                    continue
+                data = getattr(candidate, "data", {}) or {}
+                if data.get("group_key") == key:
+                    exact.append(candidate)
+                elif _canonical_core_key_of(candidate) == key:
+                    folded.append(candidate)
+            pool = exact or folded
+            if not pool:
+                return seeded
+            return min(
+                pool,
+                key=lambda item: (
+                    not _is_literal_owner(item),
+                    item is not seeded,
+                    str(getattr(item, "subentry_id", "")),
+                ),
+            )
+
+        async def _claim_unique_id(desired: str, target: ConfigSubentry | None) -> None:
+            """Free ``desired`` by displacing whichever subentry else holds it.
+
+            The type axis above turns an update into a create wherever a twin
+            stops answering for a core key, and a create is exactly where
+            ``ConfigEntries.async_add_subentry`` calls
+            ``_raise_if_subentry_unique_id_exists`` unconditionally; the update
+            calls it whenever the id actually changes. Both raise
+            ``AbortFlow("already_configured")``, and the reconfigure entry point
+            has no ``try`` around this helper, so an unhandled collision would
+            trade a data defect for a dead flow.
+
+            The canonical id stays with the canonical group and the *legacy
+            holder* is the one displaced, not the newcomer. That direction is
+            not a preference: five sites outside this flow build their subentry
+            definitions with ``f"{entry_id}-{key}"`` and reconcile against it
+            (``__init__.py`` and ``coordinator/subentry.py``), so a core group
+            carrying a derived id would collide with the runtime manager on the
+            next sync and be resolved by its type-blind adoption path instead.
+
+            The substitute is searched until it is free, for the same reason
+            ``_unclaimed_fallback_key`` searches: a third subentry may hold the
+            very substitute the first is displaced to. ``entry.subentries`` is
+            finite, so it terminates.
+            """
+
+            holder: ConfigSubentry | None = None
+            for candidate in entry.subentries.values():
+                if candidate is target:
+                    continue
+                if getattr(candidate, "unique_id", None) == desired:
+                    holder = candidate
+                    break
+            if holder is None:
+                return
+
+            taken = {
+                getattr(other, "unique_id", None)
+                for other in entry.subentries.values()
+                if other is not holder
+            }
+            replacement = f"{desired}-legacy"
+            suffix = 2
+            while replacement in taken:
+                replacement = f"{desired}-legacy-{suffix}"
+                suffix += 1
+
+            await type(self)._async_update_subentry(
+                self,
+                entry,
+                holder,
+                data=dict(getattr(holder, "data", {}) or {}),
+                title=str(getattr(holder, "title", "") or ""),
+                unique_id=replacement,
+            )
 
         def _existing_visible(subentry_obj: ConfigSubentry | None) -> tuple[str, ...]:
             if subentry_obj is None:
@@ -6948,6 +7235,7 @@ class ConfigFlow(
             tracker_key, getattr(tracker_subentry, "subentry_id", None)
         )
 
+        await _claim_unique_id(service_unique_id, service_subentry)
         if service_subentry is None:
             created_service = await type(self)._async_create_subentry(
                 self,
@@ -6973,6 +7261,7 @@ class ConfigFlow(
             context_map[service_key] = service_subentry.subentry_id
 
         tracker_subentry = _resolve_existing(tracker_key)
+        await _claim_unique_id(tracker_unique_id, tracker_subentry)
         if tracker_subentry is None:
             created_tracker = await type(self)._async_create_subentry(
                 self,
@@ -7027,8 +7316,40 @@ class ConfigFlow(
                 continue
             data = getattr(subentry, "data", {}) or {}
             group_key = data.get("group_key")
-            if isinstance(group_key, str) and group_key in allowed_keys:
-                stale_ids.append(subentry_id)
+            if not isinstance(group_key, str) or group_key not in allowed_keys:
+                continue
+            subentry_type = getattr(subentry, "subentry_type", None)
+            if subentry_type is not None and subentry_type != (
+                _LITERAL_CORE_KEY_OWNER.get(group_key)
+            ):
+                # Only the type that *literally* owns a core key can be a
+                # leftover copy of that core group; every other type sitting on
+                # the key is a group of its own, and removing it takes its
+                # device and entity registry bindings with it
+                # (``async_remove_subentry`` clears both).
+                #
+                # Before the sync resolver read ``subentry_type``, such a
+                # subentry was resolved by its stored key and therefore landed
+                # in ``context_map`` -- unless a same-keyed sibling took the
+                # slot -- which kept it out of this list by accident. The
+                # resolver may now leave one alone deliberately, so the axis has
+                # to be stated here too, and stated as *ownership* rather than
+                # as "the type names a different key": a ``hub`` writes
+                # ``SERVICE_SUBENTRY_KEY`` by design
+                # (``HubSubentryFlowHandler._group_key``), so beside a real
+                # service subentry it is not mis-keyed at all, yet the
+                # literal-owner rank makes it the deterministic loser.
+                #
+                # ``.get`` cannot miss today: ``allowed_keys`` above is exactly
+                # the key set of ``_LITERAL_CORE_KEY_OWNER``. It is written
+                # defensively rather than indexed, so that widening one of the
+                # two sets fails towards skipping. An untyped subentry is *not*
+                # covered by this guard: ``_canonical_core_key_of`` treats a
+                # missing type as "the stored key keeps deciding", which makes
+                # such a subentry a candidate copy of the core group it stores,
+                # and sweeping stale legacy copies is what this pass is for.
+                continue
+            stale_ids.append(subentry_id)
 
         if not stale_ids:
             return
@@ -7559,17 +7880,20 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin, _ContainerLoginMixi
 
         entry = self.config_entry
         options: list[_SubentryOption] = []
-        seen_keys: set[str] = set()
+        key_counts: Counter[str] = Counter()
 
         subentries = getattr(entry, "subentries", None)
-        if isinstance(subentries, dict):
+        if isinstance(subentries, Mapping):
             for subentry in subentries.values():
                 data = dict(getattr(subentry, "data", {}) or {})
                 raw_key = data.get("group_key")
                 if isinstance(raw_key, str) and raw_key.strip():
-                    key = raw_key.strip()
+                    stored_key: str | None = raw_key.strip()
                 else:
-                    key = str(getattr(subentry, "subentry_id", "core_tracking"))
+                    stored_key = None
+                key = stored_key or str(
+                    getattr(subentry, "subentry_id", TRACKER_SUBENTRY_KEY)
+                )
                 label = (
                     getattr(subentry, "title", None)
                     or data.get("entry_title")
@@ -7592,15 +7916,52 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin, _ContainerLoginMixi
                         label=str(label),
                         subentry=subentry,
                         visible_device_ids=visible,
+                        stored_key=stored_key,
                     )
                 )
-                seen_keys.add(key)
+                key_counts[key] += 1
+
+        # The key must identify the option, and the stored ``group_key`` does
+        # not: ``Subentry alias handling`` in ``agents/config_flow/AGENTS.md``
+        # explicitly lets a legacy subentry keep an email-style ``group_key``
+        # while being typed ``service``, so the *same* label can sit on a
+        # service and a tracker subentry at once. That shape is pinned in
+        # ``tests/test_config_flow_subentry_sync.py``. Every consumer downstream
+        # treats this key as an identity: ``_subentry_choice_map`` and
+        # ``_device_target_choice_map`` collapse it into a ``dict``, and
+        # ``async_step_repairs_delete`` resolves both the deletion target and
+        # the devices it hands on through that mapping. A duplicate key
+        # therefore hides one subentry from every form, and it used to let
+        # ``options.sort`` below decide which subentry an assignment wrote to.
+        #
+        # The rewrite is all-or-nothing on purpose. Moving only the duplicates
+        # looks smaller but is not total: a subentry may store the very
+        # ``subentry_id`` a duplicate is about to move to, which recreates the
+        # collision one step further out, and chaining that a second time
+        # defeats any fixed number of passes. Sending *every* option to its own
+        # ``subentry_id`` as soon as one duplicate exists is injective in a
+        # single pass, because ``subentry_id`` is the key under which
+        # ``entry.subentries`` stores the subentry and is therefore unique by
+        # construction. It also avoids picking a winner, which would leave the
+        # outcome dependent on the ``options.sort`` below.
+        #
+        # The healthy entry is untouched: without a duplicate this loop does not
+        # run, so the stored ``group_key`` keeps reaching the forms. Only an
+        # entry that already carries drifting aliases sees opaque keys, and the
+        # label the user reads is unaffected either way. Nothing new reaches
+        # storage either: ``_async_update_feature_group_subentry`` only fills a
+        # *missing* ``group_key``, and an option whose key this loop actually
+        # changes had one to begin with; an option without a stored key already
+        # carried its ``subentry_id``, so the rewrite is a no-op for it.
+        if any(count > 1 for count in key_counts.values()):
+            for option in options:
+                option.key = str(option.subentry_id or option.key)
 
         if not options:
             title = getattr(entry, "title", None) or "Core tracking"
             options.append(
                 _SubentryOption(
-                    key="core_tracking",
+                    key=TRACKER_SUBENTRY_KEY,
                     label=str(title),
                     subentry=None,
                     visible_device_ids=(),
@@ -7620,13 +7981,152 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin, _ContainerLoginMixi
         option_map = {opt.key: opt for opt in options}
         return label_map, option_map
 
-    @staticmethod
-    def _default_subentry_key(choices: dict[str, str]) -> str:
-        """Return the default subentry key for UI defaults."""
+    def _device_target_choice_map(
+        self,
+    ) -> tuple[dict[str, str], dict[str, _SubentryOption]]:
+        """Return the subentry choices that can actually hold device assignments.
 
-        if "core_tracking" in choices:
-            return "core_tracking"
-        return next(iter(choices), "core_tracking")
+        Deliberately a second helper rather than a filter inside
+        ``_subentry_choice_map``: that one fed all six steps before this
+        change, and only the three that assign devices may narrow their
+        choices. The four it still feeds must keep seeing every group:
+        ``async_step_settings`` and ``async_step_credentials`` legitimately
+        target the service group, ``async_step_repairs`` only asks whether
+        *any* subentry exists (a shared filter could send an entry whose sole
+        subentry is the service group into ``repairs_no_subentries``), and
+        ``async_step_repairs_delete`` builds its ``removable_choices`` from it,
+        because deletability is not assignability.
+        """
+
+        all_options = self._gather_subentry_options()
+        options = [
+            option for option in all_options if _accepts_device_assignment(option)
+        ]
+        if not options:
+            # Same fallback as ``_gather_subentry_options``, for the same
+            # reason: an entry whose only subentries are non-device groups
+            # would otherwise hand ``vol.In`` an empty mapping, which renders a
+            # form the user cannot submit.
+            #
+            # The key is taken from ``_unclaimed_fallback_key`` rather than
+            # being ``TRACKER_SUBENTRY_KEY`` outright, and the difference is
+            # not cosmetic: the two ``if not options:`` guards look alike but
+            # test different sets. The one in ``_gather_subentry_options``
+            # fires on the *unfiltered* list, so nothing exists that could hold
+            # the key. This one fires on the *filtered* list while the
+            # unfiltered one may well be non-empty, which is where a borrowed
+            # identity becomes possible.
+            title = getattr(self.config_entry, "title", None) or "Core tracking"
+            options = [
+                _SubentryOption(
+                    key=_unclaimed_fallback_key(
+                        {option.key for option in all_options}
+                        | {opt.stored_key for opt in all_options if opt.stored_key}
+                    ),
+                    label=str(title),
+                    subentry=None,
+                    visible_device_ids=(),
+                )
+            ]
+
+        label_map = {opt.key: opt.label for opt in options}
+        option_map = {opt.key: opt for opt in options}
+        return label_map, option_map
+
+    @staticmethod
+    def _default_subentry_key(
+        choices: dict[str, str],
+        option_map: Mapping[str, _SubentryOption],
+    ) -> str:
+        """Return the key of the group a form should preselect.
+
+        This asks ``key`` a question about *meaning* -- "which of these is the
+        tracker group?" -- and is therefore the second site that the collision
+        rewrite in ``_gather_subentry_options`` silently disarms, the first
+        being ``_accepts_device_assignment``. Once any two options collide,
+        every key becomes a ``subentry_id``, a literal membership test can no
+        longer match, and the helper preselects whichever group happens to sort
+        first by label. A user who submits ``async_step_repairs_move`` without
+        touching the target field then writes the devices to that group.
+
+        ``option_map`` is how the caller supplies the meaning the key lost, and
+        it is required rather than optional: every one of the five call sites
+        obtains it from the same choice map it passes as ``choices``, so an
+        optional parameter would only have kept a branch alive that nothing
+        reaches, and a future caller who forgot the map would silently get the
+        pre-fix behaviour back on *both* axes.
+
+        The type axis is asked as well, because a key comparison alone is the
+        very check ``agents/config_flow/AGENTS.md`` forbids: the alias rule
+        lets a ``service``-typed subentry keep the tracker key. **What the
+        axis buys here is an identity proxy, not damage prevention**, and the
+        distinction is worth stating because an earlier version of this
+        docstring got it wrong. It argued that preselecting such a group sends
+        feature-flag writes to something that cannot hold devices -- but the
+        contract two paragraphs down names the service group as a legitimate
+        target of exactly these two steps, so writing there is not the harm.
+        The harm is that the key no longer identifies the tracker group and
+        ``_accepts_device_assignment`` is the closest stand-in left: a group
+        wearing the tracker key while refusing devices is, whatever else it
+        is, not the tracker group the form means to offer first.
+
+        **The second loop is bound to that case rather than run
+        unconditionally**, and the boundary is the load-bearing part. Preferring
+        any device-accepting option also fires on an ordinary legacy entry --
+        an email-keyed tracker group beside a real service group, nothing
+        parked -- where the pre-fix answer was ``next(iter(choices))``. That
+        moved the preselection of ``async_step_settings`` and
+        ``async_step_credentials`` away from the service group they
+        legitimately target, for every such installation and in both label
+        orders. Measured, and pinned by
+        ``::test_the_preselection_is_unchanged_where_nothing_is_parked``.
+
+        **Only two of the five call sites can reach that loop at all**, which
+        bounds what it is worth rather than justifying its removal:
+        ``async_step_settings`` and ``async_step_credentials`` pass the
+        unfiltered ``_subentry_choice_map``, while ``async_step_visibility``,
+        ``async_step_repairs_move`` and ``async_step_repairs_delete`` pass
+        ``_device_target_choice_map``, whose filter is ``_accepts_device_
+        assignment`` itself -- a parked group never arrives there. The loop is
+        kept for the two that do, not written for all five.
+
+        A key with no option behind it is skipped in **both** loops. The two
+        used to disagree, the first skipping and the second returning it, so
+        an unjudgeable choice outranked every judgeable one; ``choices`` and
+        ``option_map`` come from one call today, which makes this a guard
+        rather than a live path (``::test_a_choice_without_an_option_never_
+        wins_the_preselection``).
+
+        The tracker group is *recognised* on the key axis alone; only the
+        refusal is two-axis. A legacy tracker on an email-style key is
+        therefore not recognised here, exactly as before this change, and
+        closing that belongs with the rest of the alias work in
+        ``PLAN_GFMY_ALIAS_TYPE_AXIS``.
+
+        The synthesised fallback of ``_device_target_choice_map`` stores
+        nothing, so ``stored_key or key`` is its (possibly suffixed) key; it
+        wins the first loop only when it *is* the tracker key, and it accepts
+        devices, so the answer is the same either way.
+        """
+
+        parked_on_the_tracker_key = False
+        for key in choices:
+            option = option_map.get(key)
+            if option is None:
+                continue
+            if (option.stored_key or option.key) != TRACKER_SUBENTRY_KEY:
+                continue
+            if _accepts_device_assignment(option):
+                return key
+            parked_on_the_tracker_key = True
+        if parked_on_the_tracker_key:
+            for key in choices:
+                option = option_map.get(key)
+                if option is None:
+                    continue
+                if _accepts_device_assignment(option):
+                    return key
+        return next(iter(choices), TRACKER_SUBENTRY_KEY)
 
     async def _async_update_feature_group_subentry(
         self,
@@ -7770,6 +8270,53 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin, _ContainerLoginMixi
         changed: set[str] = set()
         options = self._gather_subentry_options()
 
+        # Authoritative checkpoint for the invariant described at
+        # ``_NON_DEVICE_SUBENTRY_KEYS``. Three production sites in this module
+        # already write it that way -- both ``_visible_device_ids`` overrides
+        # and the ``service_payload`` of ``_async_sync_feature_subentries`` --
+        # and ``tests/test_config_flow_subentry_sync.py`` pins their result, but
+        # none of them is a checkpoint. The guard sits here rather than in each
+        # calling step because this is where every assignment in this module
+        # passes, including any future caller.
+        #
+        # The predicate is decided per *option* and must therefore be consumed
+        # per option. Resolving the first holder of the key and then writing to
+        # every holder is what let a service subentry receive ids while the
+        # guard judged its tracker twin (or refused on behalf of a twin the user
+        # never picked). ``_gather_subentry_options`` now hands out injective
+        # keys, so a twin cannot arise in the first place; the identity
+        # comparison in the loop below is the second, independent half, and it
+        # holds even if that ever regresses.
+        #
+        # Standing down instead of stripping the ids: the request cannot take
+        # effect, so changing nothing is safer than unassigning the devices from
+        # the group that legitimately holds them.
+        matching = [option for option in options if option.key == target_key]
+        target_option = next(
+            (option for option in matching if _accepts_device_assignment(option)), None
+        )
+        if matching and target_option is None:
+            _LOGGER.warning(
+                "Refusing to assign %d device(s) to subentry %r: this feature group "
+                "never carries device visibility",
+                len(device_ids),
+                target_key,
+            )
+            return set()
+
+        # No option carries the key at all. Inside this module the synthesised
+        # fallback of ``_device_target_choice_map`` is what produces that shape;
+        # a direct caller passing an unknown key produces it too, which is why
+        # the check sits here and not in the steps. A
+        # move needs a destination, so the loop below must not run: its
+        # ``else`` branch would strip the ids from every group that holds them
+        # and put them nowhere. That is not the requested move, it is a loss,
+        # and it would be reported as a success, because a strip fills
+        # ``changed``. Standing down keeps the ids where they legitimately are
+        # and leaves ``changed`` empty, which is what the callers read.
+        if target_option is None:
+            return set()
+
         for option in options:
             subentry = option.subentry
             if subentry is None:
@@ -7787,7 +8334,12 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin, _ContainerLoginMixi
                 visible = list(option.visible_device_ids)
 
             before = list(visible)
-            if option.key == target_key:
+            # Identity, not key equality: see the note above the guard. When no
+            # option carries ``target_key`` at all -- the synthesised fallback of
+            # ``_device_target_choice_map`` produces exactly that -- every option
+            # takes the ``else`` branch, which is what this function did before
+            # and what the empty arm of the narrowing relies on.
+            if option is target_option:
                 for dev_id in device_ids:
                     if dev_id not in visible:
                         visible.append(dev_id)
@@ -8273,7 +8825,7 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin, _ContainerLoginMixi
             )
 
         choices, option_map = self._subentry_choice_map()
-        default_subentry = self._default_subentry_key(choices)
+        default_subentry = self._default_subentry_key(choices, option_map)
 
         fields: dict[Any, Any] = {
             vol.Required(_FIELD_SUBENTRY, default=default_subentry): vol.In(choices)
@@ -8501,8 +9053,10 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin, _ContainerLoginMixi
                     name_obj = meta.get("name")
                 choices[dev_id] = dev_id if not isinstance(name_obj, str) else name_obj
 
-        subentry_choices, _ = self._subentry_choice_map()
-        default_subentry = self._default_subentry_key(subentry_choices)
+        subentry_choices, subentry_option_map = self._device_target_choice_map()
+        default_subentry = self._default_subentry_key(
+            subentry_choices, subentry_option_map
+        )
 
         schema = vol.Schema(
             {
@@ -8653,11 +9207,41 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin, _ContainerLoginMixi
             self.hass, self.config_entry
         )
 
-        subentry_choices, _ = self._subentry_choice_map()
+        # A move needs a real destination, so the synthesised fallback is not a
+        # candidate here. ``async_step_repairs_delete`` already draws that line
+        # for its own fallback field through ``real_fallback_keys``; this is the
+        # same rule, applied to the target field.
+        #
+        # Dropping it rather than letting it through is what keeps the report
+        # honest. Without a backing subentry the assignment writes nothing, so
+        # ``changed`` stays empty and the step below aborts with
+        # ``subentry_move_success`` -- a success message for a move that could
+        # not happen. Aborting on ``repairs_no_subentries`` instead says the
+        # truth about such an entry with a string that already exists, so no
+        # translation key is added.
+        #
+        # ``async_step_visibility`` deliberately keeps the fallback: there the
+        # user's request is to leave the ignore list, which the option write and
+        # the reload carry on their own, and an id no subentry claims is merged
+        # into the tracker group by ``coordinator/subentry.py``.
+        raw_choices, raw_option_map = self._device_target_choice_map()
+        # Filter the labels and the options together. Handing the *unfiltered*
+        # map to a helper that receives the filtered labels is harmless only
+        # while every branch of that helper iterates ``choices``; the step
+        # drops the synthesised fallback on purpose, so a future branch that
+        # walked the map instead would hand it back as the preselection.
+        subentry_options = {
+            key: raw_option_map[key]
+            for key in raw_choices
+            if raw_option_map[key].subentry is not None
+        }
+        subentry_choices = {key: raw_choices[key] for key in subentry_options}
         if not subentry_choices:
             return self.async_abort(reason="repairs_no_subentries")
 
-        default_subentry = self._default_subentry_key(subentry_choices)
+        default_subentry = self._default_subentry_key(
+            subentry_choices, subentry_options
+        )
         device_choices = self._device_choice_map()
 
         schema = vol.Schema(
@@ -8738,13 +9322,37 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin, _ContainerLoginMixi
             self.hass, self.config_entry
         )
 
+        # Two maps on purpose, and only one of them is narrowed. What may be
+        # *deleted* is a different question from what may *receive* devices: a
+        # service subentry stays removable (the core repair path recreates a
+        # missing one), while it must not be offered as the fallback target,
+        # because the devices moved there would go nowhere.
+        #
+        # The two questions are still coupled, through ``fallback_key !=
+        # target_key`` below: a group may only be offered for deletion while a
+        # *different* group can inherit its devices. Narrowing the fallback
+        # side without re-deriving the deletable side left the common shape
+        # (one tracker group plus one service group) with a form whose single
+        # fallback value was always the deletion target, so every submission
+        # failed on ``invalid_subentry`` with no way out. Offering an action
+        # that can never be carried out is the very defect this step was
+        # narrowed to remove, one field higher up.
         subentry_choices, option_map = self._subentry_choice_map()
+        fallback_choices, fallback_option_map = self._device_target_choice_map()
+        # Synthesised entries do not count: the ``core_tracking`` placeholder
+        # that ``_device_target_choice_map`` falls back to has no backing
+        # subentry, so it cannot actually inherit anything.
+        real_fallback_keys = {
+            key
+            for key, option in fallback_option_map.items()
+            if option.subentry is not None
+        }
         removable_choices = {
             key: label
             for key, label in subentry_choices.items()
-            if option_map[key].subentry
+            if option_map[key].subentry and (real_fallback_keys - {key})
         }
-        if not removable_choices or len(removable_choices) <= 1:
+        if not removable_choices:
             return self.async_abort(reason="subentry_delete_invalid")
 
         schema = vol.Schema(
@@ -8752,8 +9360,10 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin, _ContainerLoginMixi
                 vol.Required(_FIELD_REPAIR_DELETE): vol.In(removable_choices),
                 vol.Required(
                     _FIELD_REPAIR_FALLBACK,
-                    default=self._default_subentry_key(subentry_choices),
-                ): vol.In(subentry_choices),
+                    default=self._default_subentry_key(
+                        fallback_choices, fallback_option_map
+                    ),
+                ): vol.In(fallback_choices),
             }
         )
 
@@ -8764,7 +9374,7 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin, _ContainerLoginMixi
 
             if target_key not in removable_choices:
                 errors[_FIELD_REPAIR_DELETE] = "invalid_subentry"
-            if fallback_key not in subentry_choices or fallback_key == target_key:
+            if fallback_key not in fallback_choices or fallback_key == target_key:
                 errors[_FIELD_REPAIR_FALLBACK] = "invalid_subentry"
 
             if errors:
@@ -8786,7 +9396,7 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin, _ContainerLoginMixi
 
             placeholders = {
                 "subentry": subentry_choices[target_key],
-                "fallback": subentry_choices[fallback_key],
+                "fallback": fallback_choices[fallback_key],
                 "count": str(len(devices)),
             }
 
@@ -8818,7 +9428,7 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin, _ContainerLoginMixi
         errors: dict[str, str] = {}
 
         subentry_choices, option_map = self._subentry_choice_map()
-        default_subentry = self._default_subentry_key(subentry_choices)
+        default_subentry = self._default_subentry_key(subentry_choices, option_map)
 
         if selector is not None:
             schema = vol.Schema(
@@ -9028,7 +9638,19 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin, _ContainerLoginMixi
                                                 updated_data.pop(DATA_AAS_TOKEN, None)
                                             return await _finalize_success(updated_data)
                     except Exception as err2:  # noqa: BLE001
-                        if _is_multi_entry_guard_error(err2):
+                        # The deferral rebuilds the payload from the bundle, so
+                        # it only applies to a bundle submission. ``has_secrets``
+                        # is the guard, not a mere key check: it also rules out
+                        # an empty string, which would reach ``json.loads`` and
+                        # raise there instead. Both credential branches call
+                        # ``_finalize_success`` inside this ``try``, so a guard
+                        # error can arrive from a token-only submission too;
+                        # that one falls through to the error mapping below.
+                        # Defence in depth rather than a live user path: the
+                        # token field is commented out of both schema branches
+                        # and the flow manager rejects extra keys, so today
+                        # only a direct call produces that shape.
+                        if _is_multi_entry_guard_error(err2) and has_secrets:
                             entry = self.config_entry
                             parsed = normalize_secrets_bundle(
                                 json.loads(user_input["new_secrets_json"])
