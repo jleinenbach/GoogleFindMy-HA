@@ -32,7 +32,7 @@ CONFIG_ENTRY_VERSION: int = 2
 # NOTE: no ": str" annotation on purpose -- semantic-release's version_variables
 # regex only matches `NAME = "x"`, not `NAME: str = "x"`. Re-adding the annotation
 # would silently skip this file on the automated version bump.
-INTEGRATION_VERSION = "1.7.15.7"
+INTEGRATION_VERSION = "1.7.15.8"
 
 # --------------------------------------------------------------------------------------
 # Shared textual constants
