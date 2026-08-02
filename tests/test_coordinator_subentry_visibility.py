@@ -1020,8 +1020,8 @@ def test_a_subentry_without_a_usable_identifier_loses_the_service_slot(
     )
 
 
-def test_the_literal_owner_table_is_one_object_shared_by_both_ranking_sides() -> None:
-    """Pin the shared owner table that the two ranking sides depend on.
+def test_the_literal_owner_table_is_one_object_shared_by_all_ranking_sides() -> None:
+    """Pin the shared owner table that the three ranking sides depend on.
 
     The reading side's owner field reads
     ``LITERAL_CORE_KEY_OWNER.get(SERVICE_SUBENTRY_KEY)``, and for the service
@@ -1041,8 +1041,14 @@ def test_the_literal_owner_table_is_one_object_shared_by_both_ranking_sides() ->
     is the tripwire for the day they stop being, not a guard against a
     hard-coded literal. Killing mutations: making the flow hold a private
     ``dict`` copy, and mapping the tracker key to the wrong owner.
+
+    The runtime manager joined as a third reader with
+    ``PLAN_GFMY_ALIAS_TYPE_AXIS``; it is asserted here for the same reason as
+    the other two, because a private copy in ``__init__.py`` would drift
+    exactly as silently.
     """
 
+    from custom_components import googlefindmy as _integration
     from custom_components.googlefindmy import config_flow as _config_flow
     from custom_components.googlefindmy import const as _const
     from custom_components.googlefindmy.coordinator import subentry as _subentry
@@ -1052,6 +1058,9 @@ def test_the_literal_owner_table_is_one_object_shared_by_both_ranking_sides() ->
     )
     assert _subentry.LITERAL_CORE_KEY_OWNER is _const.LITERAL_CORE_KEY_OWNER, (
         "the runtime index must rank against the shared table, not a private copy"
+    )
+    assert _integration.LITERAL_CORE_KEY_OWNER is _const.LITERAL_CORE_KEY_OWNER, (
+        "the runtime manager must rank against the shared table, not a private copy"
     )
     assert _const.LITERAL_CORE_KEY_OWNER[SERVICE_SUBENTRY_KEY] == SUBENTRY_TYPE_SERVICE
     assert _const.LITERAL_CORE_KEY_OWNER[TRACKER_SUBENTRY_KEY] == SUBENTRY_TYPE_TRACKER

@@ -6875,9 +6875,14 @@ class ConfigFlow(
                         # ``core_tracking`` and never reaches this branch.
                         # Rewriting this branch therefore does not fix that
                         # defect; it would only let a legacy ``hub`` win the
-                        # service slot ahead of a real service subentry,
-                        # depending on manager iteration order. The manager fold
-                        # is where that defect lives and where it gets fixed.
+                        # service slot ahead of a real service subentry. That
+                        # half is now decided rather than open: beside a real
+                        # ``service`` subentry the hub is the deterministic
+                        # loser of ``_candidate_score``'s literal-owner field,
+                        # where it used to depend on manager iteration order.
+                        # What is left is the **fold**, which still leaves a
+                        # ``hub`` on its stored key and is where the remaining
+                        # defect lives.
                         subentry_type = getattr(managed_subentry, "subentry_type", None)
                         if subentry_type == SUBENTRY_TYPE_SERVICE:
                             target_key = SERVICE_SUBENTRY_KEY
@@ -7083,10 +7088,10 @@ class ConfigFlow(
             between two of its own steps, so among candidates of equal rank the
             seeded one still wins. But the seeder resolves through the runtime
             manager, which folds *every* tracker-typed subentry onto
-            ``TRACKER_SUBENTRY_KEY`` and has no type axis at all. It can
-            therefore name a subentry that does not carry the key in either
-            pool: a legacy per-account tracker group, or a ``hub`` sitting
-            beside the canonical ``service`` subentry. Ranking such a seed ahead
+            ``TRACKER_SUBENTRY_KEY``. It can therefore name a subentry that does
+            not carry the key in either pool: a legacy per-account tracker
+            group, or a ``hub`` sitting beside the canonical ``service``
+            subentry. Ranking such a seed ahead
             of the pool let it be rewritten onto the core key, displaced the
             canonical group's identity through ``_claim_unique_id`` and left
             that group out of the context map, so the cleanup swept it, device
@@ -7098,6 +7103,19 @@ class ConfigFlow(
             A seed therefore only decides among candidates that qualify for the
             key. It still decides alone when no candidate does, which is the
             case a map naming a not-yet-keyed group depends on.
+
+            ``ConfigEntrySubEntryManager._candidate_score`` now ranks a key
+            collision on the same axes this pool does (exact stored key, then
+            literal owner per ``LITERAL_CORE_KEY_OWNER``), which narrows *how
+            often* the seeder can name an unqualified subentry but does not
+            remove the case. Both shapes above are contested collisions and the
+            manager now resolves them towards the canonical group. What it
+            cannot resolve is the **uncontested** one: a legacy per-account
+            group with no canonical sibling holds ``TRACKER_SUBENTRY_KEY``
+            alone, so the manager names it because there is nothing to rank it
+            against. That is the shape this ordering still exists for, and it
+            is also why the manager's rank is not a reason to move the seed in
+            front of the pool.
             """
 
             def _is_literal_owner(candidate: ConfigSubentry) -> bool:

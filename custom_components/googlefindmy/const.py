@@ -88,15 +88,26 @@ NON_DEVICE_SUBENTRY_TYPES: frozenset[str] = frozenset(
 # the two are not interchangeable. Where both answer for the same key, this
 # table decides which one keeps it, and it lives here rather than in one of the
 # consumers because the config flow (``_resolve_existing``, the stale-subentry
-# sweep) and the runtime index (``coordinator/subentry.py``) must rank the same
-# pair identically: a slot won on one side and lost on the other is exactly the
-# drift the shared set above exists to prevent. Sharing the *definition* is the
-# point; each consumer keeps its own reader. Two consumers, not all of them: a
-# third ranker, ``ConfigEntrySubEntryManager._candidate_score`` in
-# ``__init__.py``, resolves key collisions without looking at ``subentry_type``
-# at all and therefore does not read this table. That asymmetry is deliberate
-# for now and tracked in ``PLAN_GFMY_ALIAS_TYPE_AXIS``; it is named here so the
-# sentence above is not misread as "every site that ranks a key pair".
+# sweep), the runtime index (``coordinator/subentry.py``) and the runtime
+# manager (``ConfigEntrySubEntryManager._candidate_score`` in ``__init__.py``)
+# must rank the same pair identically: a slot won on one side and lost on
+# another is exactly the drift the shared set above exists to prevent. Sharing
+# the *definition* is the point; each consumer keeps its own reader, and they
+# spell the order differently -- the flow and the index rank "lower wins", the
+# manager "higher wins" -- so only the *relative* order of the fields is
+# shared, not the tuples themselves. The manager was the one site that did not
+# read this table; it does now.
+#
+# "Identically" is deliberately about those shared fields and not about the
+# whole tuple, because two differences survive and hiding them would make this
+# comment the drift it warns against. The manager carries two provenance
+# fields (entry match, unique-id substring) *behind* the shared ones, which
+# the other two have no counterpart for; and it breaks a full tie on the raw
+# ``subentry_id`` where the index uses the sanitised, provisional-filtered one
+# -- the same flow/index difference named further down, now inherited by a
+# third reader. What stays asymmetric beyond the rank is the manager's *fold*:
+# it still leaves a ``hub`` on its stored key. That remainder is tracked in
+# ``PLAN_GFMY_ALIAS_TYPE_AXIS``.
 # Read-only on purpose: unlike the plain ``dict`` constants elsewhere in this
 # module, this one is imported by two packages at once, and an in-place mutation
 # in either would silently reach the other.

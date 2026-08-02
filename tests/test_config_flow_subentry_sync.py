@@ -1672,6 +1672,77 @@ async def test_the_canonical_service_group_survives_a_hub_claiming_its_key(
     )
 
 
+@pytest.mark.parametrize("order", [("hub", "svc"), ("svc", "hub")])
+@pytest.mark.asyncio
+async def test_a_seed_naming_a_non_owner_still_loses_to_the_literal_owner(
+    order: tuple[str, str],
+) -> None:
+    """The pool's rank outranks the seed, asserted on the one reachable route.
+
+    This is the same shape as the test above, with one difference that is the
+    whole point: the context map is written *directly* rather than resolved
+    through ``ConfigEntrySubEntryManager``. Both matter, and they stopped being
+    the same assertion once the manager gained a rank axis.
+
+    Through the manager the shape is no longer reachable: for
+    ``SERVICE_SUBENTRY_KEY`` both candidates store the key exactly, the literal
+    owner wins ``_candidate_score``'s type field, and the seed the manager
+    hands over is therefore the ``service`` subentry. The two tests above kept
+    asserting their outcomes and stopped exercising the ordering that produces
+    them -- measured by putting the seed in front of the pool, which failed
+    both before the rank existed and neither after.
+
+    A context map is not only written by that resolver, though. It survives
+    between the steps of one flow (``_ensure_subentry_context``), so an entry
+    whose shape changed mid-flow -- a hub created, then a service subentry
+    repaired beside it -- carries a seed the manager would no longer choose.
+    Guarding the ordering therefore means writing the seed the way that route
+    does, and this test is the guard the manager's rank cannot make redundant.
+    """
+
+    entry = _entry_with_subentries()
+    store = _subentry_store(entry)
+    made = {
+        "hub": ConfigSubentry(
+            data=MappingProxyType(
+                {"group_key": SERVICE_SUBENTRY_KEY, "feature_flags": {}}
+            ),
+            subentry_type=SUBENTRY_TYPE_HUB,
+            title="My Hub",
+            unique_id=f"{entry.entry_id}-hub-custom",
+            subentry_id="sub-hub",
+        ),
+        "svc": ConfigSubentry(
+            data=MappingProxyType(
+                {"group_key": SERVICE_SUBENTRY_KEY, "feature_flags": {}}
+            ),
+            subentry_type=SUBENTRY_TYPE_SERVICE,
+            title="Google Find Hub Service",
+            unique_id=f"{entry.entry_id}-{SERVICE_SUBENTRY_KEY}",
+            subentry_id="sub-service",
+        ),
+    }
+    for name in order:
+        store[made[name].subentry_id] = made[name]
+
+    flow = _build_flow(entry)
+    context_map = _context_map_for(flow, entry, "reconfigure")
+    # The seed the manager would never hand over any more. Asserted first so a
+    # future change that makes the resolver overwrite it fails here rather than
+    # turning this test into a duplicate of the one above.
+    context_map[SERVICE_SUBENTRY_KEY] = "sub-hub"
+    await _run_sync(flow, entry, context_map)
+    await flow._async_cleanup_stale_subentries(entry, context_map)  # type: ignore[attr-defined]
+
+    manager = flow.hass.config_entries  # type: ignore[attr-defined]
+    assert "sub-service" not in manager.removed, (
+        "the literal owner must survive a seed naming the hub"
+    )
+    assert made["svc"].unique_id == f"{entry.entry_id}-{SERVICE_SUBENTRY_KEY}", (
+        "and keep the canonical identity, whatever the insert order"
+    )
+
+
 @pytest.mark.parametrize("order", [("legacy", "canonical"), ("canonical", "legacy")])
 @pytest.mark.asyncio
 async def test_a_seed_that_does_not_carry_the_key_yields_to_the_stored_match(
@@ -1680,15 +1751,37 @@ async def test_a_seed_that_does_not_carry_the_key_yields_to_the_stored_match(
     """A seeded subentry that answers for a key it does not carry must not win.
 
     The reconfigure seed is resolved by ``ConfigEntrySubEntryManager``, which
-    folds *every* tracker-typed subentry onto ``TRACKER_SUBENTRY_KEY`` and has
-    no type axis, so it can name a legacy per-account group while the canonical
-    core group sits right beside it. That legacy group is in neither pool here:
-    it stores a foreign key and ``_canonical_core_key_of`` folds a tracker only
-    off the *service* key. Letting the seed outrank a pool that does not contain
-    it made the sync rewrite the legacy group onto the core key, displaced the
+    folds *every* tracker-typed subentry onto ``TRACKER_SUBENTRY_KEY``, so it
+    can name a legacy per-account group while the canonical core group sits
+    right beside it. That legacy group is in neither pool here: it stores a
+    foreign key and ``_canonical_core_key_of`` folds a tracker only off the
+    *service* key. Letting the seed outrank a pool that does not contain it
+    made the sync rewrite the legacy group onto the core key, displaced the
     canonical group's identity through ``_claim_unique_id`` and then swept it,
     device and entity registry bindings included -- where the previous commit
     raised ``AbortFlow`` and left both groups intact.
+
+    **This fixture seeds through a live manager**, and that matters for what it
+    still proves. ``_reset_reconfigure_subentry_context`` instantiates
+    ``ConfigEntrySubEntryManager`` and reads ``managed_subentries``, so once
+    that manager gained a rank axis (exact stored key, then literal owner) it
+    stopped nominating the legacy group *in this shape*: both are
+    ``tracker``-typed and fold onto the same key, so the canonical one wins on
+    the exact-key field. The pool ordering asserted here is therefore no longer
+    exercised through the seed by this fixture, which is stated rather than
+    left to be rediscovered -- the assertions below still hold, but one of the
+    two ways of reaching them closed.
+
+    Measured rather than argued: putting the seed in front of the pool
+    (``if seeded is not None: return seeded``) failed this test and
+    ``::test_the_canonical_service_group_survives_a_hub_claiming_its_key``
+    before the manager gained its rank, and fails neither afterwards. Both lost
+    their access to the ordering by the same mechanism, so the guard was
+    restored explicitly rather than left to be inferred:
+    ``::test_a_seed_naming_a_non_owner_still_loses_to_the_literal_owner``
+    injects the seed into the context map directly instead of resolving it
+    through the manager, which is the one route the manager's rank cannot
+    close.
 
     Both orders are pinned because the defect only showed in one of them, and a
     single order would pass on the implementation that decides by insertion

@@ -16,6 +16,7 @@ from custom_components.googlefindmy import (
 )
 from custom_components.googlefindmy.const import (
     DOMAIN,
+    LITERAL_CORE_KEY_OWNER,
     SERVICE_SUBENTRY_KEY,
     SUBENTRY_TYPE_HUB,
     SUBENTRY_TYPE_SERVICE,
@@ -611,6 +612,11 @@ def test_update_visible_device_ids_refuses_a_non_device_bearing_type(
 # ---------------------------------------------------------------------------
 
 _LEGACY_EMAIL_KEY = "user@example.com"
+# Index of ``type_match`` in ``_candidate_score``'s tuple. A name, not a
+# guard: inserting a field in front of it moves the assertion onto its
+# neighbour exactly as a literal would. It is named so the *fix* is one line
+# when that happens, and so a reader sees which field is meant.
+_TYPE_FIELD = 1
 
 
 def _ap1_subentry(
@@ -858,47 +864,160 @@ def test_ap1_a_hub_type_with_email_key_stays_on_that_key() -> None:
     assert manager.managed_subentries.get(_LEGACY_EMAIL_KEY) is hub
 
 
-# --- Class B: characterisation --------------------------------------------
+# --- Class B, turned over by AP3: standing assertions now ------------------
+#
+# Both assertions below were characterisation at 5e964a1f: they recorded that
+# the manager resolved a key collision by load order, and named the change that
+# would end it. AP3 made that change, so they now assert the rule rather than
+# the symptom. The pre-AP3 wording is in the history of this file; the anchor
+# commit is 5e964a1f.
 
 
 @pytest.mark.parametrize("reverse", [False, True], ids=["fwd", "rev"])
-def test_ap1_b_candidate_score_is_type_blind_on_key_collision(reverse: bool) -> None:
-    """Class B (characterisation; AP3 turns this over).
+def test_ap3_candidate_score_reads_the_type_axis_on_key_collision(
+    reverse: bool,
+) -> None:
+    """Class A (standing assertion; AP3 turned this over from Class B).
 
-    Two candidates differing in ``subentry_type`` (and, score-irrelevantly, in
-    ``subentry_id`` and title -- the score only reads whether a ``subentry_id``
-    is present) produce the same score, so ``_select_preferred_managed`` keeps
-    whichever was iterated first, the comparison being strict ``>``. The winner
-    therefore depends on load order alone. AP3 removes that by giving
-    ``_candidate_score`` a type axis ordered against ``LITERAL_CORE_KEY_OWNER``.
+    Two candidates collide on ``core_tracking`` and differ only in
+    ``subentry_type`` (their ``subentry_id`` and title differ too, but neither
+    reaches the decision: the score reads only whether an id is *present*, and
+    the identifier tie-break is not consulted once the scores differ). Before
+    AP3 both produced the same score, the strict ``>`` fell through, and the
+    winner was whichever the entry yielded first. Now the type that literally
+    owns the key per ``LITERAL_CORE_KEY_OWNER`` outranks the one that does not,
+    in either order.
+
+    The ``hub`` here is deliberately given the *lower* ``subentry_id``
+    (``id-a-hub`` < ``id-b-tracker``), so it would win the identifier tie-break
+    if the type field were removed. That is what makes this an assertion about
+    the type axis rather than about determinism in general: neutralising
+    ``type_match`` does not merely make the outcome order-dependent, it flips
+    the winner to the hub in *both* orders.
     """
 
     tracker = _ap1_subentry(
-        "id-a-tracker", TRACKER_SUBENTRY_KEY, SUBENTRY_TYPE_TRACKER, "e1-x"
+        "id-b-tracker", TRACKER_SUBENTRY_KEY, SUBENTRY_TYPE_TRACKER, "e1-x"
     )
-    hub = _ap1_subentry("id-b-hub", TRACKER_SUBENTRY_KEY, SUBENTRY_TYPE_HUB, "e1-x")
+    hub = _ap1_subentry("id-a-hub", TRACKER_SUBENTRY_KEY, SUBENTRY_TYPE_HUB, "e1-x")
     order = [hub, tracker] if reverse else [tracker, hub]
     _entry, _recorder, manager = _ap1_setup("e1", order)
 
-    assert manager._candidate_score(tracker) == manager._candidate_score(hub)
-    assert manager.get(TRACKER_SUBENTRY_KEY) is order[0]
+    tracker_score = manager._candidate_score(tracker, key=TRACKER_SUBENTRY_KEY)
+    hub_score = manager._candidate_score(hub, key=TRACKER_SUBENTRY_KEY)
+    assert tracker_score > hub_score
+    assert manager.get(TRACKER_SUBENTRY_KEY) is tracker
+
+
+def test_ap3_candidate_score_type_axis_is_neutral_off_the_core_keys() -> None:
+    """Class A (standing assertion).
+
+    ``LITERAL_CORE_KEY_OWNER`` only names the two core keys. For any other key
+    the lookup yields ``None``, so *no* candidate can match and the field is
+    uniformly ``0``. Without that guard every non-core key would acquire a
+    second ordering nobody chose.
+
+    The third candidate carries ``subentry_type=None`` and is the only one that
+    pins the guard rather than the field. An earlier version of this test
+    claimed the guard was asserted and did not assert it: with two *typed*
+    candidates, dropping ``canonical_owner is not None`` leaves both at ``0``
+    anyway and the mutation survives (measured). Only ``None == None`` turns
+    the missing table entry into a *match*, which would hand an untyped
+    subentry a rank nobody granted it on every non-core key.
+
+    That candidate is a ``SimpleNamespace`` rather than a ``ConfigSubentry``,
+    deliberately and against the file's usual rule: the core declares
+    ``subentry_type: str``, so the shape cannot be built from the real class,
+    and ``_candidate_score`` reads every attribute through ``getattr`` without
+    narrowing. The tree treats untyped subentries as a real if defensive shape
+    (``agents/config_flow/AGENTS.md`` on the stale sweep,
+    ``_canonical_core_key_of``), which is why the guard exists at all.
+    """
+
+    tracker = _ap1_subentry(
+        "id-t", _LEGACY_EMAIL_KEY, SUBENTRY_TYPE_TRACKER, "e1-legacy"
+    )
+    hub = _ap1_subentry("id-h", _LEGACY_EMAIL_KEY, SUBENTRY_TYPE_HUB, "e1-legacy")
+    untyped = SimpleNamespace(
+        data=MappingProxyType({"group_key": _LEGACY_EMAIL_KEY}),
+        subentry_type=None,
+        title="untyped",
+        unique_id="e1-legacy",
+        subentry_id="id-u",
+    )
+    _entry, _recorder, manager = _ap1_setup("e1", [tracker])
+
+    assert LITERAL_CORE_KEY_OWNER.get(_LEGACY_EMAIL_KEY) is None
+    assert (
+        manager._candidate_score(tracker, key=_LEGACY_EMAIL_KEY)[_TYPE_FIELD]
+        == manager._candidate_score(hub, key=_LEGACY_EMAIL_KEY)[_TYPE_FIELD]
+        == manager._candidate_score(untyped, key=_LEGACY_EMAIL_KEY)[_TYPE_FIELD]
+        == 0
+    )
 
 
 @pytest.mark.parametrize("reverse", [False, True], ids=["fwd", "rev"])
-def test_ap1_b_duplicate_tracker_group_first_writer_wins_in_manager(
+def test_ap3_an_exact_stored_key_outranks_a_folded_twin(reverse: bool) -> None:
+    """Class A (standing assertion).
+
+    The first three fields of the rank are provenance and exactness, and this
+    pins the third: a subentry that stores ``core_tracking`` itself beats one
+    that merely folds onto it, in either order. Both are ``tracker``-typed, so
+    the type axis ties and cannot decide.
+
+    This field is here because leaving it out was a measured regression rather
+    than a hypothetical: without it the legacy twin below wins on the
+    identifier tie-break (``id-legacy`` < ``id-tracker``), takes the
+    ``core_tracking`` slot, and ``async_sync`` then raises looking for a unique
+    id no subentry holds. The fixture keeps that identifier ordering on purpose
+    -- the twin must be able to win the later fields -- so neutralising
+    ``exact_key`` flips the outcome instead of merely making it order-dependent.
+    """
+
+    canonical = _ap1_subentry(
+        "id-tracker", TRACKER_SUBENTRY_KEY, SUBENTRY_TYPE_TRACKER, "e1-t"
+    )
+    legacy_twin = _ap1_subentry(
+        "id-legacy", _LEGACY_EMAIL_KEY, SUBENTRY_TYPE_TRACKER, "e1-legacy"
+    )
+    order = [legacy_twin, canonical] if reverse else [canonical, legacy_twin]
+    _entry, _recorder, manager = _ap1_setup("e1", order)
+
+    assert manager._candidate_score(
+        canonical, key=TRACKER_SUBENTRY_KEY
+    ) > manager._candidate_score(legacy_twin, key=TRACKER_SUBENTRY_KEY)
+    assert legacy_twin.subentry_id < canonical.subentry_id, (
+        "the fixture must let the twin win the identifier tie-break, or "
+        "neutralising exact_key would only make the outcome order-dependent"
+    )
+    slot = manager.get(TRACKER_SUBENTRY_KEY)
+    assert slot is not None and slot.subentry_id == "id-tracker"
+
+
+@pytest.mark.parametrize("reverse", [False, True], ids=["fwd", "rev"])
+def test_ap3_duplicate_tracker_group_resolves_by_identifier_not_load_order(
     reverse: bool,
 ) -> None:
-    """Class B (characterisation; AP4 turns the reading-side twin over).
+    """Class A (standing assertion; AP3 turned this over from Class B).
 
-    Two ``tracker``-typed subentries collide on ``core_tracking``. The manager
-    resolves that by load order and keeps the *first* one: equal scores make the
-    strict ``>`` fall through, and ``_refresh_from_entry`` then skips the
-    candidate. So the owning ``subentry_id`` differs between the two orders.
+    Two ``tracker``-typed subentries collide on ``core_tracking``. Their scores
+    tie on every field including the type axis -- same type, same key -- so this
+    is the case the identifier tie-break exists for. Before AP3 the strict ``>``
+    fell through and ``_refresh_from_entry`` kept whichever came first, so the
+    owning ``subentry_id`` differed between the two orders. Now the lowest
+    ``subentry_id`` wins in both.
 
-    The reading side is the opposite: ``coordinator/subentry.py`` assigns
-    ``metadata[group_key] = ...`` without a rank guard on the tracker slot, so
-    there the *last* one wins. Two rankers of the same class disagreeing is what
-    AP4 addresses.
+    Lowest rather than highest, and that direction is the load-bearing part: it
+    is the order the reading side already applies
+    (``coordinator/subentry.py``, final rank field ``subentry_id or ""`` with
+    "lower wins"). Two deterministic rankers that disagree would still hand the
+    slot to different subentries on the two sides, which is the drift
+    ``LITERAL_CORE_KEY_OWNER`` is shared to prevent.
+
+    Scope, stated because it is narrower than the name suggests: this pins the
+    *manager*. The reading side has no rank on the tracker key at all yet, so
+    the two sides are not equal here for the reason this test cannot see. That
+    remains AP4's subject.
     """
 
     first = _ap1_subentry(
@@ -910,7 +1029,10 @@ def test_ap1_b_duplicate_tracker_group_first_writer_wins_in_manager(
     order = [second, first] if reverse else [first, second]
     _entry, _recorder, manager = _ap1_setup("e1", order)
 
-    assert manager.get(TRACKER_SUBENTRY_KEY) is order[0]
+    assert manager._candidate_score(
+        first, key=TRACKER_SUBENTRY_KEY
+    ) == manager._candidate_score(second, key=TRACKER_SUBENTRY_KEY)
+    assert manager.get(TRACKER_SUBENTRY_KEY) is first
 
 
 # --- Stale-sweep pins: characterise, do not change -------------------------
