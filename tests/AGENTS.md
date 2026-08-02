@@ -361,7 +361,15 @@ are installed. **Review this checklist on every single change under
     `homeassistant.config_entries` in `sys.modules`, so the
     `from homeassistant.config_entries import ...` form reaches the stub while
     `import homeassistant.config_entries as ...` reaches the real submodule
-    through the package attribute.
+    through the package attribute. When a double must hold the *genuine* core
+    class for its guarantees to mean anything (frozen writes,
+    `MappingProxyType` fields), pick the import form deliberately **and assert
+    the resolution at the construction site** (`is_dataclass`,
+    `__dataclass_params__.frozen`) rather than trusting the form to have worked
+    -- see `_ap1_subentry` in
+    `tests/test_subentry_manager_registry_resolution.py`. Getting this wrong is
+    not a red test: the assertions simply become vacuous and stay green, which
+    is how two rounds of "fixes" there once landed without effect.
 
 Treat this checklist as a living document: if a new helper or guard
 becomes necessary, add it here and verify each item before completing

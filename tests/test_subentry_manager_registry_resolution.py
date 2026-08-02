@@ -109,6 +109,13 @@ async def test_async_sync_caches_resolved_registry_subentry(
             subentry_type="tracker",
             state=None,
         )
+    # Asymmetry worth knowing about: unlike ``_ap1_subentry`` below, this
+    # branch degrades *silently*. If the import ever binds the mutable stub
+    # again, ``is_dataclass`` turns false and the ``dataclass`` parameter id
+    # keeps running -- against the locally defined ``_FrozenSubentry`` in the
+    # ``else`` branch. That fallback is genuinely frozen, so the case is not
+    # vacuous, but it no longer measures core fidelity under a name that
+    # promises it. ``_ap1_subentry`` is where a substituted stub is made loud.
     elif _RealConfigSubentry is not None and is_dataclass(_RealConfigSubentry):
         resolved_child = _RealConfigSubentry(
             data=MappingProxyType({"group_key": "child-group"}),
@@ -638,13 +645,17 @@ def _ap1_subentry(
         # Fidelity, not a proven guard, and said plainly because the mutation
         # says so: the core declares ``data: MappingProxyType[str, Any]`` with
         # no ``__post_init__`` coercion, so this matches the real shape --
-        # but swapping it for a plain dict kills no test here (measured). Every
-        # subentry path in production narrows with ``isinstance(data, Mapping)``,
-        # which both forms satisfy; the six ``isinstance(data, dict)`` sites in
-        # the integration read other payloads (token cache, coordinator), not
-        # ``ConfigSubentry.data``. Keep the faithful shape so a future
-        # ``dict``-narrowing guard fails here rather than only in production,
-        # and treat that as the reason -- not a claim that it is pinned today.
+        # but swapping it for a plain dict kills no test here (measured).
+        # The reason, stated as measured rather than as a sweeping rule: *no*
+        # subentry path in production narrows ``data`` to ``dict``. They either
+        # narrow to ``Mapping`` (``__init__.py:4294``) or duck-type straight
+        # through ``.get()`` with no narrowing at all (``config_flow.py:1404``,
+        # ``__init__.py:4772``), and both forms satisfy either. The six
+        # ``isinstance(data, dict)`` sites in the integration read unrelated
+        # payloads -- none of them a ``ConfigSubentry``. Keep the faithful
+        # shape so a future ``dict``-narrowing guard fails here rather than
+        # only in production, and treat that as the reason -- not a claim that
+        # it is pinned today.
         data=MappingProxyType(data),
         subentry_type=subentry_type,
         title=f"{subentry_type}:{group_key}",
@@ -1012,13 +1023,19 @@ async def test_ap1_stale_sweep_is_decided_by_the_resolved_key(
             ("e1-uid-a", "e1-uid-b"),
             "none",
         ),
+        (
+            "group-no-unique-id",
+            (SUBENTRY_TYPE_TRACKER, SUBENTRY_TYPE_TRACKER),
+            (None, None),
+            "load-order-loser",
+        ),
     ],
-    ids=["unique_id", "group", "group-type-separates"],
+    ids=["unique_id", "group", "group-type-separates", "group-no-unique-id"],
 )
 async def test_ap1_deduplicate_reads_type_only_on_the_group_axis(
     axis: str,
     types: tuple[str, str],
-    unique_ids: tuple[str, str],
+    unique_ids: tuple[str | None, str | None],
     expected: str,
     reverse: bool,
 ) -> None:
@@ -1037,17 +1054,28 @@ async def test_ap1_deduplicate_reads_type_only_on_the_group_axis(
       when their types match; differing types put them in separate buckets and
       nothing is removed.
 
-    The two axes also differ in *which* field decides the survivor, which is
-    easy to get wrong: here the grouped subentries carry distinct
-    ``unique_id``s, so field 2 of the sort key breaks the tie lexicographically
-    and the outcome is load-order independent -- ``id-b`` (``e1-uid-b``) loses
-    in both orders. Load order only decides when field 2 ties, i.e. on the
-    ``unique_id`` axis. The first draft of this test asserted the load-order
-    rule for both and was caught by the run, not by reading.
+    The two axes also differ in *which* field decides the survivor, and this is
+    the part that keeps getting stated too broadly. Load order decides exactly
+    when field 2 (``unique_part``) ties, and that happens in two situations,
+    not one: always on the ``unique_id`` axis, because there the shared
+    ``unique_id`` *is* the grouping key; and on the group axis whenever both
+    subentries carry ``unique_id=None``, since ``unique_part`` then falls back
+    to ``""`` for both. With distinct ``unique_id``s on the group axis the tie
+    breaks lexicographically instead and the outcome is load-order
+    *independent*: ``id-b`` (``e1-uid-b``) loses in both orders.
 
-    That second axis is why the older, narrower claim ("no type is read") was
-    wrong, and it is the axis AP3 will pull on: a rank change that also moves a
-    subentry's *type* would silently regroup here. Three cases pin the
+    Two drafts of this docstring got that wrong in opposite directions and both
+    were corrected by a measurement rather than by reading -- first by claiming
+    load order everywhere, then by tying it to the ``unique_id`` axis alone.
+    The ``group-no-unique-id`` case exists so the second error cannot recur
+    silently: subentries without a ``unique_id`` are a real production shape,
+    they never enter the ``unique_id`` grouping at all (it filters on
+    ``isinstance(subentry_unique_id, str)``), and they are load-order decided
+    on the group axis.
+
+    That second axis is also why the older, narrower claim ("no type is read")
+    was wrong, and it is the axis AP3 will pull on: a rank change that also
+    moves a subentry's *type* would silently regroup here. Four cases pin the
     distinction, each in both load orders.
 
     Scope of the claim, stated because it stays narrower than it looks:
