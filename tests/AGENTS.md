@@ -710,6 +710,19 @@ hass = FakeHass(config_entries=manager)
 Attach the configured ``hass`` to the integration under test so registry
 publication timing and lookup retries match the scenario being exercised.
 
+A subclass that adds *subentry mutators* has three further core contracts to
+honour, because the base class carries none of them:
+``ConfigSubentry`` is a frozen dataclass, so an update must write through
+``object.__setattr__`` rather than assigning attributes (which only works
+against the mutable stub); ``async_update_subentry`` returns ``False`` when
+nothing changed, and production branches on that return; and it raises
+``AbortFlow("already_configured")`` on a unique-id collision, which production
+catches and recovers from, so a double that cannot raise it silently excludes a
+live path. Removal replaces ``entry.subentries`` with a fresh
+``MappingProxyType``; an update does not touch it. See
+``_CoreLikeSubentryEntries`` in
+``tests/test_subentry_manager_registry_resolution.py`` for a worked reference.
+
 #### `config_entry_with_subentries` factory
 
 The :func:`config_entry_with_subentries` helper in
