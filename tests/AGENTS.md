@@ -710,18 +710,32 @@ hass = FakeHass(config_entries=manager)
 Attach the configured ``hass`` to the integration under test so registry
 publication timing and lookup retries match the scenario being exercised.
 
-A subclass that adds *subentry mutators* has three further core contracts to
+A subclass that adds *subentry mutators* has four further core contracts to
 honour, because the base class carries none of them:
-``ConfigSubentry`` is a frozen dataclass, so an update must write through
-``object.__setattr__`` rather than assigning attributes (which only works
-against the mutable stub); ``async_update_subentry`` returns ``False`` when
-nothing changed, and production branches on that return; and it raises
-``AbortFlow("already_configured")`` on a unique-id collision, which production
-catches and recovers from, so a double that cannot raise it silently excludes a
-live path. Removal replaces ``entry.subentries`` with a fresh
-``MappingProxyType``; an update does not touch it. See
+
+1. ``ConfigSubentry`` is a frozen dataclass, so an update must write through
+   ``object.__setattr__`` rather than assigning attributes.
+2. ``async_update_subentry`` returns ``False`` when nothing changed, and
+   production branches on that return.
+3. It raises ``AbortFlow("already_configured")`` on a unique-id collision,
+   which production catches and recovers from, so a double that cannot raise
+   it silently excludes a live path.
+4. Removal replaces ``entry.subentries`` with a fresh ``MappingProxyType``; an
+   update does not touch it.
+
 ``_CoreLikeSubentryEntries`` in
-``tests/test_subentry_manager_registry_resolution.py`` for a worked reference.
+``tests/test_subentry_manager_registry_resolution.py`` implements all four, but
+read what that buys you before treating it as proof. Only contract 1 is pinned
+by a test: reverting the ``object.__setattr__`` write turns four cases red.
+Mutating away contracts 2, 3 and 4 individually leaves the whole file green
+(measured). They are fidelity to the core, not guards, and a double copied from
+there inherits that asymmetry.
+
+Contract 1 also only bites once the double holds the *genuine* core class:
+against the mutable ``conftest`` stand-in a frozen write is indistinguishable
+from a plain assignment, so the same test passes while proving nothing. That is
+point 10's import trap in its most expensive form -- see the assertions in
+``_ap1_subentry`` for the shape of a check that fails loudly instead.
 
 #### `config_entry_with_subentries` factory
 

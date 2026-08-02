@@ -31,8 +31,17 @@ from tests.helpers.homeassistant import (
 )
 
 try:
-    from homeassistant.config_entries import ConfigSubentry as _RealConfigSubentry
-except ModuleNotFoundError:  # pragma: no cover - optional core stubs
+    # Attribute form on purpose: ``conftest.py`` installs a synthetic
+    # ``homeassistant.config_entries`` in ``sys.modules``, so
+    # ``from homeassistant.config_entries import ConfigSubentry`` binds the
+    # *stub* -- a mutable, non-dataclass placeholder. Reaching the submodule
+    # through the package attribute yields the genuine frozen dataclass, which
+    # is the only shape that makes the frozen-write and ``MappingProxyType``
+    # guarantees below testable at all (``tests/AGENTS.md``, point 10).
+    import homeassistant.config_entries as _ha_config_entries
+
+    _RealConfigSubentry: Any = _ha_config_entries.ConfigSubentry
+except (ModuleNotFoundError, AttributeError):  # pragma: no cover - core absent
     _RealConfigSubentry = None
 
 
@@ -610,15 +619,32 @@ def _ap1_subentry(
     exempts subentry markers.
     """
 
-    # Real core class when installed; tests/conftest.py installs a stand-in
-    # only when the genuine homeassistant package is missing.
-    assert _RealConfigSubentry is not None
+    # Measured, not assumed: every guarantee the doubles below claim (frozen
+    # writes, ``MappingProxyType`` data) is vacuous against the mutable
+    # ``conftest`` stand-in, and a stub silently substituted for the core class
+    # would make those claims pass without testing anything. Assert the shape
+    # here so the substitution fails loudly instead.
+    assert _RealConfigSubentry is not None, "core config_entries not importable"
+    assert is_dataclass(_RealConfigSubentry), (
+        f"{_RealConfigSubentry.__module__}.{_RealConfigSubentry.__qualname__} is not a "
+        "dataclass -- the conftest stub was bound instead of the core class"
+    )
+    assert _RealConfigSubentry.__dataclass_params__.frozen, (
+        "core ConfigSubentry is expected to be frozen; the frozen-write "
+        "guarantees asserted by the doubles below are vacuous otherwise"
+    )
     data = {"group_key": group_key} if group_key is not None else {}
     return _RealConfigSubentry(
-        # The core declares ``data: MappingProxyType[str, Any]`` and has no
-        # ``__post_init__`` to coerce it, so a plain dict here would be a
-        # double that production narrowing to ``dict`` accepts and every real
-        # entry fails -- the trap tests/AGENTS.md names for mapping attributes.
+        # Fidelity, not a proven guard, and said plainly because the mutation
+        # says so: the core declares ``data: MappingProxyType[str, Any]`` with
+        # no ``__post_init__`` coercion, so this matches the real shape --
+        # but swapping it for a plain dict kills no test here (measured). Every
+        # subentry path in production narrows with ``isinstance(data, Mapping)``,
+        # which both forms satisfy; the six ``isinstance(data, dict)`` sites in
+        # the integration read other payloads (token cache, coordinator), not
+        # ``ConfigSubentry.data``. Keep the faithful shape so a future
+        # ``dict``-narrowing guard fails here rather than only in production,
+        # and treat that as the reason -- not a claim that it is pinned today.
         data=MappingProxyType(data),
         subentry_type=subentry_type,
         title=f"{subentry_type}:{group_key}",
@@ -965,34 +991,84 @@ async def test_ap1_stale_sweep_is_decided_by_the_resolved_key(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("reverse", [False, True], ids=["fwd", "rev"])
-async def test_ap1_deduplicate_selects_canonical_without_type_axis(
+@pytest.mark.parametrize(
+    ("axis", "types", "unique_ids", "expected"),
+    [
+        (
+            "unique_id",
+            (SUBENTRY_TYPE_TRACKER, SUBENTRY_TYPE_HUB),
+            ("e1-shared-uid", "e1-shared-uid"),
+            "load-order-loser",
+        ),
+        (
+            "group",
+            (SUBENTRY_TYPE_TRACKER, SUBENTRY_TYPE_TRACKER),
+            ("e1-uid-a", "e1-uid-b"),
+            "id-b",
+        ),
+        (
+            "group-type-separates",
+            (SUBENTRY_TYPE_TRACKER, SUBENTRY_TYPE_HUB),
+            ("e1-uid-a", "e1-uid-b"),
+            "none",
+        ),
+    ],
+    ids=["unique_id", "group", "group-type-separates"],
+)
+async def test_ap1_deduplicate_reads_type_only_on_the_group_axis(
+    axis: str,
+    types: tuple[str, str],
+    unique_ids: tuple[str, str],
+    expected: str,
     reverse: bool,
 ) -> None:
     """Class A2 (standing assertion, behaviour we carry).
 
-    ``_deduplicate_subentries`` groups by ``unique_id`` and picks a survivor via
-    ``_select_canonical``, whose sort key is
-    ``(0 if unique_part else 1, unique_part, index, subentry_part)``. On the
-    ``unique_id`` axis the first two fields are constant, so ``index`` -- the
-    load order -- decides who is *removed*. No type is read.
+    ``_deduplicate_subentries`` runs *two* grouping passes that feed one shared
+    ``removal_targets`` set, and only one of them is type-blind:
 
-    Scope of the claim, stated because it is narrower than it looks: this is a
-    *negative control*, not a guard in the strong sense. ``_deduplicate_subentries``
-    never calls ``_candidate_score``, so a pure rank change cannot turn it red
-    by construction; what the pin proves is that AP3 leaves this removal path
-    untouched. It becomes a real guard only once someone touches
-    ``_select_canonical`` or unifies the two rankers. Either way AP3 requires it
-    to stay green.
+    * the ``unique_id`` axis groups by ``unique_id`` alone. The survivor comes
+      from ``_select_canonical``, whose sort key is
+      ``(0 if unique_part else 1, unique_part, index, subentry_part)``; with the
+      ``unique_id`` equal, the first two fields are constant and ``index`` --
+      the load order -- decides who is removed. No type is read here.
+    * the ``group`` axis groups by ``(key_value, subentry_type)``, so the type
+      *is* part of the key. Two subentries sharing a ``group_key`` collapse only
+      when their types match; differing types put them in separate buckets and
+      nothing is removed.
+
+    The two axes also differ in *which* field decides the survivor, which is
+    easy to get wrong: here the grouped subentries carry distinct
+    ``unique_id``s, so field 2 of the sort key breaks the tie lexicographically
+    and the outcome is load-order independent -- ``id-b`` (``e1-uid-b``) loses
+    in both orders. Load order only decides when field 2 ties, i.e. on the
+    ``unique_id`` axis. The first draft of this test asserted the load-order
+    rule for both and was caught by the run, not by reading.
+
+    That second axis is why the older, narrower claim ("no type is read") was
+    wrong, and it is the axis AP3 will pull on: a rank change that also moves a
+    subentry's *type* would silently regroup here. Three cases pin the
+    distinction, each in both load orders.
+
+    Scope of the claim, stated because it stays narrower than it looks:
+    ``_deduplicate_subentries`` never calls ``_candidate_score``, so a pure rank
+    change cannot turn these red by construction. They are a *negative control*
+    proving AP3 leaves this removal path untouched, and they become a guard in
+    the strong sense only once someone touches ``_select_canonical`` or unifies
+    the two rankers. Either way AP3 requires them to stay green.
     """
 
-    shared = "e1-shared-uid"
-    tracker = _ap1_subentry(
-        "id-trk", TRACKER_SUBENTRY_KEY, SUBENTRY_TYPE_TRACKER, shared
-    )
-    hub = _ap1_subentry("id-hub", TRACKER_SUBENTRY_KEY, SUBENTRY_TYPE_HUB, shared)
-    order = [hub, tracker] if reverse else [tracker, hub]
+    first = _ap1_subentry("id-a", TRACKER_SUBENTRY_KEY, types[0], unique_ids[0])
+    second = _ap1_subentry("id-b", TRACKER_SUBENTRY_KEY, types[1], unique_ids[1])
+    order = [second, first] if reverse else [first, second]
     _entry, recorder, manager = _ap1_setup("e1", order)
 
     await manager._deduplicate_subentries()
 
-    assert recorder.removed == [order[1].subentry_id]
+    if expected == "load-order-loser":
+        assert recorder.removed == [order[1].subentry_id], axis
+    elif expected == "none":
+        assert recorder.removed == [], axis
+    else:
+        # Lexicographic on ``unique_id``; identical in both load orders.
+        assert recorder.removed == [expected], axis
