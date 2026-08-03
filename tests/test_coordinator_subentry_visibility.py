@@ -660,12 +660,14 @@ def _coordinator_over(
 def test_devices_parked_on_a_mis_keyed_service_twin_are_reclaimed() -> None:
     """Folding the twin must not strand the ids it accumulated.
 
-    The twin only holds those ids because it attracts the write-back: the
-    remaining key-only resolver in ``config_flow.py``
-    (``_BaseSubentryFlow._resolve_existing``) steers it there without consulting
-    the type, while ``_accepts_device_assignment`` keeps it out of every choice
-    list a user can pick from. The feature sync no longer does so, and the ids
-    a release before that fix wrote are exactly the residue meant here.
+    The twin only holds those ids because it attracted the write-back: both
+    resolvers in ``config_flow.py`` used to steer it there on the stored key
+    alone, while ``_accepts_device_assignment`` kept it out of every choice
+    list a user can pick from. Neither does so any more -- the feature sync
+    reads ``_canonical_core_key_of`` and ``_BaseSubentryFlow._resolve_existing``
+    reads ``_may_answer_for`` -- and the ids a release before those fixes wrote
+    are exactly the residue meant here. That the supply is shut is why this
+    stays: the stored ids do not disappear with it.
     Counting them as assigned would keep the unassigned-device merge away from
     them while the service branch forces the visible ids to empty, leaving the
     devices in no group at all.

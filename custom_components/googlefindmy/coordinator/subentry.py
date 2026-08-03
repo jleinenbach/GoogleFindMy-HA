@@ -480,14 +480,22 @@ class SubentryOperations(_MixinBase):
                     # `_async_sync_feature_subentries` now resolves through
                     # `_canonical_core_key_of` on both of its branches, so it no
                     # longer hands a hub storing ``core_tracking`` the tracker
-                    # payload. `_BaseSubentryFlow._resolve_existing` still
-                    # prefers the flow's own ``subentry`` and otherwise falls
-                    # back to a scan on the stored ``group_key`` alone, without
-                    # consulting the type, and that route remains open. One open
-                    # route is enough for the residue to exist, and the ids
-                    # already in storage predate the closure either way. Those
-                    # ids are the
-                    # residue, and that verdict rests on this mechanism rather
+                    # payload. The second has since been closed as well:
+                    # `_BaseSubentryFlow._resolve_existing` still prefers the
+                    # flow's own ``subentry``, which identifies the subentry the
+                    # user opened, but its fallback scan now asks
+                    # `_may_answer_for` in addition to the stored ``group_key``.
+                    # Both *scan* routes are shut, so no new residue is
+                    # produced. The qualifier is not a hedge: the flow
+                    # resolver's hand-over branch above the scan stays
+                    # deliberately unguarded, and that it produces no residue
+                    # today rests on it being unreachable
+                    # (`async_get_supported_subentry_types` returns `{}`), not
+                    # on it being closed. The ids already in storage predate
+                    # either closure, which is what this exemption is for and
+                    # why closing the routes does not make it redundant. Those
+                    # ids are the residue, and that verdict rests on this
+                    # mechanism rather
                     # than on any claim about which targets older releases
                     # offered. Folding alone would strand them: the service
                     # branch below forces the visible ids to empty while

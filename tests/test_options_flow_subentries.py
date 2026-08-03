@@ -172,7 +172,7 @@ class _EntryStub:
         title: str,
         visible_device_ids: list[str] | None = None,
         feature_flags: dict[str, Any] | None = None,
-        subentry_type: str = SUBENTRY_TYPE_TRACKER,
+        subentry_type: str | None = SUBENTRY_TYPE_TRACKER,
         identity: str | None = None,
     ) -> ConfigSubentry:
         """Add a subentry to the stub.
@@ -184,6 +184,14 @@ class _EntryStub:
         subentry whose ``group_key`` drifted from its type -- the alias case
         ``agents/config_flow/AGENTS.md`` describes under
         ``Subentry alias handling``.
+
+        ``None`` is admitted for the same reason the type is a parameter at
+        all: an untyped legacy subentry is a distinct shape from every named
+        type, and it is the one that separates "prefers a ``tracker``-typed
+        group" from "prefers any group that accepts devices". Every production
+        reader already spells the access ``getattr(subentry, "subentry_type",
+        None)``, so ``None`` is the value they are written for rather than an
+        invention of this stub.
 
         ``identity`` decouples the Home Assistant identifiers from ``key`` and
         is what makes the *collision* half of that same alias case expressible.
@@ -2070,3 +2078,92 @@ async def test_the_synthesised_fallback_does_not_borrow_a_rewritten_key() -> Non
         "the synthesised fallback must not take a key a real subentry stores, "
         "whatever the rewrite did to that subentry's identity"
     )
+
+
+@pytest.mark.parametrize(
+    "with_typed_tracker",
+    [True, False],
+    ids=["typed-tracker-present", "no-typed-tracker"],
+)
+async def test_a_parked_tracker_key_prefers_the_typed_tracker_group(
+    with_typed_tracker: bool,
+) -> None:
+    """The parked branch preselects on the type axis, not on label order.
+
+    The branch already existed and already answered "the first option that
+    accepts devices", which is label order wearing a predicate. Where a
+    ``service``-typed subentry sits on the tracker key, the group the form
+    means to offer is the one whose *type* says tracker, and on a legacy entry
+    that group wears an email-style ``group_key`` -- so the key axis cannot
+    name it and the fold cannot either: ``_canonical_core_key_of`` returns
+    ``None`` for a tracker on its own key, deliberately, because several
+    tracker groups with distinct keys are a supported shape. A direct type
+    comparison is therefore the only reader that can identify it, which is why
+    this does not route through the shared helper.
+
+    The boundary of the existing branch is left exactly where
+    ``::test_the_preselection_is_unchanged_where_nothing_is_parked`` put it.
+    Measured rather than assumed: extending the *first* loop with the same
+    type axis -- the literal shape the plan proposed -- turns that pin red
+    (``'owner@example.com'`` where it demands ``'service'``) and takes
+    ``::test_the_preselected_group_survives_the_collision_rewrite`` with it,
+    because nothing is parked there and the branch has no work to do. The axis
+    belongs inside the parked case, not in front of it.
+
+    ``no-typed-tracker`` is not decoration: it exercises the fallback, which
+    keeps the older guarantee that the preselection accepts devices even where
+    no candidate carries the tracker type at all. Without it the type
+    preference would read as a requirement.
+    """
+
+    entry = _EntryStub()
+    entry.add_subentry(
+        key=TRACKER_SUBENTRY_KEY,
+        title="Alpha parked service",
+        subentry_type=SUBENTRY_TYPE_SERVICE,
+        visible_device_ids=[],
+        identity="parked-service",
+    )
+    entry.add_subentry(
+        key="alias@example.com",
+        title="Bravo untyped legacy",
+        subentry_type=None,
+        visible_device_ids=["dev-1"],
+        identity="untyped-legacy",
+    )
+    if with_typed_tracker:
+        entry.add_subentry(
+            key="owner@example.com",
+            title="Zulu legacy tracker",
+            subentry_type=SUBENTRY_TYPE_TRACKER,
+            visible_device_ids=["dev-2"],
+            identity="legacy-tracker",
+        )
+    flow = await _build_flow(entry)
+
+    choices, option_map = flow._subentry_choice_map()
+    default_key = flow._default_subentry_key(choices, option_map)
+    preselected = option_map.get(default_key)
+    assert preselected is not None
+
+    first_device_accepting = next(
+        key
+        for key in choices
+        if (opt := option_map.get(key)) is not None
+        and config_flow._accepts_device_assignment(opt)
+    )
+
+    if with_typed_tracker:
+        assert preselected.stored_key == "owner@example.com", (
+            "the group whose type says tracker must win over the one that "
+            "merely sorts first among the device-accepting options"
+        )
+        # Asserts the fix rather than an accident of the fixture: the untyped
+        # legacy group is what label order would have handed back.
+        assert default_key != first_device_accepting
+    else:
+        assert default_key == first_device_accepting
+        assert config_flow._accepts_device_assignment(preselected), (
+            "with no tracker-typed candidate the branch must still fall back "
+            "to a group that can hold devices"
+        )
