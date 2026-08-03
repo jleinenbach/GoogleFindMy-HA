@@ -111,17 +111,23 @@ NON_DEVICE_SUBENTRY_TYPES: frozenset[str] = frozenset(
 # takes a subentry ``unique_id`` without the entry id, which no writer in
 # ``custom_components/`` produces, so it is unreachable rather than benign.
 #
-# Two more asymmetries stay beyond the rank, named so the next reader does not
-# take "must rank the same pair identically" for more than it says. The
-# manager's *fold* is unchanged: it still leaves a ``hub`` on its stored key.
-# And the index ranks **only** the service key -- its whole rank block sits
-# inside ``if group_key == SERVICE_SUBENTRY_KEY:`` and ``metadata[group_key]``
-# is assigned unconditionally afterwards -- so for ``core_tracking`` the
-# manager is deterministic while the index is still last-iterated-wins. Within
+# Two asymmetries stay beyond the rank, named so the next reader does not take
+# "must rank the same pair identically" for more than it says. The rank block
+# no longer covers only the service key -- it covers both core keys -- but the
+# two *folds* still differ, and the rank cannot repair a disagreement about
+# which subentries reach a key at all. The two sides therefore agree on
+# ``core_tracking`` exactly where both folds land there, which is the parked
+# shape (a ``tracker`` storing the service key), pinned by
+# ``::test_ap4_the_manager_and_the_index_agree_on_the_tracker_slot``. They stay
+# asymmetric where only the manager folds: for a legacy per-account key and for
+# a ``hub`` storing ``core_tracking``, the manager names the stored subentry
+# while the index names its synthetic placeholder -- measured, not inferred, so
+# do not read ``managed_subentries["core_tracking"]`` as "the subentry the
+# index describes" without checking the type. Within
 # the manager itself, ``_deduplicate_subentries`` and
-# ``_async_adopt_existing_unique_id`` (first match wins, ``break``) also
+# ``_async_adopt_existing_unique_id`` (first match wins, ``break``) still
 # resolve collisions by iteration order and do not consult this table at all.
-# Those remainders are tracked in ``PLAN_GFMY_ALIAS_TYPE_AXIS``.
+# Those remainders are tracked in ``PLAN_GFMY_SUBENTRY_DELETION_TYPE_AXIS``.
 # Read-only on purpose: unlike the plain ``dict`` constants elsewhere in this
 # module, this one is imported by two packages at once, and an in-place mutation
 # in either would silently reach the other.

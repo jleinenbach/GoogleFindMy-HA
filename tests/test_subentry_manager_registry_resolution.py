@@ -1015,18 +1015,18 @@ def test_ap3_duplicate_tracker_group_resolves_by_identifier_not_load_order(
     Lowest rather than highest, and that direction is the load-bearing part.
     The source of the direction is ``config_flow.py::_resolve_existing``, whose
     ``min(...)`` is parametric in the key and therefore already applies to
-    ``core_tracking``. It is deliberately *not* ``coordinator/subentry.py``'s
-    final rank field ``subentry_id or ""``: that field sits inside
-    ``if group_key == SERVICE_SUBENTRY_KEY:``, so citing it here would claim a
-    counterpart on this key that does not exist. An earlier draft did exactly
-    that and then contradicted itself four lines later.
+    ``core_tracking``. The counterpart it converges on is
+    ``coordinator/subentry.py``'s final rank field ``subentry_id or ""``. When
+    this test was written that citation would have been wrong -- the field sat
+    inside ``if group_key == SERVICE_SUBENTRY_KEY:`` and had no counterpart on
+    this key -- and an earlier draft made exactly that claim and then
+    contradicted itself four lines later. AP4 widened the block to both core
+    keys, so the counterpart now exists.
 
     Scope, stated because it is narrower than the name suggests: this pins the
-    *manager*. The index has no rank on the tracker key at all and assigns
-    ``metadata[group_key]`` unconditionally, so it stays last-iterated-wins
-    there and the two sides can still name different subentries. Closing that
-    is AP4's subject; this test buys determinism plus the right direction to
-    converge on, not convergence.
+    *manager*. That both sides now name the same subentry is a separate
+    assertion and lives where it can see both
+    (``tests/test_coordinator_subentry_visibility.py::test_ap4_the_manager_and_the_index_agree_on_the_tracker_slot``).
     """
 
     first = _ap1_subentry(
@@ -1231,3 +1231,50 @@ async def test_ap1_deduplicate_reads_type_only_on_the_group_axis(
     else:
         # Lexicographic on ``unique_id``; identical in both load orders.
         assert recorder.removed == [expected], axis
+
+
+# ---------------------------------------------------------------------------
+# AP4 step 3b -- the reverse index after a displacement
+# (``PLAN_GFMY_ALIAS_TYPE_AXIS``, follow-up U-23 from the AP3 re-review).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("reverse", [False, True], ids=["fwd", "rev"])
+def test_ap4_the_reverse_index_drops_a_displaced_subentry(reverse: bool) -> None:
+    """A subentry pushed off a managed key must lose its reverse-index entry.
+
+    Class A. ``_managed`` is keyed by managed key and is therefore overwritten
+    cleanly when a better candidate arrives; ``_managed_by_subentry_id`` is
+    keyed by *identifier* and survives that overwrite, so the loser kept
+    claiming a slot it no longer held.
+
+    The harm is not bookkeeping hygiene, and it was measured rather than
+    derived: ``_async_adopt_existing_unique_id`` asks
+    ``_managed_key_for_subentry_id(owner_subentry_id)`` which key the owner
+    previously held and pops it. Given the stale answer it pops the slot of the
+    *rightful* holder, so ``core_tracking`` drops out of ``_managed`` entirely
+    until the next refresh.
+
+    Only one load order produces the displacement (the loser has to be indexed
+    first), which is exactly why both are asserted: the defect was invisible in
+    the other one.
+    """
+
+    low = _ap1_subentry("id-a", TRACKER_SUBENTRY_KEY, SUBENTRY_TYPE_TRACKER, "e1-a")
+    high = _ap1_subentry("id-b", TRACKER_SUBENTRY_KEY, SUBENTRY_TYPE_TRACKER, "e1-b")
+    order = [high, low] if reverse else [low, high]
+    _entry, _recorder, manager = _ap1_setup("e1", order)
+
+    manager._refresh_from_entry()
+
+    managed = manager._managed.get(TRACKER_SUBENTRY_KEY)
+    assert managed is not None and managed.subentry_id == "id-a", (
+        "the tie-break picks the lowest identifier in both load orders"
+    )
+    assert manager._managed_key_for_subentry_id("id-b") is None, (
+        "the displaced subentry must not keep claiming the key it lost; the "
+        "adoption path reads this mapping to decide which slot to vacate"
+    )
+    assert manager._managed_key_for_subentry_id("id-a") == TRACKER_SUBENTRY_KEY, (
+        "and the winner keeps its own entry"
+    )

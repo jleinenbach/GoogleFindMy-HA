@@ -1267,6 +1267,38 @@ class ConfigEntrySubEntryManager:
             if existing_key is not None and existing_key != key:
                 self._pop_managed(existing_key)
 
+        # Displacing a *different* subentry from ``key`` has to take its
+        # reverse-index entry with it, or the loser keeps claiming a slot it no
+        # longer holds. The write below is keyed by ``key`` and therefore
+        # overwrites ``_managed`` cleanly, which is what made the leak easy to
+        # miss: only ``_managed_by_subentry_id`` is keyed by *identifier* and
+        # survives the overwrite.
+        #
+        # Measured rather than derived, in ``_refresh_from_entry`` with two
+        # ``tracker`` subentries both storing ``TRACKER_SUBENTRY_KEY``: iterated
+        # loser-first, ``_managed`` ends at ``{core_tracking: id-a}`` while the
+        # reverse index still maps ``id-b -> core_tracking``. The harm is not
+        # cosmetic. ``_async_adopt_existing_unique_id`` asks
+        # ``_managed_key_for_subentry_id(owner_subentry_id)`` which key the
+        # owner previously held and pops it; with the stale answer it pops the
+        # slot of the *rightful* holder, so ``core_tracking`` drops out of
+        # ``_managed`` entirely until the next refresh.
+        #
+        # The tie-break introduced with the rank made the shape reachable
+        # without any provenance difference: two otherwise equal candidates now
+        # resolve by lowest identifier, so the higher one loses deterministically
+        # instead of winning by arriving last.
+        displaced = self._managed.get(key)
+        if displaced is not None and displaced is not subentry:
+            displaced_id = getattr(displaced, "subentry_id", None)
+            if (
+                isinstance(displaced_id, str)
+                and displaced_id
+                and displaced_id != subentry_id
+                and self._managed_by_subentry_id.get(displaced_id) == key
+            ):
+                self._managed_by_subentry_id.pop(displaced_id, None)
+
         self._managed[key] = subentry
 
         if isinstance(subentry_id, str) and subentry_id:
@@ -1405,16 +1437,18 @@ class ConfigEntrySubEntryManager:
         # wins, matching ``_resolve_existing``'s ``min(...)``, which is
         # parametric in the key.
         #
-        # What this does **not** yet buy, stated because an earlier draft of
-        # this comment claimed it: cross-side agreement on *which* subentry
-        # holds the slot. ``coordinator/subentry.py`` wraps its whole rank in
-        # ``if group_key == SERVICE_SUBENTRY_KEY:`` and then assigns
-        # ``metadata[group_key]`` unconditionally, so for every other key the
-        # index is still last-iterated-wins. For ``core_tracking`` this method
-        # is therefore deterministic while the index is not, and the two can
-        # name different subentries. Closing that is the reading-side half of
-        # ``PLAN_GFMY_ALIAS_TYPE_AXIS``; here the tie-break buys determinism
-        # and the right *direction* to converge on, not convergence itself.
+        # What this buys and what it does not, kept apart because an earlier
+        # draft of this comment ran the two together. It buys determinism here.
+        # Cross-side agreement on *which* subentry holds the slot arrived with
+        # the reading side's half: ``coordinator/subentry.py`` used to wrap its
+        # whole rank in ``if group_key == SERVICE_SUBENTRY_KEY:``, so for every
+        # other key the index was last-iterated-wins and the two could name
+        # different subentries. Its rank block now covers both core keys, and
+        # the agreement is asserted rather than assumed
+        # (``::test_ap4_the_manager_and_the_index_agree_on_the_tracker_slot``,
+        # both iteration orders). What is still *not* covered by any of it:
+        # ``_deduplicate_subentries`` and ``_async_adopt_existing_unique_id``
+        # decide by iteration order and never call this method.
         #
         # The both-ids-missing case never reaches this point: ``subentry_id``
         # is read through the same ``getattr`` in ``_is_subentry_like``, which

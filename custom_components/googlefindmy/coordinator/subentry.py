@@ -387,6 +387,40 @@ class SubentryOperations(_MixinBase):
                     core_group_keys_present.add(group_key)
                 # The repair detection above deliberately reads the *stored*
                 # key: which core groups exist on disk is what it answers.
+                # That exception now has to carry **two** shapes, not one, and
+                # the second needs its own proof of being inert. A folded
+                # ``hub`` reports the service key as present while the index
+                # describes that group with a synthesised placeholder; the
+                # devices are still reclaimed, so the report is inert rather
+                # than lossy. A ``tracker`` parked on the service key reports
+                # *service* as present while the fold below indexes it under
+                # ``core_tracking``. It is inert *for the device assignment*,
+                # by the same mechanism, made explicit rather than assumed by
+                # analogy: the fold drops its stored ids from this in-memory
+                # view, so the unassigned-device merge collects the devices
+                # into the tracker group, which is where the type axis puts
+                # them anyway. "Inert" stops there, and the two further
+                # consequences are named rather than folded into that word.
+                # The report can cause a repair that believes a service group
+                # exists when only a parked tracker stores that key; moving the
+                # read to the canonical key would change *which* subentry the
+                # repair creates, and that is a decision of its own rather than
+                # a side effect of this one. And where the parked tracker is
+                # the *only* holder of the service key, the fold leaves the
+                # service group described by the synthesised placeholder
+                # instead of by that subentry -- measured, not derived. That
+                # placeholder is rejected by ``registry.py``'s
+                # ``_is_real_service_subentry``, because
+                # ``extract_service_subentry_ids`` still collects the parked
+                # subentry through its stored ``group_key``, so the set is
+                # non-empty and does not contain the placeholder. The service
+                # device then keeps its base identifier but loses the
+                # ``<entry>:<subentry>:service`` one it carried before. Both
+                # directions are unattractive (the old one bound the service
+                # device to a *tracker* subentry), so this is a change of
+                # shape, not a regression, and it is pinned by
+                # ``::test_ap4_a_parked_tracker_alone_leaves_the_service_group_
+                # synthesised``.
                 # Everything below indexes runtime state, and there the
                 # ``subentry_type`` is authoritative. The manager is *not*
                 # symmetric here, stated because assuming it were is what hides
@@ -407,9 +441,13 @@ class SubentryOperations(_MixinBase):
                 # tracker key would otherwise occupy a device-bearing key here,
                 # overwrite the twin that legitimately owns it, and have
                 # visible ids written back to it. Tracker subentries keep their
-                # stored key, because several tracker groups with distinct keys
-                # are a supported shape (unlike in the manager, which folds them
-                # all onto ``TRACKER_SUBENTRY_KEY``).
+                # stored key wherever that key names a group of its own,
+                # because several tracker groups with distinct keys are a
+                # supported shape; the one exception is a ``tracker`` parked on
+                # the *service* key, which the second branch below folds onto
+                # ``TRACKER_SUBENTRY_KEY``. The manager folds every tracker
+                # unconditionally, so the two sides stay asymmetric for a
+                # legacy per-account key and agree for the parked shape.
                 if (
                     getattr(subentry, "subentry_type", None)
                     in NON_DEVICE_SUBENTRY_TYPES
@@ -451,6 +489,55 @@ class SubentryOperations(_MixinBase):
                     # ``test_a_device_moved_to_the_service_subentry_is_left_alone``
                     # pins that it must not be reclaimed. Only the *mis-keyed*
                     # ids are residue.
+                    data.pop("visible_device_ids", None)
+                elif (
+                    getattr(subentry, "subentry_type", None) == SUBENTRY_TYPE_TRACKER
+                    and group_key == SERVICE_SUBENTRY_KEY
+                ):
+                    # The mirror image of the fold above, and the shape the
+                    # config flow deliberately leaves in place: a ``tracker``
+                    # parked on the service key survives
+                    # ``_async_cleanup_stale_subentries`` (pinned by
+                    # ``test_a_tracker_parked_on_the_service_key_is_not_swept_up``)
+                    # because removal is irreversible and parking is not. It
+                    # then arrives *here*, and until this fold the outcome was
+                    # that its devices were described by no group at all: the
+                    # service branch below forces the metadata ids to ``()``
+                    # while ``stored_assigned_ids`` still counts them, so the
+                    # unassigned-device merge does not reclaim them either.
+                    #
+                    # Its ids are dropped just as in the fold above, but for a
+                    # different reason, and the reason is spelled out below
+                    # rather than here: there the ids are residue of a
+                    # mis-keyed group, here they are a live group's ids that
+                    # the rank may take away again.
+                    #
+                    # This is the type axis, not the key axis, which is what
+                    # keeps ``test_a_device_moved_to_the_service_subentry_is_
+                    # left_alone`` untouched: the subentry there is
+                    # ``service``-typed and stores the canonical key, so it
+                    # neither matches this branch nor changes meaning. A
+                    # deliberate user move onto the service group is still left
+                    # alone; what moves is a *tracker group* that happens to
+                    # store the wrong key.
+                    group_key = TRACKER_SUBENTRY_KEY
+                    # The fold alone does not put the devices anywhere, which
+                    # was measured rather than assumed: with a canonical
+                    # tracker also present, the parked subentry loses the
+                    # core-key rank below, so nothing describes its ids -- and
+                    # ``stored_assigned_ids`` (filled above the rank) still
+                    # counts them, so the unassigned-device merge does not
+                    # reclaim them either. That is the very state this step
+                    # exists to end, only moved one key to the left. Dropping
+                    # the ids from this *in-memory* view (the stored subentry
+                    # is untouched) hands them to the merge, which puts them in
+                    # the tracker group -- the group the type axis says they
+                    # belong to.
+                    #
+                    # When the parked subentry instead *wins* the slot, the
+                    # drop widens its allow-list to the full device index, and
+                    # that is the same shape the merge produced before: alone,
+                    # its ids were already joined by every unassigned device.
                     data.pop("visible_device_ids", None)
                 identifier = _sanitize_subentry_identifier(subentry_id_raw)
 
@@ -623,10 +710,13 @@ class SubentryOperations(_MixinBase):
                 }
             )
 
-        # Rank of whichever subentry currently describes the service group, so a
-        # later one can only take the slot by ranking strictly better. ``None``
-        # means the slot is still free.
-        service_slot_rank: tuple[int, int, bool, str] | None = None
+        # Rank of whichever subentry currently describes each *core* group, so a
+        # later one can only take that slot by ranking strictly better. A key
+        # absent from the mapping means its slot is still free. Keyed per group
+        # rather than held in one variable because both core keys are ranked:
+        # they compete independently, and a tracker candidate must not be
+        # measured against the service incumbent.
+        core_slot_rank: dict[str, tuple[int, int, bool, str]] = {}
 
         for group_key, subentry_id, data, title, subentry_type in raw_entries:
             raw_features = data.get("features")
@@ -687,8 +777,11 @@ class SubentryOperations(_MixinBase):
                     normalized_allowed = None
 
             if normalized_allowed:
-                # Every id any subentry stores, in both spellings the loop above
-                # produced. The unassigned-device merge further down needs the
+                # Every id still standing in this in-memory view after the two
+                # folds above, in both spellings the loop produced -- *not*
+                # every stored id: a mis-keyed twin and a parked tracker have
+                # had theirs dropped by then, which is exactly how their
+                # devices reach the merge. The unassigned-device merge needs the
                 # *stored* assignment, not the metadata one: the service key has
                 # its visible ids forced to empty a few lines below, so a device
                 # the user moved there would otherwise look unassigned and be
@@ -743,54 +836,80 @@ class SubentryOperations(_MixinBase):
                     )
                 )
 
-            if group_key == SERVICE_SUBENTRY_KEY:
-                # Several subentries can answer for this one key, and without a
+            if group_key in (SERVICE_SUBENTRY_KEY, TRACKER_SUBENTRY_KEY):
+                # Several subentries can answer for one core key, and without a
                 # rank the surviving description depends on the order
-                # ``entry.subentries`` happens to yield. Three shapes reach it:
-                # the repair path creates a canonically keyed service subentry
-                # while a mis-keyed twin from an early migration is still on
-                # disk; a ``hub`` stores this key *by design*
-                # (``HubSubentryFlowHandler._group_key``), a shape the config
-                # flow now deliberately preserves instead of sweeping it; and a
-                # ``tracker`` parked on this key survives the same sweep (pinned
-                # by ``test_a_tracker_parked_on_the_service_key_is_not_swept_up``)
-                # and competes here, where it wins on the exact field. Naming
-                # only the first two would understate the rank's job by one.
+                # ``entry.subentries`` happens to yield. Two shapes reach the
+                # service key: the repair path creates a canonically keyed
+                # service subentry while a mis-keyed twin from an early
+                # migration is still on disk; and a ``hub`` stores this key *by
+                # design* (``HubSubentryFlowHandler._group_key``), a shape the
+                # config flow deliberately preserves instead of sweeping it.
+                #
+                # A ``tracker`` parked on the service key was a third until the
+                # fold above gained its tracker branch; it now leaves for
+                # ``TRACKER_SUBENTRY_KEY`` before this rank sees it. What is
+                # pinned by a mutation is the alone shape
+                # (``::test_ap4_a_parked_tracker_alone_leaves_the_service_group_
+                # synthesised``); with a real ``service`` subentry also present
+                # the departure has no observable effect on the slot, because
+                # the parked twin would have lost the owner field anyway, so
+                # ``::test_ap4_a_parked_tracker_leaves_the_service_pool`` covers
+                # both iteration orders as a regression anchor rather than as a
+                # proof. Stated that way because an earlier draft called it
+                # "measured in both iteration orders", which the tree did not
+                # check.
+                # That is the same shape the config flow excludes from the
+                # service pool through ``_may_answer_for``, so the two sides
+                # agree on it now instead of diverging.
+                #
+                # The tracker key is ranked by the same block rather than left
+                # to iteration order, and that is what this commit changes.
+                # ``_resolve_existing`` in the flow was already parametric in
+                # the key (its ``min(...)`` is), and
+                # ``ConfigEntrySubEntryManager._candidate_score`` takes the
+                # canonical key as an argument, so the service-only shape here
+                # was the last asymmetry of the three sides. Two ``tracker``
+                # subentries both storing ``TRACKER_SUBENTRY_KEY`` are the
+                # reachable collision; several tracker groups under *distinct*
+                # keys stay a supported shape and never meet here, because they
+                # keep their own ``group_key``.
                 #
                 # The ordering criteria are the ones
                 # ``config_flow._resolve_existing`` applies, and they have to
-                # agree: a slot won there and lost here would rebind the service
+                # agree: a slot won there and lost here would rebind the group's
                 # device to a subentry the platforms do not select. An exact
                 # stored-key match beats a folded twin (there expressed as
                 # ``pool = exact or folded`` rather than as a rank field, same
                 # effect), the type that *literally* owns the key beats one that
                 # merely folds onto it (the entity platforms match
-                # ``subentry_type == "service"`` literally, via
+                # ``subentry_type`` literally, via
                 # ``known_ids_for_subentry_type``), and only among equals does
                 # the lowest identifier decide, where the value is arbitrary and
                 # stability is the whole point. Ranking only the first two would
                 # leave exactly the order-dependence this replaces.
                 #
-                # Three differences are deliberate rather than overlooked, and
-                # saying "field for field" here would paper over all of them.
-                # The flow additionally prefers its seeded candidate, a notion
-                # this pass has no equivalent of; it gates candidates through
-                # ``_may_answer_for``, so a ``tracker`` storing this key is
-                # excluded there while it competes here and wins on the exact
-                # field; and it sorts on the *raw* ``subentry_id`` where this
-                # pass sorts on the sanitised, provisional-filtered one, which
-                # is why the missing-id field exists here and has no counterpart
-                # there. The second asymmetry is unchanged by this commit
-                # (measured against ``bf3a36aa`` in both iteration orders) and
-                # belongs to ``PLAN_GFMY_ALIAS_TYPE_AXIS`` with the rest of the
-                # fold; the third can only diverge for an id shape no production
-                # site in ``custom_components/`` creates.
+                # Two differences are deliberate rather than overlooked, and
+                # saying "field for field" here would paper over both. The flow
+                # additionally prefers its seeded candidate, a notion this pass
+                # has no equivalent of; and it sorts on the *raw*
+                # ``subentry_id`` where this pass sorts on the sanitised,
+                # provisional-filtered one, which is why the missing-id field
+                # exists here and has no counterpart there. The second can only
+                # diverge for an id shape no production site in
+                # ``custom_components/`` creates.
+                #
+                # A third used to sit between them and is gone: the flow gates
+                # candidates through ``_may_answer_for``, which excludes a
+                # ``tracker`` storing the service key, while this pass let it
+                # compete for that key and win on the exact field. The fold
+                # above now removes it from this key too, so the sides no
+                # longer disagree there.
                 candidate_rank = (
-                    0 if data.get("group_key") == SERVICE_SUBENTRY_KEY else 1,
+                    0 if data.get("group_key") == group_key else 1,
                     (
                         0
-                        if subentry_type
-                        == LITERAL_CORE_KEY_OWNER.get(SERVICE_SUBENTRY_KEY)
+                        if subentry_type == LITERAL_CORE_KEY_OWNER.get(group_key)
                         else 1
                     ),
                     # ``subentry_id`` here is the *sanitised and
@@ -802,31 +921,53 @@ class SubentryOperations(_MixinBase):
                     # bindings. What the group is left with then differs by
                     # route, and only one of the two ends in a placeholder: a
                     # *blank* id lets the stable-id block at the end of this
-                    # method substitute ``{entry_id}-service-subentry``, while a
-                    # *provisional* one sets ``service_provisional_seen``, which
-                    # that same block honours by skipping the key, so the group
-                    # keeps ``config_subentry_id=None`` and
-                    # ``registry.py::_is_real_service_subentry`` resolves it via
-                    # ``entry.service_subentry_id``. Both are wrong for the same
-                    # reason, so missing sorts last either way.
+                    # method substitute ``{entry_id}-{key}-subentry``, while a
+                    # *provisional* one sets the key's ``*_provisional_seen``
+                    # flag, which that same block honours by skipping the key,
+                    # so the group keeps ``config_subentry_id=None``. For the
+                    # service key ``registry.py::_is_real_service_subentry``
+                    # then resolves it via ``entry.service_subentry_id``. Both
+                    # are wrong for the same reason, so missing sorts last
+                    # either way.
                     subentry_id is None,
                     subentry_id or "",
                 )
-                if (
-                    service_slot_rank is not None
-                    and candidate_rank >= service_slot_rank
-                ):
+                incumbent_rank = core_slot_rank.get(group_key)
+                if incumbent_rank is not None and candidate_rank >= incumbent_rank:
                     continue
-                # Displacing a weaker holder needs no cleanup, and that is a
-                # property of this loop rather than a general one: only
-                # ``metadata`` is keyed per subentry, ``manager_visible`` is
-                # never filled for this key at all, and
-                # ``feature_map``/``default_key`` are keyed by group. The one
-                # deliberate exception is ``stored_assigned_ids``, which is
-                # filled above the rank and therefore also counts the loser's
-                # ids; that is what keeps the unassigned-device merge from
+                # Displacing a weaker holder needs no cleanup, and the reason is
+                # per-key rather than universal, so it is spelled out for both.
+                # The loop writes four things below, and they divide in two.
+                # ``metadata`` and ``manager_visible`` are keyed by *group*, so
+                # a later winner overwrites the loser's entry instead of
+                # needing it removed. ``feature_map`` (keyed by *feature*, via
+                # ``setdefault``) and ``default_key`` (a scalar behind an
+                # ``is None`` guard) are never overwritten at all -- stated
+                # because an earlier draft folded them into the overwrite
+                # argument, which does not hold for them. They are harmless for
+                # a different reason: the *value* written in both cases is
+                # ``group_key`` itself, and winner and loser carry the same
+                # core key by construction, so a loser's entry never points at
+                # the wrong group. What a loser can still widen is the
+                # ``feature_map`` key *set*, where the per-key feature
+                # constants are empty and each subentry brings its own
+                # ``data["features"]`` (see the fallback above): the map is
+                # then the union rather than the winner's list. That is a
+                # coarser mapping, not a misdirected one.
+                # For the service key the
+                # statement is stronger still: ``manager_visible`` is never
+                # filled for it at all (see the guard below). Saying that for
+                # the tracker key would be false -- ``manager_visible`` *is*
+                # filled there -- which is why the overwrite argument, not the
+                # never-filled one, carries the generalisation.
+                #
+                # The one deliberate exception is ``stored_assigned_ids``, which
+                # is filled above the rank and therefore also counts the ids of
+                # a loser *that still holds them there* -- a folded twin or a
+                # parked tracker had them dropped further up and is not
+                # counted. That is what keeps the unassigned-device merge from
                 # reclaiming a device the user moved, and it is unchanged here.
-                service_slot_rank = candidate_rank
+                core_slot_rank[group_key] = candidate_rank
 
             metadata[group_key] = SubentryMetadata(
                 key=group_key,

@@ -609,6 +609,20 @@ def _service_twin_coordinator(
     entry = make_config_entry(
         entry_id=entry_id, title="Google Find My", subentries=subentries
     )
+    return _coordinator_over(entry)
+
+
+def _coordinator_over(
+    entry: object,
+) -> tuple[GoogleFindMyCoordinator, object, _ManagerStub]:
+    """Wire a coordinator around ``entry`` with two known devices.
+
+    Extracted from ``_service_twin_coordinator`` so the AP4 fixtures below can
+    place arbitrary subentry shapes without copying the wiring; that fixture
+    always builds one canonical tracker plus twins of a single type, which is
+    the wrong shape for the mixed-type collisions the tracker key needs.
+    """
+
     hass_stub = SimpleNamespace(
         loop=SimpleNamespace(call_soon_threadsafe=lambda *args, **kwargs: None),
         data={DOMAIN: {}},
@@ -616,7 +630,7 @@ def _service_twin_coordinator(
     coordinator = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
     coordinator.hass = hass_stub  # type: ignore[assignment]
     coordinator.config_entry = entry  # type: ignore[attr-defined]
-    entry.runtime_data = SimpleNamespace(coordinator=coordinator)
+    entry.runtime_data = SimpleNamespace(coordinator=coordinator)  # type: ignore[attr-defined]
     coordinator.data = [
         {"id": "device-1", "name": "Tracker One"},
         {"id": "device-2", "name": "Tracker Two"},
@@ -1064,3 +1078,380 @@ def test_the_literal_owner_table_is_one_object_shared_by_all_ranking_sides() -> 
     )
     assert _const.LITERAL_CORE_KEY_OWNER[SERVICE_SUBENTRY_KEY] == SUBENTRY_TYPE_SERVICE
     assert _const.LITERAL_CORE_KEY_OWNER[TRACKER_SUBENTRY_KEY] == SUBENTRY_TYPE_TRACKER
+
+
+# ---------------------------------------------------------------------------
+# AP4 -- the reading side's tracker axis (PLAN_GFMY_ALIAS_TYPE_AXIS).
+#
+# Two changes are pinned here, and they are one commit on purpose: step 3 gives
+# the tracker key the same rank the service key already had, step 1 folds a
+# ``tracker`` parked on the service key onto the tracker key. Step 1 alone
+# would let the parked subentry compete for ``core_tracking`` while ``metadata``
+# was still written without a rank, which trades one order-dependence for
+# another instead of removing it.
+# ---------------------------------------------------------------------------
+
+
+def _ap4_subentry(
+    subentry_id: str,
+    stored_key: str | None,
+    subentry_type: str,
+    visible: list[str] | None = None,
+) -> ConfigSubentry:
+    """Build one subentry with a freely chosen (key, type) pair.
+
+    ``_service_twin_coordinator`` cannot serve these cases: it always adds a
+    canonical tracker and gives every twin the *same* type, while the tracker
+    key's collisions are precisely about mixed types on one key.
+
+    Import form, chosen rather than inherited (``tests/AGENTS.md``, point 10):
+    the module-level ``from homeassistant.config_entries import ConfigSubentry``
+    reaches the ``conftest`` stub, and that is fine *here* because nothing
+    below draws its force from a core guarantee -- the reading side touches
+    these doubles only through ``getattr`` and ``.get()``. Where a double does
+    need the genuine frozen dataclass, the resolution is asserted at the
+    construction site instead (see ``_ap1_subentry`` in
+    ``tests/test_subentry_manager_registry_resolution.py``).
+    """
+
+    payload: dict[str, object] = {}
+    if stored_key is not None:
+        payload["group_key"] = stored_key
+    if visible:
+        payload["visible_device_ids"] = list(visible)
+    return ConfigSubentry(
+        data=MappingProxyType(payload),
+        subentry_type=subentry_type,
+        title=f"{subentry_type}:{stored_key}",
+        unique_id=f"uid-{subentry_id}",
+        subentry_id=subentry_id,
+    )
+
+
+def _ap4_coordinator(
+    entry_id: str, subentries: list[ConfigSubentry]
+) -> tuple[GoogleFindMyCoordinator, object, _ManagerStub]:
+    """Coordinator over exactly ``subentries``, in the given iteration order."""
+
+    entry = make_config_entry(
+        entry_id=entry_id,
+        title="Google Find My",
+        subentries={s.subentry_id: s for s in subentries},
+    )
+    return _coordinator_over(entry)
+
+
+@pytest.mark.parametrize("parked_first", [True, False])
+def test_ap4_a_parked_tracker_reaches_exactly_one_group(parked_first: bool) -> None:
+    """A tracker parked on the service key must describe devices somewhere.
+
+    Class A. The config flow deliberately preserves this shape rather than
+    sweeping it (``::test_a_tracker_parked_on_the_service_key_is_not_swept_up``),
+    so it arrives here. Before this commit the reading side keyed it by its
+    *stored* key, and the outcome was measured, not assumed: the service branch
+    forces the metadata ids to ``()`` while ``stored_assigned_ids`` still counts
+    them, so the unassigned-device merge did not reclaim them either and the
+    devices were described by **no** group at all.
+
+    Both orders are asserted because the fold sits above the rank and the rank
+    is what decides which subentry keeps the slot afterwards.
+    """
+
+    entry_id = f"e-ap4-parked-{int(parked_first)}"
+    canonical = _ap4_subentry(
+        "id-canonical", TRACKER_SUBENTRY_KEY, SUBENTRY_TYPE_TRACKER, ["device-1"]
+    )
+    parked = _ap4_subentry(
+        "id-parked", SERVICE_SUBENTRY_KEY, SUBENTRY_TYPE_TRACKER, ["device-2"]
+    )
+    order = [parked, canonical] if parked_first else [canonical, parked]
+    coordinator, _entry, _manager = _ap4_coordinator(entry_id, order)
+
+    coordinator._refresh_subentry_index(coordinator.data, skip_repair=True)
+
+    tracker_meta = coordinator.get_subentry_metadata(key=TRACKER_SUBENTRY_KEY)
+    service_meta = coordinator.get_subentry_metadata(key=SERVICE_SUBENTRY_KEY)
+    assert tracker_meta is not None and service_meta is not None
+    assert "device-2" in tracker_meta.visible_device_ids, (
+        "the devices a parked tracker holds must be described by the tracker "
+        "group; keying it by its stored key left them in no group at all"
+    )
+    assert service_meta.config_subentry_id != "id-parked", (
+        "and the parked subentry must have left the service key entirely; "
+        "asserting on its ids instead would be tautological, because the "
+        "service branch forces them to () for whoever holds the slot"
+    )
+
+
+@pytest.mark.parametrize("higher_id_first", [True, False])
+def test_ap4_the_tracker_slot_no_longer_depends_on_iteration_order(
+    higher_id_first: bool,
+) -> None:
+    """Two canonical tracker groups must resolve by rank, not by load order.
+
+    Class A, and the case the contract named as the remaining gap until this
+    commit removed the sentence: up to ``12199494`` it read "the tracker key
+    has no such rank ... two ``tracker``-typed subentries storing
+    ``core_tracking`` still resolve by iteration order". Both candidates are
+    equal on every contract field here, so the tie-break decides, and the point
+    of the tie-break is that the value is arbitrary while stability is not.
+    """
+
+    entry_id = f"e-ap4-tie-{int(higher_id_first)}"
+    low = _ap4_subentry("id-a", TRACKER_SUBENTRY_KEY, SUBENTRY_TYPE_TRACKER)
+    high = _ap4_subentry("id-b", TRACKER_SUBENTRY_KEY, SUBENTRY_TYPE_TRACKER)
+    order = [high, low] if higher_id_first else [low, high]
+    coordinator, _entry, _manager = _ap4_coordinator(entry_id, order)
+
+    coordinator._refresh_subentry_index(coordinator.data, skip_repair=True)
+
+    tracker_meta = coordinator.get_subentry_metadata(key=TRACKER_SUBENTRY_KEY)
+    assert tracker_meta is not None
+    assert tracker_meta.config_subentry_id == "id-a", (
+        "among equals the lowest identifier decides, in both iteration orders"
+    )
+
+
+@pytest.mark.parametrize("parked_first", [True, False])
+def test_ap4_an_exact_tracker_key_outranks_a_parked_twin(parked_first: bool) -> None:
+    """The subentry that stores the tracker key beats one folded onto it.
+
+    Class A. The parked twin carries the *lower* identifier on purpose: without
+    the exact-key field the tie-break would hand it the slot, so this assertion
+    discriminates that field rather than restating the tie-break.
+    """
+
+    entry_id = f"e-ap4-exact-{int(parked_first)}"
+    canonical = _ap4_subentry(
+        "id-z-canonical", TRACKER_SUBENTRY_KEY, SUBENTRY_TYPE_TRACKER, ["device-1"]
+    )
+    parked = _ap4_subentry(
+        "id-a-parked", SERVICE_SUBENTRY_KEY, SUBENTRY_TYPE_TRACKER, ["device-2"]
+    )
+    order = [parked, canonical] if parked_first else [canonical, parked]
+    coordinator, _entry, _manager = _ap4_coordinator(entry_id, order)
+
+    coordinator._refresh_subentry_index(coordinator.data, skip_repair=True)
+
+    tracker_meta = coordinator.get_subentry_metadata(key=TRACKER_SUBENTRY_KEY)
+    assert tracker_meta is not None
+    assert tracker_meta.config_subentry_id == "id-z-canonical", (
+        "an exact stored-key match beats a folded twin, even when the twin's "
+        "identifier sorts lower"
+    )
+
+
+@pytest.mark.parametrize("foreign_first", [True, False])
+def test_ap4_the_literal_tracker_owner_outranks_a_foreign_type(
+    foreign_first: bool,
+) -> None:
+    """A type that does not own the tracker key loses it.
+
+    Class A. The reachable shape is a *future or unknown* type, named as such
+    rather than dressed up: ``service`` and ``hub`` both fold onto the service
+    key before they get here, so the only other way onto this key is a type
+    this release does not know. ``_async_cleanup_stale_subentries`` skips such
+    a subentry deliberately (removal is irreversible), so it survives to reach
+    this rank. Its identifier sorts lower, so the tie-break alone would give it
+    the slot.
+    """
+
+    entry_id = f"e-ap4-owner-{int(foreign_first)}"
+    canonical = _ap4_subentry(
+        "id-z-tracker", TRACKER_SUBENTRY_KEY, SUBENTRY_TYPE_TRACKER, ["device-1"]
+    )
+    foreign = _ap4_subentry(
+        "id-a-future", TRACKER_SUBENTRY_KEY, "future_type", ["device-2"]
+    )
+    order = [foreign, canonical] if foreign_first else [canonical, foreign]
+    coordinator, _entry, _manager = _ap4_coordinator(entry_id, order)
+
+    coordinator._refresh_subentry_index(coordinator.data, skip_repair=True)
+
+    tracker_meta = coordinator.get_subentry_metadata(key=TRACKER_SUBENTRY_KEY)
+    assert tracker_meta is not None
+    assert tracker_meta.config_subentry_id == "id-z-tracker", (
+        "the type that literally owns the tracker key beats one that merely "
+        "stores it, whichever order the entry yields"
+    )
+
+
+def test_ap4_a_displaced_tracker_leaves_no_stale_manager_write() -> None:
+    """The winner's manager write must replace the loser's, not queue behind it.
+
+    Class A, and the assertion that carries the generalised no-cleanup
+    argument. For the service key the argument was "``manager_visible`` is
+    never filled for it"; for the tracker key that is false, so the rank block
+    relies on the weaker but sufficient claim that every structure it writes is
+    keyed by *group* and therefore overwritten. This is the assertion that
+    holds the claim up: replacing the assignment with a ``setdefault`` leaves
+    the loser's ids in the write-back.
+
+    Two shapes were tried and the fixture is the second, because the first did
+    not discriminate: with a *parked* loser the fold drops its stored ids, the
+    unassigned-device merge fires and recomputes
+    ``manager_visible[TRACKER_SUBENTRY_KEY]`` from the merged metadata, so the
+    write matched the metadata whatever the loop had done. Here both
+    candidates store explicit, disjoint ids, every device is therefore
+    assigned, the merge does not fire, and the write comes straight from the
+    loop.
+
+    The order is fixed rather than parametrised: only loser-first exercises an
+    overwrite at all.
+    """
+
+    entry_id = "e-ap4-displaced"
+    winner = _ap4_subentry(
+        "id-a-winner", TRACKER_SUBENTRY_KEY, SUBENTRY_TYPE_TRACKER, ["device-1"]
+    )
+    loser = _ap4_subentry(
+        "id-b-loser", TRACKER_SUBENTRY_KEY, SUBENTRY_TYPE_TRACKER, ["device-2"]
+    )
+    coordinator, _entry, manager = _ap4_coordinator(entry_id, [loser, winner])
+
+    coordinator._refresh_subentry_index(coordinator.data, skip_repair=True)
+
+    tracker_writes = [ids for key, ids in manager.calls if key == TRACKER_SUBENTRY_KEY]
+    assert tracker_writes == [("device-1",)], (
+        "the write-back must carry the ids of the subentry that won the slot; "
+        "the loser's entry is overwritten rather than cleaned up, which is the "
+        "whole no-cleanup argument for a key the manager *is* written for"
+    )
+    tracker_meta = coordinator.get_subentry_metadata(key=TRACKER_SUBENTRY_KEY)
+    assert tracker_meta is not None
+    assert tracker_writes[0] == tracker_meta.visible_device_ids, (
+        "and what is written back is what the winner describes"
+    )
+
+
+@pytest.mark.parametrize("parked_first", [True, False])
+def test_ap4_the_manager_and_the_index_agree_on_the_tracker_slot(
+    parked_first: bool,
+) -> None:
+    """Both rankers must name the same subentry for ``core_tracking``.
+
+    Class A, and the reason step 3 is not cosmetic.
+    ``manager_visible[TRACKER_SUBENTRY_KEY]`` drives
+    ``update_visible_device_ids``, which resolves the key through the
+    *manager's* index. If the two sides rank differently, the manager describes
+    one subentry and the write-back lands on the other, and entities change
+    group without a single subentry being removed and without a log line.
+
+    The canonical subentry carries the higher identifier deliberately: with the
+    exact-key field neutralised on either side, that side falls back to the
+    tie-break and picks the other subentry, so the assertion discriminates the
+    field instead of restating a shared tie-break.
+    """
+
+    from custom_components.googlefindmy import ConfigEntrySubEntryManager
+    from tests.helpers.homeassistant import FakeHass
+
+    entry_id = f"e-ap4-agree-{int(parked_first)}"
+    canonical = _ap4_subentry(
+        "id-z-canonical", TRACKER_SUBENTRY_KEY, SUBENTRY_TYPE_TRACKER, ["device-1"]
+    )
+    parked = _ap4_subentry(
+        "id-a-parked", SERVICE_SUBENTRY_KEY, SUBENTRY_TYPE_TRACKER, ["device-2"]
+    )
+    order = [parked, canonical] if parked_first else [canonical, parked]
+    coordinator, entry, _manager = _ap4_coordinator(entry_id, order)
+
+    coordinator._refresh_subentry_index(coordinator.data, skip_repair=True)
+    index_choice = coordinator.get_subentry_metadata(key=TRACKER_SUBENTRY_KEY)
+    assert index_choice is not None
+
+    runtime_manager = ConfigEntrySubEntryManager(FakeHass(config_entries=None), entry)
+    runtime_manager._refresh_from_entry()
+    managed = runtime_manager._managed.get(TRACKER_SUBENTRY_KEY)
+    assert managed is not None
+
+    assert index_choice.config_subentry_id == managed.subentry_id, (
+        "the index and the manager must select the same subentry for the "
+        "tracker slot, or the visibility write-back rebinds entities silently"
+    )
+
+
+def test_ap4_a_parked_tracker_alone_leaves_the_service_group_synthesised() -> None:
+    """The fold changes *who describes* the service group, and that is pinned.
+
+    Class A, and the half of step 1 that is not about devices. Where a parked
+    tracker is the only holder of the service key, folding it onto the tracker
+    key leaves nothing on the service key, so the index falls back to its
+    synthesised placeholder. Before the fold the group was described by the
+    parked subentry itself.
+
+    That difference is not cosmetic downstream: ``registry.py``'s
+    ``_is_real_service_subentry`` rejects the placeholder, because
+    ``extract_service_subentry_ids`` still collects the parked subentry through
+    its stored ``group_key``, so the set is non-empty and lacks the
+    placeholder. The service device then keeps its base identifier but loses
+    the ``<entry>:<subentry>:service`` one. Both shapes are unattractive -- the
+    old one bound the service device to a *tracker* subentry -- so this pins
+    the change rather than declaring either side correct.
+
+    Killing mutation: making the ``elif`` branch of the fold unreachable
+    restores ``id-parked`` as the service holder.
+    """
+
+    entry_id = "e-ap4-parked-alone"
+    parked = _ap4_subentry(
+        "id-parked", SERVICE_SUBENTRY_KEY, SUBENTRY_TYPE_TRACKER, ["device-2"]
+    )
+    coordinator, _entry, _manager = _ap4_coordinator(entry_id, [parked])
+
+    coordinator._refresh_subentry_index(coordinator.data, skip_repair=True)
+
+    service_meta = coordinator.get_subentry_metadata(key=SERVICE_SUBENTRY_KEY)
+    tracker_meta = coordinator.get_subentry_metadata(key=TRACKER_SUBENTRY_KEY)
+    assert service_meta is not None and tracker_meta is not None
+    assert service_meta.config_subentry_id == f"{entry_id}-service-subentry", (
+        "with the parked tracker folded away, the service group must be "
+        "described by the synthesised placeholder, not by the tracker subentry"
+    )
+    assert tracker_meta.config_subentry_id == "id-parked", (
+        "and the parked subentry must hold the tracker slot it was folded onto"
+    )
+
+
+@pytest.mark.parametrize("parked_first", [True, False])
+def test_ap4_a_parked_tracker_leaves_the_service_pool(parked_first: bool) -> None:
+    """With a real ``service`` subentry present, the parked one still leaves.
+
+    Class A. The rank comment claims the parked shape "leaves for
+    ``TRACKER_SUBENTRY_KEY`` before this rank sees it, measured in both
+    iteration orders"; until this test that measurement lived only in the plan
+    notes, which the tree cannot check.
+
+    Honest note on sharpness, measured rather than asserted: **neither**
+    assertion has a killing mutation in this state, and an earlier draft of
+    this docstring claimed the first one had. Making the fold unreachable
+    leaves this test green -- with a real ``service`` subentry present the
+    parked one merely loses the rank, its metadata entry is overwritten, and
+    the unassigned-device merge still collects ``device-2`` into the tracker
+    group. The shape that *does* discriminate is the parked subentry alone,
+    pinned by the test above. This one is therefore a regression anchor for
+    the shape the rank comment describes, not a proof of the fold.
+    """
+
+    entry_id = f"e-ap4-pool-{int(parked_first)}"
+    real_service = _ap4_subentry(
+        "id-real-service", SERVICE_SUBENTRY_KEY, SUBENTRY_TYPE_SERVICE, None
+    )
+    parked = _ap4_subentry(
+        "id-parked", SERVICE_SUBENTRY_KEY, SUBENTRY_TYPE_TRACKER, ["device-2"]
+    )
+    order = [parked, real_service] if parked_first else [real_service, parked]
+    coordinator, _entry, _manager = _ap4_coordinator(entry_id, order)
+
+    coordinator._refresh_subentry_index(coordinator.data, skip_repair=True)
+
+    tracker_meta = coordinator.get_subentry_metadata(key=TRACKER_SUBENTRY_KEY)
+    service_meta = coordinator.get_subentry_metadata(key=SERVICE_SUBENTRY_KEY)
+    assert tracker_meta is not None and service_meta is not None
+    assert "device-2" in tracker_meta.visible_device_ids, (
+        "the parked subentry's devices must land in the tracker group in "
+        "either iteration order"
+    )
+    assert service_meta.config_subentry_id == "id-real-service", (
+        "and the real service subentry keeps the slot it never lost"
+    )
