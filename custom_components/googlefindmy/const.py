@@ -73,8 +73,9 @@ SUBENTRY_TYPE_TRACKER: str = "tracker"
 # (``config_flow._accepts_device_assignment``); the feature sync refuses them
 # as write *targets* for the tracker group and folds them onto the service key
 # instead (``config_flow._canonical_core_key_of``); the runtime index folds
-# them the same way and drops their ids from its *in-memory* view, leaving the
-# stored subentry alone (``coordinator/subentry.py``); and two write sinks
+# them the same way and exempts their ids from its *in-memory* assignment
+# bookkeeping, leaving both the stored subentry and that group's own
+# allow-list alone (``coordinator/subentry.py``); and two write sinks
 # refuse them, the manager's ``update_visible_device_ids`` and the
 # visibility write-back in ``async_setup_entry``, which bypasses the manager
 # and therefore needs its own guard (both in ``__init__.py``).

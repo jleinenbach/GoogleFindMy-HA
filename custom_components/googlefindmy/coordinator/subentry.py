@@ -374,8 +374,22 @@ class SubentryOperations(_MixinBase):
         # The trailing ``subentry_type`` is carried through unfolded: the fold
         # below rewrites ``group_key`` but the type is what ranks two subentries
         # that end up on the same core key, so it must survive the rewrite.
+        # The trailing ``bool`` is the re-homing flag. A folded subentry's ids
+        # have to stop counting as an *assignment* so the unassigned-device
+        # merge can reclaim them, but they must keep working as that group's
+        # *allow-list*. Dropping the ids from ``data`` did both at once, and the
+        # second half was the damage, demonstrably so for the tracker fold
+        # below: ``allow_filter`` reads a missing list as "no restriction", not
+        # as "no assignment", so a parked tracker that won ``core_tracking``
+        # was handed the entire device index -- including devices a different
+        # group owns -- and ``manager.update_visible_device_ids`` persisted
+        # that. On the service fold the same removal was inert, because that
+        # branch overwrites the ids with ``()`` and the manager loop skips the
+        # key; both are written the same way regardless, since that inertness
+        # is an accident of order rather than a guarantee. The two effects are
+        # carried separately from here on.
         raw_entries: list[
-            tuple[str, str | None, dict[str, Any], str | None, str | None]
+            tuple[str, str | None, dict[str, Any], str | None, str | None, bool]
         ] = []
         core_group_keys_present: set[str] = set()
         if entry and getattr(entry, "subentries", None):
@@ -383,6 +397,7 @@ class SubentryOperations(_MixinBase):
                 data = dict(getattr(subentry, "data", {}) or {})
                 subentry_id_raw = getattr(subentry, "subentry_id", None)
                 group_key = _extract_group_key_impl(data, subentry_id_raw)
+                ids_are_rehomable = False
                 if group_key in (SERVICE_SUBENTRY_KEY, TRACKER_SUBENTRY_KEY):
                     core_group_keys_present.add(group_key)
                 # The repair detection above deliberately reads the *stored*
@@ -396,8 +411,9 @@ class SubentryOperations(_MixinBase):
                 # *service* as present while the fold below indexes it under
                 # ``core_tracking``. It is inert *for the device assignment*,
                 # by the same mechanism, made explicit rather than assumed by
-                # analogy: the fold drops its stored ids from this in-memory
-                # view, so the unassigned-device merge collects the devices
+                # analogy: the fold exempts its stored ids from this view's
+                # assignment bookkeeping (they stay its allow-list), so the
+                # unassigned-device merge collects the devices
                 # into the tracker group, which is where the type axis puts
                 # them anyway. "Inert" stops there, and the two further
                 # consequences are named rather than folded into that word.
@@ -478,18 +494,28 @@ class SubentryOperations(_MixinBase):
                     # ``stored_assigned_ids`` would still count them as
                     # assigned, so the unassigned-device merge would not pull
                     # them into the tracker group and they would sit in no
-                    # group at all. Dropping them from this *in-memory* view
-                    # (the stored subentry is untouched) lets that merge
-                    # reclaim them.
+                    # group at all. Excusing them from that bookkeeping (the
+                    # stored subentry is untouched) lets that merge reclaim
+                    # them.
                     #
-                    # The drop stays bound to the fold, deliberately. One that
-                    # already stores the canonical key is a different case: a
-                    # device sitting there may be a move the user made while
-                    # the service group was still an offered target, and
+                    # The exemption stays bound to the fold, deliberately. One
+                    # that already stores the canonical key is a different
+                    # case: a device sitting there may be a move the user made
+                    # while the service group was still an offered target, and
                     # ``test_a_device_moved_to_the_service_subentry_is_left_alone``
                     # pins that it must not be reclaimed. Only the *mis-keyed*
                     # ids are residue.
-                    data.pop("visible_device_ids", None)
+                    #
+                    # It exempts the ids from the bookkeeping and leaves them in
+                    # ``data``. Removing them there would also clear this
+                    # group's allow-list, and an absent list means "show
+                    # everything" downstream. That is inert on *this* branch
+                    # only because the service branch overwrites the ids with
+                    # ``()`` a few hundred lines below -- an accident of order,
+                    # not a guarantee -- so the branch is written the same way
+                    # as its tracker mirror, where the same removal was
+                    # measurably harmful.
+                    ids_are_rehomable = True
                 elif (
                     getattr(subentry, "subentry_type", None) == SUBENTRY_TYPE_TRACKER
                     and group_key == SERVICE_SUBENTRY_KEY
@@ -506,11 +532,11 @@ class SubentryOperations(_MixinBase):
                     # while ``stored_assigned_ids`` still counts them, so the
                     # unassigned-device merge does not reclaim them either.
                     #
-                    # Its ids are dropped just as in the fold above, but for a
-                    # different reason, and the reason is spelled out below
-                    # rather than here: there the ids are residue of a
-                    # mis-keyed group, here they are a live group's ids that
-                    # the rank may take away again.
+                    # Its ids are exempted from the assignment bookkeeping just
+                    # as in the fold above, but for a different reason, and the
+                    # reason is spelled out below rather than here: there the
+                    # ids are residue of a mis-keyed group, here they are a
+                    # live group's ids that the rank may take away again.
                     #
                     # This is the type axis, not the key axis, which is what
                     # keeps ``test_a_device_moved_to_the_service_subentry_is_
@@ -528,17 +554,28 @@ class SubentryOperations(_MixinBase):
                     # ``stored_assigned_ids`` (filled above the rank) still
                     # counts them, so the unassigned-device merge does not
                     # reclaim them either. That is the very state this step
-                    # exists to end, only moved one key to the left. Dropping
-                    # the ids from this *in-memory* view (the stored subentry
-                    # is untouched) hands them to the merge, which puts them in
+                    # exists to end, only moved one key to the left. Exempting
+                    # the ids from that bookkeeping (the stored subentry is
+                    # untouched) hands them to the merge, which puts them in
                     # the tracker group -- the group the type axis says they
                     # belong to.
                     #
-                    # When the parked subentry instead *wins* the slot, the
-                    # drop widens its allow-list to the full device index, and
-                    # that is the same shape the merge produced before: alone,
-                    # its ids were already joined by every unassigned device.
-                    data.pop("visible_device_ids", None)
+                    # Only from the bookkeeping, though. Until this line they
+                    # were removed from ``data`` outright, which also emptied
+                    # this group's allow-list, and ``allow_filter`` reads an
+                    # absent list as "no restriction". The winner case was the
+                    # one that broke: a parked tracker that keeps the slot was
+                    # handed the whole device index, devices another group owns
+                    # included, and the manager write-back persisted the widened
+                    # list, so those devices were exposed through two subentries
+                    # at once. The claim that this matched the pre-fold shape
+                    # ("alone, its ids were already joined by every unassigned
+                    # device") held only where no other group owned anything;
+                    # the merge adds *unassigned* devices, while an absent
+                    # filter adds *every* device. Keeping the list makes the
+                    # winner see its own ids plus whatever the merge hands it,
+                    # and the loser is re-homed by the exemption alone.
+                    ids_are_rehomable = True
                 identifier = _sanitize_subentry_identifier(subentry_id_raw)
 
                 # Use filter_provisional_identifier for service subentries
@@ -571,6 +608,7 @@ class SubentryOperations(_MixinBase):
                         data,
                         getattr(subentry, "title", None),
                         getattr(subentry, "subentry_type", None),
+                        ids_are_rehomable,
                     )
                 )
 
@@ -594,6 +632,7 @@ class SubentryOperations(_MixinBase):
                     },
                     getattr(entry, "title", None),
                     None,
+                    False,
                 )
             )
 
@@ -718,7 +757,14 @@ class SubentryOperations(_MixinBase):
         # measured against the service incumbent.
         core_slot_rank: dict[str, tuple[int, int, bool, str]] = {}
 
-        for group_key, subentry_id, data, title, subentry_type in raw_entries:
+        for (
+            group_key,
+            subentry_id,
+            data,
+            title,
+            subentry_type,
+            ids_are_rehomable,
+        ) in raw_entries:
             raw_features = data.get("features")
             if isinstance(raw_features, (list, tuple, set)):
                 normalized_features = tuple(
@@ -776,16 +822,20 @@ class SubentryOperations(_MixinBase):
                 else:
                     normalized_allowed = None
 
-            if normalized_allowed:
-                # Every id still standing in this in-memory view after the two
-                # folds above, in both spellings the loop produced -- *not*
-                # every stored id: a mis-keyed twin and a parked tracker have
-                # had theirs dropped by then, which is exactly how their
-                # devices reach the merge. The unassigned-device merge needs the
-                # *stored* assignment, not the metadata one: the service key has
-                # its visible ids forced to empty a few lines below, so a device
-                # the user moved there would otherwise look unassigned and be
-                # pulled back into the tracker -- and persisted there.
+            if normalized_allowed and not ids_are_rehomable:
+                # Every id a subentry claims as its own, in both spellings the
+                # loop produced -- *not* every id in this view: a mis-keyed twin
+                # and a parked tracker were folded onto a key that is not the
+                # one they stored, and the fold exempts them here, which is
+                # exactly how their devices reach the merge. They keep their
+                # allow-list; only their claim to *own* those devices is
+                # suspended -- for the parked tracker because the rank below
+                # may hand the key to someone else, for the mis-keyed twin
+                # because its ids are residue either way. The unassigned-device merge needs the *stored*
+                # assignment, not the metadata one: the service key has its
+                # visible ids forced to empty a few lines below, so a device the
+                # user moved there would otherwise look unassigned and be pulled
+                # back into the tracker -- and persisted there.
                 stored_assigned_ids.update(normalized_allowed)
 
             allow_filter = normalized_allowed
@@ -964,7 +1014,7 @@ class SubentryOperations(_MixinBase):
                 # The one deliberate exception is ``stored_assigned_ids``, which
                 # is filled above the rank and therefore also counts the ids of
                 # a loser *that still holds them there* -- a folded twin or a
-                # parked tracker had them dropped further up and is not
+                # parked tracker was exempted further up and is not
                 # counted. That is what keeps the unassigned-device merge from
                 # reclaiming a device the user moved, and it is unchanged here.
                 core_slot_rank[group_key] = candidate_rank

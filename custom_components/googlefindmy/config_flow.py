@@ -1276,10 +1276,12 @@ class _SubentryOption:
 _NON_DEVICE_SUBENTRY_KEYS = frozenset({SERVICE_SUBENTRY_KEY})
 # The type axis is shared with the reading side rather than restated here:
 # ``coordinator/subentry.py`` folds exactly these types onto the service key
-# and drops their mis-keyed ids from its in-memory view, so a type added on
-# one side cannot be forgotten on the other. The drop does not reach storage:
-# the stored subentry keeps those ids, which is what makes the re-homing
-# reversible.
+# and exempts their mis-keyed ids from its in-memory assignment bookkeeping,
+# so a type added on one side cannot be forgotten on the other. The exemption
+# reaches neither storage nor that group's own allow-list: the stored subentry
+# keeps those ids, which is what makes the re-homing reversible, and the group
+# keeps filtering by them, because an absent list would let it see every device
+# rather than none.
 _NON_DEVICE_SUBENTRY_TYPES = NON_DEVICE_SUBENTRY_TYPES
 
 

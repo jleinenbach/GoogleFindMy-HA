@@ -699,12 +699,13 @@ def test_devices_parked_on_a_mis_keyed_service_twin_are_reclaimed() -> None:
 def test_folding_a_mis_keyed_twin_writes_nothing_back_to_it() -> None:
     """The reclaim is a re-homing, not a deletion.
 
-    Reading the drop as "the assignment is undone" is the misreading this test
-    exists to foreclose. That the device reappears under the tracker is pinned
+    Reading the re-homing as "the assignment is undone" is the misreading this
+    test exists to foreclose. That the device reappears under the tracker is pinned
     by ``test_devices_parked_on_a_mis_keyed_service_twin_are_reclaimed``. What
-    that neighbour does not say is the half that makes the drop reversible:
-    the ids leave the *in-memory* view only, and the stored subentry keeps
-    them, so a later migration can still see what the twin held.
+    that neighbour does not say is the half that makes the re-homing
+    reversible: the fold only exempts the ids from the in-memory assignment
+    bookkeeping, and the stored subentry keeps them, so a later migration can
+    still see what the twin held.
 
     This is a forward guard rather than a regression test for a fixed bug.
     Its reach was measured, not assumed, and it is narrower than "any write
@@ -739,7 +740,8 @@ def test_folding_a_mis_keyed_twin_writes_nothing_back_to_it() -> None:
 
     twin = entry.subentries[twin_id]
     assert list(twin.data.get("visible_device_ids") or []) == ["device-2"], (
-        "the drop works on the in-memory copy; the stored subentry keeps its ids"
+        "nothing in the fold touches the stored ids, neither in the in-memory copy "
+        "nor on disk"
     )
 
 
@@ -876,8 +878,8 @@ def test_a_literal_service_subentry_outranks_a_hub_storing_the_same_key(
     hub_subentry = ConfigSubentry(
         # The hub carries ids on purpose: this is the one shape
         # ``test_a_hub_typed_subentry_never_bears_devices`` cannot cover,
-        # because all of its ``stored_key`` values *fold* (and folding drops
-        # the ids so the merge reclaims them), whereas the canonical key does
+        # because all of its ``stored_key`` values *fold* (and folding exempts
+        # the ids from the assignment bookkeeping so the merge reclaims them), whereas the canonical key does
         # not fold. What happens to them is asserted below.
         data=MappingProxyType(
             {
@@ -930,8 +932,9 @@ def test_a_literal_service_subentry_outranks_a_hub_storing_the_same_key(
     assert tracker_meta is not None
     assert "device-2" not in tracker_meta.visible_device_ids, (
         "ids stored on the *canonical* service key are not reclaimed, unlike "
-        "the mis-keyed ones the fold drops; changing that is a decision of its "
-        "own, because it cannot be told apart from a move the user made"
+        "the mis-keyed ones the fold exempts from the assignment bookkeeping; "
+        "changing that is a decision of its own, because it cannot be told "
+        "apart from a move the user made"
     )
 
 
@@ -1288,8 +1291,8 @@ def test_ap4_a_displaced_tracker_leaves_no_stale_manager_write() -> None:
     the loser's ids in the write-back.
 
     Two shapes were tried and the fixture is the second, because the first did
-    not discriminate: with a *parked* loser the fold drops its stored ids, the
-    unassigned-device merge fires and recomputes
+    not discriminate: with a *parked* loser the fold exempts its stored ids from the assignment
+    bookkeeping, the unassigned-device merge fires and recomputes
     ``manager_visible[TRACKER_SUBENTRY_KEY]`` from the merged metadata, so the
     write matched the metadata whatever the loop had done. Here both
     candidates store explicit, disjoint ids, every device is therefore
@@ -1454,4 +1457,140 @@ def test_ap4_a_parked_tracker_leaves_the_service_pool(parked_first: bool) -> Non
     )
     assert service_meta.config_subentry_id == "id-real-service", (
         "and the real service subentry keeps the slot it never lost"
+    )
+
+
+def _ap4_coordinator_with_a_foreign_group(
+    entry_id: str, subentries: list[ConfigSubentry]
+) -> tuple[GoogleFindMyCoordinator, object, _ManagerStub]:
+    """``_ap4_coordinator`` plus a third device, for the ownership cases below.
+
+    ``_coordinator_over`` wires exactly two devices, which is one too few to
+    tell "this group sees everything" apart from "this group sees its own ids
+    plus the unassigned ones": with two devices and one foreign owner there is
+    no device left over to be unassigned, so both readings agree. The third
+    device is what makes the two answers differ.
+    """
+
+    coordinator, entry, manager = _ap4_coordinator(entry_id, subentries)
+    coordinator.data = [
+        {"id": "device-1", "name": "Tracker One"},
+        {"id": "device-2", "name": "Tracker Two"},
+        {"id": "device-3", "name": "Tracker Three"},
+    ]
+    coordinator._enabled_poll_device_ids = {"device-1", "device-2", "device-3"}
+    return coordinator, entry, manager
+
+
+@pytest.mark.parametrize("parked_first", [True, False])
+def test_ap4_a_parked_tracker_that_wins_keeps_its_own_allow_list(
+    parked_first: bool,
+) -> None:
+    """A folded winner must not swallow a device another group owns.
+
+    Class A, and the regression this commit repairs. Folding a parked tracker
+    onto the tracker key used to *remove* its ``visible_device_ids`` so the
+    unassigned-device merge would reclaim them when the rank took the key away
+    again. That removal did two things at once, and only one was wanted:
+    downstream, ``allow_filter`` reads a missing list as "no restriction", not
+    as "no assignment". A parked tracker that *keeps* the key was therefore
+    handed the entire device index -- ``device-3`` included, although
+    ``other_group`` owns it -- and ``manager.update_visible_device_ids``
+    persisted that widened list, exposing the device through two subentries.
+
+    The old comment defended the removal by claiming the winner's shape matched
+    the pre-fold one ("alone, its ids were already joined by every unassigned
+    device"). That holds only while no other group owns anything: the merge
+    adds *unassigned* devices, an absent filter adds *every* device. Hence the
+    third device and the foreign owner in this fixture.
+
+    Killing mutation: restoring ``data.pop("visible_device_ids", None)`` in the
+    ``elif`` branch of the fold puts ``device-3`` back into both assertions.
+    """
+
+    entry_id = f"e-ap4-winner-{int(parked_first)}"
+    parked = _ap4_subentry(
+        "id-parked", SERVICE_SUBENTRY_KEY, SUBENTRY_TYPE_TRACKER, ["device-2"]
+    )
+    foreign = _ap4_subentry(
+        "id-foreign", "other_group", SUBENTRY_TYPE_TRACKER, ["device-3"]
+    )
+    order = [parked, foreign] if parked_first else [foreign, parked]
+    coordinator, _entry, manager = _ap4_coordinator_with_a_foreign_group(
+        entry_id, order
+    )
+
+    coordinator._refresh_subentry_index(coordinator.data, skip_repair=True)
+
+    tracker_meta = coordinator.get_subentry_metadata(key=TRACKER_SUBENTRY_KEY)
+    foreign_meta = coordinator.get_subentry_metadata(key="other_group")
+    assert tracker_meta is not None and foreign_meta is not None
+    assert "device-3" not in tracker_meta.visible_device_ids, (
+        "the folded winner must keep its own allow-list; without it the group "
+        "sees the whole device index, including what another group owns"
+    )
+    assert tracker_meta.visible_device_ids == ("device-1", "device-2"), (
+        "it sees its own id plus the one device no group claims -- which is "
+        "what the fold's own justification promised"
+    )
+    assert foreign_meta.visible_device_ids == ("device-3",), (
+        "and the owning group keeps its device"
+    )
+    persisted = dict(manager.calls)
+    assert "device-3" not in persisted.get(TRACKER_SUBENTRY_KEY, ()), (
+        "the manager write-back is where the widened list became durable, so "
+        "the metadata assertion alone would understate the damage"
+    )
+
+
+@pytest.mark.parametrize("parked_first", [True, False])
+def test_ap4_a_parked_tracker_that_loses_is_still_rehomed(parked_first: bool) -> None:
+    """The other half: a folded loser's devices must still be reclaimed.
+
+    Class A, and the reason the fold touches the bookkeeping at all. Keeping
+    the allow-list (the test above) must not undo what the removal was *for*:
+    a parked tracker that loses the core key has no metadata entry left, so its
+    devices reach a group only if the unassigned-device merge counts them as
+    unassigned. That is why the fold exempts them from ``stored_assigned_ids``
+    rather than emptying ``data``.
+
+    The foreign group is here for the same reason as above: without it a green
+    result would also be produced by "the tracker sees everything".
+
+    Killing mutation: setting ``ids_are_rehomable`` to ``False`` in the
+    ``elif`` branch of the fold strands ``device-2`` in no group at all.
+    """
+
+    entry_id = f"e-ap4-loser-{int(parked_first)}"
+    canonical = _ap4_subentry(
+        "id-canonical", TRACKER_SUBENTRY_KEY, SUBENTRY_TYPE_TRACKER, ["device-1"]
+    )
+    parked = _ap4_subentry(
+        "id-parked", SERVICE_SUBENTRY_KEY, SUBENTRY_TYPE_TRACKER, ["device-2"]
+    )
+    foreign = _ap4_subentry(
+        "id-foreign", "other_group", SUBENTRY_TYPE_TRACKER, ["device-3"]
+    )
+    order = (
+        [parked, canonical, foreign] if parked_first else [canonical, foreign, parked]
+    )
+    coordinator, _entry, _manager = _ap4_coordinator_with_a_foreign_group(
+        entry_id, order
+    )
+
+    coordinator._refresh_subentry_index(coordinator.data, skip_repair=True)
+
+    tracker_meta = coordinator.get_subentry_metadata(key=TRACKER_SUBENTRY_KEY)
+    foreign_meta = coordinator.get_subentry_metadata(key="other_group")
+    assert tracker_meta is not None and foreign_meta is not None
+    assert tracker_meta.config_subentry_id == "id-canonical", (
+        "the canonical tracker outranks the parked one, so this really is the "
+        "loser case the assertion below is about"
+    )
+    assert "device-2" in tracker_meta.visible_device_ids, (
+        "the loser's devices must be re-homed into the tracker group; the "
+        "exemption from the assignment bookkeeping is what gets them there"
+    )
+    assert "device-3" not in tracker_meta.visible_device_ids, (
+        "and re-homing must not reach into a group that owns its devices"
     )
