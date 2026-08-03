@@ -928,8 +928,10 @@ def test_a_literal_service_subentry_outranks_a_hub_storing_the_same_key(
     # unassigned-device merge treats them as already assigned, while the service
     # branch keeps the metadata empty. Measured identical at ``bf3a36aa``, so
     # the rank neither causes nor fixes it; only *which* subentry holds the slot
-    # changed. Closing it in ``PLAN_GFMY_ALIAS_TYPE_AXIS`` has to come past
-    # here.
+    # changed. Carried as ``U-31`` in the remainder register of
+    # ``agents/config_flow/AGENTS.md``, owned by
+    # ``PLAN_GFMY_VISIBILITY_ASSIGNMENT_BOOKKEEPING``; closing it there has to
+    # come past here.
     tracker_meta = coordinator.get_subentry_metadata(key=TRACKER_SUBENTRY_KEY)
     assert tracker_meta is not None
     assert "device-2" not in tracker_meta.visible_device_ids, (

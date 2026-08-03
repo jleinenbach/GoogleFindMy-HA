@@ -1421,11 +1421,13 @@ def _may_answer_for(candidate: Any, key: str) -> bool:
     nothing, so lifting it changes no behaviour at the original call sites.
 
     "Live" is meant literally and is not a hedge: a third key-only lookup of
-    the same shape exists at ``_BaseSubentryFlow._lookup_subentry`` and has
-    **no caller anywhere in the tree**, so it is dead rather than exempt.
+    the same shape exists at ``ConfigFlow._lookup_subentry`` -- on the outer
+    flow, not on ``_BaseSubentryFlow``, which only begins below it -- and it
+    has **no caller anywhere in the tree**, so it is dead rather than exempt.
     Guarding it would add a line no test executes; removing it is a production
     change and belongs to its own step, tracked as ``U-29`` in
-    ``PLAN_GFMY_ALIAS_TYPE_AXIS``.
+    ``PLAN_GFMY_SUBENTRY_FLOW_CREATE_PATH`` and carried in the remainder
+    register of ``agents/config_flow/AGENTS.md``.
 
     The permissive default is deliberate and is the reason this reads as *may*
     rather than *is*: ``_canonical_core_key_of`` returns ``None`` wherever the
@@ -7691,7 +7693,10 @@ class _BaseSubentryFlow(ConfigSubentryFlow, _ConfigSubentryFlowMixin):  # type: 
         inputs that reach the branch, it did not create the dead end. Both the
         collision the ``unique_id`` would cause behind it and the raise in front
         of it are tracked as ``U-27`` and ``U-28`` in
-        ``PLAN_GFMY_ALIAS_TYPE_AXIS`` rather than repaired here.
+        ``PLAN_GFMY_SUBENTRY_FLOW_CREATE_PATH`` rather than repaired here, and
+        are carried in the remainder register of
+        ``agents/config_flow/AGENTS.md`` with the order between them: U-28
+        first, because U-27 is unreachable while the raise stands.
         """
 
         candidate = getattr(self, "subentry", None)

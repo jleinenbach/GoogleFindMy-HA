@@ -1580,7 +1580,9 @@ async def test_a_legacy_tracker_group_on_its_own_key_is_left_alone() -> None:
     ``ConfigEntrySubEntryManager`` keys every tracker-typed subentry under
     ``TRACKER_SUBENTRY_KEY`` and the seeder receives it already renamed. That
     fold is a separate defect with its own blast radius (runtime index, manager
-    adoption) and is tracked as ``PLAN_GFMY_ALIAS_TYPE_AXIS``. Parametrising
+    adoption) and is carried as ``B13`` in the remainder register of
+    ``agents/config_flow/AGENTS.md``, owned by
+    ``PLAN_GFMY_SUBENTRY_TYPE_MIGRATION``. Parametrising
     this test over both paths would assert a fix this change does not make.
     """
 
