@@ -371,6 +371,23 @@ are installed. **Review this checklist on every single change under
     not a red test: the assertions simply become vacuous and stay green, which
     is how two rounds of "fixes" there once landed without effect.
 
+    The mirror of that mistake is assuming a double binds when it does not.
+    `tests/helpers/config_entries_stub.py` defines `OptionsFlow` and
+    `ConfigFlow` with no-op bodies (`add_suggested_values_to_schema` returns
+    its argument unchanged), but those are the **fallback** for an absent core.
+    With `homeassistant` installed — 2026.2.3 in the pinned environment —
+    `config_flow.OptionsFlowHandler.__mro__` runs
+    `OptionsFlowHandler → homeassistant.config_entries.OptionsFlow →
+    ConfigEntryBaseFlow → homeassistant.data_entry_flow.FlowHandler`, and
+    `add_suggested_values_to_schema` resolves to the genuine rebuilding
+    implementation, which copies every marker, drops `advanced` fields and sets
+    `description["suggested_value"]`. Reading the stub file and concluding "the
+    suite neutralises this call" is therefore wrong in both directions: it
+    understates what the test covers, and it hides that `suggested_value`
+    outranks `default` in the rendered form. Resolve the binding
+    (`cls.__mro__`, `inspect.getsourcefile`) before reasoning about which body
+    runs; a stub file existing is not evidence that it is the one bound.
+
 Treat this checklist as a living document: if a new helper or guard
 becomes necessary, add it here and verify each item before completing
 any change under `tests/`.

@@ -284,13 +284,18 @@ async def _build_flow(entry: _EntryStub) -> config_flow.OptionsFlowHandler:
     return flow
 
 
-def _offered_keys(result: dict[str, Any], field: str) -> set[str]:
-    """Return the selectable keys a shown form offers for ``field``.
+def _offered_keys_in_order(result: dict[str, Any], field: str) -> tuple[str, ...]:
+    """Return the selectable keys for ``field`` in the order the form lists them.
 
     Reads the ``vol.In`` container out of the rendered schema instead of
     calling the production helper that built it. That is deliberate: the point
     of these tests is what the *user* can pick, so a later rename or a second
     helper must not be able to keep them green while the form changes.
+
+    Order is kept rather than discarded because the fallback the preselection
+    guards against *is* label order: a test that wants to show the form
+    preselects something other than "whatever sorts first" has to be able to
+    name that first entry.
     """
 
     schema = result["data_schema"].schema
@@ -300,7 +305,74 @@ def _offered_keys(result: dict[str, Any], field: str) -> set[str]:
         container = getattr(validator, "container", None)
         if container is None:  # pragma: no cover - schema shape changed
             raise AssertionError(f"field {field!r} is not a vol.In selector")
-        return set(container)
+        return tuple(container)
+    raise AssertionError(f"field {field!r} not present in the shown form")
+
+
+def _offered_keys(result: dict[str, Any], field: str) -> set[str]:
+    """Return the selectable keys a shown form offers for ``field``.
+
+    Set-shaped view of :func:`_offered_keys_in_order` for the callers that ask
+    membership questions, so the *offered keys* are read out of the schema in
+    exactly one place. :func:`_rendered_default` reads the same schema for a
+    different question -- which marker carries the preselection -- and shares
+    no code with it on purpose: one walks the validator, the other the key.
+    """
+
+    return set(_offered_keys_in_order(result, field))
+
+
+def _rendered_default(result: dict[str, Any], field: str) -> Any:
+    """Return the value a shown form preselects for ``field``.
+
+    Sibling of :func:`_offered_keys` and written for the same reason its
+    docstring gives: read the rendered schema, not the production helper that
+    computed the value. The helper-level tests further down call
+    ``_default_subentry_key`` directly, so they stay green even where a step
+    stops passing its result into the marker -- which is precisely the
+    regression a user would see, because the marker default *is* the
+    preselection.
+
+    Deliberately not narrowed to ``vol.Optional``: both fields this pins are
+    ``vol.Required``. ``default`` is *not* on the shared ``vol.Marker`` base --
+    measured against voluptuous 0.15.2, ``Marker.__slots__`` is
+    ``('schema', '_schema', 'msg', 'description', '__hash__')`` and carries no
+    ``__dict__``, so ``vol.Marker('x').default`` raises ``AttributeError``.
+    Only ``Optional.__init__`` and ``Required.__init__`` assign it. Hence the
+    generic ``getattr`` rather than either subclass: a missing attribute means
+    the key is not a default-carrying marker at all (a bare ``str`` key, say),
+    which is a different fault from a marker whose default is the ``UNDEFINED``
+    sentinel, and the two are reported apart. Every stored default is a
+    factory, hence the call; ``default=None`` yields a factory returning
+    ``None``, never a bare ``None``, so the two guards never collide.
+
+    Scope of the pin: this reads ``default``, and in a real Home Assistant
+    form a ``suggested_value`` in the marker's ``description`` outranks it.
+    ``FlowHandler.add_suggested_values_to_schema`` sets that key on every
+    ``vol.Marker`` whose name it finds in the suggested mapping (measured
+    against core 2026.2.3,
+    which is what binds under this suite -- the conftest double is the
+    fallback for a missing core, not what runs here). Neither field this pins
+    is an options key, so neither reaches that mapping today; the day one does,
+    this helper would still read the ``default`` while the user sees the
+    suggestion.
+    """
+
+    schema = result["data_schema"].schema
+    for marker, _validator in schema.items():
+        if str(marker) != field:
+            continue
+        default = getattr(marker, "default", None)
+        if default is None:
+            raise AssertionError(
+                f"field {field!r} is not a default-carrying vol.Marker subclass"
+            )
+        if default is config_flow.vol.UNDEFINED:
+            raise AssertionError(f"field {field!r} carries no default")
+        value = default()
+        if value is config_flow.vol.UNDEFINED:  # pragma: no cover - factory shape
+            raise AssertionError(f"field {field!r} carries no default")
+        return value
     raise AssertionError(f"field {field!r} not present in the shown form")
 
 
@@ -2167,3 +2239,122 @@ async def test_a_parked_tracker_key_prefers_the_typed_tracker_group(
             "with no tracker-typed candidate the branch must still fall back "
             "to a group that can hold devices"
         )
+
+
+@pytest.mark.parametrize(
+    ("step", "field", "service_is_offered"),
+    [
+        ("settings", "subentry", True),
+        ("repairs_move", "target_subentry", False),
+    ],
+    ids=["settings", "repairs-move"],
+)
+async def test_the_shown_form_preselects_the_group_the_helper_chose(
+    step: str, field: str, service_is_offered: bool
+) -> None:
+    """The preselection is pinned where the user meets it: in the form.
+
+    Five tests above call ``_default_subentry_key`` directly, and that is the
+    narrower question. A step can compute the right key and still render a
+    different one -- pass ``next(iter(choices))`` into the marker, drop the
+    argument, rebuild the schema after the call -- and every helper-level test
+    stays green while the form a user opens preselects the wrong group. All
+    three of those mutations were run against this test and all three turned
+    it red, the rebuild included: ``add_suggested_values_to_schema`` binds to
+    the real core here and preserves the marker's default through its
+    ``copy.copy``, so a rebuild that drops it is visible. The
+    submit path makes that costly rather than cosmetic: ``repairs_move`` writes
+    the chosen devices to whatever the target field holds when the user submits
+    without touching it.
+
+    Two steps rather than one because they reach the helper through different
+    choice maps, and ``service_is_offered`` pins that difference instead of
+    assuming it: ``settings`` passes the unfiltered ``_subentry_choice_map``
+    and legitimately offers the service group, ``repairs_move`` passes
+    ``_device_target_choice_map``, whose filter removes it. A fixture that only
+    exercised one of the two would leave the other step's wiring unpinned.
+
+    The shape is deliberately the *first* loop of the helper -- a
+    tracker-keyed group that accepts devices, sorting last by label -- and not
+    the parked branch: the parked branch is unreachable from ``repairs_move``
+    by construction, because "parked" means "refuses devices" and that is
+    exactly the filter standing in front of it. Picking the parked shape here
+    would have pinned nothing on that half, which the first draft of this test
+    did before it was measured.
+
+    ``rendered != first_offered`` is what makes this test about the wiring
+    rather than about the fixture: label order hands back ``Alpha`` in both
+    steps, so a step that stopped passing the helper's answer along would show
+    ``Alpha`` and fail here while every helper-level test stayed green.
+    """
+
+    entry = _EntryStub()
+    entry.add_subentry(
+        key="alias@example.com",
+        title="Alpha legacy tracker",
+        subentry_type=SUBENTRY_TYPE_TRACKER,
+        visible_device_ids=["dev-1"],
+        identity="legacy-tracker",
+    )
+    entry.add_subentry(
+        key=SERVICE_SUBENTRY_KEY,
+        title="Mike service",
+        subentry_type=SUBENTRY_TYPE_SERVICE,
+        visible_device_ids=[],
+        identity="service",
+    )
+    entry.add_subentry(
+        key=TRACKER_SUBENTRY_KEY,
+        title="Zulu core tracking",
+        subentry_type=SUBENTRY_TYPE_TRACKER,
+        visible_device_ids=["dev-2"],
+        identity="canonical",
+    )
+    entry.runtime_data.coordinator.data = [
+        {"device_id": "dev-1", "name": "Device 1"},
+        {"device_id": "dev-2", "name": "Device 2"},
+    ]
+    flow = await _build_flow(entry)
+
+    form = await getattr(flow, f"async_step_{step}")()
+    assert form["type"] == "form", f"{step} did not render a form"
+
+    offered_in_order = _offered_keys_in_order(form, field)
+    # Each step's own map, not one map for both: ``repairs_move`` renders out
+    # of ``_device_target_choice_map``, and resolving its keys through the
+    # unfiltered ``_subentry_choice_map`` would make the ``service_is_offered``
+    # assertion below fail open -- it would also pass if *no* offered key
+    # resolved at all, which is the opposite of what it claims to pin.
+    option_map = (
+        flow._subentry_choice_map()[1]
+        if step == "settings"
+        else flow._device_target_choice_map()[1]
+    )
+    assert set(offered_in_order) <= set(option_map), (
+        f"{step} offers keys its own choice map cannot resolve: "
+        f"{sorted(set(offered_in_order) - set(option_map))}"
+    )
+
+    offered_service = {
+        key
+        for key in offered_in_order
+        if option_map[key].stored_key == SERVICE_SUBENTRY_KEY
+    }
+    assert bool(offered_service) is service_is_offered, (
+        "the two steps must keep reaching the helper through different choice "
+        "maps, otherwise this parametrisation pins one wiring twice"
+    )
+
+    rendered = _rendered_default(form, field)
+    assert rendered in set(offered_in_order), (
+        "a preselection outside the offered set renders a form the user cannot "
+        "submit unchanged"
+    )
+
+    preselected = option_map.get(str(rendered))
+    assert preselected is not None
+    assert preselected.stored_key == TRACKER_SUBENTRY_KEY, (
+        "the shown form must preselect the group the helper chose, not "
+        "whichever group sorts first"
+    )
+    assert rendered != offered_in_order[0]
