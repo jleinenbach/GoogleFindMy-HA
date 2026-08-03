@@ -105,9 +105,23 @@ NON_DEVICE_SUBENTRY_TYPES: frozenset[str] = frozenset(
 # the other two have no counterpart for; and it breaks a full tie on the raw
 # ``subentry_id`` where the index uses the sanitised, provisional-filtered one
 # -- the same flow/index difference named further down, now inherited by a
-# third reader. What stays asymmetric beyond the rank is the manager's *fold*:
-# it still leaves a ``hub`` on its stored key. That remainder is tracked in
-# ``PLAN_GFMY_ALIAS_TYPE_AXIS``.
+# third reader. "Behind" is not "harmless": the contract's last criterion is
+# the lowest identifier, so a provenance field sitting in front of that
+# tie-break can still decide a pair the contract wanted decided by id. It
+# takes a subentry ``unique_id`` without the entry id, which no writer in
+# ``custom_components/`` produces, so it is unreachable rather than benign.
+#
+# Two more asymmetries stay beyond the rank, named so the next reader does not
+# take "must rank the same pair identically" for more than it says. The
+# manager's *fold* is unchanged: it still leaves a ``hub`` on its stored key.
+# And the index ranks **only** the service key -- its whole rank block sits
+# inside ``if group_key == SERVICE_SUBENTRY_KEY:`` and ``metadata[group_key]``
+# is assigned unconditionally afterwards -- so for ``core_tracking`` the
+# manager is deterministic while the index is still last-iterated-wins. Within
+# the manager itself, ``_deduplicate_subentries`` and
+# ``_async_adopt_existing_unique_id`` (first match wins, ``break``) also
+# resolve collisions by iteration order and do not consult this table at all.
+# Those remainders are tracked in ``PLAN_GFMY_ALIAS_TYPE_AXIS``.
 # Read-only on purpose: unlike the plain ``dict`` constants elsewhere in this
 # module, this one is imported by two packages at once, and an in-place mutation
 # in either would silently reach the other.

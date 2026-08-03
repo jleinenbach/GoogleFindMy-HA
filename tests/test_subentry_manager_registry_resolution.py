@@ -960,18 +960,23 @@ def test_ap3_candidate_score_type_axis_is_neutral_off_the_core_keys() -> None:
 def test_ap3_an_exact_stored_key_outranks_a_folded_twin(reverse: bool) -> None:
     """Class A (standing assertion).
 
-    The first three fields of the rank are provenance and exactness, and this
-    pins the third: a subentry that stores ``core_tracking`` itself beats one
-    that merely folds onto it, in either order. Both are ``tracker``-typed, so
-    the type axis ties and cannot decide.
+    This pins ``exact_key``, the **first** field of the rank tuple (index 0):
+    a subentry that stores ``core_tracking`` itself beats one that merely folds
+    onto it, in either order. Both are ``tracker``-typed, so the type axis ties
+    and cannot decide.
 
     This field is here because leaving it out was a measured regression rather
     than a hypothetical: without it the legacy twin below wins on the
-    identifier tie-break (``id-legacy`` < ``id-tracker``), takes the
-    ``core_tracking`` slot, and ``async_sync`` then raises looking for a unique
-    id no subentry holds. The fixture keeps that identifier ordering on purpose
-    -- the twin must be able to win the later fields -- so neutralising
-    ``exact_key`` flips the outcome instead of merely making it order-dependent.
+    identifier tie-break (``id-legacy`` < ``id-tracker``) and takes the
+    ``core_tracking`` slot. The failure this fixture then shows -- ``async_sync``
+    raising for a unique id no subentry holds -- is the *loud* form of it, and it
+    is loud because these fixture ids (``e1-t``, ``e1-legacy``) are not of the
+    ``f"{entry_id}-{key}"`` shape every production writer uses. On disk the
+    adoption finds an owner and writes the payload onto the wrong subentry
+    silently; see ``_candidate_score``'s docstring for the writer list. The
+    fixture keeps the identifier ordering on purpose -- the twin must be able to
+    win the later fields -- so neutralising ``exact_key`` flips the outcome
+    instead of merely making it order-dependent.
     """
 
     canonical = _ap1_subentry(
@@ -1007,17 +1012,21 @@ def test_ap3_duplicate_tracker_group_resolves_by_identifier_not_load_order(
     owning ``subentry_id`` differed between the two orders. Now the lowest
     ``subentry_id`` wins in both.
 
-    Lowest rather than highest, and that direction is the load-bearing part: it
-    is the order the reading side already applies
-    (``coordinator/subentry.py``, final rank field ``subentry_id or ""`` with
-    "lower wins"). Two deterministic rankers that disagree would still hand the
-    slot to different subentries on the two sides, which is the drift
-    ``LITERAL_CORE_KEY_OWNER`` is shared to prevent.
+    Lowest rather than highest, and that direction is the load-bearing part.
+    The source of the direction is ``config_flow.py::_resolve_existing``, whose
+    ``min(...)`` is parametric in the key and therefore already applies to
+    ``core_tracking``. It is deliberately *not* ``coordinator/subentry.py``'s
+    final rank field ``subentry_id or ""``: that field sits inside
+    ``if group_key == SERVICE_SUBENTRY_KEY:``, so citing it here would claim a
+    counterpart on this key that does not exist. An earlier draft did exactly
+    that and then contradicted itself four lines later.
 
     Scope, stated because it is narrower than the name suggests: this pins the
-    *manager*. The reading side has no rank on the tracker key at all yet, so
-    the two sides are not equal here for the reason this test cannot see. That
-    remains AP4's subject.
+    *manager*. The index has no rank on the tracker key at all and assigns
+    ``metadata[group_key]`` unconditionally, so it stays last-iterated-wins
+    there and the two sides can still name different subentries. Closing that
+    is AP4's subject; this test buys determinism plus the right direction to
+    converge on, not convergence.
     """
 
     first = _ap1_subentry(

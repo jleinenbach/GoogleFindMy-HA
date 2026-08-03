@@ -1294,15 +1294,31 @@ class ConfigEntrySubEntryManager:
            regression, not a simplification**: with only the type axis and the
            identifier tie-break, a legacy tracker twin stored under an e-mail
            key outranked the canonical ``core_tracking`` subentry whenever its
-           identifier happened to sort lower, took the slot, and drove
-           ``async_sync`` into ``_async_adopt_existing_unique_id`` for a
-           unique id no subentry held.
+           identifier happened to sort lower and took the slot. How loudly that
+           fails depends on the identifier shape: in
+           ``test_ap3_an_exact_stored_key_outranks_a_folded_twin`` the fixture
+           ids (``e1-t``, ``e1-legacy``) hold no ``f"{entry_id}-{key}"``, so
+           ``async_sync`` reaches ``_async_adopt_existing_unique_id`` for a
+           unique id no subentry holds and raises. Every production writer
+           embeds both parts (``__init__.py`` ``:8115``/``:8128``,
+           ``coordinator/subentry.py`` ``:229``/``:242``, ``config_flow.py``
+           ``:7019``/``:7020``/``:7693``), so on disk the adoption finds an
+           owner and writes the payload onto the wrong subentry instead of
+           raising. Silent misattribution rather than an exception is the worse
+           of the two, which is why this field is not optional.
         2. ``type_match`` -- the type that literally owns this core key per
            ``LITERAL_CORE_KEY_OWNER`` beats one that merely folds onto it. For
            a non-core key the table yields ``None``, no candidate matches, and
            the field is uniformly ``0``: neutral rather than a second ordering.
         3. ``subentry_id_present`` mirrors the reading side's ``subentry_id is
-           None`` field: a subentry with an id outranks one without.
+           None`` field. It **cannot discriminate at the only call site**:
+           ``_select_preferred_managed`` is the sole caller and passes both
+           operands through ``_is_subentry_like`` first, which already demands
+           a non-empty ``str`` id, so the field is uniformly ``1`` there. The
+           contract criterion it stands for is really enforced by that guard,
+           not by this tuple; the field is kept as the guard's mirror (and to
+           order duck-typed candidates handed straight to this method by a
+           test), not because it decides a production collision.
 
         The two provenance fields come **after** them, and their position is a
         correction rather than a preference. Putting them in front looked
@@ -1320,9 +1336,20 @@ class ConfigEntrySubEntryManager:
            ``hub`` whose identifier happens to contain the entry id, and the
            hub takes the service slot -- the exact cross-side disagreement
            ``LITERAL_CORE_KEY_OWNER`` is shared to prevent, since neither other
-           ranker has a provenance field to be outvoted by. Behind them it can
-           only separate candidates the contract already calls equal, which is
-           what it was doing before this method had contract fields at all.
+           ranker has a provenance field to be outvoted by. Behind them it is
+           less wrong but not neutral, and the residue is stated rather than
+           rounded off: the contract's last criterion is the *lowest
+           identifier*, so a field sitting between "identifier presence" and
+           that tie-break can still decide a pair the contract wanted decided
+           by id. Measured: ``(id-a, unique_id=None)`` scores ``(1,1,1,0,0)``
+           against ``(id-b, "e1-core_tracking")`` at ``(1,1,1,0,1)``, so this
+           method takes ``id-b`` where the flow's ``min(...)`` takes ``id-a``.
+           That pair needs a subentry ``unique_id`` without the entry id, and
+           no writer in ``custom_components/`` produces one (same list as
+           field 1), so the divergence is unreachable today rather than
+           harmless in principle. Moving the field behind the tie-break is not
+           possible in a "higher wins" tuple; removing it belongs to the
+           follow-up that gives this method the reading side's shape.
 
         A full tie is broken by ``_select_preferred_managed``, not here, because
         the reading side's final field prefers the *lowest* ``subentry_id`` and
@@ -1374,17 +1401,28 @@ class ConfigEntrySubEntryManager:
 
         # Fully tied scores used to fall through to "whichever was iterated
         # first", which made the winner a function of load order. Break the tie
-        # the way the reading side does -- lowest ``subentry_id`` wins -- so the
-        # two rankers land on the same subentry instead of merely each being
-        # deterministic on its own.
+        # in the direction the other two sites use -- lowest ``subentry_id``
+        # wins, matching ``_resolve_existing``'s ``min(...)``, which is
+        # parametric in the key.
         #
-        # The guards only ever see both-``str`` or both-non-``str``: a mismatch
-        # already differs in ``subentry_id_present`` and returns above. The
-        # both-missing case therefore still falls through to the incumbent, and
-        # that residue is stated rather than papered over -- there is nothing
-        # left to order by, and ``ConfigSubentry.subentry_id`` is a ``str``
-        # defaulting to a fresh ULID, so reaching it needs a duck-typed
-        # candidate the tree has no writer for.
+        # What this does **not** yet buy, stated because an earlier draft of
+        # this comment claimed it: cross-side agreement on *which* subentry
+        # holds the slot. ``coordinator/subentry.py`` wraps its whole rank in
+        # ``if group_key == SERVICE_SUBENTRY_KEY:`` and then assigns
+        # ``metadata[group_key]`` unconditionally, so for every other key the
+        # index is still last-iterated-wins. For ``core_tracking`` this method
+        # is therefore deterministic while the index is not, and the two can
+        # name different subentries. Closing that is the reading-side half of
+        # ``PLAN_GFMY_ALIAS_TYPE_AXIS``; here the tie-break buys determinism
+        # and the right *direction* to converge on, not convergence itself.
+        #
+        # The both-ids-missing case never reaches this point: ``subentry_id``
+        # is read through the same ``getattr`` in ``_is_subentry_like``, which
+        # rejects anything but a non-empty ``str``, so such a pair returns
+        # ``candidate`` at the first guard above -- not the incumbent, as an
+        # earlier draft said. The ``return existing`` below is consequently
+        # unreachable from the sole call site (``_refresh_from_entry``) and
+        # exists to keep the branch total.
         #
         # One asymmetry remains against the index and is deliberate: it sorts
         # on the *sanitised, provisional-filtered* identifier, this method on
