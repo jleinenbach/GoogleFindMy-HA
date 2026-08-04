@@ -1276,10 +1276,12 @@ class _SubentryOption:
 _NON_DEVICE_SUBENTRY_KEYS = frozenset({SERVICE_SUBENTRY_KEY})
 # The type axis is shared with the reading side rather than restated here:
 # ``coordinator/subentry.py`` folds exactly these types onto the service key
-# and drops their mis-keyed ids from its in-memory view, so a type added on
-# one side cannot be forgotten on the other. The drop does not reach storage:
-# the stored subentry keeps those ids, which is what makes the re-homing
-# reversible.
+# and exempts their mis-keyed ids from its in-memory assignment bookkeeping,
+# so a type added on one side cannot be forgotten on the other. The exemption
+# reaches neither storage nor that group's own allow-list: the stored subentry
+# keeps those ids, which is what makes the re-homing reversible, and the group
+# keeps filtering by them, because an absent list would let it see every device
+# rather than none.
 _NON_DEVICE_SUBENTRY_TYPES = NON_DEVICE_SUBENTRY_TYPES
 
 
@@ -1405,6 +1407,37 @@ def _canonical_core_key_of(subentry: Any) -> str | None:
             return TRACKER_SUBENTRY_KEY
         return None
     return None
+
+
+def _may_answer_for(candidate: Any, key: str) -> bool:
+    """Return whether ``candidate`` may be resolved as the ``key`` group.
+
+    Module level rather than nested, because both *live* resolvers in this file
+    need the identical judgement and a second spelling of ``canonical is None
+    or canonical == key`` is precisely the drift ``_canonical_core_key_of`` was
+    extracted to prevent. It lived inside ``_async_sync_feature_subentries``
+    while that held the only two call sites;
+    ``_BaseSubentryFlow._resolve_existing`` is the third, and it closes over
+    nothing, so lifting it changes no behaviour at the original call sites.
+
+    "Live" is meant literally and is not a hedge: a third key-only lookup of
+    the same shape exists at ``ConfigFlow._lookup_subentry`` -- on the outer
+    flow, not on ``_BaseSubentryFlow``, which only begins below it -- and it
+    has **no caller anywhere in the tree**, so it is dead rather than exempt.
+    Guarding it would add a line no test executes; removing it is a production
+    change and belongs to its own step, tracked as ``U-29`` in
+    ``PLAN_GFMY_SUBENTRY_FLOW_CREATE_PATH`` and carried in the remainder
+    register of ``agents/config_flow/AGENTS.md``.
+
+    The permissive default is deliberate and is the reason this reads as *may*
+    rather than *is*: ``_canonical_core_key_of`` returns ``None`` wherever the
+    type declines to decide -- an untyped legacy subentry, a tracker on its own
+    key, any type outside the pair -- and there the stored ``group_key`` keeps
+    deciding alone. Only a type that names a *different* core key objects.
+    """
+
+    canonical = _canonical_core_key_of(candidate)
+    return canonical is None or canonical == key
 
 
 _LITERAL_CORE_KEY_OWNER = LITERAL_CORE_KEY_OWNER
@@ -6875,9 +6908,14 @@ class ConfigFlow(
                         # ``core_tracking`` and never reaches this branch.
                         # Rewriting this branch therefore does not fix that
                         # defect; it would only let a legacy ``hub`` win the
-                        # service slot ahead of a real service subentry,
-                        # depending on manager iteration order. The manager fold
-                        # is where that defect lives and where it gets fixed.
+                        # service slot ahead of a real service subentry. That
+                        # half is now decided rather than open: beside a real
+                        # ``service`` subentry the hub is the deterministic
+                        # loser of ``_candidate_score``'s literal-owner field,
+                        # where it used to depend on manager iteration order.
+                        # What is left is the **fold**, which still leaves a
+                        # ``hub`` on its stored key and is where the remaining
+                        # defect lives.
                         subentry_type = getattr(managed_subentry, "subentry_type", None)
                         if subentry_type == SUBENTRY_TYPE_SERVICE:
                             target_key = SERVICE_SUBENTRY_KEY
@@ -7027,12 +7065,6 @@ class ConfigFlow(
             defaults=defaults,
         )
 
-        def _may_answer_for(candidate: Any, key: str) -> bool:
-            """Return whether ``candidate`` may be resolved as the ``key`` group."""
-
-            canonical = _canonical_core_key_of(candidate)
-            return canonical is None or canonical == key
-
         def _resolve_existing(key: str) -> ConfigSubentry | None:
             """Return the subentry that is the ``key`` group, type axis included.
 
@@ -7083,10 +7115,10 @@ class ConfigFlow(
             between two of its own steps, so among candidates of equal rank the
             seeded one still wins. But the seeder resolves through the runtime
             manager, which folds *every* tracker-typed subentry onto
-            ``TRACKER_SUBENTRY_KEY`` and has no type axis at all. It can
-            therefore name a subentry that does not carry the key in either
-            pool: a legacy per-account tracker group, or a ``hub`` sitting
-            beside the canonical ``service`` subentry. Ranking such a seed ahead
+            ``TRACKER_SUBENTRY_KEY``. It can therefore name a subentry that does
+            not carry the key in either pool: a legacy per-account tracker
+            group, or a ``hub`` sitting beside the canonical ``service``
+            subentry. Ranking such a seed ahead
             of the pool let it be rewritten onto the core key, displaced the
             canonical group's identity through ``_claim_unique_id`` and left
             that group out of the context map, so the cleanup swept it, device
@@ -7098,6 +7130,19 @@ class ConfigFlow(
             A seed therefore only decides among candidates that qualify for the
             key. It still decides alone when no candidate does, which is the
             case a map naming a not-yet-keyed group depends on.
+
+            ``ConfigEntrySubEntryManager._candidate_score`` now ranks a key
+            collision on the same axes this pool does (exact stored key, then
+            literal owner per ``LITERAL_CORE_KEY_OWNER``), which narrows *how
+            often* the seeder can name an unqualified subentry but does not
+            remove the case. Both shapes above are contested collisions and the
+            manager now resolves them towards the canonical group. What it
+            cannot resolve is the **uncontested** one: a legacy per-account
+            group with no canonical sibling holds ``TRACKER_SUBENTRY_KEY``
+            alone, so the manager names it because there is nothing to rank it
+            against. That is the shape this ordering still exists for, and it
+            is also why the manager's rank is not a reason to move the seed in
+            front of the pool.
             """
 
             def _is_literal_owner(candidate: ConfigSubentry) -> bool:
@@ -7611,12 +7656,58 @@ class _BaseSubentryFlow(ConfigSubentryFlow, _ConfigSubentryFlowMixin):  # type: 
         return getattr(self.config_entry, "entry_id", "")
 
     def _resolve_existing(self) -> ConfigSubentry | None:
+        """Return the subentry this handler owns, type axis included.
+
+        The scan asks ``_may_answer_for`` in addition to the stored key, for the
+        same reason ``_async_sync_feature_subentries._resolve_existing`` does:
+        the stored ``group_key`` alone hands a group to a twin whose *type*
+        names a different core key. Measured against the real handlers rather
+        than argued: a ``tracker``-typed subentry storing the service key was
+        resolved by ``HubSubentryFlowHandler`` and then overwritten through
+        ``async_step_user`` with the id-less service payload, the service title
+        and ``unique_id = f"{entry_id}-service"``, dropping the device
+        assignment it held; the mirror direction handed a ``hub``-typed twin
+        storing ``core_tracking`` to ``TrackerSubentryFlowHandler``.
+
+        What the axis deliberately does **not** touch is the branch above it. A
+        ``subentry`` handed over by Home Assistant's flow manager identifies the
+        subentry the user opened, so filtering it would make a mis-typed
+        subentry unreconfigurable. That hand-over is unreachable today rather
+        than merely rare, and the measurement says why: this integration's
+        ``async_get_supported_subentry_types`` returns ``{}`` unconditionally,
+        so core never registers these handlers with its subentry flow manager,
+        and the one production entry point that builds one (``async_step_hub``)
+        passes no ``subentry``. The branch is left open on purpose, so the
+        asymmetry is already right the day core does hand one over.
+
+        Two steps call this, and a refusal ends differently in each. In
+        ``async_step_reconfigure`` a ``None`` is an abort with
+        ``invalid_subentry`` and nothing is written. Only in
+        ``async_step_user`` does the rejection of the sole key-matching
+        candidate turn the update into a create. That create does not reach
+        ``async_add_subentry`` at all: ``ConfigSubentryFlow.async_create_entry``
+        raises ``ValueError("Source is None, expected user")`` first, because
+        ``async_step_hub`` sets a context without ``source``. Measured against
+        the real core, and **pre-existing**: the same call raises on a config
+        entry that holds no subentry whatsoever, so the axis widened the set of
+        inputs that reach the branch, it did not create the dead end. Both the
+        collision the ``unique_id`` would cause behind it and the raise in front
+        of it are tracked as ``U-27`` and ``U-28`` in
+        ``PLAN_GFMY_SUBENTRY_FLOW_CREATE_PATH`` rather than repaired here, and
+        are carried in the remainder register of
+        ``agents/config_flow/AGENTS.md`` with the order between them: U-28
+        first, because U-27 is unreachable while the raise stands.
+        """
+
         candidate = getattr(self, "subentry", None)
         if isinstance(candidate, ConfigSubentry):
             return candidate
         for subentry in getattr(self.config_entry, "subentries", {}).values():
-            if subentry.data.get("group_key") == self._group_key:
-                return subentry
+            if subentry.data.get("group_key") != self._group_key:
+                continue
+            if not _may_answer_for(subentry, self._group_key):
+                continue
+            return subentry
         return None
 
     def _current_options_payload(self) -> dict[str, Any]:
@@ -8097,11 +8188,26 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin, _ContainerLoginMixi
         rather than a live path (``::test_a_choice_without_an_option_never_
         wins_the_preselection``).
 
-        The tracker group is *recognised* on the key axis alone; only the
-        refusal is two-axis. A legacy tracker on an email-style key is
-        therefore not recognised here, exactly as before this change, and
-        closing that belongs with the rest of the alias work in
-        ``PLAN_GFMY_ALIAS_TYPE_AXIS``.
+        The *first* loop recognises the tracker group on the key axis alone,
+        and that is a measurement rather than an omission. Adding the type
+        axis there -- so that a ``tracker``-typed subentry on an email-style
+        key is recognised as the tracker group -- turns
+        ``::test_the_preselection_is_unchanged_where_nothing_is_parked`` red
+        (``'owner@example.com'`` where it demands ``'service'``) and takes
+        ``::test_the_preselected_group_survives_the_collision_rewrite`` with
+        it: on an ordinary legacy entry nothing is parked, and moving the
+        preselection of ``async_step_settings`` and ``async_step_credentials``
+        off the service group is the regression that pin exists for.
+
+        The type axis therefore sits *inside* the parked branch, where the
+        boundary above already confines it: among the options that accept
+        devices, one whose type says ``tracker`` wins over one that merely
+        sorts first. It cannot route through ``_canonical_core_key_of``, which
+        returns ``None`` for a tracker on its own key on purpose, so a direct
+        type comparison is the only reader that can name such a group. The
+        fallback to "the first device-accepting option" is kept, so the older
+        guarantee holds where no candidate carries the tracker type at all
+        (``::test_a_parked_tracker_key_prefers_the_typed_tracker_group``).
 
         The synthesised fallback of ``_device_target_choice_map`` stores
         nothing, so ``stored_key or key`` is its (possibly suffixed) key; it
@@ -8120,12 +8226,22 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin, _ContainerLoginMixi
                 return key
             parked_on_the_tracker_key = True
         if parked_on_the_tracker_key:
+            device_accepting: str | None = None
             for key in choices:
                 option = option_map.get(key)
                 if option is None:
                     continue
-                if _accepts_device_assignment(option):
+                if not _accepts_device_assignment(option):
+                    continue
+                if (
+                    getattr(option.subentry, "subentry_type", None)
+                    == SUBENTRY_TYPE_TRACKER
+                ):
                     return key
+                if device_accepting is None:
+                    device_accepting = key
+            if device_accepting is not None:
+                return device_accepting
         return next(iter(choices), TRACKER_SUBENTRY_KEY)
 
     async def _async_update_feature_group_subentry(

@@ -361,7 +361,32 @@ are installed. **Review this checklist on every single change under
     `homeassistant.config_entries` in `sys.modules`, so the
     `from homeassistant.config_entries import ...` form reaches the stub while
     `import homeassistant.config_entries as ...` reaches the real submodule
-    through the package attribute.
+    through the package attribute. When a double must hold the *genuine* core
+    class for its guarantees to mean anything (frozen writes,
+    `MappingProxyType` fields), pick the import form deliberately **and assert
+    the resolution at the construction site** (`is_dataclass`,
+    `__dataclass_params__.frozen`) rather than trusting the form to have worked
+    -- see `_ap1_subentry` in
+    `tests/test_subentry_manager_registry_resolution.py`. Getting this wrong is
+    not a red test: the assertions simply become vacuous and stay green, which
+    is how two rounds of "fixes" there once landed without effect.
+
+    The mirror of that mistake is assuming a double binds when it does not.
+    `tests/helpers/config_entries_stub.py` defines `OptionsFlow` and
+    `ConfigFlow` with no-op bodies (`add_suggested_values_to_schema` returns
+    its argument unchanged), but those are the **fallback** for an absent core.
+    With `homeassistant` installed — 2026.2.3 in the pinned environment —
+    `config_flow.OptionsFlowHandler.__mro__` runs
+    `OptionsFlowHandler → homeassistant.config_entries.OptionsFlow →
+    ConfigEntryBaseFlow → homeassistant.data_entry_flow.FlowHandler`, and
+    `add_suggested_values_to_schema` resolves to the genuine rebuilding
+    implementation, which copies every marker, drops `advanced` fields and sets
+    `description["suggested_value"]`. Reading the stub file and concluding "the
+    suite neutralises this call" is therefore wrong in both directions: it
+    understates what the test covers, and it hides that `suggested_value`
+    outranks `default` in the rendered form. Resolve the binding
+    (`cls.__mro__`, `inspect.getsourcefile`) before reasoning about which body
+    runs; a stub file existing is not evidence that it is the one bound.
 
 Treat this checklist as a living document: if a new helper or guard
 becomes necessary, add it here and verify each item before completing
@@ -709,6 +734,33 @@ hass = FakeHass(config_entries=manager)
 
 Attach the configured ``hass`` to the integration under test so registry
 publication timing and lookup retries match the scenario being exercised.
+
+A subclass that adds *subentry mutators* has four further core contracts to
+honour, because the base class carries none of them:
+
+1. ``ConfigSubentry`` is a frozen dataclass, so an update must write through
+   ``object.__setattr__`` rather than assigning attributes.
+2. ``async_update_subentry`` returns ``False`` when nothing changed, and
+   production branches on that return.
+3. It raises ``AbortFlow("already_configured")`` on a unique-id collision,
+   which production catches and recovers from, so a double that cannot raise
+   it silently excludes a live path.
+4. Removal replaces ``entry.subentries`` with a fresh ``MappingProxyType``; an
+   update does not touch it.
+
+``_CoreLikeSubentryEntries`` in
+``tests/test_subentry_manager_registry_resolution.py`` implements all four, but
+read what that buys you before treating it as proof. Only contract 1 is pinned
+by a test: reverting the ``object.__setattr__`` write turns four cases red.
+Mutating away contracts 2, 3 and 4 individually leaves the whole file green
+(measured). They are fidelity to the core, not guards, and a double copied from
+there inherits that asymmetry.
+
+Contract 1 also only bites once the double holds the *genuine* core class:
+against the mutable ``conftest`` stand-in a frozen write is indistinguishable
+from a plain assignment, so the same test passes while proving nothing. That is
+point 10's import trap in its most expensive form -- see the assertions in
+``_ap1_subentry`` for the shape of a check that fails loudly instead.
 
 #### `config_entry_with_subentries` factory
 

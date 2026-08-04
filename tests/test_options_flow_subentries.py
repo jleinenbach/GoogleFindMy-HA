@@ -172,7 +172,7 @@ class _EntryStub:
         title: str,
         visible_device_ids: list[str] | None = None,
         feature_flags: dict[str, Any] | None = None,
-        subentry_type: str = SUBENTRY_TYPE_TRACKER,
+        subentry_type: str | None = SUBENTRY_TYPE_TRACKER,
         identity: str | None = None,
     ) -> ConfigSubentry:
         """Add a subentry to the stub.
@@ -184,6 +184,14 @@ class _EntryStub:
         subentry whose ``group_key`` drifted from its type -- the alias case
         ``agents/config_flow/AGENTS.md`` describes under
         ``Subentry alias handling``.
+
+        ``None`` is admitted for the same reason the type is a parameter at
+        all: an untyped legacy subentry is a distinct shape from every named
+        type, and it is the one that separates "prefers a ``tracker``-typed
+        group" from "prefers any group that accepts devices". Every production
+        reader already spells the access ``getattr(subentry, "subentry_type",
+        None)``, so ``None`` is the value they are written for rather than an
+        invention of this stub.
 
         ``identity`` decouples the Home Assistant identifiers from ``key`` and
         is what makes the *collision* half of that same alias case expressible.
@@ -276,13 +284,18 @@ async def _build_flow(entry: _EntryStub) -> config_flow.OptionsFlowHandler:
     return flow
 
 
-def _offered_keys(result: dict[str, Any], field: str) -> set[str]:
-    """Return the selectable keys a shown form offers for ``field``.
+def _offered_keys_in_order(result: dict[str, Any], field: str) -> tuple[str, ...]:
+    """Return the selectable keys for ``field`` in the order the form lists them.
 
     Reads the ``vol.In`` container out of the rendered schema instead of
     calling the production helper that built it. That is deliberate: the point
     of these tests is what the *user* can pick, so a later rename or a second
     helper must not be able to keep them green while the form changes.
+
+    Order is kept rather than discarded because the fallback the preselection
+    guards against *is* label order: a test that wants to show the form
+    preselects something other than "whatever sorts first" has to be able to
+    name that first entry.
     """
 
     schema = result["data_schema"].schema
@@ -292,7 +305,74 @@ def _offered_keys(result: dict[str, Any], field: str) -> set[str]:
         container = getattr(validator, "container", None)
         if container is None:  # pragma: no cover - schema shape changed
             raise AssertionError(f"field {field!r} is not a vol.In selector")
-        return set(container)
+        return tuple(container)
+    raise AssertionError(f"field {field!r} not present in the shown form")
+
+
+def _offered_keys(result: dict[str, Any], field: str) -> set[str]:
+    """Return the selectable keys a shown form offers for ``field``.
+
+    Set-shaped view of :func:`_offered_keys_in_order` for the callers that ask
+    membership questions, so the *offered keys* are read out of the schema in
+    exactly one place. :func:`_rendered_default` reads the same schema for a
+    different question -- which marker carries the preselection -- and shares
+    no code with it on purpose: one walks the validator, the other the key.
+    """
+
+    return set(_offered_keys_in_order(result, field))
+
+
+def _rendered_default(result: dict[str, Any], field: str) -> Any:
+    """Return the value a shown form preselects for ``field``.
+
+    Sibling of :func:`_offered_keys` and written for the same reason its
+    docstring gives: read the rendered schema, not the production helper that
+    computed the value. The helper-level tests further down call
+    ``_default_subentry_key`` directly, so they stay green even where a step
+    stops passing its result into the marker -- which is precisely the
+    regression a user would see, because the marker default *is* the
+    preselection.
+
+    Deliberately not narrowed to ``vol.Optional``: both fields this pins are
+    ``vol.Required``. ``default`` is *not* on the shared ``vol.Marker`` base --
+    measured against voluptuous 0.15.2, ``Marker.__slots__`` is
+    ``('schema', '_schema', 'msg', 'description', '__hash__')`` and carries no
+    ``__dict__``, so ``vol.Marker('x').default`` raises ``AttributeError``.
+    Only ``Optional.__init__`` and ``Required.__init__`` assign it. Hence the
+    generic ``getattr`` rather than either subclass: a missing attribute means
+    the key is not a default-carrying marker at all (a bare ``str`` key, say),
+    which is a different fault from a marker whose default is the ``UNDEFINED``
+    sentinel, and the two are reported apart. Every stored default is a
+    factory, hence the call; ``default=None`` yields a factory returning
+    ``None``, never a bare ``None``, so the two guards never collide.
+
+    Scope of the pin: this reads ``default``, and in a real Home Assistant
+    form a ``suggested_value`` in the marker's ``description`` outranks it.
+    ``FlowHandler.add_suggested_values_to_schema`` sets that key on every
+    ``vol.Marker`` whose name it finds in the suggested mapping (measured
+    against core 2026.2.3,
+    which is what binds under this suite -- the conftest double is the
+    fallback for a missing core, not what runs here). Neither field this pins
+    is an options key, so neither reaches that mapping today; the day one does,
+    this helper would still read the ``default`` while the user sees the
+    suggestion.
+    """
+
+    schema = result["data_schema"].schema
+    for marker, _validator in schema.items():
+        if str(marker) != field:
+            continue
+        default = getattr(marker, "default", None)
+        if default is None:
+            raise AssertionError(
+                f"field {field!r} is not a default-carrying vol.Marker subclass"
+            )
+        if default is config_flow.vol.UNDEFINED:
+            raise AssertionError(f"field {field!r} carries no default")
+        value = default()
+        if value is config_flow.vol.UNDEFINED:  # pragma: no cover - factory shape
+            raise AssertionError(f"field {field!r} carries no default")
+        return value
     raise AssertionError(f"field {field!r} not present in the shown form")
 
 
@@ -2070,3 +2150,211 @@ async def test_the_synthesised_fallback_does_not_borrow_a_rewritten_key() -> Non
         "the synthesised fallback must not take a key a real subentry stores, "
         "whatever the rewrite did to that subentry's identity"
     )
+
+
+@pytest.mark.parametrize(
+    "with_typed_tracker",
+    [True, False],
+    ids=["typed-tracker-present", "no-typed-tracker"],
+)
+async def test_a_parked_tracker_key_prefers_the_typed_tracker_group(
+    with_typed_tracker: bool,
+) -> None:
+    """The parked branch preselects on the type axis, not on label order.
+
+    The branch already existed and already answered "the first option that
+    accepts devices", which is label order wearing a predicate. Where a
+    ``service``-typed subentry sits on the tracker key, the group the form
+    means to offer is the one whose *type* says tracker, and on a legacy entry
+    that group wears an email-style ``group_key`` -- so the key axis cannot
+    name it and the fold cannot either: ``_canonical_core_key_of`` returns
+    ``None`` for a tracker on its own key, deliberately, because several
+    tracker groups with distinct keys are a supported shape. A direct type
+    comparison is therefore the only reader that can identify it, which is why
+    this does not route through the shared helper.
+
+    The boundary of the existing branch is left exactly where
+    ``::test_the_preselection_is_unchanged_where_nothing_is_parked`` put it.
+    Measured rather than assumed: extending the *first* loop with the same
+    type axis -- the literal shape the plan proposed -- turns that pin red
+    (``'owner@example.com'`` where it demands ``'service'``) and takes
+    ``::test_the_preselected_group_survives_the_collision_rewrite`` with it,
+    because nothing is parked there and the branch has no work to do. The axis
+    belongs inside the parked case, not in front of it.
+
+    ``no-typed-tracker`` is not decoration: it exercises the fallback, which
+    keeps the older guarantee that the preselection accepts devices even where
+    no candidate carries the tracker type at all. Without it the type
+    preference would read as a requirement.
+    """
+
+    entry = _EntryStub()
+    entry.add_subentry(
+        key=TRACKER_SUBENTRY_KEY,
+        title="Alpha parked service",
+        subentry_type=SUBENTRY_TYPE_SERVICE,
+        visible_device_ids=[],
+        identity="parked-service",
+    )
+    entry.add_subentry(
+        key="alias@example.com",
+        title="Bravo untyped legacy",
+        subentry_type=None,
+        visible_device_ids=["dev-1"],
+        identity="untyped-legacy",
+    )
+    if with_typed_tracker:
+        entry.add_subentry(
+            key="owner@example.com",
+            title="Zulu legacy tracker",
+            subentry_type=SUBENTRY_TYPE_TRACKER,
+            visible_device_ids=["dev-2"],
+            identity="legacy-tracker",
+        )
+    flow = await _build_flow(entry)
+
+    choices, option_map = flow._subentry_choice_map()
+    default_key = flow._default_subentry_key(choices, option_map)
+    preselected = option_map.get(default_key)
+    assert preselected is not None
+
+    first_device_accepting = next(
+        key
+        for key in choices
+        if (opt := option_map.get(key)) is not None
+        and config_flow._accepts_device_assignment(opt)
+    )
+
+    if with_typed_tracker:
+        assert preselected.stored_key == "owner@example.com", (
+            "the group whose type says tracker must win over the one that "
+            "merely sorts first among the device-accepting options"
+        )
+        # Asserts the fix rather than an accident of the fixture: the untyped
+        # legacy group is what label order would have handed back.
+        assert default_key != first_device_accepting
+    else:
+        assert default_key == first_device_accepting
+        assert config_flow._accepts_device_assignment(preselected), (
+            "with no tracker-typed candidate the branch must still fall back "
+            "to a group that can hold devices"
+        )
+
+
+@pytest.mark.parametrize(
+    ("step", "field", "service_is_offered"),
+    [
+        ("settings", "subentry", True),
+        ("repairs_move", "target_subentry", False),
+    ],
+    ids=["settings", "repairs-move"],
+)
+async def test_the_shown_form_preselects_the_group_the_helper_chose(
+    step: str, field: str, service_is_offered: bool
+) -> None:
+    """The preselection is pinned where the user meets it: in the form.
+
+    Five tests above call ``_default_subentry_key`` directly, and that is the
+    narrower question. A step can compute the right key and still render a
+    different one -- pass ``next(iter(choices))`` into the marker, drop the
+    argument, rebuild the schema after the call -- and every helper-level test
+    stays green while the form a user opens preselects the wrong group. All
+    three of those mutations were run against this test and all three turned
+    it red, the rebuild included: ``add_suggested_values_to_schema`` binds to
+    the real core here and preserves the marker's default through its
+    ``copy.copy``, so a rebuild that drops it is visible. The
+    submit path makes that costly rather than cosmetic: ``repairs_move`` writes
+    the chosen devices to whatever the target field holds when the user submits
+    without touching it.
+
+    Two steps rather than one because they reach the helper through different
+    choice maps, and ``service_is_offered`` pins that difference instead of
+    assuming it: ``settings`` passes the unfiltered ``_subentry_choice_map``
+    and legitimately offers the service group, ``repairs_move`` passes
+    ``_device_target_choice_map``, whose filter removes it. A fixture that only
+    exercised one of the two would leave the other step's wiring unpinned.
+
+    The shape is deliberately the *first* loop of the helper -- a
+    tracker-keyed group that accepts devices, sorting last by label -- and not
+    the parked branch: the parked branch is unreachable from ``repairs_move``
+    by construction, because "parked" means "refuses devices" and that is
+    exactly the filter standing in front of it. Picking the parked shape here
+    would have pinned nothing on that half, which the first draft of this test
+    did before it was measured.
+
+    ``rendered != first_offered`` is what makes this test about the wiring
+    rather than about the fixture: label order hands back ``Alpha`` in both
+    steps, so a step that stopped passing the helper's answer along would show
+    ``Alpha`` and fail here while every helper-level test stayed green.
+    """
+
+    entry = _EntryStub()
+    entry.add_subentry(
+        key="alias@example.com",
+        title="Alpha legacy tracker",
+        subentry_type=SUBENTRY_TYPE_TRACKER,
+        visible_device_ids=["dev-1"],
+        identity="legacy-tracker",
+    )
+    entry.add_subentry(
+        key=SERVICE_SUBENTRY_KEY,
+        title="Mike service",
+        subentry_type=SUBENTRY_TYPE_SERVICE,
+        visible_device_ids=[],
+        identity="service",
+    )
+    entry.add_subentry(
+        key=TRACKER_SUBENTRY_KEY,
+        title="Zulu core tracking",
+        subentry_type=SUBENTRY_TYPE_TRACKER,
+        visible_device_ids=["dev-2"],
+        identity="canonical",
+    )
+    entry.runtime_data.coordinator.data = [
+        {"device_id": "dev-1", "name": "Device 1"},
+        {"device_id": "dev-2", "name": "Device 2"},
+    ]
+    flow = await _build_flow(entry)
+
+    form = await getattr(flow, f"async_step_{step}")()
+    assert form["type"] == "form", f"{step} did not render a form"
+
+    offered_in_order = _offered_keys_in_order(form, field)
+    # Each step's own map, not one map for both: ``repairs_move`` renders out
+    # of ``_device_target_choice_map``, and resolving its keys through the
+    # unfiltered ``_subentry_choice_map`` would make the ``service_is_offered``
+    # assertion below fail open -- it would also pass if *no* offered key
+    # resolved at all, which is the opposite of what it claims to pin.
+    option_map = (
+        flow._subentry_choice_map()[1]
+        if step == "settings"
+        else flow._device_target_choice_map()[1]
+    )
+    assert set(offered_in_order) <= set(option_map), (
+        f"{step} offers keys its own choice map cannot resolve: "
+        f"{sorted(set(offered_in_order) - set(option_map))}"
+    )
+
+    offered_service = {
+        key
+        for key in offered_in_order
+        if option_map[key].stored_key == SERVICE_SUBENTRY_KEY
+    }
+    assert bool(offered_service) is service_is_offered, (
+        "the two steps must keep reaching the helper through different choice "
+        "maps, otherwise this parametrisation pins one wiring twice"
+    )
+
+    rendered = _rendered_default(form, field)
+    assert rendered in set(offered_in_order), (
+        "a preselection outside the offered set renders a form the user cannot "
+        "submit unchanged"
+    )
+
+    preselected = option_map.get(str(rendered))
+    assert preselected is not None
+    assert preselected.stored_key == TRACKER_SUBENTRY_KEY, (
+        "the shown form must preselect the group the helper chose, not "
+        "whichever group sorts first"
+    )
+    assert rendered != offered_in_order[0]

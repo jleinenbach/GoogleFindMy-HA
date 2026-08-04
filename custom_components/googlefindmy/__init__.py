@@ -181,6 +181,7 @@ from .const import (
     ISSUE_MULTIPLE_CONFIG_ENTRIES,
     ISSUE_RESTART_REQUIRED_KEY,
     LEGACY_SERVICE_IDENTIFIER,
+    LITERAL_CORE_KEY_OWNER,
     NON_DEVICE_SUBENTRY_TYPES,
     OPT_ALLOW_HISTORY_FALLBACK,
     OPT_CONTRIBUTOR_MODE,
@@ -1266,31 +1267,194 @@ class ConfigEntrySubEntryManager:
             if existing_key is not None and existing_key != key:
                 self._pop_managed(existing_key)
 
+        # Displacing a *different* subentry from ``key`` has to take its
+        # reverse-index entry with it, or the loser keeps claiming a slot it no
+        # longer holds. The write below is keyed by ``key`` and therefore
+        # overwrites ``_managed`` cleanly, which is what made the leak easy to
+        # miss: only ``_managed_by_subentry_id`` is keyed by *identifier* and
+        # survives the overwrite.
+        #
+        # Measured rather than derived, in ``_refresh_from_entry`` with two
+        # ``tracker`` subentries both storing ``TRACKER_SUBENTRY_KEY``: iterated
+        # loser-first, ``_managed`` ends at ``{core_tracking: id-a}`` while the
+        # reverse index still maps ``id-b -> core_tracking``. The harm is not
+        # cosmetic. ``_async_adopt_existing_unique_id`` asks
+        # ``_managed_key_for_subentry_id(owner_subentry_id)`` which key the
+        # owner previously held and pops it; with the stale answer it pops the
+        # slot of the *rightful* holder, so ``core_tracking`` drops out of
+        # ``_managed`` entirely until the next refresh.
+        #
+        # The tie-break introduced with the rank made the shape reachable
+        # without any difference in identifier provenance: two otherwise equal
+        # candidates now resolve by lowest identifier, so the higher one loses
+        # deterministically instead of winning by arriving last. Read
+        # "provenance" here as the property, not as a field: the two provenance
+        # *fields* this method once consulted are gone, and their removal only
+        # widens the set of pairs that reach the tie-break, so it makes this
+        # paragraph apply more often rather than less.
+        displaced = self._managed.get(key)
+        if displaced is not None and displaced is not subentry:
+            displaced_id = getattr(displaced, "subentry_id", None)
+            if (
+                isinstance(displaced_id, str)
+                and displaced_id
+                and displaced_id != subentry_id
+                and self._managed_by_subentry_id.get(displaced_id) == key
+            ):
+                self._managed_by_subentry_id.pop(displaced_id, None)
+
         self._managed[key] = subentry
 
         if isinstance(subentry_id, str) and subentry_id:
             self._managed_by_subentry_id[subentry_id] = key
 
-    def _candidate_score(self, subentry: ConfigSubentry) -> tuple[int, int, int]:
-        """Return preference tuple for resolving duplicate managed keys."""
+    def _candidate_score(
+        self, subentry: ConfigSubentry, *, key: str
+    ) -> tuple[int, int, int]:
+        """Return preference tuple for resolving duplicate managed keys.
 
-        entry_match = int(
-            getattr(subentry, "entry_id", None)
-            == getattr(self._entry, "entry_id", None)
-        )
-        unique_id = getattr(subentry, "unique_id", None)
-        unique_match = int(
-            isinstance(unique_id, str)
-            and isinstance(self._entry.entry_id, str)
-            and self._entry.entry_id in unique_id
+        Higher wins. ``key`` is the *canonical* managed key the collision is
+        resolved for, not the key the subentry stores: an aliased subentry is
+        ranked for the slot it actually competes for.
+
+        The first three fields are the contract's ordering, spelled "higher
+        wins" here where ``config_flow.py::_resolve_existing`` and
+        ``coordinator/subentry.py`` spell it "lower wins"
+        (``agents/config_flow/AGENTS.md``: exact stored key, then literal
+        owner, then a candidate whose identifier is missing sorts last, then
+        the lowest identifier):
+
+        1. ``exact_key`` -- an exact stored-key match beats a folded twin. The
+           flow spells this as ``pool = exact or folded`` rather than as a rank
+           field, to the same effect. **Omitting this field was a measured
+           regression, not a simplification**: with only the type axis and the
+           identifier tie-break, a legacy tracker twin stored under an e-mail
+           key outranked the canonical ``core_tracking`` subentry whenever its
+           identifier happened to sort lower and took the slot. How loudly that
+           fails depends on the identifier shape: in
+           ``test_ap3_an_exact_stored_key_outranks_a_folded_twin`` the fixture
+           ids (``e1-t``, ``e1-legacy``) hold no ``f"{entry_id}-{key}"``, so
+           ``async_sync`` reaches ``_async_adopt_existing_unique_id`` for a
+           unique id no subentry holds and raises. Every production writer
+           embeds both parts, named by symbol rather than by line because an
+           earlier draft cited five line numbers that had already drifted onto
+           a ``)``, a comment and a line of prose: ``async_setup_entry`` and
+           ``ConfigEntrySubEntryManager.async_sync`` here,
+           ``SubentryOperations._build_core_subentry_definitions`` in
+           ``coordinator/subentry.py``, and
+           ``ConfigFlow._async_sync_feature_subentries`` in ``config_flow.py``.
+           Greppable as ``f"{entry_id}-{key}"`` and its ``entry.entry_id``
+           spellings. So on disk the adoption finds an
+           owner and writes the payload onto the wrong subentry instead of
+           raising. Silent misattribution rather than an exception is the worse
+           of the two, which is why this field is not optional.
+        2. ``type_match`` -- the type that literally owns this core key per
+           ``LITERAL_CORE_KEY_OWNER`` beats one that merely folds onto it. For
+           a non-core key the table yields ``None``, no candidate matches, and
+           the field is uniformly ``0``: neutral rather than a second ordering.
+        3. ``subentry_id_present`` mirrors the reading side's ``subentry_id is
+           None`` field. It **cannot discriminate at the only call site**:
+           ``_select_preferred_managed`` is the sole caller and passes both
+           operands through ``_is_subentry_like`` first, which already demands
+           a non-empty ``str`` id, so the field is uniformly ``1`` there. The
+           contract criterion it stands for is really enforced by that guard,
+           not by this tuple; the field is kept as the guard's mirror (and to
+           order duck-typed candidates handed straight to this method by a
+           test), not because it decides a production collision.
+
+        Two provenance fields used to sit **behind** those three, and they are
+        gone rather than reordered. Their removal is the point of this
+        paragraph, because an earlier draft argued them harmless and the
+        argument was wrong in a way worth keeping visible:
+
+        - ``entry_match`` (``subentry.entry_id == self._entry.entry_id``) could
+          never discriminate. ``ConfigSubentry`` declares ``data, subentry_id,
+          subentry_type, title, unique_id`` and no ``entry_id``, so the field
+          was ``getattr(..., None) == <our id>`` for every candidate.
+        - ``unique_match`` was a *substring* test (``entry_id in unique_id``),
+          and it is the field that broke the contract. Sitting between
+          "identifier presence" and the lowest-identifier tie-break, it decided
+          pairs the contract wanted decided by id. Measured on the pair
+          ``(id-a, unique_id=None)`` at ``(1,1,1,0,0)`` against
+          ``(id-b, "e1-core_tracking")`` at ``(1,1,1,0,1)``: this method took
+          ``id-b`` in **both** iteration orders where the flow's ``min(...)``
+          and the index's rank take ``id-a``. ``_refresh_subentry_index`` then
+          hands one holder's visible list to a manager naming the other, which
+          is how a group's device assignments land on the wrong subentry.
+
+        The reachability argument that kept the field is the part to remember,
+        because it was inverted rather than merely optimistic. It read "the
+        pair needs a ``unique_id`` without the entry id, and no writer in
+        ``custom_components/`` produces one". That is true of a *wrongly
+        shaped* identifier and irrelevant to the pair actually measured, whose
+        left operand is ``unique_id=None``: absence needs no writer. The core
+        builds subentries with ``unique_id=subentry_data.get("unique_id")`` in
+        ``ConfigEntry.__init__`` (``config_entries.py``, the ``subentries_data``
+        loop), so a stored subentry without the key is ``None`` on load, and
+        ``ConfigSubentryFlow.async_create_entry`` defaults the argument to
+        ``None``. "No writer produces it" was a statement about the happy path,
+        not about the data.
+
+        How long the shape survives is a *window*, not a permanent state, and
+        saying "never repaired" here was the same overreach one paragraph
+        later. Two kinds of write-back exist. The three subentry updates on
+        ``OptionsFlowHandler`` (``_async_update_feature_group_subentry``,
+        ``_async_refresh_subentry_entry_title``,
+        ``_async_assign_devices_to_subentry``) pass an existing value
+        through unchanged (``unique_id=getattr(subentry, "unique_id", None)``),
+        so they neither create nor repair a ``None``; but
+        ``ConfigFlow._async_sync_feature_subentries`` assigns
+        ``f"{entry_id}-{key}"`` to the *existing* core subentry it resolved
+        (and its nested ``_claim_unique_id`` does the same for a displaced
+        holder), so the next options-flow pass
+        normally does repair it. The divergence therefore lived between entry
+        load and the next flow run. That is long enough to matter -- the
+        runtime index and the visibility write-back both run in it -- and short
+        enough that the field's defenders could go a long time without seeing
+        it.
+
+        A full tie is broken by ``_select_preferred_managed``, not here, because
+        the reading side's final field prefers the *lowest* ``subentry_id`` and
+        that ordering cannot be spelled as a "higher wins" tuple element. With
+        the provenance fields gone, that tie-break is now reached by every pair
+        the three contract fields leave equal, which is what makes this method
+        agree with ``config_flow.py::_resolve_existing`` and the runtime index
+        instead of merely resembling them.
+
+        Three of four, not three of three, and the fourth runs first. On the
+        very pair pinned by
+        ``::test_ap8_the_manager_and_the_index_agree_when_one_identifier_is_missing``
+        the deletion path disagrees with all three:
+        ``_deduplicate_subentries``'s ``_select_canonical`` groups by
+        ``(group_key, subentry_type)`` and sorts a *present* ``unique_id``
+        first, so it keeps the higher identifier and removes the lower one --
+        the very subentry this method now names. ``async_sync`` calls it
+        unconditionally before anything else, so this is a live ordering, not a
+        latent one: a visibility write-back landing on the manager's holder can
+        be undone by the next sync. The removal itself is pre-existing
+        (``B16``, owned by ``PLAN_GFMY_SUBENTRY_DELETION_TYPE_AXIS``, where the
+        input shape is now measured); what this change alters is which side of
+        it the manager stands on.
+        """
+
+        data = getattr(subentry, "data", None)
+        exact_key = int(isinstance(data, Mapping) and data.get(self._key_field) == key)
+        canonical_owner = LITERAL_CORE_KEY_OWNER.get(key)
+        type_match = int(
+            canonical_owner is not None
+            and getattr(subentry, "subentry_type", None) == canonical_owner
         )
         subentry_id_present = int(
             isinstance(getattr(subentry, "subentry_id", None), str)
         )
-        return (entry_match, unique_match, subentry_id_present)
+        return (
+            exact_key,
+            type_match,
+            subentry_id_present,
+        )
 
     def _select_preferred_managed(
-        self, existing: ConfigSubentry, candidate: ConfigSubentry
+        self, existing: ConfigSubentry, candidate: ConfigSubentry, *, key: str
     ) -> ConfigSubentry:
         """Return the preferred managed subentry when keys collide."""
 
@@ -1299,8 +1463,56 @@ class ConfigEntrySubEntryManager:
         if not self._is_subentry_like(candidate):
             return existing
 
-        if self._candidate_score(candidate) > self._candidate_score(existing):
-            return candidate
+        candidate_score = self._candidate_score(candidate, key=key)
+        existing_score = self._candidate_score(existing, key=key)
+        if candidate_score != existing_score:
+            return candidate if candidate_score > existing_score else existing
+
+        # Fully tied scores used to fall through to "whichever was iterated
+        # first", which made the winner a function of load order. Break the tie
+        # in the direction the other two sites use -- lowest ``subentry_id``
+        # wins, matching ``_resolve_existing``'s ``min(...)``, which is
+        # parametric in the key.
+        #
+        # What this buys and what it does not, kept apart because an earlier
+        # draft of this comment ran the two together. It buys determinism here.
+        # Cross-side agreement on *which* subentry holds the slot arrived with
+        # the reading side's half: ``coordinator/subentry.py`` used to wrap its
+        # whole rank in ``if group_key == SERVICE_SUBENTRY_KEY:``, so for every
+        # other key the index was last-iterated-wins and the two could name
+        # different subentries. Its rank block now covers both core keys, and
+        # the agreement is asserted rather than assumed
+        # (``::test_ap4_the_manager_and_the_index_agree_on_the_tracker_slot``,
+        # both iteration orders). What is still *not* covered by any of it:
+        # ``_deduplicate_subentries`` and ``_async_adopt_existing_unique_id``
+        # never call this method. "Decide by iteration order" was the summary
+        # here and it is only half true, which matters now that the removal of
+        # the provenance fields made the other half load-bearing:
+        # ``_async_adopt_existing_unique_id`` does take the first match, but
+        # ``_select_canonical`` sorts on identifier *presence* first, then the
+        # identifier itself, and only then falls to the index. On its
+        # ``(group_key, subentry_type)`` axis that is a real criterion, and it
+        # points the opposite way from all three rankers for a pair whose lower
+        # identifier carries ``unique_id=None``.
+        #
+        # The both-ids-missing case never reaches this point: ``subentry_id``
+        # is read through the same ``getattr`` in ``_is_subentry_like``, which
+        # rejects anything but a non-empty ``str``, so such a pair returns
+        # ``candidate`` at the first guard above -- not the incumbent, as an
+        # earlier draft said. The ``return existing`` below is consequently
+        # unreachable from the sole call site (``_refresh_from_entry``) and
+        # exists to keep the branch total.
+        #
+        # One asymmetry remains against the index and is deliberate: it sorts
+        # on the *sanitised, provisional-filtered* identifier, this method on
+        # the raw one. ``agents/config_flow/AGENTS.md`` already names that
+        # difference between the flow and the index; the manager inherits it,
+        # and it can only separate the two for an identifier shape no site in
+        # ``custom_components/`` writes.
+        candidate_id = getattr(candidate, "subentry_id", None)
+        existing_id = getattr(existing, "subentry_id", None)
+        if isinstance(candidate_id, str) and isinstance(existing_id, str):
+            return candidate if candidate_id < existing_id else existing
         return existing
 
     def _resolve_updated_subentry(
@@ -1574,7 +1786,7 @@ class ConfigEntrySubEntryManager:
 
             existing = self._managed.get(canonical_key)
             preferred = (
-                self._select_preferred_managed(existing, subentry)
+                self._select_preferred_managed(existing, subentry, key=canonical_key)
                 if existing is not None
                 else subentry
             )
@@ -2281,6 +2493,53 @@ class ConfigEntrySubEntryManager:
             )
         }
 
+        # This sweep runs the *opposite* polarity of the flow-side one in
+        # ``ConfigFlow._async_cleanup_stale_subentries``, and neither sweep
+        # reads the other -- the two modules cite each other on the *ranking*
+        # axis, never on removal. There, a subentry whose stored key is **not**
+        # a core key is skipped, and the core keys themselves are additionally
+        # protected by the literal-owner type axis. Here ``desired`` *is* the
+        # core key set, so the core keys are the safe ones and every other
+        # managed key is a removal candidate -- with no type axis at all.
+        # Removal runs through ``async_remove`` into core's
+        # ``async_remove_subentry``, which takes the device and entity registry
+        # bindings with it.
+        #
+        # No *writer* in this tree produces a shape that reaches this branch,
+        # and that much is measured rather than assumed: both production
+        # callers pass exactly ``{core_tracking, service}``
+        # (``async_setup_entry`` and the repair in ``coordinator/subentry.py``,
+        # whose ``_build_core_subentry_definitions`` always returns both),
+        # every production handler stores a core key, and
+        # ``_refresh_from_entry`` folds each ``service``- or ``tracker``-typed
+        # subentry onto one before this runs -- including the one legacy shape
+        # the contract treats as real, a per-account tracker group on an e-mail
+        # key.
+        #
+        # What that does **not** establish is that the set is empty, and an
+        # earlier draft of this comment said so anyway. The claim was about
+        # stored data while the evidence covered writers only, and the fold has
+        # a gap the writer argument cannot close: it canonicalises ``service``
+        # and ``tracker`` by type but leaves ``hub`` on its **stored** key. A
+        # ``hub`` on disk under a non-core key -- from an older release or a
+        # hand-edited entry -- therefore does reach the sweep and is removed,
+        # registry bindings included. That is not hypothetical: it is pinned,
+        # as behaviour we carry rather than behaviour we want, by
+        # ``test_ap1_stale_sweep_is_decided_by_the_resolved_key`` in its
+        # ``hub-email-removed`` and ``hub-nokey-removed`` cases.
+        #
+        # No guard is added here regardless, and the reason is now the honest
+        # one: not that the set is empty, but that a second guard semantics
+        # beside the flow-side one is the very drift this axis keeps paying
+        # for, and closing the gap belongs with the type axis rather than with
+        # a local barrier.
+        #
+        # For the ``hub`` gap above the guard is owed *now*, and it widens to
+        # every managed key the moment that fold or ``_deduplicate_subentries``
+        # changes, because either can drop a group out of ``desired`` and hand
+        # it straight to this sweep. Both are owned by
+        # ``PLAN_GFMY_SUBENTRY_DELETION_TYPE_AXIS``, which also carries the
+        # ratchet that watches the two counts this latency rests on.
         stale_keys: list[str] = []
         for managed_key, subentry in list(self._managed.items()):
             if managed_key in desired:
@@ -8100,9 +8359,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
                 # It matters because the manager canonicalises ``service`` and
                 # ``tracker`` by type but leaves ``hub`` on its stored key: a
                 # legacy hub storing ``core_tracking`` therefore *is*
-                # ``managed_subentries["core_tracking"]`` whenever it is
-                # iterated first, and the tracker group's ids would be written
-                # onto it. Measured against the real manager, not assumed.
+                # ``managed_subentries["core_tracking"]``, and the tracker
+                # group's ids would be written onto it. Measured against the
+                # real manager, not assumed.
+                #
+                # What changed with the rank axis in ``_candidate_score`` is
+                # only the *contested* case: beside a real ``tracker`` storing
+                # the same key the hub is now the deterministic loser rather
+                # than a winner-by-iteration-order. Uncontested it still holds
+                # the key, so this guard is narrowed in reach, not made
+                # redundant, and it stays.
                 continue
 
             desired_visible_ids = _extract_visible_ids(subentry_meta)
