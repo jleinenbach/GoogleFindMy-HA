@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from types import MappingProxyType, SimpleNamespace
+from typing import cast
 
 import pytest
 from homeassistant.config_entries import ConfigSubentry
@@ -1099,13 +1100,35 @@ def test_the_literal_owner_table_is_one_object_shared_by_all_ranking_sides() -> 
 # ---------------------------------------------------------------------------
 
 
+class _UnsetUniqueId:
+    """Nominal type for the "argument not given" sentinel.
+
+    A bare ``object()`` would widen the parameter to ``str | None | object``,
+    which accepts anything; a one-member class keeps the union closed.
+    """
+
+
+_UNSET_UNIQUE_ID = _UnsetUniqueId()
+
+
 def _ap4_subentry(
     subentry_id: str,
     stored_key: str | None,
     subentry_type: str,
     visible: list[str] | None = None,
+    unique_id: str | None | _UnsetUniqueId = _UNSET_UNIQUE_ID,
 ) -> ConfigSubentry:
     """Build one subentry with a freely chosen (key, type) pair.
+
+    ``unique_id`` defaults to a derived ``uid-<subentry_id>``, which is the
+    shape every caller before AP8 wanted and which makes the manager's removed
+    ``unique_match`` field uniformly ``0`` (no caller's ``entry_id`` is a
+    substring of it). Passing ``None`` explicitly is therefore not a cosmetic
+    variation but the one input that separated the manager from the other two
+    rankers, and the sentinel keeps that choice distinguishable from "not
+    specified": the field's declared type is ``str | None`` on both the core
+    class and this suite's stub, so ``None`` is a value the parameter must be
+    able to carry rather than a way of omitting it.
 
     ``_service_twin_coordinator`` cannot serve these cases: it always adds a
     canonical tracker and gives every twin the *same* type, while the tracker
@@ -1126,11 +1149,14 @@ def _ap4_subentry(
         payload["group_key"] = stored_key
     if visible:
         payload["visible_device_ids"] = list(visible)
+    resolved_unique_id = (
+        f"uid-{subentry_id}" if unique_id is _UNSET_UNIQUE_ID else unique_id
+    )
     return ConfigSubentry(
         data=MappingProxyType(payload),
         subentry_type=subentry_type,
         title=f"{subentry_type}:{stored_key}",
-        unique_id=f"uid-{subentry_id}",
+        unique_id=cast("str | None", resolved_unique_id),
         subentry_id=subentry_id,
     )
 
@@ -1328,6 +1354,94 @@ def test_ap4_a_displaced_tracker_leaves_no_stale_manager_write() -> None:
     assert tracker_meta is not None
     assert tracker_writes[0] == tracker_meta.visible_device_ids, (
         "and what is written back is what the winner describes"
+    )
+
+
+@pytest.mark.parametrize("missing_first", [True, False])
+def test_ap8_the_manager_and_the_index_agree_when_one_identifier_is_missing(
+    missing_first: bool,
+) -> None:
+    """A stored ``unique_id=None`` must not split the manager from the index.
+
+    This is the shape the manager's removed ``unique_match`` field decided on
+    its own. Both candidates are literal ``tracker`` subentries storing
+    ``core_tracking``, so the three shared fields tie and the contract's last
+    criterion -- the lowest ``subentry_id`` -- is what must decide. Before AP8
+    the manager scored them ``(1,1,1,0,0)`` against ``(1,1,1,0,1)`` and took
+    the *higher* identifier in both iteration orders, while this side and
+    ``config_flow.py::_resolve_existing`` took the lower one.
+
+    Why the divergence is not cosmetic: ``_refresh_subentry_index`` fills
+    ``manager_visible[TRACKER_SUBENTRY_KEY]`` from the subentry *it* chose, and
+    ``update_visible_device_ids`` resolves that key through the *manager's*
+    index. Disagreeing sides mean one group's device assignments are written
+    onto the other subentry, with no removal and no log line.
+
+    Why the input is reachable, which is the half the removed field's comment
+    got wrong: it argued the pair needs a ``unique_id`` that lacks the entry
+    id and that no writer produces one. That is a statement about a wrongly
+    *shaped* identifier and says nothing about ``None``, which needs no writer
+    -- the core loads ``subentry_data.get("unique_id")``, so a stored subentry
+    without the key is ``None`` on load, and ``config_flow.py``'s subentry
+    write-backs pass an existing ``None`` straight through.
+
+    Killing mutation: restoring ``unique_match`` to ``_candidate_score``'s
+    tuple fails both parametrisations. Restoring ``entry_match`` alone does
+    not, and that asymmetry is the measurement rather than a gap: the field is
+    uniformly ``0`` because ``ConfigSubentry`` declares no ``entry_id``, so it
+    was removed for being inert, not for being wrong, and an inert field has no
+    killing mutation to have.
+
+    What this test does **not** cover, stated because the pair it pins is
+    exactly where the fourth ranker disagrees: ``_deduplicate_subentries``
+    keeps ``id-z-with-uid`` and removes ``id-a-no-uid``, which
+    ``async_sync`` reaches unconditionally. That is pre-existing (``B16``) and
+    owned by ``PLAN_GFMY_SUBENTRY_DELETION_TYPE_AXIS``; the assertion below is
+    about the three rankers naming one holder, not about that holder surviving
+    a sync.
+    """
+
+    from custom_components.googlefindmy import ConfigEntrySubEntryManager
+    from tests.helpers.homeassistant import FakeHass
+
+    entry_id = f"e-ap8-uid-{int(missing_first)}"
+    # The *lower* identifier is the one without a ``unique_id``: that is the
+    # pairing under which the removed field inverted the tie-break. Giving the
+    # higher one an identifier containing ``entry_id`` is what made
+    # ``unique_match`` discriminate at all.
+    missing_uid = _ap4_subentry(
+        "id-a-no-uid",
+        TRACKER_SUBENTRY_KEY,
+        SUBENTRY_TYPE_TRACKER,
+        ["device-1"],
+        unique_id=None,
+    )
+    with_uid = _ap4_subentry(
+        "id-z-with-uid",
+        TRACKER_SUBENTRY_KEY,
+        SUBENTRY_TYPE_TRACKER,
+        ["device-2"],
+        unique_id=f"{entry_id}-{TRACKER_SUBENTRY_KEY}",
+    )
+    order = [missing_uid, with_uid] if missing_first else [with_uid, missing_uid]
+    coordinator, entry, _manager = _ap4_coordinator(entry_id, order)
+
+    coordinator._refresh_subentry_index(coordinator.data, skip_repair=True)
+    index_choice = coordinator.get_subentry_metadata(key=TRACKER_SUBENTRY_KEY)
+    assert index_choice is not None
+
+    runtime_manager = ConfigEntrySubEntryManager(FakeHass(config_entries=None), entry)
+    runtime_manager._refresh_from_entry()
+    managed = runtime_manager._managed.get(TRACKER_SUBENTRY_KEY)
+    assert managed is not None
+
+    assert index_choice.config_subentry_id == managed.subentry_id, (
+        "a stored unique_id=None must not make the manager and the index name "
+        "different holders of the tracker slot"
+    )
+    assert managed.subentry_id == "id-a-no-uid", (
+        "and the holder they both name must be the lowest identifier, which is "
+        "the contract's last criterion once the three shared fields tie"
     )
 
 

@@ -100,17 +100,33 @@ NON_DEVICE_SUBENTRY_TYPES: frozenset[str] = frozenset(
 # read this table; it does now.
 #
 # "Identically" is deliberately about those shared fields and not about the
-# whole tuple, because two differences survive and hiding them would make this
-# comment the drift it warns against. The manager carries two provenance
-# fields (entry match, unique-id substring) *behind* the shared ones, which
-# the other two have no counterpart for; and it breaks a full tie on the raw
+# whole tuple, because one difference survives and hiding it would make this
+# comment the drift it warns against: the manager breaks a full tie on the raw
 # ``subentry_id`` where the index uses the sanitised, provisional-filtered one
 # -- the same flow/index difference named further down, now inherited by a
-# third reader. "Behind" is not "harmless": the contract's last criterion is
-# the lowest identifier, so a provenance field sitting in front of that
-# tie-break can still decide a pair the contract wanted decided by id. It
-# takes a subentry ``unique_id`` without the entry id, which no writer in
-# ``custom_components/`` produces, so it is unreachable rather than benign.
+# third reader.
+#
+# A second difference is gone rather than named, and the reason it lasted is
+# worth more than the field it removed. The manager carried two provenance
+# fields (entry match, unique-id substring) *behind* the shared ones, and
+# "behind" was argued to make them harmless. It does not: the contract's last
+# criterion is the lowest identifier, so a field between "identifier presence"
+# and that tie-break still decides pairs the contract wanted decided by id.
+# The reachability argument that kept them was inverted, not merely
+# optimistic. It read "it takes a subentry ``unique_id`` without the entry id,
+# which no writer in ``custom_components/`` produces". True of a wrongly
+# *shaped* identifier, irrelevant to the pair that actually diverged, whose
+# left operand is ``unique_id=None`` -- absence needs no writer. The core
+# loads the field with ``subentry_data.get("unique_id")`` and defaults it to
+# ``None`` in ``ConfigSubentryFlow.async_create_entry``. How long the shape
+# lasts is a *window* rather than a permanent state, and an earlier draft of
+# this paragraph said "never repaired", which is the same kind of overreach:
+# the subentry write-backs pass an existing value through unchanged, but
+# ``_async_sync_feature_subentries`` assigns ``f"{entry_id}-{key}"`` to the
+# core subentry it resolved, so the next options-flow pass normally does
+# repair it. The window is entry load to next flow run, which the runtime
+# index and the visibility write-back both sit inside. Both fields are
+# removed; the manager's tuple is the three shared fields and nothing else.
 #
 # Two asymmetries stay beyond the rank, named so the next reader does not take
 # "must rank the same pair identically" for more than it says. The rank block
@@ -126,9 +142,18 @@ NON_DEVICE_SUBENTRY_TYPES: frozenset[str] = frozenset(
 # do not read ``managed_subentries["core_tracking"]`` as "the subentry the
 # index describes" without checking the type. Within
 # the manager itself, ``_deduplicate_subentries`` and
-# ``_async_adopt_existing_unique_id`` (first match wins, ``break``) still
-# resolve collisions by iteration order and do not consult this table at all.
-# Those remainders are tracked in ``PLAN_GFMY_SUBENTRY_DELETION_TYPE_AXIS``.
+# ``_async_adopt_existing_unique_id`` do not consult this table at all. Saying
+# both "resolve by iteration order" was the shorthand here, and it hides the
+# part that now carries weight: ``_async_adopt_existing_unique_id`` does take
+# the first match (``break``), but ``_deduplicate_subentries``'s
+# ``_select_canonical`` sorts identifier *presence* first and the identifier
+# itself second, reaching the iteration index only third. On its
+# ``(group_key, subentry_type)`` axis that keeps the *higher* identifier of a
+# pair whose lower one carries ``unique_id=None`` -- the opposite of what all
+# three rankers above pick for it -- and it *removes* the loser, with
+# ``async_sync`` calling it unconditionally before anything else. Those
+# remainders are tracked in ``PLAN_GFMY_SUBENTRY_DELETION_TYPE_AXIS``, where
+# that input shape is now measured rather than assumed.
 # Read-only on purpose: unlike the plain ``dict`` constants elsewhere in this
 # module, this one is imported by two packages at once, and an in-place mutation
 # in either would silently reach the other.
