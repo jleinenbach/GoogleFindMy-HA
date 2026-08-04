@@ -1129,6 +1129,13 @@ def _ap4_subentry(
     class and this suite's stub, so ``None`` is a value the parameter must be
     able to carry rather than a way of omitting it.
 
+    ``visible`` is written whenever it is not ``None``, so ``[]`` stores an
+    *explicitly empty* allow-list and ``None`` stores no key at all. The
+    distinction is not academic: it is the very one the reading side loses
+    (``runtime_patterns/AGENTS.md`` remainder ``U-26``), so a helper that
+    tested truthiness here would have made the empty case unrepresentable and
+    the conflation untestable.
+
     ``_service_twin_coordinator`` cannot serve these cases: it always adds a
     canonical tracker and gives every twin the *same* type, while the tracker
     key's collisions are precisely about mixed types on one key.
@@ -1146,7 +1153,7 @@ def _ap4_subentry(
     payload: dict[str, object] = {}
     if stored_key is not None:
         payload["group_key"] = stored_key
-    if visible:
+    if visible is not None:
         payload["visible_device_ids"] = list(visible)
     resolved_unique_id = (
         f"uid-{subentry_id}" if unique_id is _UNSET_UNIQUE_ID else unique_id
@@ -1710,4 +1717,72 @@ def test_ap4_a_parked_tracker_that_loses_is_still_rehomed(parked_first: bool) ->
     )
     assert "device-3" not in tracker_meta.visible_device_ids, (
         "and re-homing must not reach into a group that owns its devices"
+    )
+
+
+@pytest.mark.parametrize("parked_first", [True, False])
+def test_ap4_a_parked_tracker_with_an_empty_allow_list_stays_empty(
+    parked_first: bool,
+) -> None:
+    """An *explicitly empty* allow-list must survive the fold as "owns nothing".
+
+    Class A, and the second half of the regression the sibling test above
+    repairs. Keeping a non-empty ``visible_device_ids`` through the fold is not
+    enough, because the reading side normalises a list that ends up empty to
+    ``None``, and ``allow_filter`` reads ``None`` as *no restriction*. A parked
+    tracker whose stored list is ``()`` therefore arrives on the tracker key
+    unfiltered and is handed the entire device index, ``device-3`` included,
+    although ``other_group`` owns it -- and ``manager.update_visible_device_ids``
+    makes that durable.
+
+    The shape is reachable through ordinary use, not only through migration
+    residue: ``_async_assign_devices_to_subentry`` writes
+    ``tuple(sorted(...))`` back unconditionally, so moving the *last* device
+    out of a group stores ``()`` for it. What the fold changed is where that
+    lands. Before it, a parked tracker stayed on the service key, whose branch
+    forces the visible ids to ``()`` and never fills ``manager_visible``, so the
+    absent-filter reading was unreachable for it. The fold routes it to the
+    tracker key, where neither guard applies.
+
+    That is the boundary of this fix. The absent-filter reading itself is
+    older and wider (``runtime_patterns/AGENTS.md`` remainder ``U-26``, owned by
+    ``PLAN_GFMY_VISIBILITY_ASSIGNMENT_BOOKKEEPING``); changing it for *every*
+    group needs its own migration reasoning. Repaired here is only what the
+    fold newly exposed.
+
+    Killing mutation: replacing ``normalized_allowed = set()`` in the
+    ``elif ids_are_rehomable`` arm of the normalisation with ``None`` -- or
+    deleting the arm outright -- puts ``device-3`` back into both assertions.
+    """
+
+    entry_id = f"e-ap4-empty-{int(parked_first)}"
+    parked = _ap4_subentry("id-parked", SERVICE_SUBENTRY_KEY, SUBENTRY_TYPE_TRACKER, [])
+    foreign = _ap4_subentry(
+        "id-foreign", "other_group", SUBENTRY_TYPE_TRACKER, ["device-3"]
+    )
+    order = [parked, foreign] if parked_first else [foreign, parked]
+    coordinator, _entry, manager = _ap4_coordinator_with_a_foreign_group(
+        entry_id, order
+    )
+
+    coordinator._refresh_subentry_index(coordinator.data, skip_repair=True)
+
+    tracker_meta = coordinator.get_subentry_metadata(key=TRACKER_SUBENTRY_KEY)
+    foreign_meta = coordinator.get_subentry_metadata(key="other_group")
+    assert tracker_meta is not None and foreign_meta is not None
+    assert "device-3" not in tracker_meta.visible_device_ids, (
+        "an explicitly empty allow-list claims nothing, so the folded group "
+        "must not be handed a device another group owns"
+    )
+    assert tracker_meta.visible_device_ids == ("device-1", "device-2"), (
+        "it sees exactly the devices no group claims -- what the "
+        "unassigned-device merge hands every tracker group, no more"
+    )
+    assert foreign_meta.visible_device_ids == ("device-3",), (
+        "and the owning group keeps its device"
+    )
+    persisted = dict(manager.calls)
+    assert "device-3" not in persisted.get(TRACKER_SUBENTRY_KEY, ()), (
+        "the manager write-back is where the widened list became durable, so "
+        "the metadata assertion alone would understate the damage"
     )

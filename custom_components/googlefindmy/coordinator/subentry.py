@@ -583,6 +583,25 @@ class SubentryOperations(_MixinBase):
                     # filter adds *every* device. Keeping the list makes the
                     # winner see its own ids plus whatever the merge hands it,
                     # and the loser is re-homed by the exemption alone.
+                    #
+                    # Keeping a *non-empty* list, that is. An earlier version of
+                    # the sentence above stopped there and was wrong for the
+                    # shape reached by moving the last device out of a group:
+                    # a stored ``()`` normalises to nothing and collapses into
+                    # the same absent-filter reading, so the promise held for
+                    # every list except the empty one. The normalisation keeps
+                    # an empty set for folded groups instead
+                    # (``::test_ap4_a_parked_tracker_with_an_empty_allow_list_
+                    # stays_empty``); the general collapse is untouched and
+                    # stays ``U-26``.
+                    #
+                    # What the fold did *not* newly break is the observable
+                    # width, and saying otherwise would misplace the blame:
+                    # measured against `f7c9eb47`, the same shape already
+                    # produced the whole index through the branch that
+                    # synthesises a missing tracker subentry (``U-25``). The
+                    # fold changes which subentry that width is attributed to,
+                    # from the synthesised placeholder to this stored one.
                     ids_are_rehomable = True
                 identifier = _sanitize_subentry_identifier(subentry_id_raw)
 
@@ -827,6 +846,35 @@ class SubentryOperations(_MixinBase):
                                 resolved.add(canonical)
                         if resolved:
                             normalized_allowed.update(resolved)
+                elif ids_are_rehomable:
+                    # A stored list that is *present but empty* says "this
+                    # group owns nothing". Everywhere else in this loop that
+                    # statement is lost: it collapses into ``None`` below, and
+                    # ``allow_filter`` reads ``None`` as *no restriction*, so
+                    # the group is handed the whole device index. That reading
+                    # is older and wider than this pass and is carried as
+                    # ``U-26`` (see ``agents/runtime_patterns/AGENTS.md``);
+                    # changing it for every group needs its own migration
+                    # reasoning, because a user whose list emptied through the
+                    # repairs move would go from seeing everything to seeing
+                    # nothing.
+                    #
+                    # For a *folded* group it is not a matter of taste. The
+                    # branches above moved this subentry onto a key it does not
+                    # store, and the comment there promises the winner "sees
+                    # its own ids plus whatever the merge hands it". With an
+                    # empty list and the collapse to ``None`` that promise is
+                    # false: it sees every device, including what another group
+                    # owns, and ``manager.update_visible_device_ids`` is handed
+                    # that widened list. Keeping the empty set makes the
+                    # promise true for the one shape this pass created, and no
+                    # further -- the loser half is unaffected, because a group
+                    # owning nothing has nothing to re-home.
+                    #
+                    # On the service fold this is inert: that branch forces the
+                    # visible ids to ``()`` regardless. Written for both anyway,
+                    # so the two folds keep the same shape.
+                    normalized_allowed = set()
                 else:
                     normalized_allowed = None
 
