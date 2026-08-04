@@ -1336,9 +1336,15 @@ class ConfigEntrySubEntryManager:
            ids (``e1-t``, ``e1-legacy``) hold no ``f"{entry_id}-{key}"``, so
            ``async_sync`` reaches ``_async_adopt_existing_unique_id`` for a
            unique id no subentry holds and raises. Every production writer
-           embeds both parts (``__init__.py`` ``:8115``/``:8128``,
-           ``coordinator/subentry.py`` ``:229``/``:242``, ``config_flow.py``
-           ``:7019``/``:7020``/``:7693``), so on disk the adoption finds an
+           embeds both parts, named by symbol rather than by line because an
+           earlier draft cited five line numbers that had already drifted onto
+           a ``)``, a comment and a line of prose: ``async_setup_entry`` and
+           ``ConfigEntrySubEntryManager.async_sync`` here,
+           ``SubentryOperations._build_core_subentry_definitions`` in
+           ``coordinator/subentry.py``, and
+           ``ConfigFlow._async_sync_feature_subentries`` in ``config_flow.py``.
+           Greppable as ``f"{entry_id}-{key}"`` and its ``entry.entry_id``
+           spellings. So on disk the adoption finds an
            owner and writes the payload onto the wrong subentry instead of
            raising. Silent misattribution rather than an exception is the worse
            of the two, which is why this field is not optional.
@@ -1391,14 +1397,16 @@ class ConfigEntrySubEntryManager:
 
         How long the shape survives is a *window*, not a permanent state, and
         saying "never repaired" here was the same overreach one paragraph
-        later. Two kinds of write-back exist. The subentry updates in
-        ``config_flow.py`` ``:8331``/``:8373``/``:8478`` pass an existing value
+        later. Two kinds of write-back exist. The three subentry updates on
+        ``OptionsFlowHandler`` (``_async_update_feature_group_subentry``,
+        ``_async_refresh_subentry_entry_title``,
+        ``_async_assign_devices_to_subentry``) pass an existing value
         through unchanged (``unique_id=getattr(subentry, "unique_id", None)``),
         so they neither create nor repair a ``None``; but
-        ``_async_sync_feature_subentries`` assigns
+        ``ConfigFlow._async_sync_feature_subentries`` assigns
         ``f"{entry_id}-{key}"`` to the *existing* core subentry it resolved
-        (``config_flow.py`` ``:7303``/``:7329``, and ``_claim_unique_id`` at
-        ``:7230`` for a displaced holder), so the next options-flow pass
+        (and its nested ``_claim_unique_id`` does the same for a displaced
+        holder), so the next options-flow pass
         normally does repair it. The divergence therefore lived between entry
         load and the next flow run. That is long enough to matter -- the
         runtime index and the visibility write-back both run in it -- and short
@@ -2485,6 +2493,53 @@ class ConfigEntrySubEntryManager:
             )
         }
 
+        # This sweep runs the *opposite* polarity of the flow-side one in
+        # ``ConfigFlow._async_cleanup_stale_subentries``, and neither sweep
+        # reads the other -- the two modules cite each other on the *ranking*
+        # axis, never on removal. There, a subentry whose stored key is **not**
+        # a core key is skipped, and the core keys themselves are additionally
+        # protected by the literal-owner type axis. Here ``desired`` *is* the
+        # core key set, so the core keys are the safe ones and every other
+        # managed key is a removal candidate -- with no type axis at all.
+        # Removal runs through ``async_remove`` into core's
+        # ``async_remove_subentry``, which takes the device and entity registry
+        # bindings with it.
+        #
+        # No *writer* in this tree produces a shape that reaches this branch,
+        # and that much is measured rather than assumed: both production
+        # callers pass exactly ``{core_tracking, service}``
+        # (``async_setup_entry`` and the repair in ``coordinator/subentry.py``,
+        # whose ``_build_core_subentry_definitions`` always returns both),
+        # every production handler stores a core key, and
+        # ``_refresh_from_entry`` folds each ``service``- or ``tracker``-typed
+        # subentry onto one before this runs -- including the one legacy shape
+        # the contract treats as real, a per-account tracker group on an e-mail
+        # key.
+        #
+        # What that does **not** establish is that the set is empty, and an
+        # earlier draft of this comment said so anyway. The claim was about
+        # stored data while the evidence covered writers only, and the fold has
+        # a gap the writer argument cannot close: it canonicalises ``service``
+        # and ``tracker`` by type but leaves ``hub`` on its **stored** key. A
+        # ``hub`` on disk under a non-core key -- from an older release or a
+        # hand-edited entry -- therefore does reach the sweep and is removed,
+        # registry bindings included. That is not hypothetical: it is pinned,
+        # as behaviour we carry rather than behaviour we want, by
+        # ``test_ap1_stale_sweep_is_decided_by_the_resolved_key`` in its
+        # ``hub-email-removed`` and ``hub-nokey-removed`` cases.
+        #
+        # No guard is added here regardless, and the reason is now the honest
+        # one: not that the set is empty, but that a second guard semantics
+        # beside the flow-side one is the very drift this axis keeps paying
+        # for, and closing the gap belongs with the type axis rather than with
+        # a local barrier.
+        #
+        # For the ``hub`` gap above the guard is owed *now*, and it widens to
+        # every managed key the moment that fold or ``_deduplicate_subentries``
+        # changes, because either can drop a group out of ``desired`` and hand
+        # it straight to this sweep. Both are owned by
+        # ``PLAN_GFMY_SUBENTRY_DELETION_TYPE_AXIS``, which also carries the
+        # ratchet that watches the two counts this latency rests on.
         stale_keys: list[str] = []
         for managed_key, subentry in list(self._managed.items()):
             if managed_key in desired:
