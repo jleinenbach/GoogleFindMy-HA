@@ -33,6 +33,7 @@ from __future__ import annotations
 from typing import Any
 
 from custom_components.googlefindmy.const import TRACKER_SUBENTRY_KEY
+from custom_components.googlefindmy.coordinator import GoogleFindMyCoordinator
 from custom_components.googlefindmy.entity import GoogleFindMyDeviceEntity
 
 DEVICE_ID = "device-1"
@@ -197,6 +198,155 @@ def test_row_keyed_only_by_device_id_is_not_matched() -> None:
     assert recorded == []
 
 
+class _FastPathCoordinator(_SnapshotCoordinator):
+    """Coordinator double implementing the allocation-free accessor as well."""
+
+    def get_device_label_in_subentry(
+        self, subentry_key: str | None, device_id: str
+    ) -> str | None:
+        for row in self._snapshots.get(subentry_key or "", []):
+            if row.get("id") != device_id:
+                continue
+            name = row.get("name")
+            return name if isinstance(name, str) else None
+        return None
+
+
+def test_fast_path_never_copies_the_snapshot() -> None:
+    """Wiring proof: a coordinator with the accessor is never asked to copy.
+
+    Asserting on the *absence* of the snapshot call is the point of this test.
+    A green refresh alone would also pass if the fast path were dead code.
+    """
+
+    coordinator = _FastPathCoordinator(
+        {TRACKER_SUBENTRY_KEY: [{"id": DEVICE_ID, "name": "New name"}]}
+    )
+    entity, recorded = _make_entity(coordinator)
+
+    for _ in range(5):
+        entity.refresh_device_label_from_coordinator()
+
+    assert entity._device["name"] == "New name"
+    assert recorded == ["New name"]  # only the first pass changes anything
+    assert coordinator.calls == []
+
+
+def test_fast_path_is_used_even_when_the_snapshot_getter_would_raise() -> None:
+    """Second wiring proof, positive this time: the label still arrives."""
+
+    class _ExplodingSnapshot(_FastPathCoordinator):
+        def get_subentry_snapshot(self, key: str | None = None) -> list[dict[str, Any]]:
+            raise AssertionError("the snapshot copy must not be requested")
+
+    coordinator = _ExplodingSnapshot(
+        {TRACKER_SUBENTRY_KEY: [{"id": DEVICE_ID, "name": "New name"}]}
+    )
+    entity, recorded = _make_entity(coordinator)
+
+    entity.refresh_device_label_from_coordinator()
+
+    assert entity._device["name"] == "New name"
+    assert entity._fallback_label == "New name"
+    assert recorded == ["New name"]
+
+
+def test_accessor_answering_none_is_final() -> None:
+    """``None`` is an answer, not a failure: it must not trigger the scan.
+
+    A coordinator that implements the accessor and reports "no label" is
+    authoritative. Falling back to the snapshot copy here would reintroduce
+    exactly the allocation this change removes, on the most common path of all
+    (a device whose name has not changed).
+    """
+
+    coordinator = _FastPathCoordinator(
+        {TRACKER_SUBENTRY_KEY: [{"id": "someone-else", "name": "Other"}]}
+    )
+    entity, recorded = _make_entity(coordinator)
+
+    entity.refresh_device_label_from_coordinator()
+
+    assert entity._device["name"] == "Old name"
+    assert entity._fallback_label == "Old name"
+    assert recorded == []
+    assert coordinator.calls == []
+
+
+def test_coordinator_without_the_accessor_still_refreshes() -> None:
+    """Fallback proof: the 11 decentral test doubles keep working unchanged."""
+
+    coordinator = _SnapshotCoordinator(
+        {TRACKER_SUBENTRY_KEY: [{"id": DEVICE_ID, "name": "New name"}]}
+    )
+    assert not hasattr(coordinator, "get_device_label_in_subentry")
+    entity, recorded = _make_entity(coordinator)
+
+    entity.refresh_device_label_from_coordinator()
+
+    assert entity._device["name"] == "New name"
+    assert recorded == ["New name"]
+    assert coordinator.calls == [TRACKER_SUBENTRY_KEY]
+
+
+def test_raising_accessor_does_not_fall_back_to_the_scan() -> None:
+    """The asymmetry is deliberate, so it is pinned rather than described.
+
+    A *missing* accessor falls back to the scan; a *raising* one does not. It
+    signals a broken coordinator, and silently scanning past that would hide
+    the defect behind a working label.
+    """
+
+    class _ExplodingAccessor(_SnapshotCoordinator):
+        def get_device_label_in_subentry(
+            self, subentry_key: str | None, device_id: str
+        ) -> str | None:
+            raise RuntimeError("accessor is broken")
+
+    coordinator = _ExplodingAccessor(
+        {TRACKER_SUBENTRY_KEY: [{"id": DEVICE_ID, "name": "New name"}]}
+    )
+    entity, recorded = _make_entity(coordinator)
+
+    entity.refresh_device_label_from_coordinator()
+
+    assert entity._device["name"] == "Old name"
+    assert entity._fallback_label == "Old name"
+    assert recorded == []
+    assert coordinator.calls == []
+
+
+def test_auto_attribute_double_falls_through_to_the_scan() -> None:
+    """A double whose accessor is auto-created answers with a proxy object.
+
+    The branch exists for doubles that implement ``get_subentry_snapshot`` for
+    real but grow ``get_device_label_in_subentry`` automatically: without it,
+    the proxy would be mistaken for an answer and the refresh would stop.
+
+    Measured limit, so the branch is not oversold: a plain
+    ``unittest.mock.MagicMock`` is *not* rescued by it. Its
+    ``get_subentry_snapshot`` yields an empty iterator, so the scan finds
+    nothing and the refresh stays a no-op either way.
+    """
+
+    class _MockLike(_SnapshotCoordinator):
+        def get_device_label_in_subentry(
+            self, subentry_key: str | None, device_id: str
+        ) -> Any:
+            return object()
+
+    coordinator = _MockLike(
+        {TRACKER_SUBENTRY_KEY: [{"id": DEVICE_ID, "name": "New name"}]}
+    )
+    entity, recorded = _make_entity(coordinator)
+
+    entity.refresh_device_label_from_coordinator()
+
+    assert entity._device["name"] == "New name"
+    assert recorded == ["New name"]
+    assert coordinator.calls == [TRACKER_SUBENTRY_KEY]
+
+
 def test_duplicate_rows_resolve_to_the_first_one() -> None:
     """Case 8: with two rows for one ``id``, the first row wins."""
 
@@ -215,3 +365,38 @@ def test_duplicate_rows_resolve_to_the_first_one() -> None:
     assert entity._device["name"] == "First"
     assert entity._fallback_label == "First"
     assert recorded == ["First"]
+
+
+def test_real_coordinator_and_real_entity_use_the_accessor() -> None:
+    """The seam itself, with no hand-written accessor on either side.
+
+    Every other wiring proof in this file pairs the production entity with a
+    *double* that reimplements the accessor, so all of them would stay green if
+    the production accessor were renamed, removed or changed its return type:
+    ``getattr`` resolves to ``None``, the entity falls back to the scan and
+    nothing turns red. ``mypy`` does not close that gap either, because the
+    ``getattr`` result is ``Any``.
+
+    This test pairs the real ``GoogleFindMyCoordinator`` with the real entity
+    and makes the snapshot copy explode, so the label can only arrive through
+    ``SubentryOperations.get_device_label_in_subentry``.
+    """
+
+    def _explode(*args: Any, **kwargs: Any) -> list[dict[str, Any]]:
+        raise AssertionError("the snapshot copy must not be requested")
+
+    coordinator = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
+    coordinator._subentry_snapshots = {
+        TRACKER_SUBENTRY_KEY: ({"id": DEVICE_ID, "name": "New name"},)
+    }
+    coordinator._default_subentry_key_value = TRACKER_SUBENTRY_KEY
+    coordinator._subentry_metadata = {}
+    coordinator.get_subentry_snapshot = _explode  # type: ignore[method-assign]
+
+    entity, recorded = _make_entity(coordinator)
+
+    entity.refresh_device_label_from_coordinator()
+
+    assert entity._device["name"] == "New name"
+    assert entity._fallback_label == "New name"
+    assert recorded == ["New name"]
