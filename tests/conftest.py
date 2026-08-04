@@ -2243,6 +2243,34 @@ def fixture_stub_coordinator_factory() -> Callable[..., type[Any]]:
                     return list(self._snapshot_callback(key, feature))
                 return list(self.data)
 
+            def get_device_label_in_subentry(
+                self, subentry_key: str | None, device_id: str
+            ) -> str | None:
+                """Mirror the coordinator's allocation-free label accessor.
+
+                Reads the same source as ``get_subentry_snapshot`` but does not
+                call it: tests asserting that the fast path never requests a
+                snapshot copy would otherwise count this stub's own call.
+                Rebuilt on every call, without a cache, because the coordinator
+                contract does not promise one.  The production accessor takes no
+                ``feature`` argument, so the callback is invoked with ``None``;
+                a test whose ``_snapshot_callback`` branches on ``feature`` will
+                see this method and ``get_subentry_snapshot`` answer from
+                different rows.
+                """
+
+                rows = (
+                    self._snapshot_callback(subentry_key, None)
+                    if self._snapshot_callback is not None
+                    else self.data
+                )
+                for row in rows:
+                    if row.get("id") != device_id:
+                        continue
+                    name = row.get("name")
+                    return name if isinstance(name, str) else None
+                return None
+
             async def async_wait_subentry_visibility_updates(self) -> None:
                 """Mirror the coordinator visibility wait helper."""
 

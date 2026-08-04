@@ -679,38 +679,72 @@ class GoogleFindMyDeviceEntity(GoogleFindMyEntity):
             name=name,
         )
 
+    def _coordinator_device_label(self, device_id: str) -> str | None:
+        """Return the coordinator's label for ``device_id``, or ``None``.
+
+        Prefers the coordinator's allocation-free accessor and falls back to a
+        scan of ``get_subentry_snapshot()`` for coordinator doubles that do not
+        implement it.  Both branches share one contract: a ``str`` when the
+        snapshot carries a string name for this device, ``None`` otherwise.
+
+        ``device_id`` is passed in rather than read from ``self`` so the caller
+        can resolve it outside its ``except`` block: a device dictionary without
+        a string ``id`` must keep raising instead of turning into a silent
+        no-op.
+        """
+
+        getter = getattr(self.coordinator, "get_device_label_in_subentry", None)
+        if callable(getter):
+            label = getter(self._subentry_key, device_id)
+            if isinstance(label, str):
+                return label
+            if label is None:
+                return None
+            # A non-str, non-None answer means the coordinator is a double whose
+            # attribute was auto-created rather than implemented.  Fall through
+            # to its real snapshot instead of treating the proxy as an answer.
+        for candidate in self.coordinator.get_subentry_snapshot(self._subentry_key):
+            if candidate.get("id") != device_id:
+                continue
+            name = candidate.get("name")
+            return name if isinstance(name, str) else None
+        return None
+
     def refresh_device_label_from_coordinator(
         self, *, log_prefix: str | None = None
     ) -> None:
         """Update the cached device label from the coordinator snapshot."""
 
+        device_id = self.device_id
         try:
-            snapshot = self.coordinator.get_subentry_snapshot(self._subentry_key)
-        except Exception as err:  # pragma: no cover - defensive best effort
-            _LOGGER.debug("Failed to fetch snapshot for %s: %s", self.device_id, err)
+            new_name = self._coordinator_device_label(device_id)
+        except Exception as err:
+            # Wider than the snapshot call it replaces: this also covers the
+            # accessor and the fallback scan.  Deliberate, because a broken
+            # coordinator must not take the entity down mid-update.
+            _LOGGER.debug(
+                "Failed to read the device label for %s from the coordinator: %s",
+                device_id,
+                err,
+            )
             return
 
-        for candidate in snapshot:
-            if candidate.get("id") != self.device_id:
-                continue
-            new_name = candidate.get("name")
-            if not isinstance(new_name, str) or not new_name.strip():
-                break
-            current = self._device.get("name")
-            if current == new_name:
-                break
-            self._device["name"] = new_name
-            self._fallback_label = new_name
-            self.maybe_update_device_registry_name(new_name)
-            if log_prefix:
-                _LOGGER.debug(
-                    "%s device label refreshed for %s: '%s' -> '%s'",
-                    log_prefix,
-                    self.device_id,
-                    current,
-                    new_name,
-                )
-            break
+        if new_name is None or not new_name.strip():
+            return
+        current = self._device.get("name")
+        if current == new_name:
+            return
+        self._device["name"] = new_name
+        self._fallback_label = new_name
+        self.maybe_update_device_registry_name(new_name)
+        if log_prefix:
+            _LOGGER.debug(
+                "%s device label refreshed for %s: '%s' -> '%s'",
+                log_prefix,
+                device_id,
+                current,
+                new_name,
+            )
 
     def coordinator_has_device(self) -> bool:
         """Return ``True`` if the device is currently visible in the coordinator."""

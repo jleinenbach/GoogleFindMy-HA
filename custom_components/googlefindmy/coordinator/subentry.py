@@ -1405,3 +1405,36 @@ class SubentryOperations(_MixinBase):
         if not self.is_device_visible_in_subentry(subentry_key, device_id):
             return None
         return self.get_device_last_seen(device_id)
+
+    def get_device_label_in_subentry(
+        self, subentry_key: str | None, device_id: str
+    ) -> str | None:
+        """Return the snapshot label for a device without copying the snapshot.
+
+        Allocation-free counterpart to scanning ``get_subentry_snapshot()``:
+        the stored tuple is iterated in place, so no row is copied.
+        Deliberately keyed on ``id`` only (never ``device_id``), deliberately
+        without the ``ENTRY_ID:DEVICE_ID`` suffix handling of
+        ``is_device_visible_in_subentry`` and deliberately without a visibility
+        gate, so the result matches what a scan of the stored snapshot yields.
+        Returns ``None`` when the subentry key is unknown, the device has no
+        row, the stored name is not a ``str``, or the instance carries no
+        snapshot store at all; callers must treat ``None`` as ``leave the
+        current label untouched``.  That last case is the one deliberate
+        divergence from ``get_subentry_snapshot``, which raises there.
+        """
+
+        lookup_key = (
+            subentry_key if subentry_key is not None else self._default_subentry_key()
+        )
+        # ``getattr`` guard: coordinator doubles built via ``__new__`` skip
+        # ``__init__`` and therefore carry no ``_subentry_snapshots`` at all.
+        snapshots: dict[str, tuple[dict[str, Any], ...]] = getattr(
+            self, "_subentry_snapshots", {}
+        )
+        for row in snapshots.get(lookup_key) or ():
+            if row.get("id") != device_id:
+                continue
+            name = row.get("name")
+            return name if isinstance(name, str) else None
+        return None

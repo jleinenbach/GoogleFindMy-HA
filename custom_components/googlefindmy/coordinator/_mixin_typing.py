@@ -321,6 +321,11 @@ class _MixinBase:
     ) -> list[dict[str, Any]]:
         raise NotImplementedError
 
+    def get_device_label_in_subentry(
+        self, subentry_key: str | None, device_id: str
+    ) -> str | None:
+        raise NotImplementedError
+
     # ------------------------------------------------------------------
     # Cross-mixin methods: PollingOperations
     # ------------------------------------------------------------------
