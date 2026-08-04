@@ -590,11 +590,11 @@ def test_update_visible_device_ids_refuses_a_non_device_bearing_type(
 
 
 # ---------------------------------------------------------------------------
-# AP1 (PLAN_GFMY_ALIAS_TYPE_AXIS): characterising the subentry manager axis.
+# Characterising the subentry manager axis (PR #1230, AP1).
 #
 # Every test below states its class in its own docstring:
-#   Class A -- standing assertion. It must stay green while this plan runs;
-#              AP3 turning one red is a FAIL of AP3, not an adjustment.
+#   Class A -- standing assertion. It must stay green: a later rank change
+#              turning one red is a regression of PR #1230, not an adjustment.
 #              Two sub-cases, both binding:
 #                A1 -- behaviour we want (the tracker fold, kept by V-1).
 #                A2 -- behaviour we carry. Changing it is reserved for
@@ -603,7 +603,7 @@ def test_update_visible_device_ids_refuses_a_non_device_bearing_type(
 #   Class B -- characterisation. AP3 (rank) or AP4 (reading side) turns
 #              exactly these over.
 #
-# Substitution declared: the plan asks the second Class B case to pin the
+# Substitution declared: PR #1230 asked the second Class B case to pin the
 # reading side (``_refresh_subentry_index`` and
 # ``metadata[TRACKER_SUBENTRY_KEY].config_subentry_id``). It is pinned here on
 # the manager side instead, because AP4 builds the coordinator fixture that
@@ -1234,8 +1234,8 @@ async def test_ap1_deduplicate_reads_type_only_on_the_group_axis(
 
 
 # ---------------------------------------------------------------------------
-# AP4 step 3b -- the reverse index after a displacement
-# (``PLAN_GFMY_ALIAS_TYPE_AXIS``, follow-up U-23 from the AP3 re-review).
+# The reverse index after a displacement (PR #1230, AP4 step 3b, a follow-up
+# from its AP3 re-review).
 # ---------------------------------------------------------------------------
 
 

@@ -1064,10 +1064,9 @@ def test_the_literal_owner_table_is_one_object_shared_by_all_ranking_sides() -> 
     hard-coded literal. Killing mutations: making the flow hold a private
     ``dict`` copy, and mapping the tracker key to the wrong owner.
 
-    The runtime manager joined as a third reader with
-    ``PLAN_GFMY_ALIAS_TYPE_AXIS``; it is asserted here for the same reason as
-    the other two, because a private copy in ``__init__.py`` would drift
-    exactly as silently.
+    The runtime manager joined as a third reader with PR #1230; it is asserted
+    here for the same reason as the other two, because a private copy in
+    ``__init__.py`` would drift exactly as silently.
     """
 
     from custom_components import googlefindmy as _integration
@@ -1089,7 +1088,7 @@ def test_the_literal_owner_table_is_one_object_shared_by_all_ranking_sides() -> 
 
 
 # ---------------------------------------------------------------------------
-# AP4 -- the reading side's tracker axis (PLAN_GFMY_ALIAS_TYPE_AXIS).
+# The reading side's tracker axis (PR #1230, AP4).
 #
 # Two changes are pinned here, and they are one commit on purpose: step 3 gives
 # the tracker key the same rank the service key already had, step 1 folds a
@@ -1121,9 +1120,9 @@ def _ap4_subentry(
     """Build one subentry with a freely chosen (key, type) pair.
 
     ``unique_id`` defaults to a derived ``uid-<subentry_id>``, which is the
-    shape every caller before AP8 wanted and which makes the manager's removed
-    ``unique_match`` field uniformly ``0`` (no caller's ``entry_id`` is a
-    substring of it). Passing ``None`` explicitly is therefore not a cosmetic
+    shape every caller wanted while the manager still carried its
+    ``unique_match`` field, and which makes that removed field uniformly ``0``
+    (no caller's ``entry_id`` is a substring of it). Passing ``None`` explicitly is therefore not a cosmetic
     variation but the one input that separated the manager from the other two
     rankers, and the sentinel keeps that choice distinguishable from "not
     specified": the field's declared type is ``str | None`` on both the core
@@ -1366,8 +1365,8 @@ def test_ap8_the_manager_and_the_index_agree_when_one_identifier_is_missing(
     This is the shape the manager's removed ``unique_match`` field decided on
     its own. Both candidates are literal ``tracker`` subentries storing
     ``core_tracking``, so the three shared fields tie and the contract's last
-    criterion -- the lowest ``subentry_id`` -- is what must decide. Before AP8
-    the manager scored them ``(1,1,1,0,0)`` against ``(1,1,1,0,1)`` and took
+    criterion -- the lowest ``subentry_id`` -- is what must decide. Before that
+    removal the manager scored them ``(1,1,1,0,0)`` against ``(1,1,1,0,1)`` and took
     the *higher* identifier in both iteration orders, while this side and
     ``config_flow.py::_resolve_existing`` took the lower one.
 
