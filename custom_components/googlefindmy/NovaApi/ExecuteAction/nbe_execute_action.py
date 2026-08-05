@@ -52,7 +52,9 @@ def create_action_request(
     Args:
         canonic_device_id: Canonical device id from the device list.
         gcm_registration_id: FCM registration token (used for push correlation).
-        request_uuid: Optional request UUID. If omitted, a random UUID is generated.
+        request_uuid: Optional request UUID. If omitted (``None``), a random UUID
+            is generated. An empty string is passed through verbatim and marks a
+            deliberately uncorrelated request.
         fmd_client_uuid: Optional session/client UUID. If omitted, a lazy, session-stable
             UUID is used.
 
@@ -69,7 +71,11 @@ def create_action_request(
 
     proto_module = _get_proto_module()
 
-    req_uuid = request_uuid or generate_random_uuid()
+    # `None` means "caller has no opinion, generate one" (locate/play path).
+    # An explicitly passed empty string means "deliberately uncorrelated" and
+    # must survive: `or` would silently replace it with a random UUID and
+    # reintroduce the fabricated correlation this guard exists to prevent.
+    req_uuid = generate_random_uuid() if request_uuid is None else request_uuid
     client_uuid = fmd_client_uuid or _get_client_uuid()
 
     action_request: ExecuteActionRequest = proto_module.ExecuteActionRequest()

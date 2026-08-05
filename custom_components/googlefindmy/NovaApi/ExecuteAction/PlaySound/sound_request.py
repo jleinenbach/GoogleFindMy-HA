@@ -56,7 +56,10 @@ def create_sound_request(
         should_start: True to start playing a sound, False to stop.
         canonic_device_id: Canonical device id (as returned by the device list).
         gcm_registration_id: FCM registration/token string used for push correlation.
-        request_uuid: Optional request UUID; a random one will be generated when omitted.
+        request_uuid: Optional request UUID. When omitted (``None``) a random one
+            is generated. An empty string is passed through verbatim and marks a
+            deliberately uncorrelated request: a stop request that has no cancel
+            key must not invent one, so the field is left empty on purpose.
 
     Returns:
         Hex-encoded protobuf payload suitable for Nova transport.

@@ -50,6 +50,11 @@ def stop_sound_request(
         canonic_device_id: The canonical ID of the target device.
         gcm_registration_id: The FCM registration token for push notifications.
         request_uuid: Optional request UUID matching a prior start request.
+            When ``None`` the payload carries no request UUID at all; the server
+            then has no key to correlate the stop with a running ring. A random
+            UUID is deliberately NOT generated here: by construction it cannot
+            reference a running ring, so sending one would fabricate a
+            correlation the server can only reject or ignore (BSkando#195).
 
     Returns:
         Hex-encoded protobuf payload for Nova transport.
@@ -58,7 +63,10 @@ def stop_sound_request(
         False,
         canonic_device_id,
         gcm_registration_id,
-        request_uuid=request_uuid,
+        # Empty string, not None: `create_sound_request` generates a random UUID
+        # for `None`. The empty string leaves `requestUuid` off the wire, since
+        # proto3 omits default-valued scalars.
+        request_uuid=request_uuid or "",
     )
 
 
@@ -95,7 +103,9 @@ async def async_submit_stop_sound_request(  # noqa: PLR0913
     Args:
         canonic_device_id: The canonical ID of the target device.
         gcm_registration_id: The FCM registration token for push notifications.
-        request_uuid: Optional request UUID matching a prior start request.
+        request_uuid: Optional request UUID matching a prior start request. When
+            omitted the stop is submitted without a cancel key (see
+            :func:`stop_sound_request`); the ring may keep playing.
         session: Optional aiohttp ClientSession to reuse (preferred in HA).
         namespace: Optional entry-scoped namespace to avoid cross-entry cache bleed.
         username: Optional Google account e-mail for the request context.
