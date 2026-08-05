@@ -530,3 +530,171 @@ class TestHeuristicConsumerSeesBytes:
         assert matches == []
         assert matched is None
         assert observed_frame is None
+
+
+# ---------------------------------------------------------------------------
+# The frame byte does not carry the EID length
+# ---------------------------------------------------------------------------
+
+
+class TestFrameTypeDoesNotDictateEidLength:
+    """Slicing by frame byte answers a question the frame byte cannot answer.
+
+    The specification ties ``0x40``/``0x41`` to unwanted tracking protection
+    mode, not to the curve. Both mixed shapes therefore occur, and each was
+    mis-sliced in its own way: a ``0x41`` frame carrying a legacy EID produced
+    no framed candidate at all (so the resolution fell through to the sliding
+    window, whose ``frame_type=None`` is invisible to the disagreement
+    channel), and a ``0x40`` frame carrying a modern EID matched on its
+    20-byte prefix -- a precomputed ``MODERN_P256_X20_TRUNC_*`` entry -- and
+    read the hashed-flags byte 12 octets too early.
+    """
+
+    _PREFIX = bytes([0x02, 0x01, 0x06, 0x0B, 0x16, 0xAA, 0xFE])
+
+    def _modern_frame_legacy_eid(self, *, flags_byte: int) -> tuple[bytes, bytes]:
+        """Build ``[prefix(7)][0x41][legacy EID(20)][flags(1)]``."""
+        eid = bytes(range(0x80, 0x80 + LEGACY_EID_LENGTH))
+        payload = self._PREFIX + bytes([_MODERN_FRAME_TYPE]) + eid + bytes([flags_byte])
+        assert len(payload) == _SERVICE_DATA_OFFSET + LEGACY_EID_LENGTH + 1
+        return payload, eid
+
+    def test_modern_frame_with_legacy_eid_decodes_flags_after_the_eid(
+        self,
+    ) -> None:
+        """0x41 + 20-byte EID resolves and reads octet 28 as the flags byte.
+
+        This is a characterisation, not a regression guard: the sliding
+        window plus the pre-geometry derivation already produced this exact
+        result. It is asserted so that the framed candidate introduced below
+        has to reproduce it rather than quietly change it.
+        """
+        resolver = _make_resolver()
+        payload, eid = self._modern_frame_legacy_eid(flags_byte=0x01)
+        _register(resolver, eid, "dev-modern-frame-legacy-eid")
+
+        result = resolver.resolve_eid(payload)
+
+        assert result is not None
+        assert result.device_id == "dev-modern-frame-legacy-eid"
+        state = resolver._ble_battery_state.get("dev-modern-frame-legacy-eid")
+        assert state is not None
+        assert state.decoded_flags == payload[_SERVICE_DATA_OFFSET + LEGACY_EID_LENGTH]
+        assert state.uwt_mode is True
+
+    def test_modern_frame_with_legacy_eid_is_visible_to_the_conflict_channel(
+        self,
+    ) -> None:
+        """The match must carry the frame byte, not the window's ``None``.
+
+        Resolution alone was never the problem here: the sliding window found
+        this EID at offset 8 anyway. What it could not do is report which
+        frame byte the payload carried, so ``FMDN_FLAGS_CONFLICT`` -- the one
+        evidence channel that decides whether 0x41 really implies a 32-byte
+        EID in the field -- stayed blind to exactly the population that would
+        settle it.
+        """
+        resolver = _make_resolver()
+        payload, eid = self._modern_frame_legacy_eid(flags_byte=0x00)
+        _register(resolver, eid, "dev-conflict-visible")
+
+        _matches, matched, observed_frame = resolver._resolve_eid_internal(payload)
+
+        assert matched == eid
+        assert observed_frame == _MODERN_FRAME_TYPE
+
+    def test_legacy_frame_with_modern_eid_reads_flags_after_32_bytes(
+        self,
+    ) -> None:
+        """0x40 + 32-byte EID must not match on its own truncated prefix.
+
+        Both entries are registered here because both really are in the
+        lookup table: the resolver precomputes ``MODERN_P256_X32_BE`` and its
+        20-byte truncation for every device. Whichever candidate is offered
+        first therefore decides where the flags byte is read.
+        """
+        resolver = _make_resolver()
+        # Octet 28 (EID byte 20) is the decoy: it decodes to battery level 1
+        # with the UWT bit clear, which the real flags byte does not.
+        eid = bytes(range(0x40, 0x40 + LEGACY_EID_LENGTH)) + bytes(
+            [0x02] + [0x55] * (MODERN_EID_LENGTH - LEGACY_EID_LENGTH - 1)
+        )
+        assert len(eid) == MODERN_EID_LENGTH
+        payload = self._PREFIX + bytes([_FMDN_FRAME_TYPE]) + eid + bytes([0x01])
+        _register(resolver, eid, "dev-legacy-frame-modern-eid")
+        _register(resolver, eid[:LEGACY_EID_LENGTH], "dev-legacy-frame-modern-eid")
+
+        resolver.resolve_eid(payload)
+
+        state = resolver._ble_battery_state.get("dev-legacy-frame-modern-eid")
+        assert state is not None
+        assert state.decoded_flags == payload[_SERVICE_DATA_OFFSET + MODERN_EID_LENGTH]
+        assert state.uwt_mode is True
+        # And specifically not the EID byte the prefix match would have read.
+        assert state.decoded_flags != payload[_SERVICE_DATA_OFFSET + LEGACY_EID_LENGTH]
+
+    def test_truncated_modern_frame_is_not_re_read_as_legacy(self) -> None:
+        """A 0x41 payload between the two shapes gets no legacy candidate.
+
+        Its octet 28 is EID material, so slicing it as legacy would trade a
+        missing candidate for a fabricated flags byte. The sliding window
+        still gets its chance.
+        """
+        resolver = _make_resolver()
+        payload = (
+            self._PREFIX + bytes([_MODERN_FRAME_TYPE]) + bytes(range(0x20, 0x20 + 26))
+        )
+        assert (
+            _SERVICE_DATA_OFFSET + LEGACY_EID_LENGTH + 1
+            < len(payload)
+            < _SERVICE_DATA_OFFSET + MODERN_EID_LENGTH
+        )
+
+        candidates, _observed = resolver._extract_eid_candidates(payload)
+
+        assert [c for c in candidates if c.layout == "framed"] == []
+        assert any(c.layout == "window" for c in candidates)
+
+    def test_legacy_frame_keeps_its_unconditional_20_byte_reading(self) -> None:
+        """0x40 must not lose the reading it has always had at any length."""
+        resolver = _make_resolver()
+        payload = (
+            self._PREFIX + bytes([_FMDN_FRAME_TYPE]) + bytes(range(0x20, 0x20 + 26))
+        )
+
+        candidates, observed = resolver._extract_eid_candidates(payload)
+
+        framed = [c for c in candidates if c.layout == "framed"]
+        assert [(c.offset, len(c.eid)) for c in framed] == [
+            (_SERVICE_DATA_OFFSET, LEGACY_EID_LENGTH)
+        ]
+        assert observed == _FMDN_FRAME_TYPE
+
+    @pytest.mark.parametrize(
+        ("frame_type", "payload_len", "expected"),
+        [
+            # Legacy geometry, exact fit: both frame types read 20 bytes.
+            (_FMDN_FRAME_TYPE, 28, (LEGACY_EID_LENGTH,)),
+            (_MODERN_FRAME_TYPE, 28, (LEGACY_EID_LENGTH,)),
+            (_FMDN_FRAME_TYPE, 29, (LEGACY_EID_LENGTH,)),
+            (_MODERN_FRAME_TYPE, 29, (LEGACY_EID_LENGTH,)),
+            # Between the shapes: 0x40 keeps its reading, 0x41 gets none.
+            (_FMDN_FRAME_TYPE, 30, (LEGACY_EID_LENGTH,)),
+            (_MODERN_FRAME_TYPE, 30, ()),
+            (_FMDN_FRAME_TYPE, 39, (LEGACY_EID_LENGTH,)),
+            (_MODERN_FRAME_TYPE, 39, ()),
+            # Modern geometry: longest reading first for both frame types.
+            (_FMDN_FRAME_TYPE, 40, (MODERN_EID_LENGTH, LEGACY_EID_LENGTH)),
+            (_MODERN_FRAME_TYPE, 40, (MODERN_EID_LENGTH,)),
+            (_FMDN_FRAME_TYPE, 41, (MODERN_EID_LENGTH, LEGACY_EID_LENGTH)),
+            (_MODERN_FRAME_TYPE, 41, (MODERN_EID_LENGTH,)),
+        ],
+    )
+    def test_service_data_eid_length_table(
+        self, frame_type: int, payload_len: int, expected: tuple[int, ...]
+    ) -> None:
+        """The full band table, so a later edit cannot move a boundary quietly."""
+        assert (
+            resolver_module._service_data_eid_lengths(frame_type, payload_len)
+            == expected
+        )

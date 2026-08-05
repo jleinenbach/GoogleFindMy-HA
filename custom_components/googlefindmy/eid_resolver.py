@@ -424,6 +424,46 @@ def _guess_flags_byte(raw: bytes) -> int | None:  # noqa: PLR0911
     return None
 
 
+def _service_data_eid_lengths(frame_type: int, payload_len: int) -> tuple[int, ...]:
+    """Return the EID lengths worth slicing at octet 8, longest reading first.
+
+    SPEC (Find Hub Network Accessory Specification, retrieved 2026-08-05): the
+    frame type is *not* coupled to the EID length. ``0x41`` only states that
+    unwanted tracking protection mode is active, so a 20-byte legacy EID in a
+    ``0x41`` frame and a 32-byte P-256 EID in a ``0x40`` frame are both
+    conformant shapes. Deriving the slice length from the frame byte therefore
+    answers a question the frame byte does not carry, which is the same class
+    of second guess that ``EidCandidate`` removed for the flags offset.
+
+    Two asymmetries survive that reading deliberately:
+
+    * The 32-byte reading is probed first wherever it fits, including in
+      ``0x40`` frames. The first 20 bytes of a 32-byte EID are a precomputed
+      lookup entry in their own right (``MODERN_P256_X20_TRUNC_*``), so the
+      shorter reading would otherwise match first and put the hashed-flags
+      byte at octet 28 instead of 40 -- on EID material, which decodes into a
+      stable but fabricated battery level and UWT bit.
+    * For ``0x41`` the 20-byte reading is offered only when the payload ends
+      right after the EID, with at most the optional flags byte behind it. A
+      longer ``0x41`` payload that still falls short of a 32-byte EID is more
+      plausibly a truncated modern frame, whose octet 28 is EID material
+      rather than flags; slicing it as legacy would trade a missing candidate
+      for a wrong one. ``0x40`` keeps the unconditional 20-byte reading it has
+      always had, because dropping it would cost resolutions that work today.
+
+    See custom_components/googlefindmy/AGENTS.md, "FHNA frame slicing
+    reminder".
+    """
+
+    lengths: list[int] = []
+    if payload_len >= SERVICE_DATA_OFFSET + MODERN_EID_LENGTH:
+        lengths.append(MODERN_EID_LENGTH)
+    legacy_fits_exactly = payload_len <= SERVICE_DATA_OFFSET + LEGACY_EID_LENGTH + 1
+    if frame_type == FMDN_FRAME_TYPE or legacy_fits_exactly:
+        lengths.append(LEGACY_EID_LENGTH)
+    return tuple(lengths)
+
+
 # Mapping from FMDN 2-bit battery level to percentage.
 # Per Google FMDN spec: 0=Unsupported, 1=Normal, 2=Low, 3=Critically Low.
 # HA icon thresholds in homeassistant/helpers/icon.py:
@@ -3306,35 +3346,19 @@ class GoogleFindMyEIDResolver:
 
         if length >= SERVICE_DATA_OFFSET + LEGACY_EID_LENGTH:
             frame_type = payload[7]
-            if frame_type == FMDN_FRAME_TYPE:
+            if frame_type in (FMDN_FRAME_TYPE, MODERN_FRAME_TYPE):
                 observed_frame = frame_type
-                candidates.append(
-                    EidCandidate(
-                        eid=payload[
-                            SERVICE_DATA_OFFSET : SERVICE_DATA_OFFSET
-                            + LEGACY_EID_LENGTH
-                        ],
-                        offset=SERVICE_DATA_OFFSET,
-                        frame_type=frame_type,
-                        layout="framed",
+                for eid_length in _service_data_eid_lengths(frame_type, length):
+                    candidates.append(
+                        EidCandidate(
+                            eid=payload[
+                                SERVICE_DATA_OFFSET : SERVICE_DATA_OFFSET + eid_length
+                            ],
+                            offset=SERVICE_DATA_OFFSET,
+                            frame_type=frame_type,
+                            layout="framed",
+                        )
                     )
-                )
-            elif (
-                frame_type == MODERN_FRAME_TYPE
-                and length >= SERVICE_DATA_OFFSET + MODERN_EID_LENGTH
-            ):
-                observed_frame = frame_type
-                candidates.append(
-                    EidCandidate(
-                        eid=payload[
-                            SERVICE_DATA_OFFSET : SERVICE_DATA_OFFSET
-                            + MODERN_EID_LENGTH
-                        ],
-                        offset=SERVICE_DATA_OFFSET,
-                        frame_type=frame_type,
-                        layout="framed",
-                    )
-                )
 
         # No `not candidates` gate any more. Byte 7 being 0x40/0x41 is a
         # 1-in-256 coincidence for any payload whose EID happens to carry that
