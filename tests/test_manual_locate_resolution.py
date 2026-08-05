@@ -198,7 +198,8 @@ def test_async_handle_manual_locate_success(
     assert "Successfully" not in caplog.text
 
 
-def test_async_handle_manual_locate_gated_is_not_reported_as_success(
+@pytest.mark.asyncio
+async def test_async_handle_manual_locate_gated_is_not_reported_as_success(
     hass: HomeAssistant,
     registries: tuple[_StubDeviceRegistry, _StubEntityRegistry],
     caplog: pytest.LogCaptureFixture,
@@ -221,7 +222,10 @@ def test_async_handle_manual_locate_gated_is_not_reported_as_success(
     coordinator = _StubCoordinator()
     coordinator.result = {}
     caplog.set_level("INFO")
-    asyncio.run(gfm.async_handle_manual_locate(hass, coordinator, "device-6"))
+    # Awaited on the loop pytest-asyncio manages, not via asyncio.run():
+    # tests/AGENTS.md forbids the latter because it starts a competing loop
+    # and breaks Home Assistant's managed loop fixtures.
+    await gfm.async_handle_manual_locate(hass, coordinator, "device-6")
     assert coordinator.calls == ["canonical-6"]
     assert "produced no location update" in caplog.text
     assert "Successfully" not in caplog.text
