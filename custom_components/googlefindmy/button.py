@@ -1329,7 +1329,16 @@ class GoogleFindMyLocateButton(GoogleFindMyButtonEntity):
                 blocking=False,  # non-blocking: avoid UI stall
             )
             self._update_last_pressed()
-            _LOGGER.info("Successfully submitted manual locate for %s", device_name)
+            # blocking=False by design (responsive UI), so the service result is
+            # never observed here. This call site therefore cannot claim
+            # success: a ServiceValidationError raised inside the handler is
+            # reported by HA core, never by the except-branch below, and a
+            # gated locate returns quietly. Say what is known -- dispatched --
+            # and nothing more.
+            _LOGGER.info(
+                "Manual locate dispatched for %s (fire-and-forget, outcome not awaited)",
+                device_name,
+            )
         except Exception as err:  # Avoid crashing the update loop
             _LOGGER.error("Error submitting manual locate for %s: %s", device_name, err)
 

@@ -5110,7 +5110,9 @@ async def async_handle_manual_locate(
 
     Behavior:
         - Resolve any incoming identifier (`device_id`, `entity_id`, or canonical).
-        - On success: dispatch the request to the coordinator and log an info line.
+        - On dispatch: log what the coordinator actually returned, distinguishing
+          a locate that produced data from one that was gated away. Neither line
+          claims that the device reported its position.
         - On failure: raise HomeAssistantError and mirror a redacted error record
           into the coordinator diagnostics buffer (if present).
 
@@ -5118,8 +5120,20 @@ async def async_handle_manual_locate(
     """
     try:
         canonical_id, friendly = _resolve_canonical_from_any(hass, arg)
-        await coordinator.async_locate_device(canonical_id)
-        _LOGGER.info("Successfully submitted manual locate for %s", friendly)
+        # The return value is the evidence, so it is read rather than dropped:
+        # async_locate_device returns an empty mapping when the request was
+        # gated away (cooldown, in-flight, device absent). Logging success for
+        # that case claims an effect that never happened -- the same class of
+        # unbacked success claim as the Stop Sound report in BSkando#195.
+        location = await coordinator.async_locate_device(canonical_id)
+        if location:
+            _LOGGER.info("Manual locate returned data for %s", friendly)
+        else:
+            _LOGGER.info(
+                "Manual locate for %s was accepted but produced no location "
+                "update (gated by cooldown, an in-flight request, or absence)",
+                friendly,
+            )
     except HomeAssistantError as err:
         diag_buffer = cast(Any, getattr(coordinator, "_diag", None))
         if diag_buffer is not None and hasattr(diag_buffer, "add_error"):

@@ -13,6 +13,7 @@ from custom_components.googlefindmy.button import (
 )
 from custom_components.googlefindmy.const import (
     DOMAIN,
+    SERVICE_LOCATE_DEVICE,
     SERVICE_PLAY_SOUND,
     SERVICE_SUBENTRY_KEY,
     TRACKER_SUBENTRY_KEY,
@@ -87,3 +88,47 @@ async def test_button_records_last_pressed_on_press() -> None:
     service_call.assert_awaited_once_with(
         DOMAIN, SERVICE_PLAY_SOUND, {"device_id": "device-1"}, blocking=True
     )
+
+
+@pytest.mark.asyncio
+async def test_locate_button_does_not_claim_success(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The fire-and-forget locate button reports dispatch, never success.
+
+    ``blocking=False`` means the service result is never observed at this call
+    site, so an INFO line saying "Successfully submitted" asserts an outcome
+    nobody looked at -- the same class of unbacked success claim that made the
+    Stop Sound button report a stop for a ring that kept playing (BSkando#195).
+    """
+
+    service_call = AsyncMock()
+    hass = SimpleNamespace(
+        services=SimpleNamespace(async_call=service_call),
+        data={DOMAIN: {}},
+        loop=None,
+    )
+    coordinator = SimpleNamespace(
+        hass=hass,
+        config_entry=make_config_entry(entry_id="entry-id"),
+        is_device_visible_in_subentry=lambda *_args: True,
+        can_request_location=lambda _dev_id: True,
+        async_request_refresh=AsyncMock(),
+    )
+    button = GoogleFindMyLocateButton(
+        coordinator,
+        {"id": "device-1", "name": "Tracker"},
+        "Tracker",
+        subentry_key=TRACKER_SUBENTRY_KEY,
+        subentry_identifier=f"{SERVICE_SUBENTRY_KEY}:tracker",
+    )
+    button.hass = hass
+
+    with caplog.at_level("INFO", logger="custom_components.googlefindmy.button"):
+        await button.async_press()
+
+    service_call.assert_awaited_once_with(
+        DOMAIN, SERVICE_LOCATE_DEVICE, {"device_id": "device-1"}, blocking=False
+    )
+    assert "Successfully" not in caplog.text
+    assert "outcome not awaited" in caplog.text
