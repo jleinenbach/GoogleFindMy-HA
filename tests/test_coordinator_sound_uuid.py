@@ -385,3 +385,107 @@ async def test_async_stop_sound_warns_when_uuid_missing(
     assert api_calls == [("device-1", None)]
     assert "No cancel key for device-1" in caplog.text
     assert "the ring may keep playing" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_blank_request_uuid_falls_back_to_the_cached_cancel_key() -> None:
+    """A blank UUID means "no opinion", not "deliberately uncorrelated".
+
+    The optional service field can be left blank, and a blank value used to
+    take a shortcut past the cached-key lookup: the stop then travelled without
+    any ``requestUuid`` (proto3 drops an empty string) while the caller was
+    told ``CANCELLED``. Two defects at once -- a live cancel key was withheld,
+    and an unprovable stop was reported as a correlated one.
+    """
+
+    for blank in ("", "   "):
+        sent: list[str | None] = []
+        coordinator = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
+        coordinator._sound_request_uuids = {"device-1": "cached-key"}  # type: ignore[attr-defined]
+        coordinator._sound_request_timestamps = {"device-1": time.time()}  # type: ignore[attr-defined]
+        coordinator._api_push_ready = lambda: True  # type: ignore[attr-defined]
+        coordinator._note_push_transport_problem = lambda: None  # type: ignore[attr-defined]
+        coordinator._set_auth_state = lambda **kwargs: None  # type: ignore[attr-defined]
+
+        async def _save() -> None:
+            return None
+
+        coordinator._async_save_sound_uuids = _save  # type: ignore[attr-defined]
+
+        async def _api_stop(device_id: str, request_uuid: str | None) -> bool:
+            sent.append(request_uuid)
+            return True
+
+        coordinator.api = SimpleNamespace(async_stop_sound=_api_stop)  # type: ignore[attr-defined]
+
+        outcome = await coordinator.async_stop_sound("device-1", blank)
+
+        assert sent == ["cached-key"], blank
+        assert outcome is StopSoundOutcome.CANCELLED, blank
+        assert coordinator._sound_request_uuids == {}  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_blank_request_uuid_without_a_cached_key_is_uncorrelated() -> None:
+    """Blank in, no cache: the stop is submitted, but nothing proves an effect."""
+
+    for blank in ("", "   "):
+        sent: list[str | None] = []
+        coordinator = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
+        coordinator._sound_request_uuids = {}  # type: ignore[attr-defined]
+        coordinator._sound_request_timestamps = {}  # type: ignore[attr-defined]
+        coordinator._api_push_ready = lambda: True  # type: ignore[attr-defined]
+        coordinator._note_push_transport_problem = lambda: None  # type: ignore[attr-defined]
+        coordinator._set_auth_state = lambda **kwargs: None  # type: ignore[attr-defined]
+
+        async def _api_stop(device_id: str, request_uuid: str | None) -> bool:
+            sent.append(request_uuid)
+            return True
+
+        coordinator.api = SimpleNamespace(async_stop_sound=_api_stop)  # type: ignore[attr-defined]
+
+        outcome = await coordinator.async_stop_sound("device-1", blank)
+
+        assert sent == [None], blank
+        assert outcome is StopSoundOutcome.UNCORRELATED, blank
+
+
+@pytest.mark.asyncio
+async def test_expired_cached_key_is_cleaned_even_for_a_blank_uuid() -> None:
+    """Housekeeping must not depend on how the caller spelled "no key".
+
+    An aged-out key is dropped on the ``UNCORRELATED`` path. Before the blank
+    values were normalised, passing "" skipped that whole block, so the stale
+    key stayed behind and every later stop kept ignoring it.
+    """
+
+    coordinator = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
+    coordinator._sound_request_uuids = {"device-1": "stale-key"}  # type: ignore[attr-defined]
+    coordinator._sound_request_timestamps = {  # type: ignore[attr-defined]
+        "device-1": time.time() - (SOUND_UUID_MAX_AGE_S + 60)
+    }
+    coordinator._api_push_ready = lambda: True  # type: ignore[attr-defined]
+    coordinator._note_push_transport_problem = lambda: None  # type: ignore[attr-defined]
+    coordinator._set_auth_state = lambda **kwargs: None  # type: ignore[attr-defined]
+
+    saved: list[bool] = []
+
+    async def _save() -> None:
+        saved.append(True)
+
+    coordinator._async_save_sound_uuids = _save  # type: ignore[attr-defined]
+
+    sent: list[str | None] = []
+
+    async def _api_stop(device_id: str, request_uuid: str | None) -> bool:
+        sent.append(request_uuid)
+        return True
+
+    coordinator.api = SimpleNamespace(async_stop_sound=_api_stop)  # type: ignore[attr-defined]
+
+    outcome = await coordinator.async_stop_sound("device-1", "")
+
+    assert sent == [None]
+    assert outcome is StopSoundOutcome.UNCORRELATED
+    assert coordinator._sound_request_uuids == {}  # type: ignore[attr-defined]
+    assert saved == [True]

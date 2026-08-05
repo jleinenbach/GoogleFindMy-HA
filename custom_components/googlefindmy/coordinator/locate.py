@@ -849,7 +849,16 @@ class LocateOperations(_MixinBase):
             # A suppressed stop is a stop that was never sent, so it is a
             # failure and must reach the service layer as one.
             return StopSoundOutcome.FAILED
-        request_uuid_to_use = request_uuid
+        # Blank means "no opinion" -- an optional field left empty, a template
+        # that rendered to nothing -- so it must fall through to the cached key
+        # below, never pose as one. In-process the absence of a key already has
+        # exactly one name, None, and only that name routes into the lookup.
+        # This is the SOLE normalisation point: every caller (service handler,
+        # button via the service, direct coordinator callers) passes here, and
+        # anything below the cache is too late to restore the fallback.
+        # Post-condition: request_uuid_to_use is None or non-blank, which is
+        # what every `is not None` check below relies on.
+        request_uuid_to_use = (request_uuid or "").strip() or None
         # True only when the key about to be sent came from our own cache AND
         # was still fresh. An explicitly passed foreign UUID does NOT qualify:
         # popping our cache entry on its behalf would drop the handle of a

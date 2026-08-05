@@ -63,10 +63,11 @@ def stop_sound_request(
         False,
         canonic_device_id,
         gcm_registration_id,
-        # Empty string, not None: `create_sound_request` generates a random UUID
-        # for `None`. The empty string leaves `requestUuid` off the wire, since
-        # proto3 omits default-valued scalars.
-        request_uuid=request_uuid or "",
+        # Forwarded as-is: `create_sound_request` normalises a missing or blank
+        # key to the empty string for stop requests, which proto3 then omits
+        # from the wire. Doing it there keeps the rule in the one place that
+        # knows whether this is a start or a stop.
+        request_uuid=request_uuid,
     )
 
 

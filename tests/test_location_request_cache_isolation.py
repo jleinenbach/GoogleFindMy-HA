@@ -436,3 +436,18 @@ def test_locate_request_requires_namespace(monkeypatch: pytest.MonkeyPatch) -> N
     # With an empty-namespace cache, the request proceeds but
     # the downstream nova call fails; the function returns [].
     assert result == []
+
+
+def test_create_location_request_rejects_a_blank_request_uuid() -> None:
+    """A locate needs its correlation id; an empty one is a defect, not a marker.
+
+    The generic envelope builder (`create_action_request`) writes any supplied
+    value verbatim, including an empty string, because it cannot tell a locate
+    from a stop sound. For a stop sound an empty value is deliberate; for a
+    locate it silently removes the id the push response is matched against.
+    The rule therefore lives in each action-aware builder.
+    """
+
+    for blank in ("", "   "):
+        with pytest.raises(ValueError, match="request_uuid"):
+            location_request.create_location_request("canon-1", "fcm-token", blank)

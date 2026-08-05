@@ -52,9 +52,12 @@ def create_action_request(
     Args:
         canonic_device_id: Canonical device id from the device list.
         gcm_registration_id: FCM registration token (used for push correlation).
-        request_uuid: Optional request UUID. If omitted (``None``), a random UUID
-            is generated. An empty string is passed through verbatim and marks a
-            deliberately uncorrelated request.
+        request_uuid: Optional request UUID, written verbatim. If omitted
+            (``None``), a random UUID is generated. A supplied value survives
+            unchanged, including an empty string; whether an empty value is a
+            deliberate marker or a defect depends on the action, which this
+            generic envelope builder does not know. The action-aware builders
+            (`create_sound_request`, `create_location_request`) own that rule.
         fmd_client_uuid: Optional session/client UUID. If omitted, a lazy, session-stable
             UUID is used.
 
@@ -71,10 +74,12 @@ def create_action_request(
 
     proto_module = _get_proto_module()
 
-    # `None` means "caller has no opinion, generate one" (locate/play path).
-    # An explicitly passed empty string means "deliberately uncorrelated" and
-    # must survive: `or` would silently replace it with a random UUID and
-    # reintroduce the fabricated correlation this guard exists to prevent.
+    # `None` means "caller has no opinion, generate one". Any supplied value is
+    # written as given: `or` would silently replace an empty one with a random
+    # UUID, and for a stop request that is exactly the fabricated correlation
+    # this guard exists to prevent (BSkando#195). This builder does not judge
+    # the value -- it cannot, it does not know the action -- it only refrains
+    # from overwriting it.
     req_uuid = generate_random_uuid() if request_uuid is None else request_uuid
     client_uuid = fmd_client_uuid or _get_client_uuid()
 

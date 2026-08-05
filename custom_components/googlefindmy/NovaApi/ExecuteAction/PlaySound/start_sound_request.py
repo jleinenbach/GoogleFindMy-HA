@@ -59,7 +59,7 @@ def start_sound_request(
         the request UUID actually used (the injected one, or a freshly
         generated one when none was supplied).
     """
-    if request_uuid is None:
+    if not request_uuid or not request_uuid.strip():
         request_uuid = generate_random_uuid()
     return (
         create_sound_request(
