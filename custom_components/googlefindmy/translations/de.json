@@ -806,6 +806,9 @@
     "stop_sound_failed": {
       "message": "Tonstopp auf {device_id} fehlgeschlagen: {error}"
     },
+    "stop_sound_invalid_uuid": {
+      "message": "Stop Sound für {device_id} wurde nicht gesendet: Die Anfrage-UUID muss Text sein, übergeben wurde aber {request_uuid}."
+    },
     "stop_sound_suppressed": {
       "message": "Stop Sound für {device_id} wurde nicht gesendet. Home Assistant kann das Gerät gerade nicht erreichen; versuche es gleich noch einmal."
     },

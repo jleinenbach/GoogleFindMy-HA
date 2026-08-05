@@ -19,6 +19,9 @@ handlers run without a live Home Assistant device registry / network helper.
 
 from __future__ import annotations
 
+import json
+import pathlib
+import string
 from types import SimpleNamespace
 from typing import Any
 from unittest import mock
@@ -164,11 +167,18 @@ class TestDeviceIdValidation:
     async def test_stop_sound_rejects_non_str_request_uuid(
         self, handlers: dict[str, Any]
     ) -> None:
-        """A non-string ``request_uuid`` fails closed before any dispatch."""
+        """A non-string ``request_uuid`` fails closed before any dispatch.
+
+        The key changed from ``stop_sound_failed`` to its own
+        ``stop_sound_invalid_uuid``: the former template carries an ``{error}``
+        placeholder that this call site cannot fill, and Home Assistant
+        swallows the resulting ``KeyError``, so the user was shown the raw
+        template. See ``TestStopSoundTranslationPlaceholders``.
+        """
         handler = handlers[services.SERVICE_STOP_SOUND]
         with pytest.raises(ServiceValidationError) as excinfo:
             await handler(_FakeCall({"device_id": "dev1", "request_uuid": 999}))
-        assert excinfo.value.translation_key == "stop_sound_failed"
+        assert excinfo.value.translation_key == "stop_sound_invalid_uuid"
 
 
 # ---------------------------------------------------------------------------
@@ -469,3 +479,73 @@ class TestRebuildRegistryGuards:
             )
         reload_mock.assert_not_awaited()
         assert "Invalid device_ids payload type" in caplog.text
+
+
+class TestStopSoundTranslationPlaceholders:
+    """Every raised message must be able to render.
+
+    Home Assistant formats an exception message with
+    ``with suppress(KeyError): message.format(**placeholders)``. A template
+    whose placeholders the call site does not supply therefore does not fail
+    loudly -- the user is simply shown the raw template, braces and all. This
+    pins the whole class rather than the one branch that was noticed.
+    """
+
+    @staticmethod
+    def _template_placeholders(translation_key: str) -> set[str]:
+        strings_path = pathlib.Path(services.__file__).parent / "strings.json"
+        message = json.loads(strings_path.read_text(encoding="utf-8"))["exceptions"][
+            translation_key
+        ]["message"]
+        return {field for _, field, _, _ in string.Formatter().parse(message) if field}
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("call_data", "outcome", "translation_key"),
+        [
+            ({"device_id": "dev1", "request_uuid": 7}, None, "stop_sound_invalid_uuid"),
+            ({"device_id": "dev1"}, StopSoundOutcome.FAILED, "stop_sound_suppressed"),
+            (
+                {"device_id": "dev1"},
+                StopSoundOutcome.UNCORRELATED,
+                "stop_sound_uncorrelated",
+            ),
+            ({"device_id": "dev1"}, RuntimeError("boom"), "stop_sound_failed"),
+        ],
+    )
+    async def test_every_raised_key_gets_all_its_placeholders(
+        self,
+        full_ctx: dict[str, Any],
+        monkeypatch: pytest.MonkeyPatch,
+        call_data: dict[str, Any],
+        outcome: Any,
+        translation_key: str,
+    ) -> None:
+        """Each reachable stop-sound error supplies every placeholder it needs."""
+
+        if isinstance(outcome, Exception):
+            stop = mock.AsyncMock(side_effect=outcome)
+        else:
+            stop = mock.AsyncMock(return_value=outcome)
+        coord = SimpleNamespace(
+            async_stop_sound=stop,
+            get_device_display_name=mock.Mock(return_value="Tag"),
+        )
+        hass = _hass_with_coordinator(coord)
+        monkeypatch.setattr(
+            services.dr,
+            "async_get",
+            lambda _h: SimpleNamespace(async_get=lambda _d: None),
+        )
+        handlers = _register(hass, full_ctx)
+
+        with pytest.raises(ServiceValidationError) as excinfo:
+            await handlers[services.SERVICE_STOP_SOUND](_FakeCall(call_data))
+
+        assert excinfo.value.translation_key == translation_key
+        supplied = set(excinfo.value.translation_placeholders or {})
+        required = self._template_placeholders(translation_key)
+        assert required <= supplied, (
+            f"{translation_key} would render with a stray literal: "
+            f"missing {sorted(required - supplied)}"
+        )

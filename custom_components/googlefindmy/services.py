@@ -931,14 +931,18 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
                 "Stop sound request UUID for '{device_id}' is invalid ({request_uuid}).".format(
                     **placeholders
                 ),
-                translation_key="stop_sound_failed",
+                # Own key, not `stop_sound_failed`: that template carries an
+                # `{error}` placeholder this call site cannot fill, and HA
+                # swallows the resulting KeyError, leaving the user with the raw
+                # template. Same defect the suppressed-stop branch already
+                # avoids; fixed here as a class, not as an instance.
+                translation_key="stop_sound_invalid_uuid",
                 translation_placeholders=placeholders,
             )
-        request_uuid: str | None
-        if request_uuid_raw is None:
-            request_uuid = None
-        else:
-            request_uuid = request_uuid_raw
+        # Blank is normalised to None one layer down, in
+        # `coordinator.async_stop_sound`, so that every caller of that method
+        # (not just this handler) gets the cached-key fallback.
+        request_uuid: str | None = request_uuid_raw
         try:
             runtime, canonical_id = await _resolve_runtime_for_device_id(raw_device_id)
             outcome = await runtime.coordinator.async_stop_sound(

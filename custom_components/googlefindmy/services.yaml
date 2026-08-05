@@ -41,7 +41,12 @@ play_sound:
 
 stop_sound:
   name: Stop Sound
-  description: "Stop the sound on a Google Find My device."
+  description: >-
+    Stop the sound on a Google Find My device. If this instance does not hold the
+    cancel key of the running ring (it was started from a phone or elsewhere), the
+    stop is still submitted, but the action reports that it could not be correlated
+    and the device may keep ringing. That report is an error, so a script stops at
+    this step unless you set continue_on_error.
   target:
     entity:
       domain: device_tracker
@@ -58,7 +63,8 @@ stop_sound:
       name: Request UUID (optional)
       description: >-
         Pass the request UUID returned by the Play Sound service when the backend requires
-        the stop request to reference an existing sound session.
+        the stop request to reference an existing sound session. Leave it empty to use the
+        key this instance stored for the running ring, if it has one.
       required: false
       selector:
         text:
