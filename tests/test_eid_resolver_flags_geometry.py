@@ -414,3 +414,86 @@ class TestHappyPathsUnchanged:
 
         assert result is not None  # positive control
         assert resolver._ble_battery_state.get("dev-no-flags") is None
+
+
+class TestTruncationDiagnosticStaysHonest:
+    """The truncation warning must describe a payload that actually failed.
+
+    Removing the exclusive service-data gate means the raw-header branch now
+    also runs for payloads the service-data probe already resolved. Without a
+    guard, those would be reported as truncated while a candidate exists.
+    """
+
+    @staticmethod
+    def _resolved_but_short_modern(fill: int) -> bytes:
+        """29 bytes: service-data hit at byte 7, raw header claims 0x41."""
+        body = bytearray([fill] * 29)
+        body[0] = _MODERN_FRAME_TYPE  # raw-header branch sees a modern frame
+        body[7] = _FMDN_FRAME_TYPE  # service-data branch builds a candidate
+        return bytes(body)
+
+    def test_no_truncation_warning_when_a_candidate_was_found(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A resolved payload is not a truncated one."""
+        resolver = _make_resolver()
+        raw = self._resolved_but_short_modern(0x77)
+
+        with caplog.at_level("WARNING"):
+            candidates, _frame = resolver._extract_eid_candidates(raw)
+
+        assert candidates  # the service-data probe did produce one
+        assert "Truncated or unexpected framed BLE payload" not in caplog.text
+
+    def test_truncation_warning_still_fires_without_any_candidate(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Positive control: the diagnostic is guarded, not disabled."""
+        resolver = _make_resolver()
+        body = bytearray([0x77] * 29)
+        body[0] = _MODERN_FRAME_TYPE
+        body[7] = 0x00  # no service-data candidate this time
+        raw = bytes(body)
+
+        with caplog.at_level("WARNING"):
+            resolver._extract_eid_candidates(raw)
+
+        assert "Truncated or unexpected framed BLE payload" in caplog.text
+
+
+class TestLegacyWrapperSemantics:
+    """The compatibility wrapper keeps its candidate list, not its frame type.
+
+    Pinned because the change is silent otherwise: no existing test covers a
+    payload where both geometries apply, so nothing would notice the second
+    return value moving.
+    """
+
+    def test_wrapper_reports_the_last_frame_byte_seen(self) -> None:
+        """Both branches run now, so the raw-header one has the last word."""
+        resolver = _make_resolver()
+        eid = bytearray([0x11] * MODERN_EID_LENGTH)
+        eid[6] = _FMDN_FRAME_TYPE  # -> payload[7] == 0x40
+        payload = bytes([_MODERN_FRAME_TYPE]) + bytes(eid) + bytes([0x01])
+
+        candidates, observed_frame = resolver._extract_candidates(payload)
+
+        # Candidate list: service-data slice first, raw-header slice second.
+        assert candidates == [payload[8:28], payload[1:33]]
+        # Second element is the raw-header frame, not the first candidate's.
+        assert observed_frame == _MODERN_FRAME_TYPE
+
+    def test_production_path_reports_the_matched_frame_instead(self) -> None:
+        """Which is exactly why production does not use the wrapper."""
+        resolver = _make_resolver()
+        eid = bytearray([0x11] * MODERN_EID_LENGTH)
+        eid[6] = _FMDN_FRAME_TYPE
+        payload = bytes([_MODERN_FRAME_TYPE]) + bytes(eid) + bytes([0x01])
+        _register(resolver, payload[8:28], "dev-sd-hit")
+
+        _matches, matched, observed_frame = resolver._resolve_eid_internal(payload)
+
+        # The service-data candidate is what matched, so its frame type is
+        # what gets reported -- 0x40, the byte that is EID material here.
+        assert matched == payload[8:28]
+        assert observed_frame == _FMDN_FRAME_TYPE

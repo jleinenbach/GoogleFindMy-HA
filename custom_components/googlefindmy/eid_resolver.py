@@ -312,7 +312,7 @@ class BLEScanInfo:
 EidLayout = Literal["framed", "bare", "window"]
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(slots=True)
 class EidCandidate:
     """One EID slice extracted from a BLE payload, with its geometry.
 
@@ -342,10 +342,17 @@ class EidCandidate:
     Deliberately unhashable. A candidate must never be usable as a dict key
     or a set member: those are the byte-keyed lookups (``self._lookup``,
     ``self._lookup_metadata``, the candidate set in ``_heuristic_resolve``)
-    that must not silently miss. ``frozen=True`` alone would generate a
-    working ``__hash__``, so the lookups would compile, run, and return
-    ``None`` forever; ``__hash__ = None`` is what turns that silent miss into
-    a loud ``TypeError``.
+    that must not silently miss. ``__hash__ = None`` is what turns that silent
+    miss into a loud ``TypeError``; it is stated explicitly rather than left
+    to the ``eq``/``frozen`` interaction, because that interaction is exactly
+    the kind of implicit behaviour this guard exists to not depend on.
+
+    Not ``frozen``: the sliding-window branch builds up to 128 of these per
+    advertisement inside the BLE callback, on the event loop, and frozen
+    instances cost roughly 3.4x as much to construct (measured: 75 us vs 31 us
+    for a 63-byte payload). Immutability buys nothing here -- candidates are
+    local and short-lived, discarded as soon as one of them matches -- while
+    the cost is paid on every unresolvable advertisement.
     """
 
     eid: bytes
@@ -359,10 +366,11 @@ class EidCandidate:
 def _guess_flags_byte(raw: bytes) -> int | None:  # noqa: PLR0911
     """Re-derive the hashed-flags position from the payload bytes alone.
 
-    This is the pre-geometry derivation, kept for exactly two callers: direct
-    calls that supply no geometry, and sliding-window matches, whose offset is
-    a search position rather than a parsed layout. Everything else takes the
-    position from the matched candidate, which already answered the question.
+    This is the pre-geometry derivation. It has one call site, which serves
+    two situations: direct calls that supply no geometry, and sliding-window
+    matches, whose offset is a search position rather than a parsed layout.
+    Everything else takes the position from the matched candidate, which
+    already answered the question.
 
     SPEC (Find Hub Network Accessory Specification, retrieved 2026-08-05):
     the hashed-flags byte sits at octet 28 for 160-bit-curve frames and at
@@ -2809,7 +2817,9 @@ class GoogleFindMyEIDResolver:
             return [], None, None
 
         raw = bytes(eid_bytes)
-        candidates, observed_frame = self._extract_eid_candidates(raw)
+        # The payload-level frame type is not used here: every consumer below
+        # takes it from the candidate that actually matched.
+        candidates, _payload_frame = self._extract_eid_candidates(raw)
         raw_prefix = raw[:4].hex()
         candidate_prefixes = [candidate.eid[:4].hex() for candidate in candidates]
 
@@ -2861,6 +2871,12 @@ class GoogleFindMyEIDResolver:
 
             # Update state for ALL matches (shared devices)
             for match in matches:
+                # Intended, and worth naming because the value is persisted
+                # via EIDGenerationLock.frame_type / to_dict(): for a
+                # sliding-window hit this now stores None where the
+                # payload-level byte used to be stored. None is the honest
+                # answer when the match carries no frame geometry, and the
+                # field has no production reader beyond the diagnostic dump.
                 self._update_match_state(
                     match,
                     metadata=metadata,
@@ -3039,10 +3055,13 @@ class GoogleFindMyEIDResolver:
             # deactivated; hashed-flags spec bit 7 carries the same state. The
             # two should therefore always agree.
             #
-            # They demonstrably do not always agree in this project's field
-            # reports: 0x41 is observed on modern 32-byte-EID accessories
-            # regardless of tracking state (docs/BLE_BATTERY_SENSOR.md). Which
-            # reading holds is an open question, so this code deliberately
+            # This repository's own documentation has long described 0x41 as
+            # "typically" the modern 32-byte-EID frame, i.e. as a property of
+            # the accessory generation rather than of the tracking state
+            # (docs/BLE_BATTERY_SENSOR.md). That reading and the specification
+            # cannot both be complete, but no primary observation is on record
+            # here either way -- which is the whole reason for this channel.
+            # Until it produces data, the question is open, so this code
             # does NOT resolve it: the decoded bit is passed through unchanged
             # in both directions. Forcing the bit to False on a 0x40/bit-1
             # disagreement would suppress precisely the signal the sensor
@@ -3246,9 +3265,15 @@ class GoogleFindMyEIDResolver:
     def _extract_candidates(self, payload: bytes) -> tuple[list[bytes], int | None]:
         """Legacy view: candidate bytes plus the payload-level frame type.
 
-        Retained verbatim for the characterization suite. Production code
-        uses :meth:`_extract_eid_candidates`, which additionally carries each
-        candidate's offset and layout.
+        Retained for the characterization suite. The *candidate list* is
+        unchanged; the second element is not. Without the exclusive
+        service-data gate, the raw-header branch also runs after a
+        service-data hit and overwrites ``observed_frame``, so this now
+        reports the last frame byte seen for the payload rather than the one
+        belonging to the first candidate. Production code uses
+        :meth:`_extract_eid_candidates` and takes the frame type from the
+        candidate that matched, which is the only reading that is well-defined
+        when both geometries produce a candidate.
         """
 
         candidates, observed_frame = self._extract_eid_candidates(payload)
@@ -3429,9 +3454,13 @@ class GoogleFindMyEIDResolver:
         everything after that is DEBUG and throttled, because a disagreeing
         beacon disagrees on every single advertisement.
 
-        The storage key matches the one ``FMDN_FLAGS_PROBE`` uses. A
-        measurement channel that cannot be joined with the probe log it is
-        meant to explain would be worthless as a diagnostic.
+        The emitted fields mirror ``FMDN_FLAGS_PROBE`` exactly -- both the
+        ``device``/``canonical`` pair and the throttle key. Emitting only the
+        storage key would look joinable and not be: the two identifiers differ
+        whenever a device carries a canonical id, and the probe log puts
+        ``device_id`` in the field this log would have filled with the
+        canonical one. A measurement channel that cannot be joined with the
+        probe log it is meant to explain is worthless as a diagnostic.
         """
 
         frame_says_uwt = observed_frame == MODERN_FRAME_TYPE
@@ -3445,10 +3474,11 @@ class GoogleFindMyEIDResolver:
                 self._frame_conflict_logged_devices.add(storage_key)
                 self._frame_conflict_log_at[(storage_key, observed_frame)] = now
                 _LOGGER.info(
-                    "FMDN_FLAGS_CONFLICT device=%s frame=0x%02x uwt_bit=%s "
-                    "decoded=0x%02x payload_len=%d; frame type and flags bit "
-                    "disagree, value passed through unchanged",
-                    storage_key,
+                    "FMDN_FLAGS_CONFLICT device=%s canonical=%s frame=0x%02x "
+                    "uwt_bit=%s decoded=0x%02x payload_len=%d; frame type and "
+                    "flags bit disagree, value passed through unchanged",
+                    match.device_id,
+                    match.canonical_id,
                     observed_frame,
                     uwt_mode,
                     decoded,
@@ -3466,10 +3496,11 @@ class GoogleFindMyEIDResolver:
 
             self._frame_conflict_log_at[key] = now
             _LOGGER.debug(
-                "FMDN_FLAGS_CONFLICT device=%s frame=0x%02x uwt_bit=%s "
-                "decoded=0x%02x payload_len=%d; frame type and flags bit "
-                "disagree, value passed through unchanged",
-                storage_key,
+                "FMDN_FLAGS_CONFLICT device=%s canonical=%s frame=0x%02x "
+                "uwt_bit=%s decoded=0x%02x payload_len=%d; frame type and "
+                "flags bit disagree, value passed through unchanged",
+                match.device_id,
+                match.canonical_id,
                 observed_frame,
                 uwt_mode,
                 decoded,

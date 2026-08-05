@@ -2223,3 +2223,61 @@ class TestFrameTypeAndUwtBitObservation:
         assert "FMDN_FLAGS_CONFLICT" not in caplog.text
         assert "CANNOT_DECODE" in caplog.text
         assert "observed_frame=0x41" in caplog.text
+
+    def test_conflict_channel_is_wired_into_the_production_path(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """The channel must fire through resolve_eid(), not just when poked.
+
+        Every other test in this class calls _update_ble_battery directly and
+        hands it the frame type. That measures the channel but not whether it
+        is connected: passing None for the frame type at the call site would
+        silence it for every real advertisement and leave those tests green.
+        """
+        resolver = _make_resolver()
+        eid = b"\xe7" * LEGACY_EID_LENGTH
+        # 0x40 frame, UWT bit set in the decoded flags: a disagreement.
+        raw = _service_data_payload(eid, 0b00000_00_1)
+        resolver._lookup[eid] = [_match("dev-wired")]
+        resolver._lookup_metadata[eid] = {"flags_xor_mask": 0x00}
+
+        with caplog.at_level("DEBUG"):
+            result = resolver.resolve_eid(raw)
+
+        assert result is not None  # positive control
+        assert "FMDN_FLAGS_CONFLICT" in caplog.text
+
+    def test_conflict_and_probe_logs_can_be_joined(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Both logs must name the same device in the same field.
+
+        Emitting only the storage key would look joinable and not be: the
+        probe log puts ``device_id`` in ``device=`` and the canonical id in
+        ``canonical=``, and the two differ for any device that has a canonical
+        id. A reporter joining the lines on ``device=`` would get nothing.
+        """
+        resolver = _make_resolver()
+        eid = b"\xe8" * LEGACY_EID_LENGTH
+        raw = _service_data_payload(eid, 0b00000_00_1)
+        match = _match("registry-id-abc", canonical_id="google-canonical-xyz")
+
+        with caplog.at_level("DEBUG"):
+            resolver._update_ble_battery(
+                raw, _FMDN_FRAME_TYPE, {"flags_xor_mask": 0x00}, [match]
+            )
+
+        conflict = next(
+            r.getMessage()
+            for r in caplog.records
+            if "FMDN_FLAGS_CONFLICT" in r.getMessage()
+        )
+        probe = next(
+            r.getMessage()
+            for r in caplog.records
+            if "FMDN_FLAGS_PROBE" in r.getMessage()
+        )
+        assert "device=registry-id-abc" in conflict
+        assert "canonical=google-canonical-xyz" in conflict
+        assert "device=registry-id-abc" in probe
+        assert "canonical=google-canonical-xyz" in probe
