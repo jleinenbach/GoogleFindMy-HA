@@ -1786,3 +1786,138 @@ def test_ap4_a_parked_tracker_with_an_empty_allow_list_stays_empty(
         "the manager write-back is where the widened list became durable, so "
         "the metadata assertion alone would understate the damage"
     )
+
+
+# --- AP3 characterisation: what each stored-key shape means today -----------
+#
+# Four shapes reach the normalisation in ``_refresh_subentry_index``, and the
+# reading side answers them in only two distinct ways: unrestricted (E1, E2,
+# E4) or filtered (E3). That collapse is the point -- three shapes carrying
+# three different statements share one answer. The table below pins today's
+# answer per shape so that the semantics change in
+# ``PLAN_GFMY_VISIBILITY_ASSIGNMENT_BOOKKEEPING`` has to face each one
+# separately instead of moving them as a block.
+_AP3_STORED_SHAPES: dict[str, list[str] | None] = {
+    # present and empty -- "this group owns nothing"
+    "E1": [],
+    # absent -- never assigned
+    "E2": None,
+    # present, normalises to a non-empty set
+    "E3": ["device-1"],
+    # present and non-empty, yet every entry is discarded by the normalisation:
+    # ``rsplit(":", 1)[-1]`` leaves the empty string for a bare prefix
+    "E4": ["e-ap3:"],
+}
+
+# What the tracker group sees today, per shape. ``None`` means "the whole
+# device index", which is what an absent filter yields.
+_AP3_TODAYS_ANSWER: dict[str, tuple[str, ...]] = {
+    "E1": ("device-1", "device-2", "device-3"),
+    "E2": ("device-1", "device-2", "device-3"),
+    "E3": ("device-1", "device-2"),
+    "E4": ("device-1", "device-2", "device-3"),
+}
+
+
+@pytest.mark.parametrize("shape", sorted(_AP3_STORED_SHAPES))
+def test_ap3_a_stored_shape_decides_what_a_group_may_see(shape: str) -> None:
+    """Pin, per stored shape, whether the allow-list still restricts anything.
+
+    This is the characterisation the semantics change measures against, and it
+    is deliberately built so that the *merge* is not what supplies the answer.
+    The sibling guard in ``test_coordinator_visibility_availability.py`` wires
+    a single device into the tracker group; that device returns through the
+    unassigned-device merge whether or not a filter is applied, so the two
+    mechanisms are indistinguishable there and the guard stays green under a
+    change to the filter. Here ``device-3`` is owned by ``other_group`` through
+    a non-empty stored list, and the merge only re-homes devices no group
+    claims, so under the code as it stands an absent filter is the route by
+    which ``device-3`` reaches the tracker view.
+
+    That is a statement about this code, not a proof about every possible
+    code: a mutation to the *merge* alone -- emptying the assigned-id set and
+    narrowing the union -- also pushes ``device-3`` into the tracker view while
+    the filter stays intact, and the fixture guard below does not notice,
+    because ``other_group``'s own view is unaffected. What the fixture does
+    buy is that no single change to the filter can be mistaken for the merge
+    or the other way round.
+
+    Two of the four shapes end up unrestricted for different reasons. For
+    ``E2`` that is intended -- a group that was never assigned anything is
+    unrestricted, which is how a freshly created group is meant to work. For
+    ``E1`` and ``E4`` it is the reading this plan is about: a list that says
+    "nothing" and a list whose entries are all unusable both collapse to the
+    same absent filter as "never assigned".
+
+    Note the boundary against the fold: the parked-tracker tests above cover
+    ``E1`` and a non-empty list on the *re-homable* arm, where an empty list is
+    already kept as an empty set. ``E2`` and ``E4`` have no counterpart there.
+    Everything here is the ordinary arm, where the group stores its own key,
+    and on which no such arm exists.
+
+    Killing mutations, one per shape, because a single mutation cannot cover
+    all four. Which assertion each one trips was measured, not assumed, and
+    the difference matters: a case killed through the *fixture guard* only
+    says the separation broke, while a case killed through the shape
+    assertion says this shape's answer really depends on the mutated code.
+
+    * ``E1``/``E4`` -- make the normalisation keep an empty set for every
+      group, not only the re-homable ones. Both fail on the shape assertion
+      (``device-3`` leaves their view); ``E2`` and ``E3`` stay green, which is
+      what makes this the mutation the semantics change has to survive.
+    * ``E2`` -- treat an absent key as an empty set (the equivalence the plan
+      measured and rejected). Only ``E2`` fails, and what it loses is
+      ``device-3``; ``device-1`` and ``device-2`` stay, because the merge
+      re-homes them. The *tracker* group is therefore cushioned by the merge,
+      and the "sees nothing" breakage that motivates the rejection lands on
+      groups the merge does not feed: a separately measured non-default group
+      with no stored key goes from three devices to none under the same
+      mutation. Stated precisely here because an earlier revision of this
+      docstring claimed ``device-1`` was lost, which a review disproved.
+    * ``E3`` -- force ``allow_filter`` to ``None``. ``E3`` fails on its shape
+      assertion (``device-3`` enters), the other three on the fixture guard,
+      because the mutation also unfilters ``other_group``. A narrower mutation
+      is not available here: every arm of the normalisation is shared by both
+      groups, so nothing distinguishes them at that point.
+    """
+
+    entry_id = f"e-ap3-{shape.lower()}"
+    canonical = _ap4_subentry(
+        "id-canonical",
+        TRACKER_SUBENTRY_KEY,
+        SUBENTRY_TYPE_TRACKER,
+        _AP3_STORED_SHAPES[shape],
+    )
+    foreign = _ap4_subentry(
+        "id-foreign", "other_group", SUBENTRY_TYPE_TRACKER, ["device-3"]
+    )
+    coordinator, _entry, manager = _ap4_coordinator_with_a_foreign_group(
+        entry_id, [canonical, foreign]
+    )
+
+    coordinator._refresh_subentry_index(coordinator.data, skip_repair=True)
+
+    tracker_meta = coordinator.get_subentry_metadata(key=TRACKER_SUBENTRY_KEY)
+    foreign_meta = coordinator.get_subentry_metadata(key="other_group")
+    assert tracker_meta is not None and foreign_meta is not None
+    assert tracker_meta.visible_device_ids == _AP3_TODAYS_ANSWER[shape], (
+        f"shape {shape} decides what the group may see, and the answer has to "
+        "change deliberately rather than as a side effect"
+    )
+    assert foreign_meta.visible_device_ids == ("device-3",), (
+        "the owning group keeps its device under every shape; a change here "
+        "would mean the fixture stopped separating the two mechanisms"
+    )
+
+    reaches_foreign_device = "device-3" in tracker_meta.visible_device_ids
+    tracker_writes = [ids for key, ids in manager.calls if key == TRACKER_SUBENTRY_KEY]
+    assert tracker_writes, (
+        "the write-back has to have happened at all -- without this the "
+        "assertion below is vacuously true for the restricted shapes, which "
+        "is the one-sided guard tests/AGENTS.md point 8 warns about"
+    )
+    persisted = dict(manager.calls).get(TRACKER_SUBENTRY_KEY, ())
+    assert ("device-3" in persisted) is reaches_foreign_device, (
+        "and the write-back mirrors the view: that is how a widened list "
+        "becomes durable instead of lasting one refresh"
+    )
