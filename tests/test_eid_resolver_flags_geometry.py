@@ -32,6 +32,7 @@ _FMDN_FRAME_TYPE = resolver_module.FMDN_FRAME_TYPE  # 0x40
 _MODERN_FRAME_TYPE = resolver_module.MODERN_FRAME_TYPE  # 0x41
 _RAW_HEADER_LENGTH = resolver_module.RAW_HEADER_LENGTH  # 1
 _SERVICE_DATA_OFFSET = resolver_module.SERVICE_DATA_OFFSET  # 8
+RAW_HEADER_PAYLOAD_LENGTH = 1 + MODERN_EID_LENGTH + 1  # frame + EID + flags
 
 
 # ---------------------------------------------------------------------------
@@ -655,6 +656,25 @@ class TestFrameTypeDoesNotDictateEidLength:
         assert [c for c in candidates if c.layout == "framed"] == []
         assert any(c.layout == "window" for c in candidates)
 
+    def test_frame_byte_without_a_reading_is_not_reported_as_observed(
+        self,
+    ) -> None:
+        """``observed_frame`` means "a framed candidate exists", not "octet 7 looked like one".
+
+        The 0x41 truncation band produces no candidate. Reporting the frame
+        byte anyway would hand the disagreement channel a frame type with no
+        geometry behind it, which is the fabrication this file exists to stop.
+        """
+        resolver = _make_resolver()
+        payload = (
+            self._PREFIX + bytes([_MODERN_FRAME_TYPE]) + bytes(range(0x20, 0x20 + 26))
+        )
+
+        candidates, observed = resolver._extract_eid_candidates(payload)
+
+        assert [c for c in candidates if c.layout == "framed"] == []
+        assert observed is None
+
     def test_legacy_frame_keeps_its_unconditional_20_byte_reading(self) -> None:
         """0x40 must not lose the reading it has always had at any length."""
         resolver = _make_resolver()
@@ -673,6 +693,11 @@ class TestFrameTypeDoesNotDictateEidLength:
     @pytest.mark.parametrize(
         ("frame_type", "payload_len", "expected"),
         [
+            # Below the shortest reading: nothing fits. Unreachable through
+            # the current call sites, pinned so that loosening one of them
+            # cannot silently produce a short slice with a framed layout.
+            (_FMDN_FRAME_TYPE, 27, ()),
+            (_MODERN_FRAME_TYPE, 27, ()),
             # Legacy geometry, exact fit: both frame types read 20 bytes.
             (_FMDN_FRAME_TYPE, 28, (LEGACY_EID_LENGTH,)),
             (_MODERN_FRAME_TYPE, 28, (LEGACY_EID_LENGTH,)),
@@ -695,6 +720,97 @@ class TestFrameTypeDoesNotDictateEidLength:
     ) -> None:
         """The full band table, so a later edit cannot move a boundary quietly."""
         assert (
-            resolver_module._service_data_eid_lengths(frame_type, payload_len)
+            resolver_module._framed_eid_lengths(
+                frame_type, payload_len, _SERVICE_DATA_OFFSET
+            )
             == expected
         )
+
+    @pytest.mark.parametrize(
+        ("frame_type", "payload_len", "expected"),
+        [
+            (_FMDN_FRAME_TYPE, 20, ()),
+            (_MODERN_FRAME_TYPE, 20, ()),
+            (_FMDN_FRAME_TYPE, 21, (LEGACY_EID_LENGTH,)),
+            (_MODERN_FRAME_TYPE, 21, (LEGACY_EID_LENGTH,)),
+            (_FMDN_FRAME_TYPE, 22, (LEGACY_EID_LENGTH,)),
+            (_MODERN_FRAME_TYPE, 22, (LEGACY_EID_LENGTH,)),
+            # The truncation band: 0x41 keeps producing nothing here, which is
+            # what routes the payload to _log_truncated_frame.
+            (_FMDN_FRAME_TYPE, 23, (LEGACY_EID_LENGTH,)),
+            (_MODERN_FRAME_TYPE, 23, ()),
+            (_FMDN_FRAME_TYPE, 32, (LEGACY_EID_LENGTH,)),
+            (_MODERN_FRAME_TYPE, 32, ()),
+            (_FMDN_FRAME_TYPE, 33, (MODERN_EID_LENGTH, LEGACY_EID_LENGTH)),
+            (_MODERN_FRAME_TYPE, 33, (MODERN_EID_LENGTH,)),
+        ],
+    )
+    def test_raw_header_eid_length_table(
+        self, frame_type: int, payload_len: int, expected: tuple[int, ...]
+    ) -> None:
+        """The same bands at offset 1, where the integration's own scanner reads.
+
+        ``fmdn_finder/ble_scanner.py`` hands the service-data value straight to
+        the resolver, so its payloads start at the frame byte. Only the 0x40
+        rows at 33+ differ from the behaviour before this change, and that is
+        the fix: the 20-byte prefix of a 32-byte EID no longer wins.
+        """
+        assert (
+            resolver_module._framed_eid_lengths(
+                frame_type, payload_len, _RAW_HEADER_LENGTH
+            )
+            == expected
+        )
+
+    def test_narrow_legacy_candidate_keeps_the_sliding_window(self) -> None:
+        """The new 0x41 candidate must not switch off the window fallback.
+
+        Octet 7 is EID material once in 256 rotation windows. Before this
+        reading existed, such a payload had no framed candidate and the window
+        found the real EID wherever it sat. Adding a candidate that then
+        suppresses the window would trade one silent resolution failure for
+        another -- the exact trade the raw-header gate was removed to avoid.
+        """
+        resolver = _make_resolver()
+        # 28-byte payload whose real 20-byte EID starts at offset 3, with
+        # octet 7 (EID byte 4) carrying 0x41 by coincidence.
+        eid = bytes([0xA0, 0xA1, 0xA2, 0xA3, _MODERN_FRAME_TYPE]) + bytes(
+            range(0xB0, 0xB0 + LEGACY_EID_LENGTH - 5)
+        )
+        payload = bytes([0x11, 0x22, 0x33]) + eid + bytes([0x77] * 5)
+        assert len(payload) == 28
+        assert payload[7] == _MODERN_FRAME_TYPE
+        _register(resolver, eid, "dev-window-survives")
+
+        result = resolver.resolve_eid(payload)
+
+        assert result is not None
+        assert result.device_id == "dev-window-survives"
+
+    def test_raw_header_legacy_frame_with_modern_eid_reads_flags_at_octet_33(
+        self,
+    ) -> None:
+        """The same defect in the geometry the integration's own scanner uses.
+
+        ``ble_scanner.py`` passes ``service_data[uuid]`` unchanged, so its
+        payloads carry the frame byte at offset 0. Fixing only the octet-8
+        geometry would have left the integration's own path fabricating a
+        battery level while the Bermuda path reported the real one.
+        """
+        resolver = _make_resolver()
+        # EID byte 20 (payload octet 21) is the decoy the prefix match reads.
+        eid = bytes(range(0x40, 0x40 + LEGACY_EID_LENGTH)) + bytes(
+            [0x02] + [0x55] * (MODERN_EID_LENGTH - LEGACY_EID_LENGTH - 1)
+        )
+        payload = bytes([_FMDN_FRAME_TYPE]) + eid + bytes([0x07])
+        assert len(payload) == RAW_HEADER_PAYLOAD_LENGTH
+        _register(resolver, eid, "dev-raw-modern")
+        _register(resolver, eid[:LEGACY_EID_LENGTH], "dev-raw-modern")
+
+        resolver.resolve_eid(payload)
+
+        state = resolver._ble_battery_state.get("dev-raw-modern")
+        assert state is not None
+        assert state.decoded_flags == payload[_RAW_HEADER_LENGTH + MODERN_EID_LENGTH]
+        assert state.uwt_mode is True
+        assert state.decoded_flags != payload[_RAW_HEADER_LENGTH + LEGACY_EID_LENGTH]

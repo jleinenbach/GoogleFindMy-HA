@@ -424,8 +424,10 @@ def _guess_flags_byte(raw: bytes) -> int | None:  # noqa: PLR0911
     return None
 
 
-def _service_data_eid_lengths(frame_type: int, payload_len: int) -> tuple[int, ...]:
-    """Return the EID lengths worth slicing at octet 8, longest reading first.
+def _framed_eid_lengths(
+    frame_type: int, payload_len: int, eid_offset: int
+) -> tuple[int, ...]:
+    """Return the EID lengths worth slicing at *eid_offset*, longest first.
 
     SPEC (Find Hub Network Accessory Specification, retrieved 2026-08-05): the
     frame type is *not* coupled to the EID length. ``0x41`` only states that
@@ -446,19 +448,32 @@ def _service_data_eid_lengths(frame_type: int, payload_len: int) -> tuple[int, .
     * For ``0x41`` the 20-byte reading is offered only when the payload ends
       right after the EID, with at most the optional flags byte behind it. A
       longer ``0x41`` payload that still falls short of a 32-byte EID is more
-      plausibly a truncated modern frame, whose octet 28 is EID material
-      rather than flags; slicing it as legacy would trade a missing candidate
-      for a wrong one. ``0x40`` keeps the unconditional 20-byte reading it has
-      always had, because dropping it would cost resolutions that work today.
+      plausibly a truncated modern frame, whose byte after the 20th EID octet
+      is EID material rather than flags; slicing it as legacy would trade a
+      missing candidate for a wrong one. ``0x40`` keeps the unconditional
+      20-byte reading it has always had, because dropping it would cost
+      resolutions that work today.
+
+    Both framed geometries share this function: *eid_offset* is 8 for a full
+    service-data frame and 1 for the bare header layout the integration's own
+    BLE scanner hands over (``fmdn_finder/ble_scanner.py``). The mis-slicing
+    is a property of the frame byte, not of the offset, so answering it in one
+    place is the point.
+
+    An empty result means no framed reading fits; the caller decides whether
+    that is a truncation to diagnose or simply a payload for the sliding
+    window.
 
     See custom_components/googlefindmy/AGENTS.md, "FHNA frame slicing
     reminder".
     """
 
+    if payload_len < eid_offset + LEGACY_EID_LENGTH:
+        return ()
     lengths: list[int] = []
-    if payload_len >= SERVICE_DATA_OFFSET + MODERN_EID_LENGTH:
+    if payload_len >= eid_offset + MODERN_EID_LENGTH:
         lengths.append(MODERN_EID_LENGTH)
-    legacy_fits_exactly = payload_len <= SERVICE_DATA_OFFSET + LEGACY_EID_LENGTH + 1
+    legacy_fits_exactly = payload_len <= eid_offset + LEGACY_EID_LENGTH + 1
     if frame_type == FMDN_FRAME_TYPE or legacy_fits_exactly:
         lengths.append(LEGACY_EID_LENGTH)
     return tuple(lengths)
@@ -3344,11 +3359,28 @@ class GoogleFindMyEIDResolver:
                 )
                 return candidates, None
 
+        force_sliding_window = False
         if length >= SERVICE_DATA_OFFSET + LEGACY_EID_LENGTH:
             frame_type = payload[7]
             if frame_type in (FMDN_FRAME_TYPE, MODERN_FRAME_TYPE):
-                observed_frame = frame_type
-                for eid_length in _service_data_eid_lengths(frame_type, length):
+                eid_lengths = _framed_eid_lengths(
+                    frame_type, length, SERVICE_DATA_OFFSET
+                )
+                if eid_lengths:
+                    observed_frame = frame_type
+                # A 0x41 frame in the exact legacy geometry had no framed
+                # candidate before this reading existed, so the sliding window
+                # was what resolved it. Letting the new candidate switch that
+                # window off would cost exactly those resolutions whenever
+                # octet 7 is EID material rather than a frame byte -- the same
+                # 1-in-256 coincidence the raw-header gate below was removed
+                # for. The window therefore stays available here, at the price
+                # of building it on the hit path too.
+                if frame_type == MODERN_FRAME_TYPE and eid_lengths == (
+                    LEGACY_EID_LENGTH,
+                ):
+                    force_sliding_window = True
+                for eid_length in eid_lengths:
                     candidates.append(
                         EidCandidate(
                             eid=payload[
@@ -3374,66 +3406,46 @@ class GoogleFindMyEIDResolver:
             had_service_data_candidate = bool(candidates)
             frame_type = payload[0]
             if frame_type in (FMDN_FRAME_TYPE, MODERN_FRAME_TYPE):
-                observed_frame = frame_type
                 modern_required_length = RAW_HEADER_LENGTH + MODERN_EID_LENGTH
-
-                if frame_type == FMDN_FRAME_TYPE and length >= (
-                    RAW_HEADER_LENGTH + LEGACY_EID_LENGTH
-                ):
-                    candidates.append(
-                        EidCandidate(
-                            eid=payload[
-                                RAW_HEADER_LENGTH : RAW_HEADER_LENGTH
-                                + LEGACY_EID_LENGTH
-                            ],
-                            offset=RAW_HEADER_LENGTH,
-                            frame_type=frame_type,
-                            layout="framed",
+                eid_lengths = _framed_eid_lengths(frame_type, length, RAW_HEADER_LENGTH)
+                # Reported even when no reading fits, unlike the service-data
+                # branch above. That asymmetry is a contract, not an oversight:
+                # a truncated 0x41 raw-header frame must still report its frame
+                # byte (tests/test_eid_resolver_candidates.py, "BUG E"), which
+                # is what routes it to the truncation diagnostic below. Octet 0
+                # is the payload's own first byte here, so reading a frame type
+                # there is a weaker claim than reading one at octet 7.
+                observed_frame = frame_type
+                if eid_lengths:
+                    for eid_length in eid_lengths:
+                        candidates.append(
+                            EidCandidate(
+                                eid=payload[
+                                    RAW_HEADER_LENGTH : RAW_HEADER_LENGTH + eid_length
+                                ],
+                                offset=RAW_HEADER_LENGTH,
+                                frame_type=frame_type,
+                                layout="framed",
+                            )
                         )
+                elif not had_service_data_candidate:
+                    # Only diagnose truncation when this payload produced
+                    # no candidate at all. Without the `not candidates`
+                    # gate above, this branch is now also reached for
+                    # payloads the service-data probe already resolved,
+                    # where a truncation warning would be a misdiagnosis.
+                    allow_sliding_window = length >= modern_required_length - 1
+                    self._log_truncated_frame(
+                        frame_type=frame_type,
+                        payload_len=length - RAW_HEADER_LENGTH,
+                        raw_len=length,
                     )
-                elif frame_type == MODERN_FRAME_TYPE:
-                    if length >= modern_required_length:
-                        candidates.append(
-                            EidCandidate(
-                                eid=payload[
-                                    RAW_HEADER_LENGTH : RAW_HEADER_LENGTH
-                                    + MODERN_EID_LENGTH
-                                ],
-                                offset=RAW_HEADER_LENGTH,
-                                frame_type=frame_type,
-                                layout="framed",
-                            )
-                        )
-                    elif (
-                        RAW_HEADER_LENGTH + LEGACY_EID_LENGTH
-                        <= length
-                        <= (RAW_HEADER_LENGTH + LEGACY_EID_LENGTH + 1)
-                    ):
-                        candidates.append(
-                            EidCandidate(
-                                eid=payload[
-                                    RAW_HEADER_LENGTH : RAW_HEADER_LENGTH
-                                    + LEGACY_EID_LENGTH
-                                ],
-                                offset=RAW_HEADER_LENGTH,
-                                frame_type=frame_type,
-                                layout="framed",
-                            )
-                        )
-                    elif not had_service_data_candidate:
-                        # Only diagnose truncation when this payload produced
-                        # no candidate at all. Without the `not candidates`
-                        # gate above, this branch is now also reached for
-                        # payloads the service-data probe already resolved,
-                        # where a truncation warning would be a misdiagnosis.
-                        allow_sliding_window = length >= modern_required_length - 1
-                        self._log_truncated_frame(
-                            frame_type=frame_type,
-                            payload_len=length - RAW_HEADER_LENGTH,
-                            raw_len=length,
-                        )
 
-        if not candidates and length > LEGACY_EID_LENGTH and allow_sliding_window:
+        if (
+            (not candidates or force_sliding_window)
+            and length > LEGACY_EID_LENGTH
+            and allow_sliding_window
+        ):
             window = min(length - LEGACY_EID_LENGTH + 1, 64)
             for i in range(window):
                 slice_20 = payload[i : i + LEGACY_EID_LENGTH]
