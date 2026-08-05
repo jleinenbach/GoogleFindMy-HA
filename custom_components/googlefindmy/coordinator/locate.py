@@ -930,6 +930,16 @@ class LocateOperations(_MixinBase):
             ):
                 # It is our key, so spending it is correct, not an eviction.
                 used_own_fresh_key = True
+            elif cached_uuid is not None and cached_uuid == request_uuid_to_use:
+                # Ours, but aged: it matches, it is simply too old to vouch
+                # for. Saying "does not match" here would be untrue, and the
+                # implicit path already distinguishes the two cases.
+                _LOGGER.debug(
+                    "Cancel key supplied for %s matches our cached key but it "
+                    "has aged out; sending it, reporting the stop as "
+                    "uncorrelated",
+                    device_id,
+                )
             else:
                 _LOGGER.warning(
                     "Cancel key for %s was supplied by the caller and does not "
@@ -942,10 +952,13 @@ class LocateOperations(_MixinBase):
             submitted = await self.api.async_stop_sound(device_id, request_uuid_to_use)
             if not submitted:
                 self._note_push_transport_problem()
-            # Success implies credentials worked
-            self._set_auth_state(failed=False)
-            if not submitted:
+                # No credential proof on this path: api.async_stop_sound
+                # swallows NovaAuthError and HTTP 401/403 into the same False
+                # as a timeout, so clearing the auth-failure state here would
+                # erase the very signal an expired sign-in produces.
                 return StopSoundOutcome.FAILED
+            # An accepted submission, and only that, proves credentials worked.
+            self._set_auth_state(failed=False)
             # CANCELLED is bound to PROVEN correlation, never to "some string
             # was sent". A key we cannot vouch for falls through to
             # UNCORRELATED below, which is what reaches the user as an error.
@@ -954,13 +967,23 @@ class LocateOperations(_MixinBase):
                 # is the ONLY branch that drops a live key --
                 # IRR-CA-CANCEL-KEY-ON-SUCCESS-ONLY is unchanged, only
                 # narrowed in the direction of its own purpose.
-                removed_request_uuid = self._sound_request_uuids.pop(device_id, None)
-                # Use getattr for test compatibility (tests may bypass __init__)
-                timestamps = getattr(self, "_sound_request_timestamps", None)
-                if timestamps is not None:
-                    timestamps.pop(device_id, None)
-                if removed_request_uuid is not None:
-                    await self._async_save_sound_uuids()
+                #
+                # Popped by VALUE, not by device id. The key was read before
+                # the await above, and a Play that lands during the Nova
+                # round trip stores a fresher one for the same device. Popping
+                # by id would then evict the handle of a ring that just
+                # started -- exactly the eviction used_own_fresh_key exists to
+                # prevent, only through the back door of an interleaving.
+                if self._sound_request_uuids.get(device_id) == request_uuid_to_use:
+                    removed_request_uuid = self._sound_request_uuids.pop(
+                        device_id, None
+                    )
+                    # Use getattr for test compatibility (tests may bypass __init__)
+                    timestamps = getattr(self, "_sound_request_timestamps", None)
+                    if timestamps is not None:
+                        timestamps.pop(device_id, None)
+                    if removed_request_uuid is not None:
+                        await self._async_save_sound_uuids()
                 return StopSoundOutcome.CANCELLED
             # IRR-CA-POP-ON-CORRELATED-CANCEL-ONLY: only a stop we can vouch
             # for spends the key. An aged key was sent unproven, so it survives

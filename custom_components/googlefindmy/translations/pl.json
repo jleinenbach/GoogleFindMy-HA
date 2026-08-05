@@ -804,7 +804,7 @@
       "message": "Nie udało się odtworzyć dźwięku na {device_id}: {error}"
     },
     "play_sound_suppressed": {
-      "message": "Nie wysłano polecenia Play Sound dla {device_id}. Home Assistant nie może teraz połączyć się z urządzeniem; spróbuj ponownie za chwilę."
+      "message": "Nie udało się uruchomić polecenia Play Sound dla {device_id}. Wpis w dzienniku dla tej próby podaje przyczynę; Home Assistant może jeszcze nie być w stanie połączyć się z urządzeniem, logowanie mogło wygasnąć, albo wystąpił błąd serwera, sieci lub ograniczenia liczby żądań."
     },
     "stop_sound_failed": {
       "message": "Nie udało się zatrzymać dźwięku na {device_id}: {error}"
@@ -813,13 +813,13 @@
       "message": "Polecenie Stop Sound dla {device_id} nie zostało wysłane: identyfikator żądania musi być tekstem, a otrzymano {request_uuid}."
     },
     "stop_sound_rejected": {
-      "message": "Polecenie Stop Sound dla {device_id} zostało wysłane, ale Google go nie przyjęło. Wpis w dzienniku dla tej próby podaje przyczynę; zwykle jest to wygasłe logowanie, błąd serwera lub sieci albo ograniczenie liczby żądań."
+      "message": "Nie udało się dokończyć polecenia Stop Sound dla {device_id}. Wpis w dzienniku dla tej próby podaje przyczynę; zwykle jest to wygasłe logowanie, brakujący token, błąd serwera lub sieci albo ograniczenie liczby żądań."
     },
     "stop_sound_suppressed": {
       "message": "Nie wysłano polecenia Stop Sound dla {device_id}. Home Assistant nie może teraz połączyć się z urządzeniem; spróbuj ponownie za chwilę."
     },
     "stop_sound_uncorrelated": {
-      "message": "Polecenie Stop Sound dla {device_id} zostało wysłane, ale ta instancja Home Assistant nie zna identyfikatora trwającego dzwonienia (zostało uruchomione gdzie indziej albo klucz został utracony). Google nie może powiązać zatrzymania z dzwonieniem, więc urządzenie może dzwonić dalej. Naciśnij przycisk na lokalizatorze albo poczekaj, aż dzwonienie samo się zakończy."
+      "message": "Polecenie Stop Sound dla {device_id} zostało wysłane, ale nie udało się powiązać go z trwającym dzwonieniem: zostało uruchomione gdzie indziej albo klucz, którym dysponuje ta instancja, jest zbyt stary, by za niego ręczyć. Google może nie powiązać zatrzymania z dzwonieniem, więc urządzenie może dzwonić dalej. Naciśnij przycisk na lokalizatorze albo poczekaj, aż dzwonienie samo ustanie."
     },
     "missing_token_cache": {
       "message": "Brak pamięci podręcznej tokenów. Podaj TokenCache specyficzny dla wpisu (na przykład entry.runtime_data.token_cache)."

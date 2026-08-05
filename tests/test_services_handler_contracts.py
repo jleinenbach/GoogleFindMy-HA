@@ -385,6 +385,36 @@ class TestResolverDispatch:
         assert excinfo.value.translation_key == "stop_sound_suppressed"
 
     @pytest.mark.asyncio
+    async def test_an_unknown_outcome_is_never_reported_as_success(
+        self, full_ctx: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The enum is a closed set, so its handling is closed too.
+
+        Three `is` comparisons and no default meant that any other value --
+        a bool from a stale test double, a member added later without visiting
+        this call site -- fell through silently and reached the user as a
+        successful stop. That is BSkando#195 reintroduced by omission, so the
+        default must be an error.
+        """
+
+        coord = SimpleNamespace(
+            async_stop_sound=mock.AsyncMock(return_value=True),
+            get_device_display_name=mock.Mock(return_value="Tag"),
+        )
+        hass = _hass_with_coordinator(coord)
+        monkeypatch.setattr(
+            services.dr,
+            "async_get",
+            lambda _h: SimpleNamespace(async_get=lambda _d: None),
+        )
+        handlers = _register(hass, full_ctx)
+        with pytest.raises(ServiceValidationError) as excinfo:
+            await handlers[services.SERVICE_STOP_SOUND](
+                _FakeCall({"device_id": "dev1"})
+            )
+        assert excinfo.value.translation_key == "stop_sound_uncorrelated"
+
+    @pytest.mark.asyncio
     async def test_rejected_stop_does_not_borrow_the_suppressed_advice(
         self, full_ctx: dict[str, Any], monkeypatch: pytest.MonkeyPatch
     ) -> None:

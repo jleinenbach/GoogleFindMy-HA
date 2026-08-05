@@ -978,8 +978,23 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
                 # Submitted, but nothing proves an effect: reporting plain
                 # success here would be misinformation (BSkando#195).
                 raise _service_validation_error(
-                    "Stop sound for '{device_id}' was submitted without a cancel "
-                    "key; the ring may keep playing.".format(**placeholders),
+                    "Stop sound for '{device_id}' could not be matched to a "
+                    "running ring; it may keep playing.".format(**placeholders),
+                    translation_key="stop_sound_uncorrelated",
+                    translation_placeholders=placeholders,
+                )
+            if outcome is not StopSoundOutcome.CANCELLED:
+                # Closed set, closed handling. Silence here would mean that any
+                # value outside the enum -- a bool from a stale test double, a
+                # future member added without visiting this site -- is reported
+                # to the user as a successful stop. That is the BSkando#195
+                # failure mode reintroduced by omission, so the default is an
+                # error, not success.
+                raise _service_validation_error(
+                    "Stop sound for '{device_id}' returned an unknown outcome "
+                    "({outcome}); treating it as unproven.".format(
+                        outcome=outcome, **placeholders
+                    ),
                     translation_key="stop_sound_uncorrelated",
                     translation_placeholders=placeholders,
                 )
