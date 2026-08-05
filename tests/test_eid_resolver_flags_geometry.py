@@ -497,3 +497,36 @@ class TestLegacyWrapperSemantics:
         # what gets reported -- 0x40, the byte that is EID material here.
         assert matched == payload[8:28]
         assert observed_frame == _FMDN_FRAME_TYPE
+
+
+class TestHeuristicConsumerSeesBytes:
+    """The one consumer of the candidate list that has no tests of its own.
+
+    ``_heuristic_resolve`` builds ``set(candidates)`` internally. Handing it
+    ``EidCandidate`` objects instead of their bytes now raises ``TypeError``
+    rather than silently producing a set disjoint from every generated EID --
+    but only if something actually walks this path, and nothing did.
+    """
+
+    def test_unresolvable_payload_reaches_the_heuristic_path_with_bytes(
+        self,
+    ) -> None:
+        """A cache miss must not blow up on the way to heuristic discovery.
+
+        ``_cached_identities`` has to be non-empty: ``_heuristic_resolve``
+        returns before building its candidate set otherwise, and the test
+        would cover the call site without ever exercising it.
+        """
+        resolver = _make_resolver()
+        # A non-empty lookup, so the "cache not primed" early return is skipped.
+        _register(resolver, bytes([0x01] * LEGACY_EID_LENGTH), "dev-other")
+        # Non-empty identities, so set(candidates) is actually reached; a
+        # None identity_key then short-circuits the expensive hypothesis test.
+        resolver._cached_identities = [SimpleNamespace(identity_key=None)]
+
+        unrelated = bytes([_FMDN_FRAME_TYPE]) + bytes([0x99] * MODERN_EID_LENGTH)
+        matches, matched, observed_frame = resolver._resolve_eid_internal(unrelated)
+
+        assert matches == []
+        assert matched is None
+        assert observed_frame is None
