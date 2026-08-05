@@ -2030,3 +2030,254 @@ class TestBLEBatterySensorEdgeCases:
 
         assert sensor._device_id is None
         assert "unknown_ble_battery" in sensor._attr_unique_id
+
+
+class TestFrameTypeAndUwtBitObservation:
+    """The frame type and the UWT flag bit are two channels for one state.
+
+    The specification says they always agree; this project's field reports say
+    otherwise. Which reading holds is unresolved, so the code measures the
+    disagreement instead of arbitrating it -- arbitrating would either suppress
+    the very signal the sensor exists for, or mark every modern tracker as
+    permanently tracked.
+    """
+
+    @staticmethod
+    def _uwt_payload(device_suffix: str = "") -> tuple[bytes, int]:
+        """Return a legacy service-data payload whose decoded UWT bit is set."""
+        eid = bytes([0xA0 + len(device_suffix)]) * LEGACY_EID_LENGTH
+        decoded = 0b00000_00_1  # UWT bit set, battery level 0
+        return _service_data_payload(eid, decoded), decoded
+
+    def test_disagreement_logs_but_does_not_change_uwt_bit(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """0x40 frame with the UWT bit set: logged, passed through unchanged."""
+        resolver = _make_resolver()
+        raw, decoded = self._uwt_payload()
+        match = _match("dev-conflict")
+
+        with caplog.at_level("DEBUG"):
+            resolver._update_ble_battery(
+                raw, _FMDN_FRAME_TYPE, {"flags_xor_mask": 0x00}, [match]
+            )
+
+        state = resolver._ble_battery_state.get("dev-conflict")
+        assert state is not None
+        assert state.uwt_mode is True  # unchanged, not forced to False
+        assert state.decoded_flags == decoded
+        assert "FMDN_FLAGS_CONFLICT" in caplog.text
+
+    def test_modern_frame_without_uwt_bit_logs_but_stays_off(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """0x41 frame without the UWT bit: logged, still reported as off."""
+        resolver = _make_resolver()
+        eid = b"\xb1" * LEGACY_EID_LENGTH
+        raw = _service_data_payload(eid, 0b00000_01_0)  # battery 1, UWT clear
+        match = _match("dev-conflict-inverse")
+
+        with caplog.at_level("DEBUG"):
+            resolver._update_ble_battery(
+                raw, _MODERN_FRAME_TYPE, {"flags_xor_mask": 0x00}, [match]
+            )
+
+        state = resolver._ble_battery_state.get("dev-conflict-inverse")
+        assert state is not None
+        assert state.uwt_mode is False  # unchanged, not derived from the frame
+        assert "FMDN_FLAGS_CONFLICT" in caplog.text
+
+    @pytest.mark.parametrize(
+        ("frame_type", "decoded"),
+        [
+            (0x40, 0b00000_01_0),  # no UWT mode, no UWT bit
+            (0x41, 0b00000_00_1),  # UWT mode, UWT bit set
+        ],
+    )
+    def test_agreement_does_not_log(
+        self, frame_type: int, decoded: int, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Agreement in either direction produces no conflict record."""
+        resolver = _make_resolver()
+        eid = bytes([0xC0 + frame_type % 16]) * LEGACY_EID_LENGTH
+        raw = _service_data_payload(eid, decoded)
+
+        with caplog.at_level("DEBUG"):
+            resolver._update_ble_battery(
+                raw, frame_type, {"flags_xor_mask": 0x00}, [_match("dev-agree")]
+            )
+
+        assert "FMDN_FLAGS_CONFLICT" not in caplog.text
+
+    def test_unknown_frame_type_skips_observation(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """No frame byte was observed, so there is nothing to contradict.
+
+        This is not a gap in the measurement but a property of the input: the
+        naked-EID path carries no frame byte at all.
+        """
+        resolver = _make_resolver()
+        raw, _decoded = self._uwt_payload()
+
+        with caplog.at_level("DEBUG"):
+            resolver._update_ble_battery(
+                raw, None, {"flags_xor_mask": 0x00}, [_match("dev-no-frame")]
+            )
+
+        assert "FMDN_FLAGS_CONFLICT" not in caplog.text
+
+    def test_first_conflict_per_device_is_info_then_debug(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """First disagreement at INFO so a stock build can report it."""
+        resolver = _make_resolver()
+        raw, _decoded = self._uwt_payload()
+        match = _match("dev-first")
+
+        with caplog.at_level("DEBUG"):
+            resolver._update_ble_battery(
+                raw, _FMDN_FRAME_TYPE, {"flags_xor_mask": 0x00}, [match]
+            )
+
+        records = [r for r in caplog.records if "FMDN_FLAGS_CONFLICT" in r.getMessage()]
+        assert len(records) == 1
+        assert records[0].levelname == "INFO"
+
+    def test_second_conflict_within_window_is_throttled(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A disagreeing beacon disagrees on every advertisement."""
+        resolver = _make_resolver()
+        raw, _decoded = self._uwt_payload()
+        match = _match("dev-throttle")
+        metadata = {"flags_xor_mask": 0x00}
+
+        with caplog.at_level("DEBUG"):
+            resolver._update_ble_battery(raw, _FMDN_FRAME_TYPE, metadata, [match])
+            resolver._update_ble_battery(raw, _FMDN_FRAME_TYPE, metadata, [match])
+            resolver._update_ble_battery(raw, _FMDN_FRAME_TYPE, metadata, [match])
+
+        records = [r for r in caplog.records if "FMDN_FLAGS_CONFLICT" in r.getMessage()]
+        assert len(records) == 1  # the INFO one; the rest are inside the window
+
+    def test_conflict_outside_window_logs_again_at_debug(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Once the throttle window passes, the channel keeps measuring."""
+        resolver = _make_resolver()
+        raw, _decoded = self._uwt_payload()
+        match = _match("dev-window-expiry")
+        metadata = {"flags_xor_mask": 0x00}
+
+        with caplog.at_level("DEBUG"):
+            resolver._update_ble_battery(raw, _FMDN_FRAME_TYPE, metadata, [match])
+            resolver._frame_conflict_log_at[("dev-window-expiry", _FMDN_FRAME_TYPE)] = (
+                time.time() - 3600
+            )
+            resolver._update_ble_battery(raw, _FMDN_FRAME_TYPE, metadata, [match])
+
+        records = [r for r in caplog.records if "FMDN_FLAGS_CONFLICT" in r.getMessage()]
+        assert [r.levelname for r in records] == ["INFO", "DEBUG"]
+
+    def test_resolver_built_without_init_does_not_raise(self) -> None:
+        """Stubs bypass __init__, so every new cache needs its defaults guard."""
+        resolver = GoogleFindMyEIDResolver.__new__(GoogleFindMyEIDResolver)
+        resolver.hass = _fake_hass()
+        resolver._lookup = {}
+        resolver._lookup_metadata = {}
+        resolver._ensure_cache_defaults()
+
+        raw, _decoded = self._uwt_payload()
+        resolver._update_ble_battery(
+            raw, _FMDN_FRAME_TYPE, {"flags_xor_mask": 0x00}, [_match("dev-stub")]
+        )
+
+        assert resolver._ble_battery_state["dev-stub"].uwt_mode is True
+
+    def test_undecodable_modern_frame_is_visible_via_the_probe_log(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """The population that would settle the question is already visible.
+
+        A 0x41 frame whose flags byte cannot be decoded never reaches the
+        conflict channel -- there is no decoded bit to contradict. It is not
+        invisible, though: the pre-existing CANNOT_DECODE probe reports it once
+        per device at INFO, carrying the observed frame type.
+
+        That distinction matters for reading the field data, because the
+        specification permits omitting the hashed-flags byte only when the
+        beacon supports neither battery indication nor unwanted tracking
+        protection mode. A 0x41 frame arriving without a decodable flags byte
+        is therefore either a beacon violating that rule or a payload shape
+        this code slices wrongly -- and the probe log is what tells them apart.
+        """
+        resolver = _make_resolver()
+        eid = b"\xd4" * LEGACY_EID_LENGTH
+        raw = _service_data_payload(eid, 0x42)
+        match = _match("dev-undecodable")
+
+        with caplog.at_level("DEBUG"):
+            resolver._update_ble_battery(raw, _MODERN_FRAME_TYPE, {}, [match])
+
+        assert "FMDN_FLAGS_CONFLICT" not in caplog.text
+        assert "CANNOT_DECODE" in caplog.text
+        assert "observed_frame=0x41" in caplog.text
+
+    def test_conflict_channel_is_wired_into_the_production_path(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """The channel must fire through resolve_eid(), not just when poked.
+
+        Every other test in this class calls _update_ble_battery directly and
+        hands it the frame type. That measures the channel but not whether it
+        is connected: passing None for the frame type at the call site would
+        silence it for every real advertisement and leave those tests green.
+        """
+        resolver = _make_resolver()
+        eid = b"\xe7" * LEGACY_EID_LENGTH
+        # 0x40 frame, UWT bit set in the decoded flags: a disagreement.
+        raw = _service_data_payload(eid, 0b00000_00_1)
+        resolver._lookup[eid] = [_match("dev-wired")]
+        resolver._lookup_metadata[eid] = {"flags_xor_mask": 0x00}
+
+        with caplog.at_level("DEBUG"):
+            result = resolver.resolve_eid(raw)
+
+        assert result is not None  # positive control
+        assert "FMDN_FLAGS_CONFLICT" in caplog.text
+
+    def test_conflict_and_probe_logs_can_be_joined(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Both logs must name the same device in the same field.
+
+        Emitting only the storage key would look joinable and not be: the
+        probe log puts ``device_id`` in ``device=`` and the canonical id in
+        ``canonical=``, and the two differ for any device that has a canonical
+        id. A reporter joining the lines on ``device=`` would get nothing.
+        """
+        resolver = _make_resolver()
+        eid = b"\xe8" * LEGACY_EID_LENGTH
+        raw = _service_data_payload(eid, 0b00000_00_1)
+        match = _match("registry-id-abc", canonical_id="google-canonical-xyz")
+
+        with caplog.at_level("DEBUG"):
+            resolver._update_ble_battery(
+                raw, _FMDN_FRAME_TYPE, {"flags_xor_mask": 0x00}, [match]
+            )
+
+        conflict = next(
+            r.getMessage()
+            for r in caplog.records
+            if "FMDN_FLAGS_CONFLICT" in r.getMessage()
+        )
+        probe = next(
+            r.getMessage()
+            for r in caplog.records
+            if "FMDN_FLAGS_PROBE" in r.getMessage()
+        )
+        assert "device=registry-id-abc" in conflict
+        assert "canonical=google-canonical-xyz" in conflict
+        assert "device=registry-id-abc" in probe
+        assert "canonical=google-canonical-xyz" in probe
