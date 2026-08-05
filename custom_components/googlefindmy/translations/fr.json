@@ -803,8 +803,23 @@
     "play_sound_failed": {
       "message": "Échec de la lecture du son sur {device_id} : {error}"
     },
+    "play_sound_suppressed": {
+      "message": "Play Sound pour {device_id} n'a pas pu être lancé. L'entrée de journal de cette tentative en indique la raison; Home Assistant n'est peut-être pas encore en mesure de joindre l'appareil, la connexion a pu expirer, ou il s'agit d'une erreur serveur, réseau ou de limite de débit."
+    },
     "stop_sound_failed": {
       "message": "Échec de l’arrêt du son sur {device_id} : {error}"
+    },
+    "stop_sound_invalid_uuid": {
+      "message": "Stop Sound pour {device_id} n'a pas été envoyé : l'UUID de requête doit être du texte, mais {request_uuid} a été fourni."
+    },
+    "stop_sound_rejected": {
+      "message": "Stop Sound pour {device_id} n'a pas pu être mené à bien. L'entrée de journal de cette tentative en indique la raison; il s'agit le plus souvent d'une connexion expirée, d'un jeton manquant, d'une erreur serveur ou réseau, ou d'une limite de débit."
+    },
+    "stop_sound_suppressed": {
+      "message": "Stop Sound pour {device_id} n'a pas été envoyé. Home Assistant ne parvient pas à joindre l'appareil pour le moment ; réessayez dans un instant."
+    },
+    "stop_sound_uncorrelated": {
+      "message": "Stop Sound pour {device_id} a été envoyé, mais n'a pas pu être associé à la sonnerie en cours: elle a été déclenchée ailleurs, ou la clé dont dispose cette instance est trop ancienne pour en répondre. Google risque de ne pas pouvoir associer l'arrêt à la sonnerie, l'appareil peut donc continuer à sonner. Appuyez sur le bouton du traceur ou attendez la fin de la sonnerie."
     },
     "missing_token_cache": {
       "message": "Cache de jetons manquant. Fournissez le TokenCache spécifique à l’entrée (par exemple entry.runtime_data.token_cache)."

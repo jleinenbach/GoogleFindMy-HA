@@ -803,8 +803,23 @@
     "play_sound_failed": {
       "message": "Tonwiedergabe auf {device_id} fehlgeschlagen: {error}"
     },
+    "play_sound_suppressed": {
+      "message": "Play Sound für {device_id} konnte nicht gestartet werden. Der Log-Eintrag zu diesem Versuch nennt den Grund; möglich sind eine noch nicht bereite Verbindung zum Gerät, eine abgelaufene Anmeldung oder ein Server-, Netzwerk- oder Ratenbegrenzungsfehler."
+    },
     "stop_sound_failed": {
       "message": "Tonstopp auf {device_id} fehlgeschlagen: {error}"
+    },
+    "stop_sound_invalid_uuid": {
+      "message": "Stop Sound für {device_id} wurde nicht gesendet: Die Anfrage-UUID muss Text sein, übergeben wurde aber {request_uuid}."
+    },
+    "stop_sound_rejected": {
+      "message": "Stop Sound für {device_id} konnte nicht abgeschlossen werden. Der Log-Eintrag zu diesem Versuch nennt den Grund; meist ist es eine abgelaufene Anmeldung, ein fehlendes Token, ein Server- oder Netzwerkfehler oder eine Ratenbegrenzung."
+    },
+    "stop_sound_suppressed": {
+      "message": "Stop Sound für {device_id} wurde nicht gesendet. Home Assistant kann das Gerät gerade nicht erreichen; versuche es gleich noch einmal."
+    },
+    "stop_sound_uncorrelated": {
+      "message": "Stop Sound für {device_id} wurde gesendet, konnte aber dem laufenden Klingeln nicht zugeordnet werden: Das Klingeln wurde anderswo gestartet, oder der hier vorliegende Schlüssel ist zu alt, um dafür einzustehen. Google kann den Stopp möglicherweise nicht zuordnen, das Gerät klingelt dann weiter. Drücke die Taste am Tracker oder warte, bis das Klingeln von selbst endet."
     },
     "missing_token_cache": {
       "message": "Token-Cache fehlt. Bitte den eintragsbezogenen TokenCache übergeben (z. B. entry.runtime_data.token_cache)."

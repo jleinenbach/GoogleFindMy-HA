@@ -236,9 +236,20 @@ def is_presence_expired(
 # Play Sound UUID Expiry
 # ---------------------------------------------------------------------------
 
-# Stored Play Sound UUIDs older than this are considered stale (#108): a ring
-# auto-stops long before then, so an aged key must not be trusted as a Stop
-# target nor block a fresh cancel key from being cached.
+# Age at which a stored Play Sound cancel key stops being TRUSTED.
+#
+# This is not a claim about when a ring ends. It bounds two things only:
+#   * store hygiene -- the reload filter drops keys older than this, so the
+#     persisted map cannot grow without limit over deleted devices;
+#   * the overwrite guard -- an ambiguous play (ok=False) may replace a key
+#     older than this, but never a fresher one.
+# An aged key is still SENT on a Stop; it is simply reported as an uncorrelated
+# attempt rather than a confirmed cancel (coordinator/locate.py, async_stop_sound).
+#
+# The value stays at 30 minutes deliberately. No measurement of the Nova queue
+# latency exists in this project, so every alternative number would be invented,
+# and correctness does not rest on it: it rests on
+# IRR-CA-CANCEL-KEY-ON-SUCCESS-ONLY plus the uncorrelated-outcome rule above.
 SOUND_UUID_MAX_AGE_S = 30 * 60  # 30 minutes
 
 

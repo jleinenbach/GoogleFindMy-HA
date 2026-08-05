@@ -25,7 +25,7 @@ from aiohttp import ClientConnectionError, ClientError
 from homeassistant.exceptions import ConfigEntryAuthFailed, HomeAssistantError
 
 from .._reauth_reason import ReauthReasonCode
-from ..const import DEFAULT_MIN_POLL_INTERVAL
+from ..const import DEFAULT_MIN_POLL_INTERVAL, StopSoundOutcome
 from ..NovaApi.ExecuteAction.LocateTracker.decrypt_locations import (
     DecryptionError,
     OwnerKeyLookupTransientError,
@@ -761,6 +761,12 @@ class LocateOperations(_MixinBase):
             # the reload filter would discard — the ambiguous UUID is still
             # stored, since it may be the only handle on a current ring. See
             # IRR-CA-CANCEL-KEY-ON-SUCCESS-ONLY.
+            #
+            # Since the three-valued Stop outcome landed, the drop branch in
+            # async_stop_sound is additionally bound to "the key we sent was
+            # our own AND was fresh": an explicitly passed foreign key must not
+            # evict our handle. That narrows the invariant in the direction of
+            # its own purpose; the wording above is unchanged.
             existing_uuid = self._sound_request_uuids.get(device_id)
             existing_is_stale = (
                 existing_uuid is not None
@@ -816,65 +822,175 @@ class LocateOperations(_MixinBase):
         self,
         device_id: str,
         request_uuid: str | None = None,
-    ) -> bool:
+    ) -> StopSoundOutcome:
         """Stop sound on a device using the native async API (no executor).
 
         **IMPORTANT**: This method retrieves the UUID from the previous Play Sound request
-        and uses it to cancel that specific request. Without the UUID, Google's API may
-        not properly cancel the sound and the device will continue ringing.
+        and uses it to cancel that specific request. Without it the field is absent from
+        the proto3 payload, so the server cannot correlate the stop with a running ring
+        and the device may keep ringing.
 
         Args:
             device_id: The canonical ID of the device.
             request_uuid: Optional request UUID that identifies the prior play request.
 
         Returns:
-            True if the command was submitted successfully, False otherwise.
+            A :class:`StopSoundOutcome`. The state space is four-valued on
+            purpose: ``CANCELLED`` (submitted with a correlated cancel key),
+            ``UNCORRELATED`` (submitted without one, so nothing proves an
+            effect), ``SUPPRESSED`` (never sent by this integration) and
+            ``FAILED`` (handed to the transport and not accepted). A bool cannot
+            carry the middle state, and collapsing it into success is what
+            reported a stop for a ring that kept playing (BSkando#195).
         """
         # Less strict than can_play_sound(): stopping is harmless but still requires push readiness.
         if not self._api_push_ready():
             _LOGGER.debug(
                 "Suppressing stop_sound call for %s: push not ready", device_id
             )
-            return False
-        request_uuid_to_use = request_uuid
+            # A suppressed stop is a stop that was never sent, so it is a
+            # failure and must reach the service layer as one -- but as its own
+            # kind: nothing left this machine, and the condition clears itself.
+            return StopSoundOutcome.SUPPRESSED
+        # Blank means "no opinion" -- an optional field left empty, a template
+        # that rendered to nothing -- so it must fall through to the cached key
+        # below, never pose as one. In-process the absence of a key already has
+        # exactly one name, None, and only that name routes into the lookup.
+        # This is the SOLE normalisation point: every caller (service handler,
+        # button via the service, direct coordinator callers) passes here, and
+        # anything below the cache is too late to restore the fallback.
+        # Post-condition: request_uuid_to_use is None or non-blank, which is
+        # what every `is not None` check below relies on.
+        request_uuid_to_use = (request_uuid or "").strip() or None
+        # True only when the key about to be sent came from our own cache AND
+        # was still fresh. An explicitly passed foreign UUID does NOT qualify:
+        # popping our cache entry on its behalf would drop the handle of a
+        # different, possibly still running ring.
+        used_own_fresh_key = False
+        cached_uuid_was_expired = False
         if request_uuid_to_use is None:
             cached_uuid = self._sound_request_uuids.get(device_id)
-            # An aged-out key is no better than no key: the ring it referenced
-            # auto-stopped long ago (the reload filter would discard it), so
-            # targeting it could miss a current ring. Treat it as absent.
-            if cached_uuid is not None and self._cached_sound_uuid_is_stale(device_id):
-                _LOGGER.debug(
-                    "Ignoring expired cached Play Sound UUID for %s", device_id
-                )
-                cached_uuid = None
+            # An aged-out key is still strictly better than no key, so it is
+            # SENT but not TRUSTED.
+            #
+            # Why sent: Nova queues an action command until the tracker becomes
+            # reachable, which can take hours to days (BSkando#108). A key that
+            # aged past SOUND_UUID_MAX_AGE_S may therefore still be the handle
+            # on the ring that is audible right now. It cannot hit a different
+            # ring -- it belongs to this device, and a fresher key would have
+            # replaced it. Dropping it traded a possible correlation for a
+            # guaranteed absence of one.
+            #
+            # Why not trusted: nothing proves the aged key references the
+            # running ring, so the outcome stays UNCORRELATED and reaches the
+            # user as such. It is also not popped afterwards: unspent, it is
+            # still the best handle a second attempt has.
+            #
+            # The previous justification ("the ring it referenced auto-stopped
+            # long ago") conflated two timers on two protocol layers. The FMDN
+            # BLE ring timeout (Data ID 0x05, at most 10 minutes) bounds how
+            # long a ring LASTS from the moment it starts; the Nova queue
+            # bounds how long DELIVERY takes. This timestamp records when we
+            # sent the play, not when the ring began, so nothing about the age
+            # of the key implies the ring is over.
+            cached_uuid_was_expired = cached_uuid is not None and (
+                self._cached_sound_uuid_is_stale(device_id)
+            )
             request_uuid_to_use = cached_uuid
-            if request_uuid_to_use is not None:
+            if request_uuid_to_use is None:
+                _LOGGER.warning(
+                    "No cancel key for %s; submitting an uncorrelated stop "
+                    "(the ring may keep playing)",
+                    device_id,
+                )
+            elif cached_uuid_was_expired:
+                _LOGGER.debug(
+                    "Using aged cached Play Sound UUID for %s (sent, but the "
+                    "outcome is reported as uncorrelated)",
+                    device_id,
+                )
+            else:
+                used_own_fresh_key = True
                 _LOGGER.debug(
                     "Using cached Play Sound UUID for %s: %s",
                     device_id,
                     request_uuid_to_use,
                 )
+        else:
+            # An explicitly passed key is a CLAIM of correlation, not a proof.
+            # It proves correlation in exactly one case: it IS our own fresh
+            # cached key. Any other string -- a typo, a stale template, the key
+            # of a different ring -- is unverifiable, and reporting CANCELLED
+            # for it would be BSkando#195 one layer up: success without effect.
+            cached_uuid = self._sound_request_uuids.get(device_id)
+            if (
+                cached_uuid is not None
+                and cached_uuid == request_uuid_to_use
+                and not self._cached_sound_uuid_is_stale(device_id)
+            ):
+                # It is our key, so spending it is correct, not an eviction.
+                used_own_fresh_key = True
+            elif cached_uuid is not None and cached_uuid == request_uuid_to_use:
+                # Ours, but aged: it matches, it is simply too old to vouch
+                # for. Saying "does not match" here would be untrue, and the
+                # implicit path already distinguishes the two cases.
+                _LOGGER.debug(
+                    "Cancel key supplied for %s matches our cached key but it "
+                    "has aged out; sending it, reporting the stop as "
+                    "uncorrelated",
+                    device_id,
+                )
             else:
                 _LOGGER.warning(
-                    "Missing Play Sound UUID for %s; attempting stop without it",
+                    "Cancel key for %s was supplied by the caller and does not "
+                    "match a live Play Sound request of this integration; the "
+                    "stop cannot be correlated (the ring may keep playing)",
                     device_id,
                 )
 
         try:
-            ok = await self.api.async_stop_sound(device_id, request_uuid_to_use)
-            if not ok:
+            submitted = await self.api.async_stop_sound(device_id, request_uuid_to_use)
+            if not submitted:
                 self._note_push_transport_problem()
-            # Success implies credentials worked
+                # No credential proof on this path: api.async_stop_sound
+                # swallows NovaAuthError and HTTP 401/403 into the same False
+                # as a timeout, so clearing the auth-failure state here would
+                # erase the very signal an expired sign-in produces.
+                return StopSoundOutcome.FAILED
+            # An accepted submission, and only that, proves credentials worked.
             self._set_auth_state(failed=False)
-            if ok:
-                removed_request_uuid = self._sound_request_uuids.pop(device_id, None)
-                # Use getattr for test compatibility (tests may bypass __init__)
-                timestamps = getattr(self, "_sound_request_timestamps", None)
-                if timestamps is not None:
-                    timestamps.pop(device_id, None)
-                if removed_request_uuid is not None:
-                    await self._async_save_sound_uuids()
-            return bool(ok)
+            # CANCELLED is bound to PROVEN correlation, never to "some string
+            # was sent". A key we cannot vouch for falls through to
+            # UNCORRELATED below, which is what reaches the user as an error.
+            if used_own_fresh_key:
+                # Correlated stop accepted with OUR key: it is spent. This
+                # is the ONLY branch that drops a live key --
+                # IRR-CA-CANCEL-KEY-ON-SUCCESS-ONLY is unchanged, only
+                # narrowed in the direction of its own purpose.
+                #
+                # Popped by VALUE, not by device id. The key was read before
+                # the await above, and a Play that lands during the Nova
+                # round trip stores a fresher one for the same device. Popping
+                # by id would then evict the handle of a ring that just
+                # started -- exactly the eviction used_own_fresh_key exists to
+                # prevent, only through the back door of an interleaving.
+                if self._sound_request_uuids.get(device_id) == request_uuid_to_use:
+                    removed_request_uuid = self._sound_request_uuids.pop(
+                        device_id, None
+                    )
+                    # Use getattr for test compatibility (tests may bypass __init__)
+                    timestamps = getattr(self, "_sound_request_timestamps", None)
+                    if timestamps is not None:
+                        timestamps.pop(device_id, None)
+                    if removed_request_uuid is not None:
+                        await self._async_save_sound_uuids()
+                return StopSoundOutcome.CANCELLED
+            # IRR-CA-POP-ON-CORRELATED-CANCEL-ONLY: only a stop we can vouch
+            # for spends the key. An aged key was sent unproven, so it survives
+            # -- it remains the best handle a retry has, and the reload filter
+            # clears it at the next restart anyway. Popping it here would leave
+            # a second attempt with nothing at all.
+            return StopSoundOutcome.UNCORRELATED
         except ConfigEntryAuthFailed as auth_exc:
             self._set_auth_state(
                 failed=True, reason=f"Auth failed during stop_sound: {auth_exc}"
@@ -883,7 +999,7 @@ class LocateOperations(_MixinBase):
                 await self.async_request_refresh()
             except Exception:
                 pass
-            return False
+            return StopSoundOutcome.FAILED
         except (TimeoutError, ClientConnectionError, ClientError) as conn_err:
             _LOGGER.warning(
                 "Connection failed during stop_sound for %s: %s",
@@ -892,7 +1008,7 @@ class LocateOperations(_MixinBase):
             )
             self.note_error(conn_err, where="async_stop_sound", device=device_id)
             self._note_push_transport_problem()
-            return False
+            return StopSoundOutcome.FAILED
         except Exception as err:
             _LOGGER.error(
                 "Unexpected error during stop_sound for %s: %s",
@@ -902,4 +1018,4 @@ class LocateOperations(_MixinBase):
             )
             self.note_error(err, where="async_stop_sound", device=device_id)
             self._note_push_transport_problem()
-            return False
+            return StopSoundOutcome.FAILED

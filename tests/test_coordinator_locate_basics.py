@@ -19,7 +19,10 @@ from unittest.mock import MagicMock
 import pytest
 from homeassistant.exceptions import HomeAssistantError
 
-from custom_components.googlefindmy.const import DEFAULT_MIN_POLL_INTERVAL
+from custom_components.googlefindmy.const import (
+    DEFAULT_MIN_POLL_INTERVAL,
+    StopSoundOutcome,
+)
 from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker.decrypt_locations import (
     DecryptionError,
     OwnerKeyLookupTransientError,
@@ -394,36 +397,93 @@ class TestAsyncStopSoundGating:
 
     async def test_blocks_when_push_not_ready(self, coord: LocateStub) -> None:
         coord._api_push_ready.return_value = False
-        ok = await coord.async_stop_sound("dev-1")
-        assert ok is False
+        outcome = await coord.async_stop_sound("dev-1")
+        # A suppressed stop was never sent, so it is a failure, not a silent
+        # "uncorrelated". The service layer has to raise on it -- and it is
+        # SUPPRESSED, not FAILED: nothing left this machine, so the advice
+        # "try again shortly" is true here and false for a rejected stop.
+        assert outcome is StopSoundOutcome.SUPPRESSED
         coord.api.async_stop_sound.assert_not_called()
+
+    async def test_rejected_submission_is_failed_not_suppressed(
+        self, coord: LocateStub
+    ) -> None:
+        """A stop the transport refused must not claim a local, transient cause.
+
+        ``api.async_stop_sound`` swallows every exception and returns False, so
+        auth failures, 401/403, server errors, rate limits and network errors
+        all arrive as a plain False. Reporting them as SUPPRESSED would tell a
+        user with an expired sign-in to wait a moment.
+        """
+
+        coord.api.async_stop_sound.return_value = False
+        outcome = await coord.async_stop_sound("dev-1")
+        assert outcome is StopSoundOutcome.FAILED
+        coord.api.async_stop_sound.assert_awaited_once()
 
     async def test_uses_cached_uuid_when_none_passed(self, coord: LocateStub) -> None:
         coord._sound_request_uuids["dev-1"] = "cached-uuid"
-        ok = await coord.async_stop_sound("dev-1")
-        assert ok is True
+        outcome = await coord.async_stop_sound("dev-1")
+        assert outcome is StopSoundOutcome.CANCELLED
         coord.api.async_stop_sound.assert_awaited_once_with("dev-1", "cached-uuid")
         # successful stop removes the uuid
         assert "dev-1" not in coord._sound_request_uuids
 
-    async def test_explicit_uuid_overrides_cache(self, coord: LocateStub) -> None:
-        coord._sound_request_uuids["dev-1"] = "cached-uuid"
-        ok = await coord.async_stop_sound("dev-1", request_uuid="explicit")
-        assert ok is True
-        coord.api.async_stop_sound.assert_awaited_once_with("dev-1", "explicit")
-
-    async def test_missing_uuid_warns_but_attempts_stop(
+    async def test_explicit_uuid_does_not_drop_our_own_cached_key(
         self, coord: LocateStub
     ) -> None:
-        ok = await coord.async_stop_sound("dev-1")
-        assert ok is True
+        """A foreign cancel key must not evict our own handle, nor claim success.
+
+        The caller may pass the key of a *different* ring (that is precisely the
+        BSkando#195 scenario). Popping our cached key on its behalf would throw
+        away the only handle for a ring that may still be running -- and calling
+        it CANCELLED would be the same unbacked success claim one layer up:
+        correlation is something we prove, not something the caller asserts.
+        """
+
+        coord._sound_request_uuids["dev-1"] = "cached-uuid"
+        outcome = await coord.async_stop_sound("dev-1", request_uuid="explicit")
+        assert outcome is StopSoundOutcome.UNCORRELATED
+        coord.api.async_stop_sound.assert_awaited_once_with("dev-1", "explicit")
+        assert coord._sound_request_uuids["dev-1"] == "cached-uuid"
+
+    async def test_explicit_uuid_equal_to_our_fresh_key_is_correlated(
+        self, coord: LocateStub
+    ) -> None:
+        """Passing back our own live key is the one provable caller claim.
+
+        It is not a foreign key at all, so it correlates and is spent -- the
+        verdict follows the proof, not the presence of an argument.
+        """
+
+        coord._sound_request_uuids["dev-1"] = "cached-uuid"
+        outcome = await coord.async_stop_sound("dev-1", request_uuid="cached-uuid")
+        assert outcome is StopSoundOutcome.CANCELLED
+        coord.api.async_stop_sound.assert_awaited_once_with("dev-1", "cached-uuid")
+        assert "dev-1" not in coord._sound_request_uuids
+
+    async def test_missing_uuid_reports_uncorrelated(self, coord: LocateStub) -> None:
+        outcome = await coord.async_stop_sound("dev-1")
+        # Submitted, but nothing proves an effect.
+        assert outcome is StopSoundOutcome.UNCORRELATED
         coord.api.async_stop_sound.assert_awaited_once_with("dev-1", None)
 
     async def test_failure_notes_problem(self, coord: LocateStub) -> None:
         coord.api.async_stop_sound.return_value = False
-        ok = await coord.async_stop_sound("dev-1", request_uuid="x")
-        assert ok is False
+        outcome = await coord.async_stop_sound("dev-1", request_uuid="x")
+        assert outcome is StopSoundOutcome.FAILED
         coord._note_push_transport_problem.assert_called_once()
+
+    async def test_failed_stop_keeps_a_fresh_cancel_key(
+        self, coord: LocateStub
+    ) -> None:
+        """IRR-CA-CANCEL-KEY-ON-SUCCESS-ONLY: a rejected stop spends nothing."""
+
+        coord._sound_request_uuids["dev-1"] = "cached-uuid"
+        coord.api.async_stop_sound.return_value = False
+        outcome = await coord.async_stop_sound("dev-1")
+        assert outcome is StopSoundOutcome.FAILED
+        assert coord._sound_request_uuids["dev-1"] == "cached-uuid"
 
 
 _ = DEFAULT_MIN_POLL_INTERVAL  # silence unused-import lint when production no-ops

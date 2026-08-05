@@ -11,6 +11,7 @@ import hashlib
 import math
 import time
 from collections.abc import Mapping, Sequence
+from enum import StrEnum
 from types import MappingProxyType
 from typing import Final, Literal
 
@@ -33,6 +34,68 @@ CONFIG_ENTRY_VERSION: int = 2
 # regex only matches `NAME = "x"`, not `NAME: str = "x"`. Re-adding the annotation
 # would silently skip this file on the automated version bump.
 INTEGRATION_VERSION = "1.7.15.8"
+
+# --------------------------------------------------------------------------------------
+# Stop Sound outcome
+# --------------------------------------------------------------------------------------
+
+
+class StopSoundOutcome(StrEnum):
+    """Outcome of a Stop Sound attempt.
+
+    Four states, because the state space is genuinely four-valued and a bool
+    cannot carry it: a stop that was submitted without a cancel key is neither a
+    success (nothing proves it reached a ring) nor a rejection (the server did
+    accept the submission). Collapsing the middle state into ``True`` is what
+    made the integration report success for a ring that kept playing
+    (BSkando#195).
+
+    The two failure states are kept apart for the same reason the middle state
+    exists: they differ in what the user has to do about them. ``SUPPRESSED``
+    never left this machine and clears itself; ``FAILED`` reached the transport
+    and may need credentials, a network, or patience with a rate limit. One
+    message cannot advise on both without misleading half its readers.
+
+    Note that even ``CANCELLED`` means "submitted with a correlated cancel key",
+    not "the device stopped". Nova returns no parsable ExecuteActionResponse, so
+    no reply of the cloud API can prove an effect on the device; see
+    ``docs/PLAY_SOUND_ARCHITECTURE.md`` and IRR-CA-NO-RING-CONFIRMATION.
+    """
+
+    CANCELLED = "cancelled"
+    """Submitted WITH a cancel key whose correlation this integration can prove.
+
+    Proof means the key is our own, still fresh, cached Play Sound handle. A key
+    supplied by the caller qualifies only when it IS that handle; an arbitrary
+    string is a claim we cannot check and yields ``UNCORRELATED`` instead.
+    """
+
+    UNCORRELATED = "uncorrelated"
+    """Submitted without a provably correlated key; the effect may be nil.
+
+    Covers both "no key at all" and "a key we cannot vouch for". Both leave the
+    server unable to match the stop to a running ring, so both are reported to
+    the user rather than silently counted as success.
+    """
+
+    SUPPRESSED = "suppressed"
+    """Never sent, because this integration declined to send it.
+
+    Today the sole cause is a push transport that is not ready yet. The command
+    never reached the network, the condition is local and transient, and the
+    only useful advice is to retry shortly.
+    """
+
+    FAILED = "failed"
+    """Handed to the transport, but not accepted.
+
+    Covers every way the attempt can die once it leaves this integration:
+    missing action token, authentication failure, HTTP 401/403, server error,
+    rate limit, network error, and an empty reply. These need different remedies
+    from ``SUPPRESSED`` -- often re-authentication -- so telling the user to
+    "try again in a moment" would be wrong for most of them.
+    """
+
 
 # --------------------------------------------------------------------------------------
 # Shared textual constants

@@ -803,8 +803,23 @@
     "play_sound_failed": {
       "message": "Falha ao reproduzir som em {device_id}: {error}"
     },
+    "play_sound_suppressed": {
+      "message": "Não foi possível iniciar o Play Sound para {device_id}. A entrada de registo desta tentativa indica o motivo; pode ser que o Home Assistant ainda não consiga alcançar o dispositivo, que o início de sessão tenha expirado, ou um erro de servidor, de rede ou de limite de pedidos."
+    },
     "stop_sound_failed": {
       "message": "Falha ao interromper o som em {device_id}: {error}"
+    },
+    "stop_sound_invalid_uuid": {
+      "message": "O Stop Sound para {device_id} não foi enviado: o UUID do pedido deve ser texto, mas foi fornecido {request_uuid}."
+    },
+    "stop_sound_rejected": {
+      "message": "Não foi possível concluir o Stop Sound para {device_id}. A entrada de registo desta tentativa indica o motivo; normalmente é um início de sessão expirado, um token em falta, um erro de servidor ou de rede, ou um limite de pedidos."
+    },
+    "stop_sound_suppressed": {
+      "message": "O Stop Sound para {device_id} não foi enviado. O Home Assistant não consegue alcançar o dispositivo neste momento; tente novamente dentro de instantes."
+    },
+    "stop_sound_uncorrelated": {
+      "message": "O Stop Sound para {device_id} foi enviado, mas não foi possível associá-lo ao toque em curso: foi iniciado noutro local, ou a chave que esta instância possui é demasiado antiga para servir de garantia. A Google pode não conseguir associar a paragem ao toque, pelo que o dispositivo pode continuar a tocar. Prima o botão no localizador ou aguarde que o toque termine."
     },
     "missing_token_cache": {
       "message": "Cache de token ausente. "

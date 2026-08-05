@@ -803,8 +803,23 @@
     "play_sound_failed": {
       "message": "No se pudo reproducir sonido en {device_id}: {error}"
     },
+    "play_sound_suppressed": {
+      "message": "No se pudo iniciar Play Sound para {device_id}. La entrada del registro de este intento indica el motivo; puede que Home Assistant aún no pueda acceder al dispositivo, que la sesión haya caducado, o que se trate de un error del servidor, de red o de límite de peticiones."
+    },
     "stop_sound_failed": {
       "message": "No se pudo detener el sonido en {device_id}: {error}"
+    },
+    "stop_sound_invalid_uuid": {
+      "message": "Stop Sound para {device_id} no se envió: el UUID de solicitud debe ser texto, pero se recibió {request_uuid}."
+    },
+    "stop_sound_rejected": {
+      "message": "No se pudo completar Stop Sound para {device_id}. La entrada del registro de este intento indica el motivo; suele ser una sesión caducada, un token ausente, un error del servidor o de red, o un límite de peticiones."
+    },
+    "stop_sound_suppressed": {
+      "message": "No se envió Stop Sound para {device_id}. Home Assistant no puede acceder al dispositivo en este momento; inténtalo de nuevo en un momento."
+    },
+    "stop_sound_uncorrelated": {
+      "message": "Stop Sound para {device_id} se envió, pero no se pudo asociar al timbre en curso: se inició desde otro lugar, o la clave que tiene esta instancia es demasiado antigua para garantizarla. Puede que Google no consiga asociar la detención al timbre, así que el dispositivo podría seguir sonando. Pulsa el botón del rastreador o espera a que el timbre termine."
     },
     "missing_token_cache": {
       "message": "Falta la caché de tokens. Proporciona la TokenCache específica de la entrada (por ejemplo, entry.runtime_data.token_cache)."

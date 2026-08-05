@@ -166,8 +166,14 @@ class _StubCoordinator:
         self.subentry_manager = manager
         self.is_reload = is_reload
 
-    async def async_locate_device(self, canonical_id: str) -> None:
+    # Mirrors the real signature: the coordinator returns the location mapping
+    # and an EMPTY one when the request was gated away. A stub returning None
+    # would hide exactly the branch this contract is about.
+    result: dict[str, Any] = {"latitude": 1.0, "longitude": 2.0}
+
+    async def async_locate_device(self, canonical_id: str) -> dict[str, Any]:
         self.calls.append(canonical_id)
+        return self.result
 
 
 def test_async_handle_manual_locate_success(
@@ -175,7 +181,7 @@ def test_async_handle_manual_locate_success(
     registries: tuple[_StubDeviceRegistry, _StubEntityRegistry],
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """Manual locate dispatches to the coordinator and logs success."""
+    """Manual locate dispatches to the coordinator and logs what it got back."""
 
     device_registry, _ = registries
     device_registry._mapping["device-4"] = SimpleNamespace(  # type: ignore[attr-defined]
@@ -188,7 +194,41 @@ def test_async_handle_manual_locate_success(
     caplog.set_level("INFO")
     asyncio.run(gfm.async_handle_manual_locate(hass, coordinator, "device-4"))
     assert coordinator.calls == ["canonical-4"]
-    assert "Successfully submitted manual locate for Bicycle" in caplog.text
+    assert "Manual locate returned data for Bicycle" in caplog.text
+    assert "Successfully" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_async_handle_manual_locate_gated_is_not_reported_as_success(
+    hass: HomeAssistant,
+    registries: tuple[_StubDeviceRegistry, _StubEntityRegistry],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A gated locate returns an empty mapping and must not claim an effect.
+
+    ``async_locate_device`` returns ``{}`` when the request was refused by the
+    cooldown, an in-flight request or device absence. The previous log line
+    dropped that return value and announced success regardless, which is the
+    unbacked-success class this change set removes (BSkando#195).
+    """
+
+    device_registry, _ = registries
+    device_registry._mapping["device-6"] = SimpleNamespace(  # type: ignore[attr-defined]
+        id="ha-device-6",
+        identifiers={(gfm.DOMAIN, "canonical-6")},
+        name="Gated Tag",
+        name_by_user=None,
+    )
+    coordinator = _StubCoordinator()
+    coordinator.result = {}
+    caplog.set_level("INFO")
+    # Awaited on the loop pytest-asyncio manages, not via asyncio.run():
+    # tests/AGENTS.md forbids the latter because it starts a competing loop
+    # and breaks Home Assistant's managed loop fixtures.
+    await gfm.async_handle_manual_locate(hass, coordinator, "device-6")
+    assert coordinator.calls == ["canonical-6"]
+    assert "produced no location update" in caplog.text
+    assert "Successfully" not in caplog.text
 
 
 def test_async_handle_manual_locate_namespaced_identifier(

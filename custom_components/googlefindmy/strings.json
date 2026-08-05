@@ -803,8 +803,23 @@
     "play_sound_failed": {
       "message": "Failed to play sound on {device_id}: {error}"
     },
+    "play_sound_suppressed": {
+      "message": "Play Sound for {device_id} could not be started. The log entry for this attempt names the reason; it may be that Home Assistant is not ready to reach the device yet, or that the sign-in expired, or a server, network or rate-limit error."
+    },
     "stop_sound_failed": {
       "message": "Failed to stop sound on {device_id}: {error}"
+    },
+    "stop_sound_invalid_uuid": {
+      "message": "Stop Sound for {device_id} was not sent: the request UUID must be text, but {request_uuid} was supplied."
+    },
+    "stop_sound_rejected": {
+      "message": "Stop Sound for {device_id} could not be completed. The log entry for this attempt names the reason; it is usually an expired sign-in, a missing token, a server or network error, or a rate limit."
+    },
+    "stop_sound_suppressed": {
+      "message": "Stop Sound for {device_id} was not sent. Home Assistant is not ready to reach the device right now; try again in a moment."
+    },
+    "stop_sound_uncorrelated": {
+      "message": "Stop Sound for {device_id} was submitted, but it could not be matched to the running ring: the ring was started elsewhere, or the key this instance holds is too old to vouch for. Google may not be able to match the stop to the ring, so the device may keep playing. Press the button on the tracker, or wait for the ring to time out."
     },
     "missing_token_cache": {
       "message": "Token cache missing. Provide the entry-specific TokenCache (for example, entry.runtime_data.token_cache)."

@@ -23,6 +23,7 @@ from custom_components.googlefindmy.const import (
     DOMAIN,
     SERVICE_LOCATE_DEVICE,
     SERVICE_PLAY_SOUND,
+    StopSoundOutcome,
 )
 from tests.helpers import drain_loop
 from tests.helpers.homeassistant import resolve_config_entry_lookup
@@ -453,8 +454,10 @@ def test_multi_account_end_to_end(
             self.play_calls.append((canonical_id, token))
             return True
 
-        async def _async_stop_sound(self: Any, _canonical_id: str) -> bool:
-            return True
+        async def _async_stop_sound(self: Any, _canonical_id: str) -> StopSoundOutcome:
+            # Production returns the enum; a bool would slip through the
+            # service handler's default branch unnoticed.
+            return StopSoundOutcome.CANCELLED
 
         def _force_poll_due(self: Any) -> None:
             self.refresh_calls += 1

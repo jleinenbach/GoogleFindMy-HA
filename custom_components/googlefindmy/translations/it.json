@@ -803,8 +803,23 @@
     "play_sound_failed": {
       "message": "Impossibile riprodurre il suono su {device_id}: {error}"
     },
+    "play_sound_suppressed": {
+      "message": "Non è stato possibile avviare Play Sound per {device_id}. La voce di log di questo tentativo ne indica il motivo; può darsi che Home Assistant non riesca ancora a raggiungere il dispositivo, che l'accesso sia scaduto, oppure che si tratti di un errore del server, di rete o di limite di frequenza."
+    },
     "stop_sound_failed": {
       "message": "Impossibile interrompere il suono su {device_id}: {error}"
+    },
+    "stop_sound_invalid_uuid": {
+      "message": "Stop Sound per {device_id} non è stato inviato: l'UUID della richiesta deve essere testo, ma è stato fornito {request_uuid}."
+    },
+    "stop_sound_rejected": {
+      "message": "Non è stato possibile completare Stop Sound per {device_id}. La voce di log di questo tentativo ne indica il motivo; di solito è un accesso scaduto, un token mancante, un errore del server o di rete, oppure un limite di frequenza."
+    },
+    "stop_sound_suppressed": {
+      "message": "Stop Sound per {device_id} non è stato inviato. Home Assistant al momento non riesce a raggiungere il dispositivo; riprova tra un istante."
+    },
+    "stop_sound_uncorrelated": {
+      "message": "Stop Sound per {device_id} è stato inviato, ma non è stato possibile associarlo alla suoneria in corso: è stata avviata altrove, oppure la chiave di cui dispone questa istanza è troppo vecchia per garantirla. Google potrebbe non riuscire ad associare l'arresto alla suoneria, quindi il dispositivo potrebbe continuare a suonare. Premi il pulsante sul tracker o attendi che la suoneria termini."
     },
     "missing_token_cache": {
       "message": "Cache del token mancante. Fornisci il TokenCache specifico della voce (ad esempio entry.runtime_data.token_cache)."

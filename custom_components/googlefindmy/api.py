@@ -1619,7 +1619,16 @@ class GoogleFindMyAPI:
             ringing. The pre-/post-dispatch split is classified in-band on the
             raised NovaError (`NovaError.dispatched`), stamped uniformly at the
             transport's retry-loop choke point for every exit. See
-            IRR-CA-CANCEL-KEY-ON-SUCCESS-ONLY.
+            IRR-CA-CANCEL-KEY-ON-SUCCESS-ONLY. On the Stop side the drop branch
+            is additionally bound to "the cancel key was our own and fresh", so
+            a foreign key passed in by a service call never evicts our handle.
+
+            True means Nova accepted the submission (HTTP 200). It is NOT a
+            confirmation that the device received or executed the command: no
+            ExecuteActionResponse schema exists and no FCM callback is
+            registered for sound, so nothing on this path can observe the ring.
+            See IRR-CA-NO-RING-CONFIRMATION in
+            docs/PLAY_SOUND_ARCHITECTURE.md.
         """
         # Pass cache explicitly for multi-account isolation
         token = self._get_fcm_token_for_action()
@@ -1774,15 +1783,34 @@ class GoogleFindMyAPI:
         Args:
             device_id: The canonical ID of the device.
             request_uuid: Optional UUID of the Play Sound request to cancel.
-                         If not provided, a new UUID is generated (may not properly cancel).
+                If omitted, the request is submitted WITHOUT a cancel key
+                (the protobuf leaves ``requestUuid`` empty). Google then has
+                nothing to correlate the stop with, so the ring may keep
+                playing. The caller is responsible for surfacing that
+                limitation; see StopSoundOutcome.UNCORRELATED.
 
         Returns:
             True if the command was submitted successfully, False otherwise.
+
+            True means Nova accepted the submission (HTTP 200). It is NOT a
+            confirmation that the device received or executed the command, and
+            in particular not that the ring stopped: no ExecuteActionResponse
+            schema exists and no FCM callback is registered for sound, so
+            nothing on this path can observe the ring. See
+            IRR-CA-NO-RING-CONFIRMATION in docs/PLAY_SOUND_ARCHITECTURE.md.
         """
         # Pass cache explicitly for multi-account isolation
         token = self._get_fcm_token_for_action()
         if not token:
             return False
+        # Idempotent guard, not a second normalisation policy: the coordinator
+        # funnel already maps blank to None. This entry point is public and
+        # documented "for non-HA contexts", so a blank string can still arrive
+        # here -- and a blank key is dropped from the proto3 payload entirely.
+        # Without this, the log below would claim a cancel key that never
+        # reaches the wire, which is the very class of unbacked success claim
+        # this change set removes.
+        request_uuid = (request_uuid or "").strip() or None
         try:
             if request_uuid:
                 _LOGGER.info(
@@ -1792,7 +1820,8 @@ class GoogleFindMyAPI:
                 )
             else:
                 _LOGGER.warning(
-                    "Submitting Stop Sound (async) for %s without UUID (may not cancel properly)",
+                    "Submitting Stop Sound (async) for %s without a cancel key; "
+                    "the server cannot correlate it with a running ring",
                     device_id,
                 )
             result_hex = await async_submit_stop_sound_request(
@@ -1803,11 +1832,24 @@ class GoogleFindMyAPI:
                 cache=cast("TokenCache | None", self._cache),
                 request_uuid=request_uuid,
             )
-            ok = result_hex is not None
-            if ok:
+            # NOTE: a non-empty Nova reply means "the POST was accepted", not
+            # "the device stopped". No ExecuteActionResponse schema exists, so
+            # the body is never parsed. Deliberate architecture boundary, see
+            # docs/PLAY_SOUND_ARCHITECTURE.md and IRR-CA-NO-RING-CONFIRMATION.
+            submitted = result_hex is not None
+            if submitted and request_uuid:
                 _LOGGER.info(
-                    "Stop Sound (async) submitted successfully for %s", device_id
+                    "Stop Sound (async) submitted for %s (cancel key present)",
+                    device_id,
                 )
+            elif submitted:
+                _LOGGER.warning(
+                    "Stop Sound (async) submitted for %s without a cancel key; "
+                    "the server cannot correlate it with a running ring, so the "
+                    "device may keep ringing",
+                    device_id,
+                )
+            if submitted:
                 _LOGGER.debug(
                     "Stop Sound Nova response for %s: %d bytes: %s",
                     device_id,
@@ -1820,7 +1862,7 @@ class GoogleFindMyAPI:
                     "empty response from server (no error details available)",
                     device_id,
                 )
-            return bool(ok)
+            return bool(submitted)
 
         except NovaAuthError as err:
             _LOGGER.error(

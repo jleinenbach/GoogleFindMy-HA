@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from custom_components.googlefindmy.const import StopSoundOutcome
 from custom_components.googlefindmy.coordinator import GoogleFindMyCoordinator
 from custom_components.googlefindmy.coordinator.helpers.cache import (
     SOUND_UUID_MAX_AGE_S,
@@ -250,12 +251,19 @@ async def test_ambiguous_play_replaces_expired_cancel_key() -> None:
 
 
 @pytest.mark.asyncio
-async def test_async_stop_sound_ignores_expired_cached_uuid() -> None:
-    """Stop must not target an expired cached UUID (sibling of the store guard).
+async def test_async_stop_sound_sends_expired_cached_uuid_uncorrelated() -> None:
+    """An aged cancel key is SENT but not TRUSTED, and it survives the attempt.
 
-    A cached key older than SOUND_UUID_MAX_AGE_S refers to a ring that has long
-    auto-stopped; the reload filter would discard it. The default Stop path must
-    treat it as absent and stop without it rather than cancel a dead request.
+    Deliberate reversal of the previous behaviour. Nova queues an action until
+    the tracker is reachable, which can take hours to days (BSkando#108), so an
+    aged key may still be the handle on the ring that is audible right now. It
+    cannot hit a different ring (it is device-bound) and a fresher key would
+    have replaced it, so sending it can only help or do nothing, whereas
+    dropping it guaranteed no correlation at all.
+
+    Not trusted: the outcome stays UNCORRELATED, which reaches the user as an
+    error rather than as a confirmed cancel. Not popped: unspent, it remains
+    the best handle a second attempt has.
     """
 
     coordinator = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
@@ -277,9 +285,49 @@ async def test_async_stop_sound_ignores_expired_cached_uuid() -> None:
 
     result = await coordinator.async_stop_sound("device-1")
 
-    assert result is True
-    # The expired UUID is ignored; Stop is attempted without a request UUID.
-    assert api_calls == [("device-1", None)]
+    # Aged key means unproven correlation, so the stop is not a success.
+    assert result is StopSoundOutcome.UNCORRELATED
+    # ... but it IS the key that goes on the wire, not None.
+    assert api_calls == [("device-1", "uuid-expired")]
+    # And it is not spent: only a provably correlated cancel pops a key
+    # (IRR-CA-POP-ON-CORRELATED-CANCEL-ONLY).
+    assert coordinator._sound_request_uuids == {"device-1": "uuid-expired"}  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_fresh_cancel_key_is_reported_cancelled_and_spent() -> None:
+    """Counterpart to the aged-key case: a fresh key proves correlation.
+
+    Same setup, only the timestamp differs. This pins that the aged-key
+    behaviour above is driven by the age and by nothing else, and that the
+    CANCELLED path still spends the key it used.
+    """
+
+    coordinator = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
+    coordinator._sound_request_uuids = {"device-1": "uuid-fresh"}  # type: ignore[attr-defined]
+    coordinator._sound_request_timestamps = {"device-1": time.time()}  # type: ignore[attr-defined]
+    coordinator._note_push_transport_problem = lambda: None  # type: ignore[attr-defined]
+    coordinator._set_auth_state = lambda **kwargs: None  # type: ignore[attr-defined]
+    coordinator._api_push_ready = lambda: True  # type: ignore[attr-defined]
+
+    async def _save() -> None:
+        return None
+
+    coordinator._async_save_sound_uuids = _save  # type: ignore[attr-defined]
+
+    api_calls: list[tuple[str, str | None]] = []
+
+    async def _async_stop_sound(device_id: str, request_uuid: str | None) -> bool:
+        api_calls.append((device_id, request_uuid))
+        return True
+
+    coordinator.api = SimpleNamespace(async_stop_sound=_async_stop_sound)  # type: ignore[attr-defined]
+
+    result = await coordinator.async_stop_sound("device-1")
+
+    assert result is StopSoundOutcome.CANCELLED
+    assert api_calls == [("device-1", "uuid-fresh")]
+    assert coordinator._sound_request_uuids == {}  # type: ignore[attr-defined]
 
 
 @pytest.mark.asyncio
@@ -349,7 +397,7 @@ async def test_async_stop_sound_uses_cached_uuid() -> None:
 
     result = await coordinator.async_stop_sound("device-1")
 
-    assert result is True
+    assert result is StopSoundOutcome.CANCELLED
     assert coordinator._sound_request_uuids == {}  # type: ignore[attr-defined]
     assert api_calls == [("device-1", "uuid-1")]
 
@@ -377,6 +425,211 @@ async def test_async_stop_sound_warns_when_uuid_missing(
     with caplog.at_level(logging.WARNING):
         result = await coordinator.async_stop_sound("device-1")
 
-    assert result is True
+    assert result is StopSoundOutcome.UNCORRELATED
     assert api_calls == [("device-1", None)]
-    assert "Missing Play Sound UUID for device-1" in caplog.text
+    assert "No cancel key for device-1" in caplog.text
+    assert "the ring may keep playing" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_blank_request_uuid_falls_back_to_the_cached_cancel_key() -> None:
+    """A blank UUID means "no opinion", not "deliberately uncorrelated".
+
+    The optional service field can be left blank, and a blank value used to
+    take a shortcut past the cached-key lookup: the stop then travelled without
+    any ``requestUuid`` (proto3 drops an empty string) while the caller was
+    told ``CANCELLED``. Two defects at once -- a live cancel key was withheld,
+    and an unprovable stop was reported as a correlated one.
+    """
+
+    for blank in ("", "   "):
+        sent: list[str | None] = []
+        coordinator = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
+        coordinator._sound_request_uuids = {"device-1": "cached-key"}  # type: ignore[attr-defined]
+        coordinator._sound_request_timestamps = {"device-1": time.time()}  # type: ignore[attr-defined]
+        coordinator._api_push_ready = lambda: True  # type: ignore[attr-defined]
+        coordinator._note_push_transport_problem = lambda: None  # type: ignore[attr-defined]
+        coordinator._set_auth_state = lambda **kwargs: None  # type: ignore[attr-defined]
+
+        async def _save() -> None:
+            return None
+
+        coordinator._async_save_sound_uuids = _save  # type: ignore[attr-defined]
+
+        async def _api_stop(device_id: str, request_uuid: str | None) -> bool:
+            sent.append(request_uuid)
+            return True
+
+        coordinator.api = SimpleNamespace(async_stop_sound=_api_stop)  # type: ignore[attr-defined]
+
+        outcome = await coordinator.async_stop_sound("device-1", blank)
+
+        assert sent == ["cached-key"], blank
+        assert outcome is StopSoundOutcome.CANCELLED, blank
+        assert coordinator._sound_request_uuids == {}  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_blank_request_uuid_without_a_cached_key_is_uncorrelated() -> None:
+    """Blank in, no cache: the stop is submitted, but nothing proves an effect."""
+
+    for blank in ("", "   "):
+        sent: list[str | None] = []
+        coordinator = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
+        coordinator._sound_request_uuids = {}  # type: ignore[attr-defined]
+        coordinator._sound_request_timestamps = {}  # type: ignore[attr-defined]
+        coordinator._api_push_ready = lambda: True  # type: ignore[attr-defined]
+        coordinator._note_push_transport_problem = lambda: None  # type: ignore[attr-defined]
+        coordinator._set_auth_state = lambda **kwargs: None  # type: ignore[attr-defined]
+
+        async def _api_stop(device_id: str, request_uuid: str | None) -> bool:
+            sent.append(request_uuid)
+            return True
+
+        coordinator.api = SimpleNamespace(async_stop_sound=_api_stop)  # type: ignore[attr-defined]
+
+        outcome = await coordinator.async_stop_sound("device-1", blank)
+
+        assert sent == [None], blank
+        assert outcome is StopSoundOutcome.UNCORRELATED, blank
+
+
+@pytest.mark.asyncio
+async def test_blank_uuid_falls_through_to_the_aged_cached_key() -> None:
+    """The cached-key fallback must not depend on how "no key" was spelled.
+
+    Before the blank values were normalised, passing "" skipped the cache
+    lookup entirely: a valid, frontal cancel key sat unused while an empty
+    field went on the wire. The key here is aged, so it is sent and reported
+    UNCORRELATED, but it is sent -- that is the regression this pins.
+    """
+
+    coordinator = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
+    coordinator._sound_request_uuids = {"device-1": "stale-key"}  # type: ignore[attr-defined]
+    coordinator._sound_request_timestamps = {  # type: ignore[attr-defined]
+        "device-1": time.time() - (SOUND_UUID_MAX_AGE_S + 60)
+    }
+    coordinator._api_push_ready = lambda: True  # type: ignore[attr-defined]
+    coordinator._note_push_transport_problem = lambda: None  # type: ignore[attr-defined]
+    coordinator._set_auth_state = lambda **kwargs: None  # type: ignore[attr-defined]
+
+    saved: list[bool] = []
+
+    async def _save() -> None:
+        saved.append(True)
+
+    coordinator._async_save_sound_uuids = _save  # type: ignore[attr-defined]
+
+    sent: list[str | None] = []
+
+    async def _api_stop(device_id: str, request_uuid: str | None) -> bool:
+        sent.append(request_uuid)
+        return True
+
+    coordinator.api = SimpleNamespace(async_stop_sound=_api_stop)  # type: ignore[attr-defined]
+
+    outcome = await coordinator.async_stop_sound("device-1", "")
+
+    assert sent == ["stale-key"]
+    assert outcome is StopSoundOutcome.UNCORRELATED
+    # Unproven, therefore unspent: still available to a retry.
+    assert coordinator._sound_request_uuids == {"device-1": "stale-key"}  # type: ignore[attr-defined]
+    assert saved == []
+
+
+@pytest.mark.asyncio
+async def test_a_play_landing_during_the_stop_keeps_its_fresh_key() -> None:
+    """The cancel key is spent by VALUE, so an interleaved Play is not evicted.
+
+    The key is read before the Nova round trip and popped after it. A Play that
+    lands in between stores a fresher key for the same device; popping by
+    device id would then throw away the handle of a ring that just started --
+    the exact eviction the used_own_fresh_key gate exists to prevent, reached
+    through an interleaving instead of through a foreign UUID.
+    """
+
+    coordinator = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
+    coordinator._sound_request_uuids = {"device-1": "uuid-old"}  # type: ignore[attr-defined]
+    coordinator._sound_request_timestamps = {"device-1": time.time()}  # type: ignore[attr-defined]
+    coordinator._note_push_transport_problem = lambda: None  # type: ignore[attr-defined]
+    coordinator._set_auth_state = lambda **kwargs: None  # type: ignore[attr-defined]
+    coordinator._api_push_ready = lambda: True  # type: ignore[attr-defined]
+
+    async def _save() -> None:
+        return None
+
+    coordinator._async_save_sound_uuids = _save  # type: ignore[attr-defined]
+
+    async def _async_stop_sound(device_id: str, request_uuid: str | None) -> bool:
+        # A Play completes while the stop is in flight.
+        coordinator._sound_request_uuids[device_id] = "uuid-new"  # type: ignore[attr-defined]
+        coordinator._sound_request_timestamps[device_id] = time.time()  # type: ignore[attr-defined]
+        return True
+
+    coordinator.api = SimpleNamespace(async_stop_sound=_async_stop_sound)  # type: ignore[attr-defined]
+
+    result = await coordinator.async_stop_sound("device-1")
+
+    assert result is StopSoundOutcome.CANCELLED
+    assert coordinator._sound_request_uuids == {"device-1": "uuid-new"}  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_a_rejected_stop_does_not_clear_the_auth_failure_state() -> None:
+    """A False from the api layer is not proof that the credentials worked.
+
+    api.async_stop_sound swallows NovaAuthError and HTTP 401/403 into the same
+    False as a timeout, so clearing the auth-failure state on that path erases
+    the signal an expired sign-in produces.
+    """
+
+    coordinator = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
+    coordinator._sound_request_uuids = {}  # type: ignore[attr-defined]
+    coordinator._sound_request_timestamps = {}  # type: ignore[attr-defined]
+    coordinator._api_push_ready = lambda: True  # type: ignore[attr-defined]
+    coordinator._note_push_transport_problem = lambda: None  # type: ignore[attr-defined]
+
+    auth_calls: list[dict[str, object]] = []
+    coordinator._set_auth_state = lambda **kwargs: auth_calls.append(kwargs)  # type: ignore[attr-defined]
+
+    async def _async_stop_sound(device_id: str, request_uuid: str | None) -> bool:
+        return False
+
+    coordinator.api = SimpleNamespace(async_stop_sound=_async_stop_sound)  # type: ignore[attr-defined]
+
+    result = await coordinator.async_stop_sound("device-1")
+
+    assert result is StopSoundOutcome.FAILED
+    assert auth_calls == []
+
+
+@pytest.mark.asyncio
+async def test_an_explicit_key_that_is_ours_but_aged_is_not_called_foreign(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Our own aged key matches; it is only too old to vouch for.
+
+    Warning the user that the key "does not match a live Play Sound request"
+    would be untrue, and the implicit path already tells the two apart.
+    """
+
+    coordinator = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
+    coordinator._sound_request_uuids = {"device-1": "uuid-aged"}  # type: ignore[attr-defined]
+    coordinator._sound_request_timestamps = {  # type: ignore[attr-defined]
+        "device-1": time.time() - (SOUND_UUID_MAX_AGE_S + 60)
+    }
+    coordinator._api_push_ready = lambda: True  # type: ignore[attr-defined]
+    coordinator._note_push_transport_problem = lambda: None  # type: ignore[attr-defined]
+    coordinator._set_auth_state = lambda **kwargs: None  # type: ignore[attr-defined]
+
+    async def _async_stop_sound(device_id: str, request_uuid: str | None) -> bool:
+        return True
+
+    coordinator.api = SimpleNamespace(async_stop_sound=_async_stop_sound)  # type: ignore[attr-defined]
+
+    with caplog.at_level("DEBUG"):
+        result = await coordinator.async_stop_sound("device-1", "uuid-aged")
+
+    assert result is StopSoundOutcome.UNCORRELATED
+    assert "does not match a live Play Sound request" not in caplog.text
+    assert "has aged out" in caplog.text

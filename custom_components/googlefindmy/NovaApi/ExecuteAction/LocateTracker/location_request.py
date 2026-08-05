@@ -182,13 +182,24 @@ def create_location_request(
     Args:
         canonic_device_id: The canonical ID of the target device.
         fcm_registration_id: The FCM token for push notifications.
-        request_uuid: A unique identifier for this request.
+        request_uuid: A unique identifier for this request. Required and
+            non-blank: a locate is correlated to its push response through this
+            value, so an empty one is a defect here, not a marker. (The sound
+            builders use an empty value deliberately, for stop requests only;
+            `create_action_request` cannot tell the two actions apart, so the
+            rule belongs in each action-aware builder.)
         contributor_mode: Contributor preference ("high_traffic" or "in_all_areas").
         last_mode_switch: Epoch timestamp when the contributor mode last changed.
 
     Returns:
         A hex-encoded string representing the serialized protobuf message.
+
+    Raises:
+        ValueError: If `request_uuid` is missing or blank.
     """
+    if not isinstance(request_uuid, str) or not request_uuid.strip():
+        raise ValueError("request_uuid must be a non-empty string for a locate request")
+
     device_update_pb2 = _import_deviceupdate_pb2()
 
     normalized_mode = _normalize_contributor_mode(contributor_mode)

@@ -29,6 +29,7 @@ from typing import TYPE_CHECKING, Any, NamedTuple
 from homeassistant.components.button import ButtonEntityDescription
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import ServiceValidationError
 from homeassistant.helpers import entity_platform
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
@@ -1128,6 +1129,12 @@ class GoogleFindMyPlaySoundButton(GoogleFindMyButtonEntity):
             _LOGGER.info(
                 "Successfully submitted Play Sound request for %s", device_name
             )
+        except ServiceValidationError:
+            # The service layer raises this to *tell the user something*, with a
+            # translated message. Swallowing it into a log line is how a
+            # deliberately written explanation never reaches the person pressing
+            # the button. Let HA surface it; it is not an unexpected crash.
+            raise
         except Exception as err:  # Avoid crashing the update loop
             _LOGGER.error("Error playing sound on %s: %s", device_name, err)
 
@@ -1225,6 +1232,12 @@ class GoogleFindMyStopSoundButton(GoogleFindMyButtonEntity):
             _LOGGER.info(
                 "Successfully submitted Stop Sound request for %s", device_name
             )
+        except ServiceValidationError:
+            # This button is the primary path for BSkando#195: it is where a
+            # user learns that the ring could not be correlated and may keep
+            # playing. That message exists in ten languages; a log line reaches
+            # none of them. Let HA show it.
+            raise
         except Exception as err:
             _LOGGER.error("Error stopping sound on %s: %s", device_name, err)
 
@@ -1316,7 +1329,16 @@ class GoogleFindMyLocateButton(GoogleFindMyButtonEntity):
                 blocking=False,  # non-blocking: avoid UI stall
             )
             self._update_last_pressed()
-            _LOGGER.info("Successfully submitted manual locate for %s", device_name)
+            # blocking=False by design (responsive UI), so the service result is
+            # never observed here. This call site therefore cannot claim
+            # success: a ServiceValidationError raised inside the handler is
+            # reported by HA core, never by the except-branch below, and a
+            # gated locate returns quietly. Say what is known -- dispatched --
+            # and nothing more.
+            _LOGGER.info(
+                "Manual locate dispatched for %s (fire-and-forget, outcome not awaited)",
+                device_name,
+            )
         except Exception as err:  # Avoid crashing the update loop
             _LOGGER.error("Error submitting manual locate for %s: %s", device_name, err)
 

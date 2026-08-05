@@ -19,6 +19,9 @@ handlers run without a live Home Assistant device registry / network helper.
 
 from __future__ import annotations
 
+import json
+import pathlib
+import string
 from types import SimpleNamespace
 from typing import Any
 from unittest import mock
@@ -26,6 +29,7 @@ from unittest import mock
 import pytest
 
 from custom_components.googlefindmy import services
+from custom_components.googlefindmy.const import StopSoundOutcome
 from custom_components.googlefindmy.services import (
     HomeAssistantError,
     ServiceValidationError,
@@ -163,11 +167,18 @@ class TestDeviceIdValidation:
     async def test_stop_sound_rejects_non_str_request_uuid(
         self, handlers: dict[str, Any]
     ) -> None:
-        """A non-string ``request_uuid`` fails closed before any dispatch."""
+        """A non-string ``request_uuid`` fails closed before any dispatch.
+
+        The key changed from ``stop_sound_failed`` to its own
+        ``stop_sound_invalid_uuid``: the former template carries an ``{error}``
+        placeholder that this call site cannot fill, and Home Assistant
+        swallows the resulting ``KeyError``, so the user was shown the raw
+        template. See ``TestSoundTranslationPlaceholders``.
+        """
         handler = handlers[services.SERVICE_STOP_SOUND]
         with pytest.raises(ServiceValidationError) as excinfo:
             await handler(_FakeCall({"device_id": "dev1", "request_uuid": 999}))
-        assert excinfo.value.translation_key == "stop_sound_failed"
+        assert excinfo.value.translation_key == "stop_sound_invalid_uuid"
 
 
 # ---------------------------------------------------------------------------
@@ -238,7 +249,11 @@ class TestResolverDispatch:
         self, full_ctx: dict[str, Any], monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """A coordinator that returns ``False`` (suppressed) surfaces as a
-        play_sound_failed validation error."""
+        play_sound_suppressed validation error.
+
+        Not ``play_sound_failed``: that template needs an ``{error}`` this call
+        site has no value for, so the user would be shown the raw brace.
+        """
         coord = SimpleNamespace(
             async_play_sound=mock.AsyncMock(return_value=False),
             get_device_display_name=mock.Mock(return_value="Tag"),
@@ -254,7 +269,7 @@ class TestResolverDispatch:
             await handlers[services.SERVICE_PLAY_SOUND](
                 _FakeCall({"device_id": "dev1"})
             )
-        assert excinfo.value.translation_key == "play_sound_failed"
+        assert excinfo.value.translation_key == "play_sound_suppressed"
 
     @pytest.mark.parametrize(
         ("service_const", "coord_attr", "translation_key"),
@@ -299,7 +314,7 @@ class TestResolverDispatch:
     ) -> None:
         """A valid ``request_uuid`` is forwarded verbatim to the coordinator."""
         coord = SimpleNamespace(
-            async_stop_sound=mock.AsyncMock(return_value=True),
+            async_stop_sound=mock.AsyncMock(return_value=StopSoundOutcome.CANCELLED),
             get_device_display_name=mock.Mock(return_value="Tag"),
         )
         hass = _hass_with_coordinator(coord)
@@ -313,6 +328,120 @@ class TestResolverDispatch:
             _FakeCall({"device_id": "dev1", "request_uuid": "req-7"})
         )
         coord.async_stop_sound.assert_awaited_once_with("CANON", "req-7")
+
+    @pytest.mark.asyncio
+    async def test_uncorrelated_stop_is_reported_not_swallowed(
+        self, full_ctx: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A stop without a cancel key must not be reported as plain success.
+
+        The submission was accepted, but nothing proves an effect on the
+        device. Returning silently would tell the user the ring was stopped
+        when it may well keep playing (BSkando#195).
+        """
+
+        coord = SimpleNamespace(
+            async_stop_sound=mock.AsyncMock(return_value=StopSoundOutcome.UNCORRELATED),
+            get_device_display_name=mock.Mock(return_value="Tag"),
+        )
+        hass = _hass_with_coordinator(coord)
+        monkeypatch.setattr(
+            services.dr,
+            "async_get",
+            lambda _h: SimpleNamespace(async_get=lambda _d: None),
+        )
+        handlers = _register(hass, full_ctx)
+        with pytest.raises(ServiceValidationError) as excinfo:
+            await handlers[services.SERVICE_STOP_SOUND](
+                _FakeCall({"device_id": "dev1"})
+            )
+        assert excinfo.value.translation_key == "stop_sound_uncorrelated"
+
+    @pytest.mark.asyncio
+    async def test_suppressed_stop_reports_its_own_cause(
+        self, full_ctx: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A stop that was never sent gets its own, placeholder-correct key.
+
+        ``stop_sound_failed`` carries an ``{error}`` placeholder that this call
+        site cannot fill, so it would render with a stray literal.
+        """
+
+        coord = SimpleNamespace(
+            async_stop_sound=mock.AsyncMock(return_value=StopSoundOutcome.SUPPRESSED),
+            get_device_display_name=mock.Mock(return_value="Tag"),
+        )
+        hass = _hass_with_coordinator(coord)
+        monkeypatch.setattr(
+            services.dr,
+            "async_get",
+            lambda _h: SimpleNamespace(async_get=lambda _d: None),
+        )
+        handlers = _register(hass, full_ctx)
+        with pytest.raises(ServiceValidationError) as excinfo:
+            await handlers[services.SERVICE_STOP_SOUND](
+                _FakeCall({"device_id": "dev1"})
+            )
+        assert excinfo.value.translation_key == "stop_sound_suppressed"
+
+    @pytest.mark.asyncio
+    async def test_an_unknown_outcome_is_never_reported_as_success(
+        self, full_ctx: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The enum is a closed set, so its handling is closed too.
+
+        Three `is` comparisons and no default meant that any other value --
+        a bool from a stale test double, a member added later without visiting
+        this call site -- fell through silently and reached the user as a
+        successful stop. That is BSkando#195 reintroduced by omission, so the
+        default must be an error.
+        """
+
+        coord = SimpleNamespace(
+            async_stop_sound=mock.AsyncMock(return_value=True),
+            get_device_display_name=mock.Mock(return_value="Tag"),
+        )
+        hass = _hass_with_coordinator(coord)
+        monkeypatch.setattr(
+            services.dr,
+            "async_get",
+            lambda _h: SimpleNamespace(async_get=lambda _d: None),
+        )
+        handlers = _register(hass, full_ctx)
+        with pytest.raises(ServiceValidationError) as excinfo:
+            await handlers[services.SERVICE_STOP_SOUND](
+                _FakeCall({"device_id": "dev1"})
+            )
+        assert excinfo.value.translation_key == "stop_sound_uncorrelated"
+
+    @pytest.mark.asyncio
+    async def test_rejected_stop_does_not_borrow_the_suppressed_advice(
+        self, full_ctx: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A refused stop must not be reported as a local, transient condition.
+
+        SUPPRESSED means "we never sent it, retry shortly". FAILED means the
+        transport refused it, most often because the sign-in expired. Sharing
+        one message would give the wrong advice to whichever half is not the
+        actual cause.
+        """
+
+        coord = SimpleNamespace(
+            async_stop_sound=mock.AsyncMock(return_value=StopSoundOutcome.FAILED),
+            get_device_display_name=mock.Mock(return_value="Tag"),
+        )
+        hass = _hass_with_coordinator(coord)
+        monkeypatch.setattr(
+            services.dr,
+            "async_get",
+            lambda _h: SimpleNamespace(async_get=lambda _d: None),
+        )
+        handlers = _register(hass, full_ctx)
+        with pytest.raises(ServiceValidationError) as excinfo:
+            await handlers[services.SERVICE_STOP_SOUND](
+                _FakeCall({"device_id": "dev1"})
+            )
+        assert excinfo.value.translation_key == "stop_sound_rejected"
 
 
 # ---------------------------------------------------------------------------
@@ -413,3 +542,117 @@ class TestRebuildRegistryGuards:
             )
         reload_mock.assert_not_awaited()
         assert "Invalid device_ids payload type" in caplog.text
+
+
+class TestSoundTranslationPlaceholders:
+    """Every raised message must be able to render.
+
+    Covers the stop AND the play path: the class claim is only as strong as the
+    branches it actually enumerates.
+
+    Home Assistant formats an exception message with
+    ``with suppress(KeyError): message.format(**placeholders)``. A template
+    whose placeholders the call site does not supply therefore does not fail
+    loudly -- the user is simply shown the raw template, braces and all. This
+    pins the whole class rather than the one branch that was noticed.
+    """
+
+    @staticmethod
+    def _template_placeholders(translation_key: str) -> set[str]:
+        strings_path = pathlib.Path(services.__file__).parent / "strings.json"
+        message = json.loads(strings_path.read_text(encoding="utf-8"))["exceptions"][
+            translation_key
+        ]["message"]
+        return {field for _, field, _, _ in string.Formatter().parse(message) if field}
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("call_data", "outcome", "translation_key"),
+        [
+            ({"device_id": "dev1", "request_uuid": 7}, None, "stop_sound_invalid_uuid"),
+            (
+                {"device_id": "dev1"},
+                StopSoundOutcome.SUPPRESSED,
+                "stop_sound_suppressed",
+            ),
+            ({"device_id": "dev1"}, StopSoundOutcome.FAILED, "stop_sound_rejected"),
+            (
+                {"device_id": "dev1"},
+                StopSoundOutcome.UNCORRELATED,
+                "stop_sound_uncorrelated",
+            ),
+            ({"device_id": "dev1"}, RuntimeError("boom"), "stop_sound_failed"),
+        ],
+    )
+    async def test_every_raised_key_gets_all_its_placeholders(
+        self,
+        full_ctx: dict[str, Any],
+        monkeypatch: pytest.MonkeyPatch,
+        call_data: dict[str, Any],
+        outcome: Any,
+        translation_key: str,
+    ) -> None:
+        """Each reachable stop-sound error supplies every placeholder it needs."""
+
+        if isinstance(outcome, Exception):
+            stop = mock.AsyncMock(side_effect=outcome)
+        else:
+            stop = mock.AsyncMock(return_value=outcome)
+        coord = SimpleNamespace(
+            async_stop_sound=stop,
+            get_device_display_name=mock.Mock(return_value="Tag"),
+        )
+        hass = _hass_with_coordinator(coord)
+        monkeypatch.setattr(
+            services.dr,
+            "async_get",
+            lambda _h: SimpleNamespace(async_get=lambda _d: None),
+        )
+        handlers = _register(hass, full_ctx)
+
+        with pytest.raises(ServiceValidationError) as excinfo:
+            await handlers[services.SERVICE_STOP_SOUND](_FakeCall(call_data))
+
+        assert excinfo.value.translation_key == translation_key
+        supplied = set(excinfo.value.translation_placeholders or {})
+        required = self._template_placeholders(translation_key)
+        assert required <= supplied, (
+            f"{translation_key} would render with a stray literal: "
+            f"missing {sorted(required - supplied)}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_play_sound_suppressed_key_gets_all_its_placeholders(
+        self, full_ctx: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The play path belongs to the same class and was its last gap.
+
+        ``play_sound_failed`` carries an ``{error}`` the suppression branch
+        cannot fill. Until button.py stopped swallowing ServiceValidationError
+        the defect was invisible; pinning only the stop keys left it standing.
+        """
+
+        coord = SimpleNamespace(
+            async_play_sound=mock.AsyncMock(return_value=False),
+            get_device_display_name=mock.Mock(return_value="Tag"),
+        )
+        hass = _hass_with_coordinator(coord)
+        monkeypatch.setattr(
+            services.dr,
+            "async_get",
+            lambda _h: SimpleNamespace(async_get=lambda _d: None),
+        )
+        handlers = _register(hass, full_ctx)
+
+        with pytest.raises(ServiceValidationError) as excinfo:
+            await handlers[services.SERVICE_PLAY_SOUND](
+                _FakeCall({"device_id": "dev1"})
+            )
+
+        key = excinfo.value.translation_key
+        supplied = set(excinfo.value.translation_placeholders or {})
+        required = self._template_placeholders(str(key))
+        assert required <= supplied, (
+            f"{key} would render with a stray literal: "
+            f"missing {sorted(required - supplied)}"
+        )

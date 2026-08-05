@@ -49,17 +49,22 @@ def start_sound_request(
         canonic_device_id: The canonical ID of the target device.
         gcm_registration_id: The FCM registration token for push notifications.
         request_uuid: Optional caller-supplied request UUID (the Stop-Sound
-            correlation/cancel key). When ``None`` a fresh UUID is generated, so
-            existing callers keep their previous behaviour. Passing it lets an
-            upper layer know the cancel key *before* dispatch, so it survives
-            every outcome (success, empty response, exception).
+            correlation/cancel key). When ``None`` or blank a fresh UUID is
+            generated, so existing callers keep their previous behaviour.
+            Repairing a blank here is safe precisely because this function
+            RETURNS the key it used; the underlying builder
+            ``create_sound_request`` raises ``ValueError`` on a blank start key
+            instead, since a key it invented would never reach the caller.
+            Passing it lets an upper layer know the cancel key *before*
+            dispatch, so it survives every outcome (success, empty response,
+            exception).
 
     Returns:
         Tuple containing the hex-encoded protobuf payload for Nova transport and
         the request UUID actually used (the injected one, or a freshly
         generated one when none was supplied).
     """
-    if request_uuid is None:
+    if not request_uuid or not request_uuid.strip():
         request_uuid = generate_random_uuid()
     return (
         create_sound_request(

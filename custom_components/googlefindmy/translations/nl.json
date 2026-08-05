@@ -803,8 +803,23 @@
     "play_sound_failed": {
       "message": "Kan geluid niet afspelen op {device_id}: {error}"
     },
+    "play_sound_suppressed": {
+      "message": "Play Sound voor {device_id} kon niet worden gestart. De logregel van deze poging noemt de reden; mogelijk kan Home Assistant het apparaat nog niet bereiken, is de aanmelding verlopen, of gaat het om een server-, netwerk- of snelheidslimietfout."
+    },
     "stop_sound_failed": {
       "message": "Kan geluid niet stoppen op {device_id}: {error}"
+    },
+    "stop_sound_invalid_uuid": {
+      "message": "Stop Sound voor {device_id} is niet verzonden: de request-UUID moet tekst zijn, maar {request_uuid} werd meegegeven."
+    },
+    "stop_sound_rejected": {
+      "message": "Stop Sound voor {device_id} kon niet worden voltooid. De logregel van deze poging noemt de reden; meestal is dat een verlopen aanmelding, een ontbrekend token, een server- of netwerkfout, of een snelheidslimiet."
+    },
+    "stop_sound_suppressed": {
+      "message": "Stop Sound voor {device_id} is niet verzonden. Home Assistant kan het apparaat op dit moment niet bereiken; probeer het zo meteen opnieuw."
+    },
+    "stop_sound_uncorrelated": {
+      "message": "Stop Sound voor {device_id} is verzonden, maar kon niet aan het lopende belsignaal worden gekoppeld: het is elders gestart, of de sleutel die deze installatie heeft is te oud om voor in te staan. Google kan de stop mogelijk niet koppelen, dus het apparaat kan blijven afspelen. Druk op de knop op de tracker of wacht tot het belsignaal vanzelf stopt."
     },
     "missing_token_cache": {
       "message": "Tokencache ontbreekt. Geef de item-specifieke TokenCache op (bijvoorbeeld entry.runtime_data.token_cache)."
