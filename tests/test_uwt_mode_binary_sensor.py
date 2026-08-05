@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import inspect
+import re
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
@@ -330,3 +332,117 @@ class TestUWTModeSensorCoordinatorUpdate:
         sensor._handle_coordinator_update()
 
         sensor.async_write_ha_state.assert_called_once()
+
+
+# ===========================================================================
+# 7. GoogleFindMyUWTModeSensor — documentation guards (BSkando#210)
+# ===========================================================================
+
+
+class TestUWTModeSensorDocumentationMatchesSpec:
+    """Guard the docstrings against the semantics drift fixed for BSkando#210.
+
+    The class docstring once claimed a fixed separation window that the Find Hub
+    Network Accessory Specification does not define, which produced misdirected
+    automations and bug reports.
+
+    Scope and blind spot, stated plainly: these are pattern and presence checks,
+    not prose review. They pin that the debunked figure stays out (in any of its
+    common spellings) and that the specification reference stays discoverable.
+    They cannot tell a well-written docstring from a bag of the right keywords.
+    Widen them when a regression slips past, not before.
+    """
+
+    #: Matches the debunked separation figure in its common spellings, including
+    #: hyphen/en-dash/em-dash variants, "8 to 24" and the spelled-out form.
+    SEPARATION_FIGURE_RE = re.compile(
+        r"8\s*[-\u2010-\u2015]\s*24\s*h|8\s+to\s+24\s+h|eight\s+to\s+twenty[- ]four",
+        re.IGNORECASE,
+    )
+
+    def test_docstring_does_not_claim_a_separation_duration(self) -> None:
+        """The debunked separation figure must not reappear in the docstrings."""
+        class_doc = inspect.getdoc(GoogleFindMyUWTModeSensor) or ""
+        is_on_doc = inspect.getdoc(GoogleFindMyUWTModeSensor.is_on.fget) or ""
+        icon_doc = inspect.getdoc(GoogleFindMyUWTModeSensor.icon.fget) or ""
+
+        for name, doc in (
+            ("class", class_doc),
+            ("is_on", is_on_doc),
+            ("icon", icon_doc),
+        ):
+            match = self.SEPARATION_FIGURE_RE.search(doc)
+            assert match is None, (
+                f"{name} docstring reintroduces the debunked separation figure: "
+                f"{match.group(0)!r}"
+            )
+
+    def test_docstring_names_spec_term_and_source(self) -> None:
+        """The docstrings must name the specification term, source and mechanism."""
+        class_doc = inspect.getdoc(GoogleFindMyUWTModeSensor) or ""
+        is_on_doc = inspect.getdoc(GoogleFindMyUWTModeSensor.is_on.fget) or ""
+
+        assert "unwanted tracking protection mode" in class_doc
+        assert (
+            "developers.google.com/nearby/fast-pair/specifications/extensions/fmdn"
+            in class_doc
+        )
+        assert "unwanted tracking protection mode" in is_on_doc
+        # The mode is command-driven; both Data IDs must stay named, otherwise the
+        # "not by elapsed time" statement loses its evidence.
+        assert "0x07" in class_doc
+        assert "0x08" in class_doc
+
+    def test_docstring_keeps_the_skip_ringing_authentication_caveat(self) -> None:
+        """The unauthenticated-ring consequence of the mode must stay documented.
+
+        Case (b) of the guard family in ``tests/AGENTS.md``, "load-bearing
+        cross-reference": the class docstring carries the only in-repo statement
+        that links this sensor to the spurious-ring reports, namely that while
+        the mode is active and was activated with control flag ``0x01``, ring
+        requests are not authenticated, so a chime with no cloud request behind
+        it is specification-conformant. Deleting the prose deletes the link
+        silently, and no behavioural test would notice.
+
+        This guard pins that the mechanism stays documented. It deliberately
+        does NOT pin any claim about what caused a given report: the docstring
+        names the DULT non-owner path as the likelier explanation, and that
+        attribution is the reporter's, not this repository's.
+
+        The guard does not assert on ``0x01``: that literal is already required
+        by the bit-mask caveat above and would pass even if the control flag
+        went unmentioned.
+
+        Retirement condition: BSkando#195 and BSkando#210 both closed, or the
+        mechanism documented somewhere that a docstring edit cannot silently
+        remove.
+        """
+        class_doc = inspect.getdoc(GoogleFindMyUWTModeSensor) or ""
+
+        assert "Skip ringing authentication" in class_doc
+        assert "BSkando#195" in class_doc
+
+    def test_docstring_keeps_the_msb_first_bit_numbering_caveat(self) -> None:
+        """Spec bit 7 is standard bit 0; the mask is 0x01, never 0x80.
+
+        The resolver marks ``0x80`` as an anti-pattern. A docstring that says
+        "bit 7" without the caveat invites exactly that "fix".
+        """
+        class_doc = inspect.getdoc(GoogleFindMyUWTModeSensor) or ""
+
+        assert "spec bit 7" in class_doc
+        assert "0x01" in class_doc
+        assert "0x80" in class_doc
+
+    def test_is_on_docstring_documents_absence_of_ttl(self) -> None:
+        """The missing staleness TTL must be documented as a decision.
+
+        Mirrors the rationale comment on the BLE battery sensor: the absence of
+        ageing is deliberate, has a stated reason, and names what would make it
+        revisitable.
+        """
+        is_on_doc = inspect.getdoc(GoogleFindMyUWTModeSensor.is_on.fget) or ""
+
+        assert "No BLE staleness TTL" in is_on_doc
+        assert "decision rather than an oversight" in is_on_doc
+        assert "FMDN_FLAGS_PROBE" in is_on_doc
