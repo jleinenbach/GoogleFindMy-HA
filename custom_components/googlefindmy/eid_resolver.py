@@ -946,6 +946,10 @@ class GoogleFindMyEIDResolver:
     )
     _heuristic_miss_log_at: dict[str, float] = field(init=False, default_factory=dict)
     _flags_logged_devices: set[str] = field(init=False, default_factory=set)
+    _frame_conflict_logged_devices: set[str] = field(init=False, default_factory=set)
+    _frame_conflict_log_at: dict[tuple[str, int], float] = field(
+        init=False, default_factory=dict
+    )
     _ble_battery_state: dict[str, BLEBatteryState] = field(
         init=False, default_factory=dict
     )
@@ -1012,6 +1016,10 @@ class GoogleFindMyEIDResolver:
             self._locks = {}
         if not hasattr(self, "_truncated_frame_log_at"):
             self._truncated_frame_log_at = {}
+        if not hasattr(self, "_frame_conflict_logged_devices"):
+            self._frame_conflict_logged_devices = set()
+        if not hasattr(self, "_frame_conflict_log_at"):
+            self._frame_conflict_log_at = {}
         # Heuristic phone discovery state
         if not hasattr(self, "_learned_heuristic_params"):
             self._learned_heuristic_params = {}
@@ -3023,6 +3031,35 @@ class GoogleFindMyEIDResolver:
             battery_pct = FMDN_BATTERY_PCT.get(battery_raw)
             now_wall = time.time()
 
+            # Observe -- do not arbitrate -- the two redundant channels.
+            #
+            # SPEC (Find Hub Network Accessory Specification, retrieved
+            # 2026-08-05): the frame type is set to 0x41 while unwanted
+            # tracking protection mode is active and back to 0x40 when it is
+            # deactivated; hashed-flags spec bit 7 carries the same state. The
+            # two should therefore always agree.
+            #
+            # They demonstrably do not always agree in this project's field
+            # reports: 0x41 is observed on modern 32-byte-EID accessories
+            # regardless of tracking state (docs/BLE_BATTERY_SENSOR.md). Which
+            # reading holds is an open question, so this code deliberately
+            # does NOT resolve it: the decoded bit is passed through unchanged
+            # in both directions. Forcing the bit to False on a 0x40/bit-1
+            # disagreement would suppress precisely the signal the sensor
+            # exists for; deriving True from a 0x41 frame would mark every
+            # modern tracker as permanently "unwanted tracking".
+            #
+            # This log is the measurement channel that will decide the
+            # question. Revisit once field data exists.
+            if observed_frame is not None:
+                self._log_frame_conflict(
+                    matches=matches,
+                    observed_frame=observed_frame,
+                    uwt_mode=uwt_mode,
+                    decoded=decoded,
+                    payload_len=length,
+                )
+
             state = BLEBatteryState(
                 battery_level=battery_raw,
                 battery_pct=battery_pct,
@@ -3374,6 +3411,70 @@ class GoogleFindMyEIDResolver:
                     )
 
         return candidates, observed_frame
+
+    def _log_frame_conflict(
+        self,
+        *,
+        matches: list[EIDMatch],
+        observed_frame: int,
+        uwt_mode: bool,
+        decoded: int,
+        payload_len: int,
+    ) -> None:
+        """Record a disagreement between the frame type and the UWT flag bit.
+
+        Two-stage on purpose. The first disagreement per device is INFO, the
+        same visibility as ``FMDN_FLAGS_PROBE``, so a reporter running a stock
+        build can contribute the observation without turning on debug logging;
+        everything after that is DEBUG and throttled, because a disagreeing
+        beacon disagrees on every single advertisement.
+
+        The storage key matches the one ``FMDN_FLAGS_PROBE`` uses. A
+        measurement channel that cannot be joined with the probe log it is
+        meant to explain would be worthless as a diagnostic.
+        """
+
+        frame_says_uwt = observed_frame == MODERN_FRAME_TYPE
+        if frame_says_uwt == uwt_mode:
+            return
+
+        now = time.time()
+        for match in matches:
+            storage_key = match.canonical_id or match.device_id
+            if storage_key not in self._frame_conflict_logged_devices:
+                self._frame_conflict_logged_devices.add(storage_key)
+                self._frame_conflict_log_at[(storage_key, observed_frame)] = now
+                _LOGGER.info(
+                    "FMDN_FLAGS_CONFLICT device=%s frame=0x%02x uwt_bit=%s "
+                    "decoded=0x%02x payload_len=%d; frame type and flags bit "
+                    "disagree, value passed through unchanged",
+                    storage_key,
+                    observed_frame,
+                    uwt_mode,
+                    decoded,
+                    payload_len,
+                )
+                continue
+
+            key = (storage_key, observed_frame)
+            last_log = self._frame_conflict_log_at.get(key)
+            if (
+                last_log is not None
+                and now - last_log < TRUNCATED_FRAME_LOG_WINDOW_SECONDS
+            ):
+                continue
+
+            self._frame_conflict_log_at[key] = now
+            _LOGGER.debug(
+                "FMDN_FLAGS_CONFLICT device=%s frame=0x%02x uwt_bit=%s "
+                "decoded=0x%02x payload_len=%d; frame type and flags bit "
+                "disagree, value passed through unchanged",
+                storage_key,
+                observed_frame,
+                uwt_mode,
+                decoded,
+                payload_len,
+            )
 
     def _log_truncated_frame(
         self, *, frame_type: int, payload_len: int, raw_len: int
