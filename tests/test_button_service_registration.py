@@ -157,3 +157,42 @@ def test_button_setup_skips_service_registration_when_platform_missing(
         "locate_device",
     ]
     assert recorded_calls == []
+
+
+@pytest.mark.asyncio
+async def test_sound_buttons_surface_service_validation_errors() -> None:
+    """A translated user message must not die in the log.
+
+    The Stop Sound button is the primary path for BSkando#195: it is where a
+    user learns that the ring could not be correlated and may keep playing.
+    That message exists in ten languages, and a blanket `except Exception`
+    turned every one of them into a log line nobody reads. Play Sound carries
+    the same class of message and is pinned alongside it.
+    """
+
+    button_module = importlib.import_module("custom_components.googlefindmy.button")
+
+    class _RaisingServices:
+        async def async_call(self, *args: Any, **kwargs: Any) -> None:
+            raise button_module.ServiceValidationError("translated user message")
+
+    for cls_name in ("GoogleFindMyStopSoundButton", "GoogleFindMyPlaySoundButton"):
+        base = getattr(button_module, cls_name)
+
+        # Subclass rather than patch: mutating the production class would leak
+        # the stubbed gates into every later test in the session.
+        class _Pressable(base):  # type: ignore[misc, valid-type]
+            device_id = "device-1"
+            available = True
+
+            def device_label(self) -> str:
+                return "Device 1"
+
+            def _update_last_pressed(self) -> None:
+                return None
+
+        button = _Pressable.__new__(_Pressable)
+        button.hass = SimpleNamespace(services=_RaisingServices())  # type: ignore[attr-defined]
+
+        with pytest.raises(button_module.ServiceValidationError):
+            await button.async_press()
