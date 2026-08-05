@@ -335,12 +335,12 @@ class TestUWTModeSensorCoordinatorUpdate:
 
 
 # ===========================================================================
-# 7. GoogleFindMyUWTModeSensor — documentation guards (issue #210)
+# 7. GoogleFindMyUWTModeSensor — documentation guards (BSkando#210)
 # ===========================================================================
 
 
 class TestUWTModeSensorDocumentationMatchesSpec:
-    """Guard the docstrings against the semantics drift fixed for issue #210.
+    """Guard the docstrings against the semantics drift fixed for BSkando#210.
 
     The class docstring once claimed a fixed separation window that the Find Hub
     Network Accessory Specification does not define, which produced misdirected
@@ -392,6 +392,35 @@ class TestUWTModeSensorDocumentationMatchesSpec:
         # "not by elapsed time" statement loses its evidence.
         assert "0x07" in class_doc
         assert "0x08" in class_doc
+
+    def test_docstring_keeps_the_skip_ringing_authentication_caveat(self) -> None:
+        """The unauthenticated-ring consequence of the mode must stay documented.
+
+        Case (b) of the guard family in ``tests/AGENTS.md``, "load-bearing
+        cross-reference": the class docstring carries the only in-repo statement
+        that links this sensor to the spurious-ring reports, namely that while
+        the mode is active and was activated with control flag ``0x01``, ring
+        requests are not authenticated, so a chime with no cloud request behind
+        it is specification-conformant. Deleting the prose deletes the link
+        silently, and no behavioural test would notice.
+
+        This guard pins that the mechanism stays documented. It deliberately
+        does NOT pin any claim about what caused a given report: the docstring
+        names the DULT non-owner path as the likelier explanation, and that
+        attribution is the reporter's, not this repository's.
+
+        The guard does not assert on ``0x01``: that literal is already required
+        by the bit-mask caveat above and would pass even if the control flag
+        went unmentioned.
+
+        Retirement condition: BSkando#195 and BSkando#210 both closed, or the
+        mechanism documented somewhere that a docstring edit cannot silently
+        remove.
+        """
+        class_doc = inspect.getdoc(GoogleFindMyUWTModeSensor) or ""
+
+        assert "Skip ringing authentication" in class_doc
+        assert "BSkando#195" in class_doc
 
     def test_docstring_keeps_the_msb_first_bit_numbering_caveat(self) -> None:
         """Spec bit 7 is standard bit 0; the mask is 0x01, never 0x80.

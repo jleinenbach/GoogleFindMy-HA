@@ -977,10 +977,19 @@ reads docstrings via `inspect.getdoc` and asserts that a specific, previously
 wrong claim cannot return and that the specification reference stays present.
 It exists because the UWT-mode sensor documented a separation duration the Find
 Hub Network Accessory Specification never defines, which produced misdirected
-automations and bug reports (issue #210) without a single failing test.
+automations and bug reports (BSkando#210) without a single failing test.
 
-Use this pattern only where a wrong docstring has already caused a real defect,
-and keep three properties:
+Use this pattern in one of exactly two situations, and keep four properties:
+
+- **(a) Corrective.** A wrong docstring has already caused a real defect. This is
+  the original case above.
+- **(b) Load-bearing cross-reference.** The docstring carries the only in-repo
+  statement that links an entity to an open upstream report, so deleting the prose
+  silently deletes the link. `test_docstring_keeps_the_skip_ringing_authentication_caveat`
+  is the first member of this kind: it pins the "Skip ringing authentication"
+  control flag, which is what connects the UWT-mode sensor to the spurious-ring
+  reports. Case (b) is narrower than it looks and is not a licence to freeze prose
+  in general: without property 4 below it degenerates into exactly that.
 
 1. **Match patterns, not one spelling.** The negative guard uses a regular
    expression covering hyphen, en-dash and spelled-out variants. A plain
@@ -992,3 +1001,8 @@ and keep three properties:
 3. **State the blind spot in the test class docstring.** These are pattern and
    presence checks; they cannot distinguish good prose from a bag of the right
    keywords. Like the CLI kill guard, this is a ratchet, not a proof.
+4. **Name the retirement condition.** Every guard states in its own docstring
+   what would make it obsolete: for case (a) that the corrected claim has been
+   stable across a release, for case (b) that the named upstream report has
+   closed. A guard with no stated exit turns documentation into a permanent
+   fixture and outlives the reason it was written.

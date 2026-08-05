@@ -941,8 +941,35 @@ class GoogleFindMyUWTModeSensor(GoogleFindMyDeviceEntity, BinarySensorEntity):
     a separation duration. An earlier docstring here claimed that the sensor
     turns on after a fixed separation window; no such window exists in the
     specification, and the claim caused misdirected automations and bug reports
-    (issue #210). A separation-based anti-stalking chime is a DULT platform
+    (BSkando#210). A separation-based anti-stalking chime is a DULT platform
     behaviour and is not what this bit reports.
+
+    Why the mode is nonetheless relevant to reports of spurious ringing:
+    activation (Data ID 0x07) takes an optional control flag, ``0x01``
+    "Skip ringing authentication", specified as "When set, ringing requests
+    aren't authenticated while in unwanted tracking protection mode" (section
+    "Beacon Actions", retrieved 2026-08-05). A beacon activated with that flag
+    set still expects authentication data on a ring request but no longer
+    verifies it, so while the mode is active the OWNER ring path is reachable
+    without the ring key by any party in Bluetooth range. Two caveats, both
+    load-bearing:
+
+        - The likelier explanation for the existing reports is the DULT
+          non-owner sound path, which is unauthenticated by design and needs no
+          such flag (see ``docs/PLAY_SOUND_ARCHITECTURE.md``). The flag is
+          documented here because it is the only mechanism that also removes
+          authentication from the OWNER path, which the DULT explanation does
+          not. Neither is asserted as the cause of any particular report.
+        - The bit itself is not yet trustworthy as a trigger. Episodes of 38
+          and 57 seconds and same-second flips across two devices at home are
+          on record (BSkando#210). Treat this sensor as context for a report,
+          never as an alerting signal.
+
+    What this does establish: a chime with no cloud request behind it is
+    specification-conformant and does not imply that this integration sent
+    anything (BSkando#195, BSkando#108). This integration has no GATT write
+    path at all. The advertisement carries the mode, never the flag, so the
+    sensor can narrow such a report down but cannot confirm a cause.
 
     Data source: spec bit 7 (standard bit 0) of the FMDN hashed-flags byte,
     decoded by the EID resolver as :pyattr:`BLEBatteryState.uwt_mode`.
@@ -1012,7 +1039,7 @@ class GoogleFindMyUWTModeSensor(GoogleFindMyDeviceEntity, BinarySensorEntity):
         no measurement in this project that would justify any particular TTL
         value. Ageing is therefore left to the consumer, which is why
         ``last_ble_observation`` is exposed as an attribute. Revisit when field
-        data from FMDN_FLAGS_PROBE exists (issue #210).
+        data from FMDN_FLAGS_PROBE exists (BSkando#210).
         """
         resolver = self._get_resolver()
         if resolver is None or self._device_id is None:

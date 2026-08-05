@@ -413,7 +413,7 @@ device logged into the owner's Google account. This is the opposite of our use c
 > Find Hub Network Accessory Specification, section "Beacon Actions"
 > (<https://developers.google.com/nearby/fast-pair/specifications/extensions/fmdn>,
 > retrieved 2026-08-04). Do not use the `uwt_mode` binary sensor as a separation timer
-> (issue #210).
+> ([BSkando#210](https://github.com/BSkando/GoogleFindMy-HA/issues/210)).
 
 **We must use FMDN Beacon Actions (authenticated ring)** because:
 1. We have the EIK → can derive the ring key
@@ -431,6 +431,40 @@ three independent ring trigger sources:
 | Non-owner BLE sound | `DULT_BT_GATT` | DULT ANOS (`15190001-12F4`) | None |
 | Motion auto-ring | `DULT_MOTION_DETECTOR` | Internal (separated state) | N/A |
 
+> **The `HMAC-SHA256` in row 1 is conditional on how UTP mode was activated.**
+> Activating unwanted tracking protection mode (Data ID `0x07`) takes an optional
+> control flag, `0x01` "Skip ringing authentication", specified as "When set, ringing
+> requests aren't authenticated while in unwanted tracking protection mode" (Find Hub
+> Network Accessory Specification, section "Beacon Actions",
+> <https://developers.google.com/nearby/fast-pair/specifications/extensions/fmdn>,
+> retrieved 2026-08-05). A beacon activated with that flag set still expects
+> authentication data on a ring request but no longer verifies it, so while the mode
+> is active the owner ring path is reachable by any party in Bluetooth range without
+> the ring key.
+>
+> Three consequences, in decreasing order of confidence:
+>
+> 1. An implementation of the owner ring must not infer from a successful ring that
+>    the ring was authenticated, and must not treat the ring key as a capability that
+>    only the owner holds while the mode is active.
+> 2. A chime with no cloud request behind it is specification-conformant and does not
+>    imply a defect in this integration
+>    ([BSkando#195](https://github.com/BSkando/GoogleFindMy-HA/issues/195),
+>    [BSkando#108](https://github.com/BSkando/GoogleFindMy-HA/issues/108)).
+> 3. This flag is **not** the likeliest explanation for those reports. Row 2 of the
+>    table above, the DULT non-owner sound, is unauthenticated by design and needs no
+>    flag at all; the reporter in
+>    [BSkando#210](https://github.com/BSkando/GoogleFindMy-HA/issues/210) attributes
+>    the observed chirps to that path, having instrumented the event bus to rule this
+>    integration out as the source. The `0x07` flag is documented here because it is
+>    the only mechanism that also removes authentication from the **owner** path,
+>    which the DULT explanation does not.
+>
+> The advertisement reports the mode (`uwt_mode` binary sensor), never the flag, and
+> the mode itself is observed to flap on timescales of under a minute
+> ([BSkando#210](https://github.com/BSkando/GoogleFindMy-HA/issues/210)). It is
+> context for a report, not evidence of a cause.
+
 ---
 
 ## Comparison: All Three Ring Paths
@@ -439,7 +473,7 @@ three independent ring trigger sources:
 |--------|------------------|-----------------------|---------------------------|
 | **Latency** | 2-15 seconds (FCM) | < 1 second | < 1 second |
 | **Range** | Global | ~30m BLE | ~30m BLE |
-| **Auth** | Google OAuth + FCM | HMAC-SHA256 (ring key) | None |
+| **Auth** | Google OAuth + FCM | HMAC-SHA256 (ring key), but see the UTP control-flag note above: not verified while the tracker is in unwanted tracking protection mode that was activated with flag `0x01` | None |
 | **Availability** | Always | Always (owner has key) | Separated state only |
 | **Confirmation** | None (fire-and-forget) | Ring state notification | Command_Response indication |
 | **Reliability** | FCM delivery dependent | Direct, deterministic | Direct, deterministic |
@@ -574,7 +608,7 @@ The ring key is currently only used during device registration
 | **FMDN** | Find My Device Network — Google's crowdsource tracker protocol |
 | **EIK** | Ephemeral Identity Key — 32-byte root key for tracker crypto |
 | **EID** | Ephemeral Identifier — rotating BLE address derived from EIK |
-| **Beacon Actions** | FMDN GATT characteristic (`FE2C1238`) for owner-authenticated commands (ring, UTP) |
+| **Beacon Actions** | FMDN GATT characteristic (`FE2C1238`) for owner-authenticated commands (ring, UTP); ring authentication can be waived for the duration of UTP mode by control flag `0x01` at activation |
 | **DULT** | Detecting Unwanted Location Trackers — IETF specification for anti-stalking |
 | **ANOS** | Accessory Non-Owner Service — DULT GATT service (`15190001-12F4`) for unauthenticated commands |
 | **Separated State** | DULT platform state, entered after roughly 30 minutes without an owner device; the unauthenticated DULT sound is enabled only after a further 8-24 hours (both figures from DULT drafts and field reports, not from the FMDN specification; see `docs/TRIGGER_MECHANISMS.md` sections 4.1 and 8). **Not** the same as the FMDN unwanted tracking protection mode, which is command-driven (Data ID `0x07` / `0x08`) and is what the `uwt_mode` binary sensor reports |

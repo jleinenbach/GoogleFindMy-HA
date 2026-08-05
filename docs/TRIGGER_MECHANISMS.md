@@ -82,7 +82,7 @@ Unlike the proprietary obscurity of Apple's initial launch, the DULT specificati
 > per the Find Hub Network Accessory Specification
 > (<https://developers.google.com/nearby/fast-pair/specifications/extensions/fmdn>,
 > retrieved 2026-08-04). Do not read this section as documentation of that sensor, and
-> do not build separation timers on it (issue #210). See
+> do not build separation timers on it ([BSkando#210](https://github.com/BSkando/GoogleFindMy-HA/issues/210)). See
 > `custom_components/googlefindmy/binary_sensor.py::GoogleFindMyUWTModeSensor`.
 
 The UT Mode is the critical operational phase for anti-stalking alerts. When a device has been in the Separated state for an extended period, it alters its behavior to become more visible to detection networks.
