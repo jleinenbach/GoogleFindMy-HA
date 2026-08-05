@@ -968,3 +968,27 @@ following to preserve migration coverage:
 `custom_components.googlefindmy.const.SERVICE_DEVICE_TRANSLATION_KEY`. Update this
 test whenever new locales or service-device translation keys are introduced so it
 continues to guard localized device names.
+
+## Docstring semantics guards
+
+`tests/test_uwt_mode_binary_sensor.py::TestUWTModeSensorDocumentationMatchesSpec`
+introduces a guard family that pins *documentation* rather than behaviour: it
+reads docstrings via `inspect.getdoc` and asserts that a specific, previously
+wrong claim cannot return and that the specification reference stays present.
+It exists because the UWT-mode sensor documented a separation duration the Find
+Hub Network Accessory Specification never defines, which produced misdirected
+automations and bug reports (issue #210) without a single failing test.
+
+Use this pattern only where a wrong docstring has already caused a real defect,
+and keep three properties:
+
+1. **Match patterns, not one spelling.** The negative guard uses a regular
+   expression covering hyphen, en-dash and spelled-out variants. A plain
+   substring check is trivially evaded by rewording, which makes the guard read
+   as protection while providing none.
+2. **Do not paraphrase the banned claim in the guarded docstring.** If the
+   prose needs to mention what was wrong, it must do so without restating the
+   figure, otherwise the guard fires on its own debunking.
+3. **State the blind spot in the test class docstring.** These are pattern and
+   presence checks; they cannot distinguish good prose from a bag of the right
+   keywords. Like the CLI kill guard, this is a ratchet, not a proof.

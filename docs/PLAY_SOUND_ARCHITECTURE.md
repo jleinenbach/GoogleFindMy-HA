@@ -334,7 +334,7 @@ use case where the caller does NOT own the tracker.
 | CCCD Descriptor | `00002902-0000-1000-8000-00805F9B34FB` |
 | Byte Order | **Little endian** (opposite of FMDN Beacon Actions!) |
 | Authentication | **None** |
-| Availability | **Separated state only** (tracker away from owner 8-24 hours) |
+| Availability | **Separated state only**; the unauthenticated sound is enabled 8-24 hours after separation (figure from DULT/AirTag field reports, not from the FMDN specification; see `docs/TRIGGER_MECHANISMS.md` sections 4.1 and 8) |
 
 ### DULT Opcodes (Little-Endian Wire Format)
 
@@ -404,6 +404,16 @@ account). In near-owner state, the tracker responds to DULT Sound_Start with
 
 DULT only works when the tracker enters "separated state" — 8-24 hours away from any
 device logged into the owner's Google account. This is the opposite of our use case.
+
+> **Provenance of the 8-24 hour figure:** it comes from DULT/AirTag field reports and
+> describes a *platform* behaviour (see `docs/TRIGGER_MECHANISMS.md` sections 4.1 and 8
+> for the per-device figures and their sources). It is **not** in the FMDN
+> specification, and it is **not** what the FMDN unwanted tracking protection mode
+> reports: that mode is entered and left by command (Data ID `0x07` / `0x08`), per the
+> Find Hub Network Accessory Specification, section "Beacon Actions"
+> (<https://developers.google.com/nearby/fast-pair/specifications/extensions/fmdn>,
+> retrieved 2026-08-04). Do not use the `uwt_mode` binary sensor as a separation timer
+> (issue #210).
 
 **We must use FMDN Beacon Actions (authenticated ring)** because:
 1. We have the EIK → can derive the ring key
@@ -567,7 +577,7 @@ The ring key is currently only used during device registration
 | **Beacon Actions** | FMDN GATT characteristic (`FE2C1238`) for owner-authenticated commands (ring, UTP) |
 | **DULT** | Detecting Unwanted Location Trackers — IETF specification for anti-stalking |
 | **ANOS** | Accessory Non-Owner Service — DULT GATT service (`15190001-12F4`) for unauthenticated commands |
-| **Separated State** | Tracker state when away from owner device for 8-24 hours; enables DULT/UTP features |
+| **Separated State** | DULT platform state, entered after roughly 30 minutes without an owner device; the unauthenticated DULT sound is enabled only after a further 8-24 hours (both figures from DULT drafts and field reports, not from the FMDN specification; see `docs/TRIGGER_MECHANISMS.md` sections 4.1 and 8). **Not** the same as the FMDN unwanted tracking protection mode, which is command-driven (Data ID `0x07` / `0x08`) and is what the `uwt_mode` binary sensor reports |
 | **GATT** | Generic Attribute Profile — BLE protocol for read/write operations |
 | **CCCD** | Client Characteristic Configuration Descriptor — enables BLE notifications/indications |
 | **ADM** | Android Device Management — Google auth token type |

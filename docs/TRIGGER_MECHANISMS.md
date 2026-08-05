@@ -75,6 +75,16 @@ Unlike the proprietary obscurity of Apple's initial launch, the DULT specificati
 
 ### **4.2 Unwanted Tracking (UT) Mode**
 
+> **Not the same thing as the `uwt_mode` binary sensor.** This section describes the
+> DULT *platform* behaviour, which is reached by elapsed time. The FMDN *unwanted
+> tracking protection mode*, which bit 7 of the hashed-flags byte reports and which the
+> `uwt_mode` entity exposes, is entered and left by command (Data ID `0x07` / `0x08`)
+> per the Find Hub Network Accessory Specification
+> (<https://developers.google.com/nearby/fast-pair/specifications/extensions/fmdn>,
+> retrieved 2026-08-04). Do not read this section as documentation of that sensor, and
+> do not build separation timers on it (issue #210). See
+> `custom_components/googlefindmy/binary_sensor.py::GoogleFindMyUWTModeSensor`.
+
 The UT Mode is the critical operational phase for anti-stalking alerts. When a device has been in the Separated state for an extended period, it alters its behavior to become more visible to detection networks.
 
 * **Static MAC Address:** Crucially, upon entering UT Mode, the tracker ceases the rapid rotation of its MAC address. The MAC address rotation slows significantly, often persisting for **24 hours**. This allows the "Unknown Tracker Alert" algorithms on Android and iOS devices to recognize the device as a persistent companion rather than a series of transient devices passing by.¹⁷  
