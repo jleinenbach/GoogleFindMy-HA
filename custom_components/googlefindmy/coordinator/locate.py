@@ -870,28 +870,51 @@ class LocateOperations(_MixinBase):
         cached_uuid_was_expired = False
         if request_uuid_to_use is None:
             cached_uuid = self._sound_request_uuids.get(device_id)
-            # An aged-out key is no better than no key: the ring it referenced
-            # auto-stopped long ago (the reload filter would discard it), so
-            # targeting it could miss a current ring. Treat it as absent.
-            if cached_uuid is not None and self._cached_sound_uuid_is_stale(device_id):
-                _LOGGER.debug(
-                    "Ignoring expired cached Play Sound UUID for %s", device_id
-                )
-                cached_uuid = None
-                cached_uuid_was_expired = True
+            # An aged-out key is still strictly better than no key, so it is
+            # SENT but not TRUSTED.
+            #
+            # Why sent: Nova queues an action command until the tracker becomes
+            # reachable, which can take hours to days (BSkando#108). A key that
+            # aged past SOUND_UUID_MAX_AGE_S may therefore still be the handle
+            # on the ring that is audible right now. It cannot hit a different
+            # ring -- it belongs to this device, and a fresher key would have
+            # replaced it. Dropping it traded a possible correlation for a
+            # guaranteed absence of one.
+            #
+            # Why not trusted: nothing proves the aged key references the
+            # running ring, so the outcome stays UNCORRELATED and reaches the
+            # user as such. It is also not popped afterwards: unspent, it is
+            # still the best handle a second attempt has.
+            #
+            # The previous justification ("the ring it referenced auto-stopped
+            # long ago") conflated two timers on two protocol layers. The FMDN
+            # BLE ring timeout (Data ID 0x05, at most 10 minutes) bounds how
+            # long a ring LASTS from the moment it starts; the Nova queue
+            # bounds how long DELIVERY takes. This timestamp records when we
+            # sent the play, not when the ring began, so nothing about the age
+            # of the key implies the ring is over.
+            cached_uuid_was_expired = cached_uuid is not None and (
+                self._cached_sound_uuid_is_stale(device_id)
+            )
             request_uuid_to_use = cached_uuid
-            if request_uuid_to_use is not None:
+            if request_uuid_to_use is None:
+                _LOGGER.warning(
+                    "No cancel key for %s; submitting an uncorrelated stop "
+                    "(the ring may keep playing)",
+                    device_id,
+                )
+            elif cached_uuid_was_expired:
+                _LOGGER.debug(
+                    "Using aged cached Play Sound UUID for %s (sent, but the "
+                    "outcome is reported as uncorrelated)",
+                    device_id,
+                )
+            else:
                 used_own_fresh_key = True
                 _LOGGER.debug(
                     "Using cached Play Sound UUID for %s: %s",
                     device_id,
                     request_uuid_to_use,
-                )
-            else:
-                _LOGGER.warning(
-                    "No cancel key for %s; submitting an uncorrelated stop "
-                    "(the ring may keep playing)",
-                    device_id,
                 )
         else:
             # An explicitly passed key is a CLAIM of correlation, not a proof.
@@ -939,15 +962,11 @@ class LocateOperations(_MixinBase):
                 if removed_request_uuid is not None:
                     await self._async_save_sound_uuids()
                 return StopSoundOutcome.CANCELLED
-            if cached_uuid_was_expired:
-                # Housekeeping only: a key that the reload filter would discard
-                # anyway. Never a fresh key -- a fresh one would have been used.
-                removed_expired_uuid = self._sound_request_uuids.pop(device_id, None)
-                timestamps = getattr(self, "_sound_request_timestamps", None)
-                if timestamps is not None:
-                    timestamps.pop(device_id, None)
-                if removed_expired_uuid is not None:
-                    await self._async_save_sound_uuids()
+            # IRR-CA-POP-ON-CORRELATED-CANCEL-ONLY: only a stop we can vouch
+            # for spends the key. An aged key was sent unproven, so it survives
+            # -- it remains the best handle a retry has, and the reload filter
+            # clears it at the next restart anyway. Popping it here would leave
+            # a second attempt with nothing at all.
             return StopSoundOutcome.UNCORRELATED
         except ConfigEntryAuthFailed as auth_exc:
             self._set_auth_state(

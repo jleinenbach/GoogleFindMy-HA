@@ -251,12 +251,19 @@ async def test_ambiguous_play_replaces_expired_cancel_key() -> None:
 
 
 @pytest.mark.asyncio
-async def test_async_stop_sound_ignores_expired_cached_uuid() -> None:
-    """Stop must not target an expired cached UUID (sibling of the store guard).
+async def test_async_stop_sound_sends_expired_cached_uuid_uncorrelated() -> None:
+    """An aged cancel key is SENT but not TRUSTED, and it survives the attempt.
 
-    A cached key older than SOUND_UUID_MAX_AGE_S refers to a ring that has long
-    auto-stopped; the reload filter would discard it. The default Stop path must
-    treat it as absent and stop without it rather than cancel a dead request.
+    Deliberate reversal of the previous behaviour. Nova queues an action until
+    the tracker is reachable, which can take hours to days (BSkando#108), so an
+    aged key may still be the handle on the ring that is audible right now. It
+    cannot hit a different ring (it is device-bound) and a fresher key would
+    have replaced it, so sending it can only help or do nothing, whereas
+    dropping it guaranteed no correlation at all.
+
+    Not trusted: the outcome stays UNCORRELATED, which reaches the user as an
+    error rather than as a confirmed cancel. Not popped: unspent, it remains
+    the best handle a second attempt has.
     """
 
     coordinator = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
@@ -278,11 +285,48 @@ async def test_async_stop_sound_ignores_expired_cached_uuid() -> None:
 
     result = await coordinator.async_stop_sound("device-1")
 
-    # Ignored key means no correlation, so the stop is unprovable, not a success.
+    # Aged key means unproven correlation, so the stop is not a success.
     assert result is StopSoundOutcome.UNCORRELATED
-    # The expired UUID is ignored; Stop is attempted without a request UUID.
-    assert api_calls == [("device-1", None)]
-    # Housekeeping: the dead key is dropped, it would not survive a reload anyway.
+    # ... but it IS the key that goes on the wire, not None.
+    assert api_calls == [("device-1", "uuid-expired")]
+    # And it is not spent: only a provably correlated cancel pops a key
+    # (IRR-CA-POP-ON-CORRELATED-CANCEL-ONLY).
+    assert coordinator._sound_request_uuids == {"device-1": "uuid-expired"}  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_fresh_cancel_key_is_reported_cancelled_and_spent() -> None:
+    """Counterpart to the aged-key case: a fresh key proves correlation.
+
+    Same setup, only the timestamp differs. This pins that the aged-key
+    behaviour above is driven by the age and by nothing else, and that the
+    CANCELLED path still spends the key it used.
+    """
+
+    coordinator = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
+    coordinator._sound_request_uuids = {"device-1": "uuid-fresh"}  # type: ignore[attr-defined]
+    coordinator._sound_request_timestamps = {"device-1": time.time()}  # type: ignore[attr-defined]
+    coordinator._note_push_transport_problem = lambda: None  # type: ignore[attr-defined]
+    coordinator._set_auth_state = lambda **kwargs: None  # type: ignore[attr-defined]
+    coordinator._api_push_ready = lambda: True  # type: ignore[attr-defined]
+
+    async def _save() -> None:
+        return None
+
+    coordinator._async_save_sound_uuids = _save  # type: ignore[attr-defined]
+
+    api_calls: list[tuple[str, str | None]] = []
+
+    async def _async_stop_sound(device_id: str, request_uuid: str | None) -> bool:
+        api_calls.append((device_id, request_uuid))
+        return True
+
+    coordinator.api = SimpleNamespace(async_stop_sound=_async_stop_sound)  # type: ignore[attr-defined]
+
+    result = await coordinator.async_stop_sound("device-1")
+
+    assert result is StopSoundOutcome.CANCELLED
+    assert api_calls == [("device-1", "uuid-fresh")]
     assert coordinator._sound_request_uuids == {}  # type: ignore[attr-defined]
 
 
@@ -451,12 +495,13 @@ async def test_blank_request_uuid_without_a_cached_key_is_uncorrelated() -> None
 
 
 @pytest.mark.asyncio
-async def test_expired_cached_key_is_cleaned_even_for_a_blank_uuid() -> None:
-    """Housekeeping must not depend on how the caller spelled "no key".
+async def test_blank_uuid_falls_through_to_the_aged_cached_key() -> None:
+    """The cached-key fallback must not depend on how "no key" was spelled.
 
-    An aged-out key is dropped on the ``UNCORRELATED`` path. Before the blank
-    values were normalised, passing "" skipped that whole block, so the stale
-    key stayed behind and every later stop kept ignoring it.
+    Before the blank values were normalised, passing "" skipped the cache
+    lookup entirely: a valid, frontal cancel key sat unused while an empty
+    field went on the wire. The key here is aged, so it is sent and reported
+    UNCORRELATED, but it is sent -- that is the regression this pins.
     """
 
     coordinator = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
@@ -485,7 +530,8 @@ async def test_expired_cached_key_is_cleaned_even_for_a_blank_uuid() -> None:
 
     outcome = await coordinator.async_stop_sound("device-1", "")
 
-    assert sent == [None]
+    assert sent == ["stale-key"]
     assert outcome is StopSoundOutcome.UNCORRELATED
-    assert coordinator._sound_request_uuids == {}  # type: ignore[attr-defined]
-    assert saved == [True]
+    # Unproven, therefore unspent: still available to a retry.
+    assert coordinator._sound_request_uuids == {"device-1": "stale-key"}  # type: ignore[attr-defined]
+    assert saved == []
