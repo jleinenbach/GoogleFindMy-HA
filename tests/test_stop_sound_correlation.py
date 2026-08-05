@@ -186,3 +186,41 @@ def test_sound_builder_rejects_a_non_string_cancel_key() -> None:
             raise AssertionError(
                 f"start={should_start} uuid={bad!r} was accepted silently"
             )
+
+
+def test_api_docstrings_declare_no_ring_confirmation() -> None:
+    """The boundary must stay written down where a caller actually reads it.
+
+    Drift guard in the style of the FMDN constant checks in
+    tests/test_ble_battery_sensor.py: a boundary that lives only in a design
+    document gets re-discovered as a bug. Both public sound entry points return
+    a plain bool, which is exactly the shape that invites "True means it
+    stopped", so each one carries the disclaimer in its own Returns block.
+    """
+
+    import inspect
+
+    from custom_components.googlefindmy.api import GoogleFindMyAPI
+
+    for method in (GoogleFindMyAPI.async_play_sound, GoogleFindMyAPI.async_stop_sound):
+        doc = inspect.getdoc(method) or ""
+        assert "IRR-CA-NO-RING-CONFIRMATION" in doc, (
+            f"{method.__name__} no longer names the boundary anchor"
+        )
+        assert "NOT a" in doc, (
+            f"{method.__name__} names the anchor but no longer states the limit"
+        )
+
+
+def test_no_ring_confirmation_anchor_is_defined_where_it_is_referenced() -> None:
+    """Every reference to the anchor resolves to its definition.
+
+    api.py pointed at IRR-CA-NO-RING-CONFIRMATION before anything defined it,
+    which is a dangling reference: a reader following it found nothing.
+    """
+
+    import pathlib
+
+    root = pathlib.Path(__file__).resolve().parents[1]
+    doc = (root / "docs" / "PLAY_SOUND_ARCHITECTURE.md").read_text(encoding="utf-8")
+    assert "**IRR-CA-NO-RING-CONFIRMATION (deliberate boundary).**" in doc

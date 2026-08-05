@@ -64,6 +64,13 @@ def create_sound_request(
             * stop, blank      -> same as ``None``;
             * either, a value  -> written verbatim.
 
+            The blank-start rule is this builder's policy, not a global one.
+            ``start_sound_request`` sits above it, RETURNS the key to its
+            caller and can therefore repair a blank one by generating a fresh
+            UUID; it never forwards a blank. This builder cannot repair it,
+            because a substitute key it invented would stay inside this
+            function and a cancel key nobody holds is worth as much as none.
+
     Returns:
         Hex-encoded protobuf payload suitable for Nova transport.
 

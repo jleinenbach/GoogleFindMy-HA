@@ -1622,6 +1622,13 @@ class GoogleFindMyAPI:
             IRR-CA-CANCEL-KEY-ON-SUCCESS-ONLY. On the Stop side the drop branch
             is additionally bound to "the cancel key was our own and fresh", so
             a foreign key passed in by a service call never evicts our handle.
+
+            True means Nova accepted the submission (HTTP 200). It is NOT a
+            confirmation that the device received or executed the command: no
+            ExecuteActionResponse schema exists and no FCM callback is
+            registered for sound, so nothing on this path can observe the ring.
+            See IRR-CA-NO-RING-CONFIRMATION in
+            docs/PLAY_SOUND_ARCHITECTURE.md.
         """
         # Pass cache explicitly for multi-account isolation
         token = self._get_fcm_token_for_action()
@@ -1784,6 +1791,13 @@ class GoogleFindMyAPI:
 
         Returns:
             True if the command was submitted successfully, False otherwise.
+
+            True means Nova accepted the submission (HTTP 200). It is NOT a
+            confirmation that the device received or executed the command, and
+            in particular not that the ring stopped: no ExecuteActionResponse
+            schema exists and no FCM callback is registered for sound, so
+            nothing on this path can observe the ring. See
+            IRR-CA-NO-RING-CONFIRMATION in docs/PLAY_SOUND_ARCHITECTURE.md.
         """
         # Pass cache explicitly for multi-account isolation
         token = self._get_fcm_token_for_action()

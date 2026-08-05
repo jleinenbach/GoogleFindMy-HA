@@ -130,6 +130,46 @@ could be matched against the UUID from `start_sound_request()` for correlation.
 | FCM push arrives after successful commands | Whether sound-specific FCM pushes differ from location pushes |
 | `requestUuid` is sent and echoed in FCM | Whether the HTTP response also echoes it |
 
+**IRR-CA-NO-RING-CONFIRMATION (deliberate boundary).** A Nova HTTP 200 proves
+that the submission was accepted, nothing more. No `ExecuteActionResponse`
+schema exists (Path A) and no FCM callback is registered for sound (Path B),
+so on the cloud path neither delivery nor execution is observable. Every
+`ok`/`submitted`/`cancelled` produced by `api.py` and by
+`coordinator/locate.py` means exactly this and must not be worded as
+confirmation.
+
+The boundary is a property of the *cloud* path, not of the protocol. The FMDN
+specification does define a ring confirmation: when ringing starts or stops,
+the beacon emits a notification on the Beacon Actions characteristic
+(`FE2C1238-8366-4814-8EB0-01DE32100BEA`) carrying a ringing state of Started,
+Failed to start or stop, Stopped (timeout), Stopped (button press) or Stopped
+(GATT request). That signal exists on a channel this integration does not
+speak. Saying "no confirmation exists" would therefore be wrong; the accurate
+statement is that no confirmation is reachable *over Nova*.
+
+Two consequences follow, and both are already implemented:
+
+- `StopSoundOutcome` is four-valued rather than boolean, so a stop that was
+  submitted without a provable cancel key is reported as `UNCORRELATED`
+  instead of being collapsed into success (BSkando#195).
+- Even `CANCELLED` claims only "submitted with a correlated cancel key", never
+  "the device stopped".
+
+#### Follow-up (not in this change)
+
+Closing the boundary on the cloud path means wiring **Path B**: registering an
+FCM callback for sound events and matching the incoming
+`ExecuteActionRequestMetadata.requestUuid` against the key held by the
+coordinator. That is tracked separately and carries its own risks: the sound
+push may not carry a `DeviceUpdate` payload at all, an unmatched push
+currently falls through to the location decoder, and a callback that never
+fires would need a timeout policy of its own rather than an indefinite wait.
+
+Closing it on the local path means speaking GATT directly (`0x05` with ring
+operation `0x00`), which additionally yields a stop that is independent of who
+started the ring. That is a separate design with its own plan; see the BLE
+sections below for the protocol details.
+
 ### Upstream Parity
 
 **Our code and upstream are functionally identical for PlaySound:**
