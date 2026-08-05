@@ -806,6 +806,12 @@
     "stop_sound_failed": {
       "message": "No se pudo detener el sonido en {device_id}: {error}"
     },
+    "stop_sound_suppressed": {
+      "message": "No se envió Stop Sound para {device_id}. Home Assistant no puede acceder al dispositivo en este momento; inténtalo de nuevo en un momento."
+    },
+    "stop_sound_uncorrelated": {
+      "message": "Se envió Stop Sound para {device_id}, pero esta instancia de Home Assistant no conoce el identificador del timbre en curso (se inició en otro lugar o se perdió la clave). Google no puede asociar la parada con el timbre, por lo que el dispositivo puede seguir sonando. Pulsa el botón del rastreador o espera a que el timbre se detenga solo."
+    },
     "missing_token_cache": {
       "message": "Falta la caché de tokens. Proporciona la TokenCache específica de la entrada (por ejemplo, entry.runtime_data.token_cache)."
     },

@@ -806,6 +806,12 @@
     "stop_sound_failed": {
       "message": "Failed to stop sound on {device_id}: {error}"
     },
+    "stop_sound_suppressed": {
+      "message": "Stop Sound for {device_id} was not sent. Home Assistant is not ready to reach the device right now; try again in a moment."
+    },
+    "stop_sound_uncorrelated": {
+      "message": "Stop Sound for {device_id} was submitted, but this Home Assistant instance does not know the ID of the running ring (it was started elsewhere, or the key was lost). Google cannot match the stop to the ring, so the device may keep playing. Press the button on the tracker, or wait for the ring to time out."
+    },
     "missing_token_cache": {
       "message": "Token cache missing. Provide the entry-specific TokenCache (for example, entry.runtime_data.token_cache)."
     },

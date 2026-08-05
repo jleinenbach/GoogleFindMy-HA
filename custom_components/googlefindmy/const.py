@@ -11,6 +11,7 @@ import hashlib
 import math
 import time
 from collections.abc import Mapping, Sequence
+from enum import StrEnum
 from types import MappingProxyType
 from typing import Final, Literal
 
@@ -33,6 +34,37 @@ CONFIG_ENTRY_VERSION: int = 2
 # regex only matches `NAME = "x"`, not `NAME: str = "x"`. Re-adding the annotation
 # would silently skip this file on the automated version bump.
 INTEGRATION_VERSION = "1.7.15.8"
+
+# --------------------------------------------------------------------------------------
+# Stop Sound outcome
+# --------------------------------------------------------------------------------------
+
+
+class StopSoundOutcome(StrEnum):
+    """Outcome of a Stop Sound attempt.
+
+    Three states, because the state space is genuinely three-valued and a bool
+    cannot carry it: a stop that was submitted without a cancel key is neither a
+    success (nothing proves it reached a ring) nor a rejection (the server did
+    accept the submission). Collapsing the middle state into ``True`` is what
+    made the integration report success for a ring that kept playing
+    (BSkando#195).
+
+    Note that even ``CANCELLED`` means "submitted with a correlated cancel key",
+    not "the device stopped". Nova returns no parsable ExecuteActionResponse, so
+    no reply of the cloud API can prove an effect on the device; see
+    ``docs/PLAY_SOUND_ARCHITECTURE.md`` and IRR-CA-NO-RING-CONFIRMATION.
+    """
+
+    CANCELLED = "cancelled"
+    """Submitted WITH a cancel key that correlates to a known play request."""
+
+    UNCORRELATED = "uncorrelated"
+    """Submitted WITHOUT one; the effect is unprovable and may be nil."""
+
+    FAILED = "failed"
+    """Not submitted at all, or rejected by the server."""
+
 
 # --------------------------------------------------------------------------------------
 # Shared textual constants

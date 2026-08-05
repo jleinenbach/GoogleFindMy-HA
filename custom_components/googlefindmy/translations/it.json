@@ -806,6 +806,12 @@
     "stop_sound_failed": {
       "message": "Impossibile interrompere il suono su {device_id}: {error}"
     },
+    "stop_sound_suppressed": {
+      "message": "Stop Sound per {device_id} non è stato inviato. Home Assistant al momento non riesce a raggiungere il dispositivo; riprova tra un istante."
+    },
+    "stop_sound_uncorrelated": {
+      "message": "Stop Sound per {device_id} è stato inviato, ma questa istanza di Home Assistant non conosce l'identificativo della suoneria in corso (è stata avviata altrove, oppure la chiave è andata persa). Google non può associare l'arresto alla suoneria, quindi il dispositivo potrebbe continuare a suonare. Premi il pulsante sul tracker oppure attendi che la suoneria termini da sola."
+    },
     "missing_token_cache": {
       "message": "Cache del token mancante. Fornisci il TokenCache specifico della voce (ad esempio entry.runtime_data.token_cache)."
     },

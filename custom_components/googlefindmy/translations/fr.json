@@ -806,6 +806,12 @@
     "stop_sound_failed": {
       "message": "Échec de l’arrêt du son sur {device_id} : {error}"
     },
+    "stop_sound_suppressed": {
+      "message": "Stop Sound pour {device_id} n'a pas été envoyé. Home Assistant ne parvient pas à joindre l'appareil pour le moment ; réessayez dans un instant."
+    },
+    "stop_sound_uncorrelated": {
+      "message": "Stop Sound pour {device_id} a été soumis, mais cette instance Home Assistant ne connaît pas l'identifiant de la sonnerie en cours (elle a été déclenchée ailleurs, ou la clé a été perdue). Google ne peut pas associer l'arrêt à la sonnerie, l'appareil peut donc continuer à sonner. Appuyez sur le bouton du traceur ou attendez que la sonnerie s'arrête d'elle-même."
+    },
     "missing_token_cache": {
       "message": "Cache de jetons manquant. Fournissez le TokenCache spécifique à l’entrée (par exemple entry.runtime_data.token_cache)."
     },

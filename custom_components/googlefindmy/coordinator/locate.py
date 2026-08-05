@@ -25,7 +25,7 @@ from aiohttp import ClientConnectionError, ClientError
 from homeassistant.exceptions import ConfigEntryAuthFailed, HomeAssistantError
 
 from .._reauth_reason import ReauthReasonCode
-from ..const import DEFAULT_MIN_POLL_INTERVAL
+from ..const import DEFAULT_MIN_POLL_INTERVAL, StopSoundOutcome
 from ..NovaApi.ExecuteAction.LocateTracker.decrypt_locations import (
     DecryptionError,
     OwnerKeyLookupTransientError,
@@ -761,6 +761,12 @@ class LocateOperations(_MixinBase):
             # the reload filter would discard — the ambiguous UUID is still
             # stored, since it may be the only handle on a current ring. See
             # IRR-CA-CANCEL-KEY-ON-SUCCESS-ONLY.
+            #
+            # Since the three-valued Stop outcome landed, the drop branch in
+            # async_stop_sound is additionally bound to "the key we sent was
+            # our own AND was fresh": an explicitly passed foreign key must not
+            # evict our handle. That narrows the invariant in the direction of
+            # its own purpose; the wording above is unchanged.
             existing_uuid = self._sound_request_uuids.get(device_id)
             existing_is_stale = (
                 existing_uuid is not None
@@ -816,7 +822,7 @@ class LocateOperations(_MixinBase):
         self,
         device_id: str,
         request_uuid: str | None = None,
-    ) -> bool:
+    ) -> StopSoundOutcome:
         """Stop sound on a device using the native async API (no executor).
 
         **IMPORTANT**: This method retrieves the UUID from the previous Play Sound request
@@ -828,15 +834,28 @@ class LocateOperations(_MixinBase):
             request_uuid: Optional request UUID that identifies the prior play request.
 
         Returns:
-            True if the command was submitted successfully, False otherwise.
+            A :class:`StopSoundOutcome`. The state space is three-valued on
+            purpose: ``CANCELLED`` (submitted with a correlated cancel key),
+            ``UNCORRELATED`` (submitted without one, so nothing proves an
+            effect) and ``FAILED`` (not submitted, or rejected). A bool cannot
+            carry the middle state, and collapsing it into success is what
+            reported a stop for a ring that kept playing (BSkando#195).
         """
         # Less strict than can_play_sound(): stopping is harmless but still requires push readiness.
         if not self._api_push_ready():
             _LOGGER.debug(
                 "Suppressing stop_sound call for %s: push not ready", device_id
             )
-            return False
+            # A suppressed stop is a stop that was never sent, so it is a
+            # failure and must reach the service layer as one.
+            return StopSoundOutcome.FAILED
         request_uuid_to_use = request_uuid
+        # True only when the key about to be sent came from our own cache AND
+        # was still fresh. An explicitly passed foreign UUID does NOT qualify:
+        # popping our cache entry on its behalf would drop the handle of a
+        # different, possibly still running ring.
+        used_own_fresh_key = False
+        cached_uuid_was_expired = False
         if request_uuid_to_use is None:
             cached_uuid = self._sound_request_uuids.get(device_id)
             # An aged-out key is no better than no key: the ring it referenced
@@ -847,8 +866,10 @@ class LocateOperations(_MixinBase):
                     "Ignoring expired cached Play Sound UUID for %s", device_id
                 )
                 cached_uuid = None
+                cached_uuid_was_expired = True
             request_uuid_to_use = cached_uuid
             if request_uuid_to_use is not None:
+                used_own_fresh_key = True
                 _LOGGER.debug(
                     "Using cached Play Sound UUID for %s: %s",
                     device_id,
@@ -856,25 +877,45 @@ class LocateOperations(_MixinBase):
                 )
             else:
                 _LOGGER.warning(
-                    "Missing Play Sound UUID for %s; attempting stop without it",
+                    "No cancel key for %s; submitting an uncorrelated stop "
+                    "(the ring may keep playing)",
                     device_id,
                 )
 
         try:
-            ok = await self.api.async_stop_sound(device_id, request_uuid_to_use)
-            if not ok:
+            submitted = await self.api.async_stop_sound(device_id, request_uuid_to_use)
+            if not submitted:
                 self._note_push_transport_problem()
             # Success implies credentials worked
             self._set_auth_state(failed=False)
-            if ok:
-                removed_request_uuid = self._sound_request_uuids.pop(device_id, None)
-                # Use getattr for test compatibility (tests may bypass __init__)
+            if not submitted:
+                return StopSoundOutcome.FAILED
+            if request_uuid_to_use is not None:
+                if used_own_fresh_key:
+                    # Correlated stop accepted with OUR key: it is spent. This
+                    # is the ONLY branch that drops a live key --
+                    # IRR-CA-CANCEL-KEY-ON-SUCCESS-ONLY is unchanged, only
+                    # narrowed in the direction of its own purpose.
+                    removed_request_uuid = self._sound_request_uuids.pop(
+                        device_id, None
+                    )
+                    # Use getattr for test compatibility (tests may bypass __init__)
+                    timestamps = getattr(self, "_sound_request_timestamps", None)
+                    if timestamps is not None:
+                        timestamps.pop(device_id, None)
+                    if removed_request_uuid is not None:
+                        await self._async_save_sound_uuids()
+                return StopSoundOutcome.CANCELLED
+            if cached_uuid_was_expired:
+                # Housekeeping only: a key that the reload filter would discard
+                # anyway. Never a fresh key -- a fresh one would have been used.
+                removed_expired_uuid = self._sound_request_uuids.pop(device_id, None)
                 timestamps = getattr(self, "_sound_request_timestamps", None)
                 if timestamps is not None:
                     timestamps.pop(device_id, None)
-                if removed_request_uuid is not None:
+                if removed_expired_uuid is not None:
                     await self._async_save_sound_uuids()
-            return bool(ok)
+            return StopSoundOutcome.UNCORRELATED
         except ConfigEntryAuthFailed as auth_exc:
             self._set_auth_state(
                 failed=True, reason=f"Auth failed during stop_sound: {auth_exc}"
@@ -883,7 +924,7 @@ class LocateOperations(_MixinBase):
                 await self.async_request_refresh()
             except Exception:
                 pass
-            return False
+            return StopSoundOutcome.FAILED
         except (TimeoutError, ClientConnectionError, ClientError) as conn_err:
             _LOGGER.warning(
                 "Connection failed during stop_sound for %s: %s",
@@ -892,7 +933,7 @@ class LocateOperations(_MixinBase):
             )
             self.note_error(conn_err, where="async_stop_sound", device=device_id)
             self._note_push_transport_problem()
-            return False
+            return StopSoundOutcome.FAILED
         except Exception as err:
             _LOGGER.error(
                 "Unexpected error during stop_sound for %s: %s",
@@ -902,4 +943,4 @@ class LocateOperations(_MixinBase):
             )
             self.note_error(err, where="async_stop_sound", device=device_id)
             self._note_push_transport_problem()
-            return False
+            return StopSoundOutcome.FAILED

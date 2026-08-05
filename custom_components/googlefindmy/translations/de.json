@@ -806,6 +806,12 @@
     "stop_sound_failed": {
       "message": "Tonstopp auf {device_id} fehlgeschlagen: {error}"
     },
+    "stop_sound_suppressed": {
+      "message": "Stop Sound für {device_id} wurde nicht gesendet. Home Assistant kann das Gerät gerade nicht erreichen; versuche es gleich noch einmal."
+    },
+    "stop_sound_uncorrelated": {
+      "message": "Stop Sound für {device_id} wurde abgeschickt, aber diese Home-Assistant-Instanz kennt die Kennung des laufenden Klingelns nicht (es wurde anderswo gestartet, oder der Schlüssel ging verloren). Google kann den Stopp dem Klingeln nicht zuordnen, das Gerät klingelt daher möglicherweise weiter. Drücke die Taste am Tracker oder warte, bis das Klingeln von selbst endet."
+    },
     "missing_token_cache": {
       "message": "Token-Cache fehlt. Bitte den eintragsbezogenen TokenCache übergeben (z. B. entry.runtime_data.token_cache)."
     },

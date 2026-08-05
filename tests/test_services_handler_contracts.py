@@ -26,6 +26,7 @@ from unittest import mock
 import pytest
 
 from custom_components.googlefindmy import services
+from custom_components.googlefindmy.const import StopSoundOutcome
 from custom_components.googlefindmy.services import (
     HomeAssistantError,
     ServiceValidationError,
@@ -299,7 +300,7 @@ class TestResolverDispatch:
     ) -> None:
         """A valid ``request_uuid`` is forwarded verbatim to the coordinator."""
         coord = SimpleNamespace(
-            async_stop_sound=mock.AsyncMock(return_value=True),
+            async_stop_sound=mock.AsyncMock(return_value=StopSoundOutcome.CANCELLED),
             get_device_display_name=mock.Mock(return_value="Tag"),
         )
         hass = _hass_with_coordinator(coord)
@@ -313,6 +314,61 @@ class TestResolverDispatch:
             _FakeCall({"device_id": "dev1", "request_uuid": "req-7"})
         )
         coord.async_stop_sound.assert_awaited_once_with("CANON", "req-7")
+
+    @pytest.mark.asyncio
+    async def test_uncorrelated_stop_is_reported_not_swallowed(
+        self, full_ctx: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A stop without a cancel key must not be reported as plain success.
+
+        The submission was accepted, but nothing proves an effect on the
+        device. Returning silently would tell the user the ring was stopped
+        when it may well keep playing (BSkando#195).
+        """
+
+        coord = SimpleNamespace(
+            async_stop_sound=mock.AsyncMock(return_value=StopSoundOutcome.UNCORRELATED),
+            get_device_display_name=mock.Mock(return_value="Tag"),
+        )
+        hass = _hass_with_coordinator(coord)
+        monkeypatch.setattr(
+            services.dr,
+            "async_get",
+            lambda _h: SimpleNamespace(async_get=lambda _d: None),
+        )
+        handlers = _register(hass, full_ctx)
+        with pytest.raises(ServiceValidationError) as excinfo:
+            await handlers[services.SERVICE_STOP_SOUND](
+                _FakeCall({"device_id": "dev1"})
+            )
+        assert excinfo.value.translation_key == "stop_sound_uncorrelated"
+
+    @pytest.mark.asyncio
+    async def test_suppressed_stop_reports_its_own_cause(
+        self, full_ctx: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A stop that was never sent gets its own, placeholder-correct key.
+
+        ``stop_sound_failed`` carries an ``{error}`` placeholder that this call
+        site cannot fill, so it would render with a stray literal.
+        """
+
+        coord = SimpleNamespace(
+            async_stop_sound=mock.AsyncMock(return_value=StopSoundOutcome.FAILED),
+            get_device_display_name=mock.Mock(return_value="Tag"),
+        )
+        hass = _hass_with_coordinator(coord)
+        monkeypatch.setattr(
+            services.dr,
+            "async_get",
+            lambda _h: SimpleNamespace(async_get=lambda _d: None),
+        )
+        handlers = _register(hass, full_ctx)
+        with pytest.raises(ServiceValidationError) as excinfo:
+            await handlers[services.SERVICE_STOP_SOUND](
+                _FakeCall({"device_id": "dev1"})
+            )
+        assert excinfo.value.translation_key == "stop_sound_suppressed"
 
 
 # ---------------------------------------------------------------------------

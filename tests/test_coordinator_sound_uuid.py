@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from custom_components.googlefindmy.const import StopSoundOutcome
 from custom_components.googlefindmy.coordinator import GoogleFindMyCoordinator
 from custom_components.googlefindmy.coordinator.helpers.cache import (
     SOUND_UUID_MAX_AGE_S,
@@ -277,9 +278,12 @@ async def test_async_stop_sound_ignores_expired_cached_uuid() -> None:
 
     result = await coordinator.async_stop_sound("device-1")
 
-    assert result is True
+    # Ignored key means no correlation, so the stop is unprovable, not a success.
+    assert result is StopSoundOutcome.UNCORRELATED
     # The expired UUID is ignored; Stop is attempted without a request UUID.
     assert api_calls == [("device-1", None)]
+    # Housekeeping: the dead key is dropped, it would not survive a reload anyway.
+    assert coordinator._sound_request_uuids == {}  # type: ignore[attr-defined]
 
 
 @pytest.mark.asyncio
@@ -349,7 +353,7 @@ async def test_async_stop_sound_uses_cached_uuid() -> None:
 
     result = await coordinator.async_stop_sound("device-1")
 
-    assert result is True
+    assert result is StopSoundOutcome.CANCELLED
     assert coordinator._sound_request_uuids == {}  # type: ignore[attr-defined]
     assert api_calls == [("device-1", "uuid-1")]
 
@@ -377,6 +381,7 @@ async def test_async_stop_sound_warns_when_uuid_missing(
     with caplog.at_level(logging.WARNING):
         result = await coordinator.async_stop_sound("device-1")
 
-    assert result is True
+    assert result is StopSoundOutcome.UNCORRELATED
     assert api_calls == [("device-1", None)]
-    assert "Missing Play Sound UUID for device-1" in caplog.text
+    assert "No cancel key for device-1" in caplog.text
+    assert "the ring may keep playing" in caplog.text

@@ -1352,6 +1352,46 @@ class TestAsyncStopSoundErrorMapping:
         self._patch_submit(monkeypatch, "CDEF")
         assert run_coro(api.async_stop_sound("d", "uuid-5678")) is True
 
+    def test_stop_without_uuid_does_not_claim_success(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """An accepted POST without a cancel key is not a success message.
+
+        A non-empty Nova reply proves that the submission was accepted, never
+        that the device stopped. Without a cancel key the server cannot even
+        correlate the stop with a running ring, so an INFO reading
+        "submitted successfully" is misinformation (BSkando#195).
+        """
+
+        api = self._api_with_token(monkeypatch)
+        self._patch_submit(monkeypatch, "CDEF")
+
+        with caplog.at_level(logging.DEBUG):
+            assert run_coro(api.async_stop_sound("d")) is True
+
+        assert "successfully" not in caplog.text
+        warnings = [
+            record
+            for record in caplog.records
+            if record.levelno >= logging.WARNING
+            and "without a cancel key" in record.getMessage()
+        ]
+        assert warnings, "the uncorrelated submission must be logged as a warning"
+
+    def test_stop_with_uuid_logs_the_cancel_key_branch(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Positive control: with a key the warning must NOT appear."""
+
+        api = self._api_with_token(monkeypatch)
+        self._patch_submit(monkeypatch, "CDEF")
+
+        with caplog.at_level(logging.DEBUG):
+            assert run_coro(api.async_stop_sound("d", "uuid-5678")) is True
+
+        assert "cancel key present" in caplog.text
+        assert "without a cancel key" not in caplog.text
+
     @pytest.mark.parametrize(
         "exc",
         [

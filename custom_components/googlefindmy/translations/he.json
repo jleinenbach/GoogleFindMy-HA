@@ -806,6 +806,12 @@
     "stop_sound_failed": {
       "message": "עצירת הצליל על {device_id} נכשלה: {error}"
     },
+    "stop_sound_suppressed": {
+      "message": "הפקודה Stop Sound עבור {device_id} לא נשלחה. Home Assistant אינו מצליח להגיע למכשיר כרגע; נסו שוב בעוד רגע."
+    },
+    "stop_sound_uncorrelated": {
+      "message": "הפקודה Stop Sound עבור {device_id} נשלחה, אך מופע Home Assistant זה אינו מכיר את המזהה של הצלצול הפעיל (הוא הופעל במקום אחר, או שהמפתח אבד). Google אינה יכולה לשייך את העצירה לצלצול, ולכן ייתכן שהמכשיר ימשיך לצלצל. לחצו על הכפתור בגשש, או המתינו עד שהצלצול יסתיים מעצמו."
+    },
     "missing_token_cache": {
       "message": "מטמון הטוקן חסר. יש לספק TokenCache ייעודי לרשומה (לדוגמה, entry.runtime_data.token_cache)."
     },

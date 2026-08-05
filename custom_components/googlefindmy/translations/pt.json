@@ -806,6 +806,12 @@
     "stop_sound_failed": {
       "message": "Falha ao interromper o som em {device_id}: {error}"
     },
+    "stop_sound_suppressed": {
+      "message": "O Stop Sound para {device_id} não foi enviado. O Home Assistant não consegue alcançar o dispositivo neste momento; tente novamente dentro de instantes."
+    },
+    "stop_sound_uncorrelated": {
+      "message": "O Stop Sound para {device_id} foi submetido, mas esta instância do Home Assistant não conhece o identificador do toque em curso (foi iniciado noutro local ou a chave perdeu-se). A Google não consegue associar a paragem ao toque, pelo que o dispositivo pode continuar a tocar. Prima o botão no localizador ou aguarde que o toque termine por si."
+    },
     "missing_token_cache": {
       "message": "Cache de token ausente. "
     },

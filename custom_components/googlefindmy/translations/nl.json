@@ -806,6 +806,12 @@
     "stop_sound_failed": {
       "message": "Kan geluid niet stoppen op {device_id}: {error}"
     },
+    "stop_sound_suppressed": {
+      "message": "Stop Sound voor {device_id} is niet verzonden. Home Assistant kan het apparaat op dit moment niet bereiken; probeer het zo meteen opnieuw."
+    },
+    "stop_sound_uncorrelated": {
+      "message": "Stop Sound voor {device_id} is verzonden, maar deze Home Assistant-instantie kent de id van het lopende belsignaal niet (het is elders gestart, of de sleutel is verloren gegaan). Google kan de stop niet aan het belsignaal koppelen, dus het apparaat blijft mogelijk rinkelen. Druk op de knop op de tracker of wacht tot het belsignaal vanzelf stopt."
+    },
     "missing_token_cache": {
       "message": "Tokencache ontbreekt. Geef de item-specifieke TokenCache op (bijvoorbeeld entry.runtime_data.token_cache)."
     },

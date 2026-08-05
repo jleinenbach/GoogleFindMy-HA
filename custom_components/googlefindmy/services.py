@@ -47,6 +47,7 @@ from .const import (
     SERVICE_STOP_SOUND,
     SERVICE_SUBENTRY_KEY,
     TRACKER_SUBENTRY_KEY,
+    StopSoundOutcome,
     map_token_hex_digest,
     map_token_secret_seed,
     service_device_identifier,
@@ -940,14 +941,25 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
             request_uuid = request_uuid_raw
         try:
             runtime, canonical_id = await _resolve_runtime_for_device_id(raw_device_id)
-            ok = await runtime.coordinator.async_stop_sound(canonical_id, request_uuid)
-            if not ok:
-                placeholders = {"device_id": str(raw_device_id)}
+            outcome = await runtime.coordinator.async_stop_sound(
+                canonical_id, request_uuid
+            )
+            placeholders = {"device_id": str(raw_device_id)}
+            if outcome is StopSoundOutcome.FAILED:
                 raise _service_validation_error(
                     "Stop sound suppressed for device '{device_id}'".format(
                         **placeholders
                     ),
-                    translation_key="stop_sound_failed",
+                    translation_key="stop_sound_suppressed",
+                    translation_placeholders=placeholders,
+                )
+            if outcome is StopSoundOutcome.UNCORRELATED:
+                # Submitted, but nothing proves an effect: reporting plain
+                # success here would be misinformation (BSkando#195).
+                raise _service_validation_error(
+                    "Stop sound for '{device_id}' was submitted without a cancel "
+                    "key; the ring may keep playing.".format(**placeholders),
+                    translation_key="stop_sound_uncorrelated",
                     translation_placeholders=placeholders,
                 )
         except ServiceValidationError:
