@@ -19,7 +19,15 @@ from collections import OrderedDict
 from collections.abc import Coroutine, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
-from typing import TYPE_CHECKING, Any, NamedTuple, Protocol, cast, runtime_checkable
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Literal,
+    NamedTuple,
+    Protocol,
+    cast,
+    runtime_checkable,
+)
 
 from homeassistant.core import CALLBACK_TYPE, HomeAssistant
 from homeassistant.helpers.event import async_call_later, async_track_time_interval
@@ -299,6 +307,113 @@ class BLEScanInfo:
     ble_address: str
     observed_at: float
     observed_at_wall: float
+
+
+EidLayout = Literal["framed", "bare", "window"]
+
+
+@dataclass(frozen=True, slots=True)
+class EidCandidate:
+    """One EID slice extracted from a BLE payload, with its geometry.
+
+    The offset is the load-bearing field: it is what turns "the EID matched"
+    into "and therefore the optional hashed-flags byte sits at offset +
+    len(eid)". Re-deriving that position from the payload afterwards guesses
+    a second time at something the successful match already answered.
+
+    ``layout`` -- not ``frame_type`` -- is the discriminator for that
+    decision:
+
+    ==========  ===========================================  ==================
+    layout      where the candidate came from                flags position?
+    ==========  ===========================================  ==================
+    "framed"    a frame byte selected the layout             known
+    "bare"      the payload *is* the EID (consumer stripped  known: there is
+                the frame and flags bytes before handing it  none
+                over)
+    "window"    sliding-window search; the offset is a find  unknown
+                position, not a parsed layout
+    ==========  ===========================================  ==================
+
+    "bare" and "window" both carry ``frame_type=None`` yet demand the exact
+    opposite handling, which is why the frame type cannot carry this
+    distinction.
+
+    Deliberately unhashable. A candidate must never be usable as a dict key
+    or a set member: those are the byte-keyed lookups (``self._lookup``,
+    ``self._lookup_metadata``, the candidate set in ``_heuristic_resolve``)
+    that must not silently miss. ``frozen=True`` alone would generate a
+    working ``__hash__``, so the lookups would compile, run, and return
+    ``None`` forever; ``__hash__ = None`` is what turns that silent miss into
+    a loud ``TypeError``.
+    """
+
+    eid: bytes
+    offset: int  # index of eid[0] within the payload
+    frame_type: int | None  # frame byte observed for this payload, if any
+    layout: EidLayout
+
+    __hash__ = None  # type: ignore[assignment]
+
+
+def _guess_flags_byte(raw: bytes) -> int | None:  # noqa: PLR0911
+    """Re-derive the hashed-flags position from the payload bytes alone.
+
+    This is the pre-geometry derivation, kept for exactly two callers: direct
+    calls that supply no geometry, and sliding-window matches, whose offset is
+    a search position rather than a parsed layout. Everything else takes the
+    position from the matched candidate, which already answered the question.
+
+    SPEC (Find Hub Network Accessory Specification, retrieved 2026-08-05):
+    the hashed-flags byte sits at octet 28 for 160-bit-curve frames and at
+    octet 40 for 256-bit-curve frames -- i.e. directly after the EID, whose
+    own offset is 8 in a full service-data frame. The specification does not
+    tie the frame type to the EID length, so a 0x41 frame with a 20-byte
+    legacy EID is specification-conformant (a legacy-EID beacon in unwanted
+    tracking protection mode), not an exception to be tolerated. The narrow
+    length ranges below therefore encode observed payload shapes, not a
+    hierarchy of "normal" and "defensive" cases.
+    """
+
+    length = len(raw)
+
+    # Service-data format: [header(7)][frame(1)][EID(N)][flags(1)]
+    if length >= SERVICE_DATA_OFFSET + LEGACY_EID_LENGTH + 1 and raw[7] == (
+        FMDN_FRAME_TYPE
+    ):
+        return raw[SERVICE_DATA_OFFSET + LEGACY_EID_LENGTH]
+    if (
+        length >= SERVICE_DATA_OFFSET + MODERN_EID_LENGTH + 1
+        and raw[7] == MODERN_FRAME_TYPE
+    ):
+        return raw[SERVICE_DATA_OFFSET + MODERN_EID_LENGTH]
+    if (
+        SERVICE_DATA_OFFSET + LEGACY_EID_LENGTH + 1
+        <= length
+        <= SERVICE_DATA_OFFSET + LEGACY_EID_LENGTH + 2
+        and raw[7] == MODERN_FRAME_TYPE
+    ):
+        return raw[SERVICE_DATA_OFFSET + LEGACY_EID_LENGTH]
+    # Raw-header format: [frame(1)][EID(N)][flags(1)]
+    if (
+        length >= RAW_HEADER_LENGTH + LEGACY_EID_LENGTH + 1
+        and raw[0] == FMDN_FRAME_TYPE
+    ):
+        return raw[RAW_HEADER_LENGTH + LEGACY_EID_LENGTH]
+    if (
+        length >= RAW_HEADER_LENGTH + MODERN_EID_LENGTH + 1
+        and raw[0] == MODERN_FRAME_TYPE
+    ):
+        return raw[RAW_HEADER_LENGTH + MODERN_EID_LENGTH]
+    if (
+        RAW_HEADER_LENGTH + LEGACY_EID_LENGTH + 1
+        <= length
+        <= RAW_HEADER_LENGTH + LEGACY_EID_LENGTH + 2
+        and raw[0] == MODERN_FRAME_TYPE
+    ):
+        return raw[RAW_HEADER_LENGTH + LEGACY_EID_LENGTH]
+
+    return None
 
 
 # Mapping from FMDN 2-bit battery level to percentage.
@@ -2686,9 +2801,9 @@ class GoogleFindMyEIDResolver:
             return [], None, None
 
         raw = bytes(eid_bytes)
-        candidates, observed_frame = self._extract_candidates(raw)
+        candidates, observed_frame = self._extract_eid_candidates(raw)
         raw_prefix = raw[:4].hex()
-        candidate_prefixes = [candidate[:4].hex() for candidate in candidates]
+        candidate_prefixes = [candidate.eid[:4].hex() for candidate in candidates]
 
         if not candidates:
             _LOGGER.debug(
@@ -2729,11 +2844,11 @@ class GoogleFindMyEIDResolver:
             return [], None, None
 
         for candidate_prefix, candidate in zip(candidate_prefixes, candidates):
-            matches = self._lookup.get(candidate)
+            matches = self._lookup.get(candidate.eid)
             if not matches:
                 continue
 
-            metadata: dict[str, Any] = self._lookup_metadata.get(candidate) or {}
+            metadata: dict[str, Any] = self._lookup_metadata.get(candidate.eid) or {}
             now = int(time.time())
 
             # Update state for ALL matches (shared devices)
@@ -2741,8 +2856,8 @@ class GoogleFindMyEIDResolver:
                 self._update_match_state(
                     match,
                     metadata=metadata,
-                    candidate=candidate,
-                    observed_frame=observed_frame,
+                    candidate=candidate.eid,
+                    observed_frame=candidate.frame_type,
                     candidate_prefix=candidate_prefix,
                     raw_prefix=raw_prefix,
                     now=now,
@@ -2751,9 +2866,21 @@ class GoogleFindMyEIDResolver:
             # ---------------------------------------------------------
             # FMDN BLE battery: decode flags + store per device
             # ---------------------------------------------------------
-            self._update_ble_battery(raw, observed_frame, metadata, matches)
+            # The match itself locates the payload: the optional hashed-flags
+            # byte, when present, is the byte right after the matched EID.
+            # The candidate is passed WHOLE, not pre-reduced to an offset: the
+            # callee must be able to tell "no geometry supplied" (direct test
+            # call) from "geometry known, no flags byte present" (production).
+            # An `int | None` cannot carry that distinction.
+            self._update_ble_battery(
+                raw,
+                candidate.frame_type,
+                metadata,
+                matches,
+                geometry=candidate,
+            )
 
-            return matches, candidate, observed_frame
+            return matches, candidate.eid, candidate.frame_type
 
         # =================================================================
         # Heuristic Phone Discovery: Reactive check before logging MISS
@@ -2762,7 +2889,9 @@ class GoogleFindMyEIDResolver:
         # for Android phones that may use different rotation periods or
         # time bases than standard FMDN trackers.
         now_unix = int(time.time())
-        heuristic_match = self._heuristic_resolve(candidates, now_unix=now_unix)
+        heuristic_match = self._heuristic_resolve(
+            [candidate.eid for candidate in candidates], now_unix=now_unix
+        )
         if heuristic_match is not None:
             # Update standard tracking state for the heuristic match
             self._last_lock_confirmation[heuristic_match.device_id] = now_unix
@@ -2797,6 +2926,8 @@ class GoogleFindMyEIDResolver:
         observed_frame: int | None,
         metadata: dict[str, Any],
         matches: list[EIDMatch],
+        *,
+        geometry: EidCandidate | None = None,
     ) -> None:
         """Decode the FMDN hashed-flags byte and store battery state.
 
@@ -2820,58 +2951,39 @@ class GoogleFindMyEIDResolver:
         xor_mask: int | None = metadata.get("flags_xor_mask")
 
         # ---- Determine the hashed-flags byte position ----
-        # FMDN frame-type semantics for 0x40/0x41 are not publicly fixed and
-        # are accessory-generation specific (see docs/FMDN.md). The strict
-        # mapping in docs/BLE_BATTERY_SENSOR.md (0x40<->20-byte EID,
-        # 0x41<->32-byte EID) describes the common case, but variants with
-        # 0x41 carrying a 20-byte legacy EID have been observed and are
-        # already tolerated in `_extract_candidates` (raw-header path, see
-        # the `RAW_HEADER_LENGTH + LEGACY_EID_LENGTH <= length <= +1` branch).
-        # The lenient elif branches below mirror that tolerance for the
-        # flags-byte lookup so a 29-byte service-data payload or a 22-byte
-        # raw-header payload with `byte[frame_pos] == MODERN_FRAME_TYPE`
-        # still decodes the UT-mode/battery flags instead of silently
-        # dropping them. Range is intentionally narrow (legacy_min..legacy_min+1)
-        # to match the existing tolerance and limit false-positive decodes.
-        flags_byte: int | None = None
-        # Service-data format: [header(7)][frame(1)][EID(N)][flags(1)]
-        if (
-            length >= SERVICE_DATA_OFFSET + LEGACY_EID_LENGTH + 1
-            and raw[7] == FMDN_FRAME_TYPE
-        ):
-            flags_byte = raw[SERVICE_DATA_OFFSET + LEGACY_EID_LENGTH]
-        elif (
-            length >= SERVICE_DATA_OFFSET + MODERN_EID_LENGTH + 1
-            and raw[7] == MODERN_FRAME_TYPE
-        ):
-            flags_byte = raw[SERVICE_DATA_OFFSET + MODERN_EID_LENGTH]
-        elif (
-            SERVICE_DATA_OFFSET + LEGACY_EID_LENGTH + 1
-            <= length
-            <= SERVICE_DATA_OFFSET + LEGACY_EID_LENGTH + 2
-            and raw[7] == MODERN_FRAME_TYPE
-        ):
-            # Lenient: 0x41 frame with legacy-length payload (UT-mode variant).
-            flags_byte = raw[SERVICE_DATA_OFFSET + LEGACY_EID_LENGTH]
-        # Raw-header format: [frame(1)][EID(N)][flags(1)]
-        elif (
-            length >= RAW_HEADER_LENGTH + LEGACY_EID_LENGTH + 1
-            and raw[0] == FMDN_FRAME_TYPE
-        ):
-            flags_byte = raw[RAW_HEADER_LENGTH + LEGACY_EID_LENGTH]
-        elif (
-            length >= RAW_HEADER_LENGTH + MODERN_EID_LENGTH + 1
-            and raw[0] == MODERN_FRAME_TYPE
-        ):
-            flags_byte = raw[RAW_HEADER_LENGTH + MODERN_EID_LENGTH]
-        elif (
-            RAW_HEADER_LENGTH + LEGACY_EID_LENGTH + 1
-            <= length
-            <= RAW_HEADER_LENGTH + LEGACY_EID_LENGTH + 2
-            and raw[0] == MODERN_FRAME_TYPE
-        ):
-            # Lenient: 0x41 frame with legacy-length payload (UT-mode variant).
-            flags_byte = raw[RAW_HEADER_LENGTH + LEGACY_EID_LENGTH]
+        # Three distinct states, deliberately not collapsed into one value.
+        # The discriminator is `layout`, NOT `frame_type`: "bare" and "window"
+        # both carry frame_type=None and demand opposite handling.
+        #
+        #   geometry is None
+        #       No caller-supplied geometry (the characterization suite calls
+        #       this method directly). Re-derive as before.
+        #
+        #   geometry.layout == "window"
+        #       A candidate matched, but it came from the sliding window: its
+        #       offset is a search position, not a parsed layout, and it says
+        #       nothing about where an optional flags byte would sit. Treating
+        #       it as authoritative would make an arbitrary payload byte the
+        #       flags byte -- a NEW fabrication class, not the one being fixed.
+        #
+        #   geometry.layout in ("framed", "bare")
+        #       The geometry is known. For "framed" the byte after the EID is
+        #       the flags byte -- or there is none, and then there is none. For
+        #       "bare" the payload IS the EID, so there is provably none: the
+        #       consumer stripped the frame and flags bytes before handing it
+        #       over. Guessing here is what fabricates a battery level and a
+        #       UWT bit out of EID material.
+        #
+        # The condition is written POSITIVELY on the authoritative layouts, not
+        # negatively on "window": an unexpected layout value must fall back to
+        # guessing, never into the authoritative branch. Failing open into
+        # "geometry is authoritative" would turn an arbitrary payload byte into
+        # the flags byte -- the very class this removes.
+        if geometry is not None and geometry.layout in ("framed", "bare"):
+            flags_offset = geometry.offset + len(geometry.eid)
+            flags_byte = raw[flags_offset] if flags_offset < length else None
+        else:
+            flags_byte = _guess_flags_byte(raw)
 
         # ---- Decode and store ----
         # CANONICAL SPEC ANCHOR for FMDN hashed_flags decoding.
@@ -3094,13 +3206,24 @@ class GoogleFindMyEIDResolver:
             self._record_ble_scan_info(matches, ble_address)
         return matches
 
-    def _extract_candidates(  # noqa: PLR0912
+    def _extract_candidates(self, payload: bytes) -> tuple[list[bytes], int | None]:
+        """Legacy view: candidate bytes plus the payload-level frame type.
+
+        Retained verbatim for the characterization suite. Production code
+        uses :meth:`_extract_eid_candidates`, which additionally carries each
+        candidate's offset and layout.
+        """
+
+        candidates, observed_frame = self._extract_eid_candidates(payload)
+        return [candidate.eid for candidate in candidates], observed_frame
+
+    def _extract_eid_candidates(  # noqa: PLR0912
         self, payload: bytes
-    ) -> tuple[list[bytes], int | None]:
-        """Extract possible EID slices from a BLE payload."""
+    ) -> tuple[list[EidCandidate], int | None]:
+        """Extract possible EID slices from a BLE payload, with geometry."""
 
         length = len(payload)
-        candidates: list[bytes] = []
+        candidates: list[EidCandidate] = []
         observed_frame: int | None = None
         allow_sliding_window = True
 
@@ -3109,7 +3232,14 @@ class GoogleFindMyEIDResolver:
                 length == MODERN_EID_LENGTH
                 and payload[0] in (FMDN_FRAME_TYPE, MODERN_FRAME_TYPE)
             ):
-                candidates.append(payload)
+                # The payload IS the EID: a consumer stripped the frame and
+                # the optional hashed-flags byte before handing it over (see
+                # the Bermuda fallback path). The geometry is fully known,
+                # and it says there is no flags byte -- which is why this is
+                # "bare" and not "window".
+                candidates.append(
+                    EidCandidate(eid=payload, offset=0, frame_type=None, layout="bare")
+                )
                 return candidates, None
 
         if length >= SERVICE_DATA_OFFSET + LEGACY_EID_LENGTH:
@@ -3117,9 +3247,15 @@ class GoogleFindMyEIDResolver:
             if frame_type == FMDN_FRAME_TYPE:
                 observed_frame = frame_type
                 candidates.append(
-                    payload[
-                        SERVICE_DATA_OFFSET : SERVICE_DATA_OFFSET + LEGACY_EID_LENGTH
-                    ]
+                    EidCandidate(
+                        eid=payload[
+                            SERVICE_DATA_OFFSET : SERVICE_DATA_OFFSET
+                            + LEGACY_EID_LENGTH
+                        ],
+                        offset=SERVICE_DATA_OFFSET,
+                        frame_type=frame_type,
+                        layout="framed",
+                    )
                 )
             elif (
                 frame_type == MODERN_FRAME_TYPE
@@ -3127,12 +3263,29 @@ class GoogleFindMyEIDResolver:
             ):
                 observed_frame = frame_type
                 candidates.append(
-                    payload[
-                        SERVICE_DATA_OFFSET : SERVICE_DATA_OFFSET + MODERN_EID_LENGTH
-                    ]
+                    EidCandidate(
+                        eid=payload[
+                            SERVICE_DATA_OFFSET : SERVICE_DATA_OFFSET
+                            + MODERN_EID_LENGTH
+                        ],
+                        offset=SERVICE_DATA_OFFSET,
+                        frame_type=frame_type,
+                        layout="framed",
+                    )
                 )
 
-        if not candidates and length >= RAW_HEADER_LENGTH + LEGACY_EID_LENGTH:
+        # No `not candidates` gate any more. Byte 7 being 0x40/0x41 is a
+        # 1-in-256 coincidence for any payload whose EID happens to carry that
+        # value at that position; today the service-data probe then wins
+        # exclusively, the raw-header candidate is never built, and the device
+        # stays unresolvable for a full rotation window (~1024 s, the EID is
+        # constant within it). Probing both geometries is monotone: no
+        # candidate that the previous code produced is lost, one dict lookup is
+        # added, and a collision between two independent 160-/256-bit EIDs is
+        # not a practical concern. See custom_components/googlefindmy/AGENTS.md,
+        # "FHNA frame slicing reminder".
+        if length >= RAW_HEADER_LENGTH + LEGACY_EID_LENGTH:
+            had_service_data_candidate = bool(candidates)
             frame_type = payload[0]
             if frame_type in (FMDN_FRAME_TYPE, MODERN_FRAME_TYPE):
                 observed_frame = frame_type
@@ -3142,31 +3295,51 @@ class GoogleFindMyEIDResolver:
                     RAW_HEADER_LENGTH + LEGACY_EID_LENGTH
                 ):
                     candidates.append(
-                        payload[
-                            RAW_HEADER_LENGTH : RAW_HEADER_LENGTH + LEGACY_EID_LENGTH
-                        ]
+                        EidCandidate(
+                            eid=payload[
+                                RAW_HEADER_LENGTH : RAW_HEADER_LENGTH
+                                + LEGACY_EID_LENGTH
+                            ],
+                            offset=RAW_HEADER_LENGTH,
+                            frame_type=frame_type,
+                            layout="framed",
+                        )
                     )
                 elif frame_type == MODERN_FRAME_TYPE:
                     if length >= modern_required_length:
                         candidates.append(
-                            payload[
-                                RAW_HEADER_LENGTH : RAW_HEADER_LENGTH
-                                + MODERN_EID_LENGTH
-                            ]
+                            EidCandidate(
+                                eid=payload[
+                                    RAW_HEADER_LENGTH : RAW_HEADER_LENGTH
+                                    + MODERN_EID_LENGTH
+                                ],
+                                offset=RAW_HEADER_LENGTH,
+                                frame_type=frame_type,
+                                layout="framed",
+                            )
                         )
-                        return candidates, observed_frame
                     elif (
                         RAW_HEADER_LENGTH + LEGACY_EID_LENGTH
                         <= length
                         <= (RAW_HEADER_LENGTH + LEGACY_EID_LENGTH + 1)
                     ):
                         candidates.append(
-                            payload[
-                                RAW_HEADER_LENGTH : RAW_HEADER_LENGTH
-                                + LEGACY_EID_LENGTH
-                            ]
+                            EidCandidate(
+                                eid=payload[
+                                    RAW_HEADER_LENGTH : RAW_HEADER_LENGTH
+                                    + LEGACY_EID_LENGTH
+                                ],
+                                offset=RAW_HEADER_LENGTH,
+                                frame_type=frame_type,
+                                layout="framed",
+                            )
                         )
-                    else:
+                    elif not had_service_data_candidate:
+                        # Only diagnose truncation when this payload produced
+                        # no candidate at all. Without the `not candidates`
+                        # gate above, this branch is now also reached for
+                        # payloads the service-data probe already resolved,
+                        # where a truncation warning would be a misdiagnosis.
                         allow_sliding_window = length >= modern_required_length - 1
                         self._log_truncated_frame(
                             frame_type=frame_type,
@@ -3179,10 +3352,26 @@ class GoogleFindMyEIDResolver:
             for i in range(window):
                 slice_20 = payload[i : i + LEGACY_EID_LENGTH]
                 if len(slice_20) == LEGACY_EID_LENGTH:
-                    candidates.append(slice_20)
+                    # The offset is a search position, not a parsed layout: it
+                    # says nothing about where an optional flags byte sits.
+                    candidates.append(
+                        EidCandidate(
+                            eid=slice_20,
+                            offset=i,
+                            frame_type=None,
+                            layout="window",
+                        )
+                    )
                 slice_32 = payload[i : i + MODERN_EID_LENGTH]
                 if len(slice_32) == MODERN_EID_LENGTH:
-                    candidates.append(slice_32)
+                    candidates.append(
+                        EidCandidate(
+                            eid=slice_32,
+                            offset=i,
+                            frame_type=None,
+                            layout="window",
+                        )
+                    )
 
         return candidates, observed_frame
 
