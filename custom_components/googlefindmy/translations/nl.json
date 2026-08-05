@@ -803,6 +803,9 @@
     "play_sound_failed": {
       "message": "Kan geluid niet afspelen op {device_id}: {error}"
     },
+    "play_sound_suppressed": {
+      "message": "Play Sound voor {device_id} is niet verzonden. Home Assistant kan het apparaat op dit moment niet bereiken; probeer het zo meteen opnieuw."
+    },
     "stop_sound_failed": {
       "message": "Kan geluid niet stoppen op {device_id}: {error}"
     },

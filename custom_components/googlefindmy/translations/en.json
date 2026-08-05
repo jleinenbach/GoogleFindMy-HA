@@ -803,6 +803,9 @@
     "play_sound_failed": {
       "message": "Failed to play sound on {device_id}: {error}"
     },
+    "play_sound_suppressed": {
+      "message": "Play Sound for {device_id} was not sent. Home Assistant is not ready to reach the device right now; try again in a moment."
+    },
     "stop_sound_failed": {
       "message": "Failed to stop sound on {device_id}: {error}"
     },

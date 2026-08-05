@@ -803,6 +803,9 @@
     "play_sound_failed": {
       "message": "השמעת צליל על {device_id} נכשלה: {error}"
     },
+    "play_sound_suppressed": {
+      "message": "הפקודה Play Sound עבור {device_id} לא נשלחה. Home Assistant אינו מצליח להגיע למכשיר כרגע; נסו שוב בעוד רגע."
+    },
     "stop_sound_failed": {
       "message": "עצירת הצליל על {device_id} נכשלה: {error}"
     },

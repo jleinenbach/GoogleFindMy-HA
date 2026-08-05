@@ -893,7 +893,11 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
                     "Play sound suppressed for device '{device_id}'".format(
                         **placeholders
                     ),
-                    translation_key="play_sound_failed",
+                    # NOT play_sound_failed: that template carries an {error}
+                    # placeholder this call site cannot fill, so HA would render
+                    # the literal "{error}" (it formats under suppress(KeyError)).
+                    # Same defect class as the stop path, same fix.
+                    translation_key="play_sound_suppressed",
                     translation_placeholders=placeholders,
                 )
         except ServiceValidationError:

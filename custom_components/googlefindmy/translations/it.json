@@ -803,6 +803,9 @@
     "play_sound_failed": {
       "message": "Impossibile riprodurre il suono su {device_id}: {error}"
     },
+    "play_sound_suppressed": {
+      "message": "Play Sound per {device_id} non è stato inviato. Home Assistant al momento non riesce a raggiungere il dispositivo; riprova tra un istante."
+    },
     "stop_sound_failed": {
       "message": "Impossibile interrompere il suono su {device_id}: {error}"
     },

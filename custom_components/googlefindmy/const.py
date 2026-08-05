@@ -57,10 +57,20 @@ class StopSoundOutcome(StrEnum):
     """
 
     CANCELLED = "cancelled"
-    """Submitted WITH a cancel key that correlates to a known play request."""
+    """Submitted WITH a cancel key whose correlation this integration can prove.
+
+    Proof means the key is our own, still fresh, cached Play Sound handle. A key
+    supplied by the caller qualifies only when it IS that handle; an arbitrary
+    string is a claim we cannot check and yields ``UNCORRELATED`` instead.
+    """
 
     UNCORRELATED = "uncorrelated"
-    """Submitted WITHOUT one; the effect is unprovable and may be nil."""
+    """Submitted without a provably correlated key; the effect may be nil.
+
+    Covers both "no key at all" and "a key we cannot vouch for". Both leave the
+    server unable to match the stop to a running ring, so both are reported to
+    the user rather than silently counted as success.
+    """
 
     FAILED = "failed"
     """Not submitted at all, or rejected by the server."""

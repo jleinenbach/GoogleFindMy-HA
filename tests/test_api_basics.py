@@ -1392,6 +1392,31 @@ class TestAsyncStopSoundErrorMapping:
         assert "cancel key present" in caplog.text
         assert "without a cancel key" not in caplog.text
 
+    @pytest.mark.parametrize("blank", ["", "   ", "\t\n"])
+    def test_blank_uuid_logs_as_uncorrelated_not_as_a_key(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+        blank: str,
+    ) -> None:
+        """A blank key is dropped from the proto3 payload, so it is no key.
+
+        This entry point is public and documented for non-HA contexts, so it can
+        be reached without the coordinator funnel that normalises blanks. Without
+        its own guard the log would announce a cancel key that never reaches the
+        wire -- the same unbacked claim, only in the log instead of the service
+        result.
+        """
+
+        api = self._api_with_token(monkeypatch)
+        self._patch_submit(monkeypatch, "CDEF")
+
+        with caplog.at_level(logging.DEBUG):
+            assert run_coro(api.async_stop_sound("d", blank)) is True
+
+        assert "cancel key present" not in caplog.text
+        assert "without a cancel key" in caplog.text
+
     @pytest.mark.parametrize(
         "exc",
         [

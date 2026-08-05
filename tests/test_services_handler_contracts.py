@@ -173,7 +173,7 @@ class TestDeviceIdValidation:
         ``stop_sound_invalid_uuid``: the former template carries an ``{error}``
         placeholder that this call site cannot fill, and Home Assistant
         swallows the resulting ``KeyError``, so the user was shown the raw
-        template. See ``TestStopSoundTranslationPlaceholders``.
+        template. See ``TestSoundTranslationPlaceholders``.
         """
         handler = handlers[services.SERVICE_STOP_SOUND]
         with pytest.raises(ServiceValidationError) as excinfo:
@@ -249,7 +249,11 @@ class TestResolverDispatch:
         self, full_ctx: dict[str, Any], monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """A coordinator that returns ``False`` (suppressed) surfaces as a
-        play_sound_failed validation error."""
+        play_sound_suppressed validation error.
+
+        Not ``play_sound_failed``: that template needs an ``{error}`` this call
+        site has no value for, so the user would be shown the raw brace.
+        """
         coord = SimpleNamespace(
             async_play_sound=mock.AsyncMock(return_value=False),
             get_device_display_name=mock.Mock(return_value="Tag"),
@@ -265,7 +269,7 @@ class TestResolverDispatch:
             await handlers[services.SERVICE_PLAY_SOUND](
                 _FakeCall({"device_id": "dev1"})
             )
-        assert excinfo.value.translation_key == "play_sound_failed"
+        assert excinfo.value.translation_key == "play_sound_suppressed"
 
     @pytest.mark.parametrize(
         ("service_const", "coord_attr", "translation_key"),
@@ -481,8 +485,11 @@ class TestRebuildRegistryGuards:
         assert "Invalid device_ids payload type" in caplog.text
 
 
-class TestStopSoundTranslationPlaceholders:
+class TestSoundTranslationPlaceholders:
     """Every raised message must be able to render.
+
+    Covers the stop AND the play path: the class claim is only as strong as the
+    branches it actually enumerates.
 
     Home Assistant formats an exception message with
     ``with suppress(KeyError): message.format(**placeholders)``. A template
@@ -547,5 +554,41 @@ class TestStopSoundTranslationPlaceholders:
         required = self._template_placeholders(translation_key)
         assert required <= supplied, (
             f"{translation_key} would render with a stray literal: "
+            f"missing {sorted(required - supplied)}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_play_sound_suppressed_key_gets_all_its_placeholders(
+        self, full_ctx: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The play path belongs to the same class and was its last gap.
+
+        ``play_sound_failed`` carries an ``{error}`` the suppression branch
+        cannot fill. Until button.py stopped swallowing ServiceValidationError
+        the defect was invisible; pinning only the stop keys left it standing.
+        """
+
+        coord = SimpleNamespace(
+            async_play_sound=mock.AsyncMock(return_value=False),
+            get_device_display_name=mock.Mock(return_value="Tag"),
+        )
+        hass = _hass_with_coordinator(coord)
+        monkeypatch.setattr(
+            services.dr,
+            "async_get",
+            lambda _h: SimpleNamespace(async_get=lambda _d: None),
+        )
+        handlers = _register(hass, full_ctx)
+
+        with pytest.raises(ServiceValidationError) as excinfo:
+            await handlers[services.SERVICE_PLAY_SOUND](
+                _FakeCall({"device_id": "dev1"})
+            )
+
+        key = excinfo.value.translation_key
+        supplied = set(excinfo.value.translation_placeholders or {})
+        required = self._template_placeholders(str(key))
+        assert required <= supplied, (
+            f"{key} would render with a stray literal: "
             f"missing {sorted(required - supplied)}"
         )

@@ -1789,6 +1789,14 @@ class GoogleFindMyAPI:
         token = self._get_fcm_token_for_action()
         if not token:
             return False
+        # Idempotent guard, not a second normalisation policy: the coordinator
+        # funnel already maps blank to None. This entry point is public and
+        # documented "for non-HA contexts", so a blank string can still arrive
+        # here -- and a blank key is dropped from the proto3 payload entirely.
+        # Without this, the log below would claim a cancel key that never
+        # reaches the wire, which is the very class of unbacked success claim
+        # this change set removes.
+        request_uuid = (request_uuid or "").strip() or None
         try:
             if request_uuid:
                 _LOGGER.info(
@@ -1798,7 +1806,8 @@ class GoogleFindMyAPI:
                 )
             else:
                 _LOGGER.warning(
-                    "Submitting Stop Sound (async) for %s without UUID (may not cancel properly)",
+                    "Submitting Stop Sound (async) for %s without a cancel key; "
+                    "the server cannot correlate it with a running ring",
                     device_id,
                 )
             result_hex = await async_submit_stop_sound_request(

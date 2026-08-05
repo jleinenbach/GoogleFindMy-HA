@@ -826,8 +826,9 @@ class LocateOperations(_MixinBase):
         """Stop sound on a device using the native async API (no executor).
 
         **IMPORTANT**: This method retrieves the UUID from the previous Play Sound request
-        and uses it to cancel that specific request. Without the UUID, Google's API may
-        not properly cancel the sound and the device will continue ringing.
+        and uses it to cancel that specific request. Without it the field is absent from
+        the proto3 payload, so the server cannot correlate the stop with a running ring
+        and the device may keep ringing.
 
         Args:
             device_id: The canonical ID of the device.
@@ -890,6 +891,27 @@ class LocateOperations(_MixinBase):
                     "(the ring may keep playing)",
                     device_id,
                 )
+        else:
+            # An explicitly passed key is a CLAIM of correlation, not a proof.
+            # It proves correlation in exactly one case: it IS our own fresh
+            # cached key. Any other string -- a typo, a stale template, the key
+            # of a different ring -- is unverifiable, and reporting CANCELLED
+            # for it would be BSkando#195 one layer up: success without effect.
+            cached_uuid = self._sound_request_uuids.get(device_id)
+            if (
+                cached_uuid is not None
+                and cached_uuid == request_uuid_to_use
+                and not self._cached_sound_uuid_is_stale(device_id)
+            ):
+                # It is our key, so spending it is correct, not an eviction.
+                used_own_fresh_key = True
+            else:
+                _LOGGER.warning(
+                    "Cancel key for %s was supplied by the caller and does not "
+                    "match a live Play Sound request of this integration; the "
+                    "stop cannot be correlated (the ring may keep playing)",
+                    device_id,
+                )
 
         try:
             submitted = await self.api.async_stop_sound(device_id, request_uuid_to_use)
@@ -899,21 +921,21 @@ class LocateOperations(_MixinBase):
             self._set_auth_state(failed=False)
             if not submitted:
                 return StopSoundOutcome.FAILED
-            if request_uuid_to_use is not None:
-                if used_own_fresh_key:
-                    # Correlated stop accepted with OUR key: it is spent. This
-                    # is the ONLY branch that drops a live key --
-                    # IRR-CA-CANCEL-KEY-ON-SUCCESS-ONLY is unchanged, only
-                    # narrowed in the direction of its own purpose.
-                    removed_request_uuid = self._sound_request_uuids.pop(
-                        device_id, None
-                    )
-                    # Use getattr for test compatibility (tests may bypass __init__)
-                    timestamps = getattr(self, "_sound_request_timestamps", None)
-                    if timestamps is not None:
-                        timestamps.pop(device_id, None)
-                    if removed_request_uuid is not None:
-                        await self._async_save_sound_uuids()
+            # CANCELLED is bound to PROVEN correlation, never to "some string
+            # was sent". A key we cannot vouch for falls through to
+            # UNCORRELATED below, which is what reaches the user as an error.
+            if used_own_fresh_key:
+                # Correlated stop accepted with OUR key: it is spent. This
+                # is the ONLY branch that drops a live key --
+                # IRR-CA-CANCEL-KEY-ON-SUCCESS-ONLY is unchanged, only
+                # narrowed in the direction of its own purpose.
+                removed_request_uuid = self._sound_request_uuids.pop(device_id, None)
+                # Use getattr for test compatibility (tests may bypass __init__)
+                timestamps = getattr(self, "_sound_request_timestamps", None)
+                if timestamps is not None:
+                    timestamps.pop(device_id, None)
+                if removed_request_uuid is not None:
+                    await self._async_save_sound_uuids()
                 return StopSoundOutcome.CANCELLED
             if cached_uuid_was_expired:
                 # Housekeeping only: a key that the reload filter would discard

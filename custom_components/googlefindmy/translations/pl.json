@@ -803,6 +803,9 @@
     "play_sound_failed": {
       "message": "Nie udało się odtworzyć dźwięku na {device_id}: {error}"
     },
+    "play_sound_suppressed": {
+      "message": "Nie wysłano polecenia Play Sound dla {device_id}. Home Assistant nie może teraz połączyć się z urządzeniem; spróbuj ponownie za chwilę."
+    },
     "stop_sound_failed": {
       "message": "Nie udało się zatrzymać dźwięku na {device_id}: {error}"
     },

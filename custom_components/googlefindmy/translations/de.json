@@ -803,6 +803,9 @@
     "play_sound_failed": {
       "message": "Tonwiedergabe auf {device_id} fehlgeschlagen: {error}"
     },
+    "play_sound_suppressed": {
+      "message": "Play Sound für {device_id} wurde nicht gesendet. Home Assistant kann das Gerät gerade nicht erreichen; versuche es gleich noch einmal."
+    },
     "stop_sound_failed": {
       "message": "Tonstopp auf {device_id} fehlgeschlagen: {error}"
     },

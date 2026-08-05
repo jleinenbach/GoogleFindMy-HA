@@ -414,18 +414,35 @@ class TestAsyncStopSoundGating:
     async def test_explicit_uuid_does_not_drop_our_own_cached_key(
         self, coord: LocateStub
     ) -> None:
-        """A foreign cancel key must not evict our own handle.
+        """A foreign cancel key must not evict our own handle, nor claim success.
 
         The caller may pass the key of a *different* ring (that is precisely the
         BSkando#195 scenario). Popping our cached key on its behalf would throw
-        away the only handle for a ring that may still be running.
+        away the only handle for a ring that may still be running -- and calling
+        it CANCELLED would be the same unbacked success claim one layer up:
+        correlation is something we prove, not something the caller asserts.
         """
 
         coord._sound_request_uuids["dev-1"] = "cached-uuid"
         outcome = await coord.async_stop_sound("dev-1", request_uuid="explicit")
-        assert outcome is StopSoundOutcome.CANCELLED
+        assert outcome is StopSoundOutcome.UNCORRELATED
         coord.api.async_stop_sound.assert_awaited_once_with("dev-1", "explicit")
         assert coord._sound_request_uuids["dev-1"] == "cached-uuid"
+
+    async def test_explicit_uuid_equal_to_our_fresh_key_is_correlated(
+        self, coord: LocateStub
+    ) -> None:
+        """Passing back our own live key is the one provable caller claim.
+
+        It is not a foreign key at all, so it correlates and is spent -- the
+        verdict follows the proof, not the presence of an argument.
+        """
+
+        coord._sound_request_uuids["dev-1"] = "cached-uuid"
+        outcome = await coord.async_stop_sound("dev-1", request_uuid="cached-uuid")
+        assert outcome is StopSoundOutcome.CANCELLED
+        coord.api.async_stop_sound.assert_awaited_once_with("dev-1", "cached-uuid")
+        assert "dev-1" not in coord._sound_request_uuids
 
     async def test_missing_uuid_reports_uncorrelated(self, coord: LocateStub) -> None:
         outcome = await coord.async_stop_sound("dev-1")

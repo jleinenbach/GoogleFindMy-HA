@@ -62,9 +62,11 @@ stop_sound:
     request_uuid:
       name: Request UUID (optional)
       description: >-
-        Pass the request UUID returned by the Play Sound service when the backend requires
-        the stop request to reference an existing sound session. Leave it empty to use the
-        key this instance stored for the running ring, if it has one.
+        Normally leave this empty: the integration then uses the cancel key it stored for
+        the ring it started itself, which is the only key whose correlation it can prove.
+        Only fill it in if you obtained a key from another source. A key that does not
+        match a live Play Sound request of this instance is reported as an error, because
+        the stop cannot be correlated and the device may keep ringing.
       required: false
       selector:
         text:
