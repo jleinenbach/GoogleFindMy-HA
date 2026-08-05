@@ -368,7 +368,7 @@ class TestResolverDispatch:
         """
 
         coord = SimpleNamespace(
-            async_stop_sound=mock.AsyncMock(return_value=StopSoundOutcome.FAILED),
+            async_stop_sound=mock.AsyncMock(return_value=StopSoundOutcome.SUPPRESSED),
             get_device_display_name=mock.Mock(return_value="Tag"),
         )
         hass = _hass_with_coordinator(coord)
@@ -383,6 +383,35 @@ class TestResolverDispatch:
                 _FakeCall({"device_id": "dev1"})
             )
         assert excinfo.value.translation_key == "stop_sound_suppressed"
+
+    @pytest.mark.asyncio
+    async def test_rejected_stop_does_not_borrow_the_suppressed_advice(
+        self, full_ctx: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A refused stop must not be reported as a local, transient condition.
+
+        SUPPRESSED means "we never sent it, retry shortly". FAILED means the
+        transport refused it, most often because the sign-in expired. Sharing
+        one message would give the wrong advice to whichever half is not the
+        actual cause.
+        """
+
+        coord = SimpleNamespace(
+            async_stop_sound=mock.AsyncMock(return_value=StopSoundOutcome.FAILED),
+            get_device_display_name=mock.Mock(return_value="Tag"),
+        )
+        hass = _hass_with_coordinator(coord)
+        monkeypatch.setattr(
+            services.dr,
+            "async_get",
+            lambda _h: SimpleNamespace(async_get=lambda _d: None),
+        )
+        handlers = _register(hass, full_ctx)
+        with pytest.raises(ServiceValidationError) as excinfo:
+            await handlers[services.SERVICE_STOP_SOUND](
+                _FakeCall({"device_id": "dev1"})
+            )
+        assert excinfo.value.translation_key == "stop_sound_rejected"
 
 
 # ---------------------------------------------------------------------------
@@ -511,7 +540,12 @@ class TestSoundTranslationPlaceholders:
         ("call_data", "outcome", "translation_key"),
         [
             ({"device_id": "dev1", "request_uuid": 7}, None, "stop_sound_invalid_uuid"),
-            ({"device_id": "dev1"}, StopSoundOutcome.FAILED, "stop_sound_suppressed"),
+            (
+                {"device_id": "dev1"},
+                StopSoundOutcome.SUPPRESSED,
+                "stop_sound_suppressed",
+            ),
+            ({"device_id": "dev1"}, StopSoundOutcome.FAILED, "stop_sound_rejected"),
             (
                 {"device_id": "dev1"},
                 StopSoundOutcome.UNCORRELATED,

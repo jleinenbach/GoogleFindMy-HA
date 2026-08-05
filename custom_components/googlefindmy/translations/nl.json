@@ -812,6 +812,9 @@
     "stop_sound_invalid_uuid": {
       "message": "Stop Sound voor {device_id} is niet verzonden: de request-UUID moet tekst zijn, maar {request_uuid} werd meegegeven."
     },
+    "stop_sound_rejected": {
+      "message": "Stop Sound voor {device_id} is verzonden, maar Google heeft het niet geaccepteerd. De logregel van deze poging noemt de reden; meestal is dat een verlopen aanmelding, een server- of netwerkfout, of een snelheidslimiet."
+    },
     "stop_sound_suppressed": {
       "message": "Stop Sound voor {device_id} is niet verzonden. Home Assistant kan het apparaat op dit moment niet bereiken; probeer het zo meteen opnieuw."
     },

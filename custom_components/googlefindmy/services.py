@@ -953,12 +953,25 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
                 canonical_id, request_uuid
             )
             placeholders = {"device_id": str(raw_device_id)}
-            if outcome is StopSoundOutcome.FAILED:
+            if outcome is StopSoundOutcome.SUPPRESSED:
                 raise _service_validation_error(
                     "Stop sound suppressed for device '{device_id}'".format(
                         **placeholders
                     ),
                     translation_key="stop_sound_suppressed",
+                    translation_placeholders=placeholders,
+                )
+            if outcome is StopSoundOutcome.FAILED:
+                # Distinct from SUPPRESSED: this one reached the transport and
+                # was refused. The api layer swallows every exception and
+                # returns False, so auth failures, 401/403, server errors, rate
+                # limits, network errors and empty replies all arrive here.
+                # "Try again in a moment" -- the suppressed advice -- is wrong
+                # for most of them, so this branch gets its own message and
+                # points at the log, which does carry the specific cause.
+                raise _service_validation_error(
+                    "Stop sound for '{device_id}' was rejected".format(**placeholders),
+                    translation_key="stop_sound_rejected",
                     translation_placeholders=placeholders,
                 )
             if outcome is StopSoundOutcome.UNCORRELATED:

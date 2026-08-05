@@ -812,6 +812,9 @@
     "stop_sound_invalid_uuid": {
       "message": "Stop Sound pour {device_id} n'a pas été envoyé : l'UUID de requête doit être du texte, mais {request_uuid} a été fourni."
     },
+    "stop_sound_rejected": {
+      "message": "Stop Sound pour {device_id} a été envoyé, mais Google ne l'a pas accepté. L'entrée de journal de cette tentative en indique la raison; il s'agit le plus souvent d'une connexion expirée, d'une erreur serveur ou réseau, ou d'une limite de débit."
+    },
     "stop_sound_suppressed": {
       "message": "Stop Sound pour {device_id} n'a pas été envoyé. Home Assistant ne parvient pas à joindre l'appareil pour le moment ; réessayez dans un instant."
     },

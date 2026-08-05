@@ -835,10 +835,11 @@ class LocateOperations(_MixinBase):
             request_uuid: Optional request UUID that identifies the prior play request.
 
         Returns:
-            A :class:`StopSoundOutcome`. The state space is three-valued on
+            A :class:`StopSoundOutcome`. The state space is four-valued on
             purpose: ``CANCELLED`` (submitted with a correlated cancel key),
             ``UNCORRELATED`` (submitted without one, so nothing proves an
-            effect) and ``FAILED`` (not submitted, or rejected). A bool cannot
+            effect), ``SUPPRESSED`` (never sent by this integration) and
+            ``FAILED`` (handed to the transport and not accepted). A bool cannot
             carry the middle state, and collapsing it into success is what
             reported a stop for a ring that kept playing (BSkando#195).
         """
@@ -848,8 +849,9 @@ class LocateOperations(_MixinBase):
                 "Suppressing stop_sound call for %s: push not ready", device_id
             )
             # A suppressed stop is a stop that was never sent, so it is a
-            # failure and must reach the service layer as one.
-            return StopSoundOutcome.FAILED
+            # failure and must reach the service layer as one -- but as its own
+            # kind: nothing left this machine, and the condition clears itself.
+            return StopSoundOutcome.SUPPRESSED
         # Blank means "no opinion" -- an optional field left empty, a template
         # that rendered to nothing -- so it must fall through to the cached key
         # below, never pose as one. In-process the absence of a key already has

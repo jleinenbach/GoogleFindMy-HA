@@ -812,6 +812,9 @@
     "stop_sound_invalid_uuid": {
       "message": "הפקודה Stop Sound עבור {device_id} לא נשלחה: מזהה הבקשה חייב להיות טקסט, אך התקבל {request_uuid}."
     },
+    "stop_sound_rejected": {
+      "message": "הפקודה Stop Sound עבור {device_id} נשלחה, אך Google לא קיבלה אותה. רשומת היומן של הניסיון הזה מציינת את הסיבה; לרוב מדובר בהתחברות שפגה, בשגיאת שרת או רשת, או במגבלת קצב."
+    },
     "stop_sound_suppressed": {
       "message": "הפקודה Stop Sound עבור {device_id} לא נשלחה. Home Assistant אינו מצליח להגיע למכשיר כרגע; נסו שוב בעוד רגע."
     },

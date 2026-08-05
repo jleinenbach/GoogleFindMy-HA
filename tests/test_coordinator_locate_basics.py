@@ -399,9 +399,27 @@ class TestAsyncStopSoundGating:
         coord._api_push_ready.return_value = False
         outcome = await coord.async_stop_sound("dev-1")
         # A suppressed stop was never sent, so it is a failure, not a silent
-        # "uncorrelated". The service layer has to raise on it.
-        assert outcome is StopSoundOutcome.FAILED
+        # "uncorrelated". The service layer has to raise on it -- and it is
+        # SUPPRESSED, not FAILED: nothing left this machine, so the advice
+        # "try again shortly" is true here and false for a rejected stop.
+        assert outcome is StopSoundOutcome.SUPPRESSED
         coord.api.async_stop_sound.assert_not_called()
+
+    async def test_rejected_submission_is_failed_not_suppressed(
+        self, coord: LocateStub
+    ) -> None:
+        """A stop the transport refused must not claim a local, transient cause.
+
+        ``api.async_stop_sound`` swallows every exception and returns False, so
+        auth failures, 401/403, server errors, rate limits and network errors
+        all arrive as a plain False. Reporting them as SUPPRESSED would tell a
+        user with an expired sign-in to wait a moment.
+        """
+
+        coord.api.async_stop_sound.return_value = False
+        outcome = await coord.async_stop_sound("dev-1")
+        assert outcome is StopSoundOutcome.FAILED
+        coord.api.async_stop_sound.assert_awaited_once()
 
     async def test_uses_cached_uuid_when_none_passed(self, coord: LocateStub) -> None:
         coord._sound_request_uuids["dev-1"] = "cached-uuid"

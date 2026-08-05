@@ -43,12 +43,18 @@ INTEGRATION_VERSION = "1.7.15.8"
 class StopSoundOutcome(StrEnum):
     """Outcome of a Stop Sound attempt.
 
-    Three states, because the state space is genuinely three-valued and a bool
+    Four states, because the state space is genuinely four-valued and a bool
     cannot carry it: a stop that was submitted without a cancel key is neither a
     success (nothing proves it reached a ring) nor a rejection (the server did
     accept the submission). Collapsing the middle state into ``True`` is what
     made the integration report success for a ring that kept playing
     (BSkando#195).
+
+    The two failure states are kept apart for the same reason the middle state
+    exists: they differ in what the user has to do about them. ``SUPPRESSED``
+    never left this machine and clears itself; ``FAILED`` reached the transport
+    and may need credentials, a network, or patience with a rate limit. One
+    message cannot advise on both without misleading half its readers.
 
     Note that even ``CANCELLED`` means "submitted with a correlated cancel key",
     not "the device stopped". Nova returns no parsable ExecuteActionResponse, so
@@ -72,8 +78,23 @@ class StopSoundOutcome(StrEnum):
     the user rather than silently counted as success.
     """
 
+    SUPPRESSED = "suppressed"
+    """Never sent, because this integration declined to send it.
+
+    Today the sole cause is a push transport that is not ready yet. The command
+    never reached the network, the condition is local and transient, and the
+    only useful advice is to retry shortly.
+    """
+
     FAILED = "failed"
-    """Not submitted at all, or rejected by the server."""
+    """Handed to the transport, but not accepted.
+
+    Covers every way the attempt can die once it leaves this integration:
+    missing action token, authentication failure, HTTP 401/403, server error,
+    rate limit, network error, and an empty reply. These need different remedies
+    from ``SUPPRESSED`` -- often re-authentication -- so telling the user to
+    "try again in a moment" would be wrong for most of them.
+    """
 
 
 # --------------------------------------------------------------------------------------

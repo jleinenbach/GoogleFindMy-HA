@@ -76,6 +76,12 @@ def create_sound_request(
         raise ValueError("canonic_device_id must be a non-empty string")
     if not isinstance(gcm_registration_id, str) or not gcm_registration_id.strip():
         raise ValueError("gcm_registration_id must be a non-empty string")
+    # Type before value, as in the sibling builder location_request.py. Both
+    # branches below call .strip(), so without this a non-string argument would
+    # die with an AttributeError deep inside the builder instead of the
+    # ValueError this docstring promises.
+    if request_uuid is not None and not isinstance(request_uuid, str):
+        raise ValueError("request_uuid must be a string or None")
 
     # The two branches carry OPPOSITE invariants, and `should_start` is the only
     # field that can tell them apart, so the rule lives here rather than in a

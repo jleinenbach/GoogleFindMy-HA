@@ -160,3 +160,29 @@ def test_stop_request_with_omitted_uuid_does_not_invent_one() -> None:
 
     assert request.requestMetadata.requestUuid == ""
     assert request.action.HasField("stopSound")
+
+
+def test_sound_builder_rejects_a_non_string_cancel_key() -> None:
+    """A wrong TYPE fails as the documented ValueError, not as an AttributeError.
+
+    Both branches of the builder call ``.strip()``, so without an explicit type
+    guard an int or a list dies deep inside with an AttributeError, while the
+    docstring promises ValueError. The sibling builder in
+    ``LocateTracker/location_request.py`` checks the type first; this keeps the
+    two consistent, which matters because callers catch on the promised type.
+    """
+
+    for should_start in (True, False):
+        for bad in (7, ["uuid"], object()):
+            try:
+                create_sound_request(should_start, _CANONICAL_ID, _FCM_TOKEN, bad)  # type: ignore[arg-type]
+            except ValueError:
+                continue
+            except Exception as err:  # pragma: no cover - the defect being fixed
+                raise AssertionError(
+                    f"start={should_start} uuid={bad!r} raised "
+                    f"{type(err).__name__}, expected ValueError"
+                ) from err
+            raise AssertionError(
+                f"start={should_start} uuid={bad!r} was accepted silently"
+            )
