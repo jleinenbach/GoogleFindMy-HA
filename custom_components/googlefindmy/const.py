@@ -221,7 +221,14 @@ NON_DEVICE_SUBENTRY_KEYS: frozenset[str] = frozenset({SERVICE_SUBENTRY_KEY})
 # it -- so the survivor was whichever subentry the entry happened to yield
 # first, and the loser's registry bindings went with it. The shape reaching that
 # axis in production is a ``hub`` and a ``service`` sharing
-# ``f"{entry_id}-service"``. Mind the direction when comparing, and note that
+# ``f"{entry_id}-service"``. The rank is only half of what that axis needed: on
+# top of it the removal is *guarded* by type, so a candidate whose
+# ``subentry_type`` differs from the canonical one is spared entirely rather
+# than merely ranked below it. Without that guard the rank made the foreign
+# type the reliable loser instead of a random one, which is the wrong direction
+# on an irreversible path; with it, only the rank decides which type the guard
+# then compares against. Both halves have their own killing mutation in
+# ``tests/test_subentry_manager_registry_resolution.py``. Mind the direction when comparing, and note that
 # the four sites do not split two against two: the flow, the index and
 # ``_select_canonical`` all rank "lower wins" -- the last one because it picks
 # with ``min`` -- while ``_candidate_score`` alone spells it "higher wins"

@@ -2069,9 +2069,17 @@ class ConfigEntrySubEntryManager:
                 #
                 # Fail-safe on unknown input: an unknown group key, a missing
                 # one and a missing ``subentry_type`` all yield 1, so every
-                # candidate ties and the previous order decides. Within a single
-                # bucket the field therefore only ever breaks a tie, never adds
-                # or drops a removal.
+                # candidate ties and the previous order decides.
+                #
+                # An earlier version of this paragraph went on to say the field
+                # "only ever breaks a tie, never adds or drops a removal" inside
+                # one bucket. That was true while the loser was removed
+                # unconditionally and stopped being true the moment the removal
+                # gained the type guard below: which candidate wins now also
+                # decides *which type* the guard compares against, and therefore
+                # how many siblings it spares. Measured in a single bucket by
+                # ``::test_dedup_the_guard_still_needs_the_rank`` -- ranked, one
+                # removal; rank neutralised, none.
                 #
                 # Across buckets that is *not* true, and the difference was
                 # measured rather than reasoned about, because an earlier draft
@@ -2081,10 +2089,16 @@ class ConfigEntrySubEntryManager:
                 # overlap with the group axis. Concretely, with three subentries
                 # all storing ``service`` -- a ``service`` carrying the tracker
                 # key's identifier, a ``hub`` and a ``service`` sharing
-                # ``e1-service`` -- the old order removed one subentry and the
-                # new order removes two. The direction is coherent: an
-                # exhaustive sweep of the three-subentry shapes never newly
-                # removes a canonically keyed owner, only non-owners. But the
+                # ``e1-service`` -- the count went from one at ``c835d6b6``
+                # to two with the rank alone, and back to one once the guard
+                # spared the hub. Not the *same* one: the first stage removed
+                # the canonical service group, this one removes it too but only
+                # through the group axis, which is a pre-existing defect of its
+                # own (``B20``). The exhaustive three-subentry sweep behind the
+                # "never newly removes a canonically keyed owner" claim was run
+                # against the rank-only stage and has not been repeated for the
+                # guard; the claim is therefore carried as unverified for the
+                # current stage rather than dropped. What holds either way: the
                 # count is not invariant, and a reader on a removal path should
                 # not be told that it is.
                 stored_key = stored_group_keys.get(id(candidate))
@@ -2116,13 +2130,106 @@ class ConfigEntrySubEntryManager:
             if len(candidates) <= 1:
                 continue
             canonical = _select_canonical(candidates)
-            duplicate_descriptors.add(f"unique_id={unique_id}")
+            canonical_type = getattr(canonical, "subentry_type", None)
+            removed_here = False
             for candidate in candidates:
                 if candidate is canonical:
+                    continue
+                # Only a *same-typed* sibling can be a duplicate copy of the
+                # group ``canonical`` stands for; a different type sharing the
+                # identifier is a group of its own and is left alone.
+                #
+                # This is the manager-side half of a rule the flow side already
+                # states, and the halves were split for a while: this axis is
+                # the only one where two types can meet at all, because
+                # ``grouped_by_group`` carries ``subentry_type`` in its key.
+                # ``_async_cleanup_stale_subentries`` in ``config_flow.py``
+                # skips a subentry whose type does not literally own the key it
+                # stores, with the reasoning spelled out in
+                # ``agents/config_flow/AGENTS.md``: a ``hub`` writes
+                # ``SERVICE_SUBENTRY_KEY`` by design, so beside a real service
+                # subentry it is not mis-keyed but simply a different group,
+                # and it keeps its title, its key and its stored ids. Both
+                # handlers derive ``unique_id`` from that same key, so the pair
+                # lands in one bucket here, where the type rank above makes the
+                # hub the deterministic loser. Ranking without this guard
+                # therefore traded a *random* silent removal for a *reliable*
+                # one, which is the trade Codex flagged on PR #1236.
+                #
+                # The rank is still load-bearing, and the guard is why: the
+                # guard removes only what matches ``canonical_type``, so which
+                # type wins decides which duplicates are still collapsed. An
+                # unranked load-order winner can be the hub, and then *no*
+                # candidate matches its type and a genuine duplicate survives
+                # with it. Rank first, then remove same-typed only.
+                #
+                # The shape that shows this needs all three to sit in *distinct*
+                # ``grouped_by_group`` buckets, which was measured rather than
+                # assumed: a first draft of this sentence used two ``service``
+                # twins on the same stored key, and neutralising the rank
+                # changed nothing there, because that pair collides on the group
+                # axis and is collapsed by it regardless. The witness is
+                # ``::test_dedup_the_guard_still_needs_the_rank``: a ``hub`` and
+                # two ``service`` subentries sharing ``e1-service`` but storing
+                # three different keys. Ranked, the key-owning ``service`` wins
+                # and the other ``service`` goes; unranked, the hub wins the
+                # bucket and nothing is removed at all.
+                #
+                # ``getattr`` on both sides for the same reason the sort key
+                # uses it: a missing type is ``None`` on both, so two untyped
+                # siblings still collapse. The two guards are deliberately *not*
+                # identical here, and the difference is stated rather than
+                # papered over: the flow guard reads ``subentry_type is not None
+                # and != owner``, so it never spares an untyped subentry, while
+                # this one is plain equality and therefore *does* spare an
+                # untyped subentry beside a typed canonical. Unreachable in the
+                # installed core (``ConfigSubentry.subentry_type`` is a required
+                # ``str``), and equality is the right shape for an axis that has
+                # no notion of key ownership, but the flow's reasoning does not
+                # carry over and is not borrowed.
+                #
+                # What is *not* resolved by skipping: the colliding identifier
+                # stays. ``_claim_unique_id`` displaces such a holder by
+                # renaming it, and it runs only inside
+                # ``ConfigFlow._async_sync_feature_subentries`` -- never from
+                # this manager. Leaving the pair intact therefore defers the
+                # collision rather than curing it here. That is the deliberate
+                # direction: a removal takes device and entity registry
+                # bindings with it and cannot be undone, while a deferred
+                # rename can.
+                #
+                # Two limits on "left alone", both measured, because the first
+                # draft of the contract text overstated them:
+                #
+                # * it is a statement about *this helper*. ``async_sync`` runs a
+                #   type-blind stale sweep afterwards which still removes a
+                #   spared ``hub`` that stores a legacy or absent key. Only the
+                #   production shape is verified through a whole call, by
+                #   ``::test_dedup_a_spared_hub_survives_a_whole_sync_not_just_the_helper``.
+                # * sparing is not free. Where the spared twin is the one that
+                #   then holds a core slot through its stored key, the sync's
+                #   write-back changes an identifier after all, aborts twice and
+                #   ends in ``_async_adopt_existing_unique_id``
+                #   (``::test_dedup_sparing_a_twin_can_route_a_sync_through_the_adoption_exit``).
+                #   Same holder either way, so the trade stands, but it is a
+                #   trade.
+                if getattr(candidate, "subentry_type", None) != canonical_type:
                     continue
                 candidate_id = getattr(candidate, "subentry_id", None)
                 if isinstance(candidate_id, str):
                     removal_targets.add(candidate_id)
+                    removed_here = True
+            # Descriptor only where the bucket actually contributes a removal.
+            # Before the guard a multi-candidate bucket almost always did (the
+            # exception being one whose losers all lack a ``str`` identifier);
+            # now a cross-type bucket contributes nothing by design, and naming
+            # it in the log line would report a collision that was left standing
+            # as one that was cleaned up. The group loop below keeps setting its
+            # descriptor unconditionally, and that asymmetry is intended: its
+            # grouping key carries the type, so a multi-candidate bucket there
+            # is always same-typed and always contributes.
+            if removed_here:
+                duplicate_descriptors.add(f"unique_id={unique_id}")
 
         for (key_value, subentry_type), candidates in grouped_by_group.items():
             if len(candidates) <= 1:
