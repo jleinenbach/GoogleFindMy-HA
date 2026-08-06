@@ -1573,10 +1573,14 @@ class ConfigEntrySubEntryManager:
         # the provenance fields made the other half load-bearing:
         # ``_async_adopt_existing_unique_id`` does take the first match, but
         # ``_select_canonical`` sorts on identifier *presence* first, then the
-        # identifier itself, and only then falls to the index. On its
-        # ``(group_key, subentry_type)`` axis that is a real criterion, and it
-        # points the opposite way from all three rankers for a pair whose lower
-        # identifier carries ``unique_id=None``.
+        # identifier itself, then the type against ``LITERAL_CORE_KEY_OWNER``,
+        # and only then falls to the index. That third field is constant on the
+        # ``(group_key, subentry_type)`` axis, because the type is part of that
+        # axis's grouping key, so nothing there changed: the first two fields
+        # are still a real criterion, and they still point the opposite way from
+        # all three rankers for a pair whose lower identifier carries
+        # ``unique_id=None``. The field decides on the ``unique_id`` axis, where
+        # everything above it ties by construction.
         #
         # The both-ids-missing case never reaches this point: ``subentry_id``
         # is read through the same ``getattr`` in ``_is_subentry_like``, which
@@ -1989,6 +1993,20 @@ class ConfigEntrySubEntryManager:
         grouped_by_group: dict[tuple[str | None, str | None], list[ConfigSubentry]] = (
             defaultdict(list)
         )
+        # Reuse the key this loop already resolved instead of re-reading it in
+        # the sort helper below. A second reading form is exactly the drift this
+        # module keeps paying for: the flow-side and manager-side sweeps answer
+        # the same question through two readers, and neither notices when they
+        # disagree.
+        #
+        # Keyed by object identity rather than by ``subentry_id``: the loop
+        # above appends every candidate, including one whose id is missing or
+        # not a ``str``, so an id-keyed map would need a guard against a shape
+        # the core cannot build (``ConfigSubentry.subentry_id`` is a ``str``
+        # defaulting to a fresh ULID) and would collide if two such candidates
+        # ever appeared. ``id()`` is safe here because every key refers to an
+        # object held alive by ``subentries`` for the whole function.
+        stored_group_keys: dict[int, str | None] = {}
 
         for subentry in subentries:
             subentry_unique_id = getattr(subentry, "unique_id", None)
@@ -2003,6 +2021,7 @@ class ConfigEntrySubEntryManager:
             key_value = (
                 group_value if isinstance(group_value, str) and group_value else None
             )
+            stored_group_keys[id(subentry)] = key_value
             grouped_by_group[
                 (key_value, getattr(subentry, "subentry_type", None))
             ].append(subentry)
@@ -2010,7 +2029,7 @@ class ConfigEntrySubEntryManager:
         def _select_canonical(candidates: list[ConfigSubentry]) -> ConfigSubentry:
             def _sort_key(
                 item: tuple[int, ConfigSubentry],
-            ) -> tuple[int, str, int, str]:
+            ) -> tuple[int, str, int, int, str]:
                 index, candidate = item
                 candidate_unique_id = getattr(candidate, "unique_id", None)
                 unique_part = (
@@ -2022,7 +2041,71 @@ class ConfigEntrySubEntryManager:
                     if isinstance(candidate_subentry_id, str)
                     else ""
                 )
-                return (0 if unique_part else 1, unique_part, index, subentry_part)
+                # Field 3, the type axis, decides *before* load order.
+                #
+                # Why it is needed at all: on the ``unique_id`` axis the
+                # candidates were grouped *by* ``unique_id``, so fields 1 and 2
+                # are constant across the bucket and field 5 is unreachable
+                # because ``index`` cannot tie. Without this field the survivor
+                # is whichever subentry ``entry.subentries`` happens to yield
+                # first, and the loser's device and entity registry bindings are
+                # cleared. ``agents/config_flow/AGENTS.md`` records that exact
+                # semantics as a defect on the flow side, where "taking
+                # whichever came first" silently removed the canonical service
+                # group; the production shape reaching this bucket is the same
+                # one, ``hub`` and ``service`` sharing ``f"{entry_id}-service"``.
+                #
+                # ``LITERAL_CORE_KEY_OWNER`` rather than a new table: the flow
+                # sweep and ``_candidate_score`` already rank against it, and a
+                # fourth answer to "which type owns this key" is the drift this
+                # module is still paying for.
+                #
+                # Mind the direction. ``_candidate_score`` compares with ``>``,
+                # so a *higher* number wins there; this helper picks with
+                # ``min``, so the owner has to sort *low*. A rank tuple copied
+                # over from that method would be inverted here. The flow's
+                # ``_resolve_existing`` and the runtime index rank "lower wins"
+                # like this helper, so only ``_candidate_score`` is the odd one.
+                #
+                # Fail-safe on unknown input: an unknown group key, a missing
+                # one and a missing ``subentry_type`` all yield 1, so every
+                # candidate ties and the previous order decides. Within a single
+                # bucket the field therefore only ever breaks a tie, never adds
+                # or drops a removal.
+                #
+                # Across buckets that is *not* true, and the difference was
+                # measured rather than reasoned about, because an earlier draft
+                # of this comment claimed the count could never change. The two
+                # grouping passes feed one shared ``removal_targets`` set, so
+                # moving a survivor on the ``unique_id`` axis can move the
+                # overlap with the group axis. Concretely, with three subentries
+                # all storing ``service`` -- a ``service`` carrying the tracker
+                # key's identifier, a ``hub`` and a ``service`` sharing
+                # ``e1-service`` -- the old order removed one subentry and the
+                # new order removes two. The direction is coherent: an
+                # exhaustive sweep of the three-subentry shapes never newly
+                # removes a canonically keyed owner, only non-owners. But the
+                # count is not invariant, and a reader on a removal path should
+                # not be told that it is.
+                stored_key = stored_group_keys.get(id(candidate))
+                literal_owner = (
+                    LITERAL_CORE_KEY_OWNER.get(stored_key)
+                    if stored_key is not None
+                    else None
+                )
+                type_part = (
+                    0
+                    if literal_owner is not None
+                    and getattr(candidate, "subentry_type", None) == literal_owner
+                    else 1
+                )
+                return (
+                    0 if unique_part else 1,
+                    unique_part,
+                    type_part,
+                    index,
+                    subentry_part,
+                )
 
             return min(enumerate(candidates), key=_sort_key)[1]
 

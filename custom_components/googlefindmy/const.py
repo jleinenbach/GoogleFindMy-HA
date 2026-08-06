@@ -211,19 +211,31 @@ NON_DEVICE_SUBENTRY_KEYS: frozenset[str] = frozenset({SERVICE_SUBENTRY_KEY})
 # while the index names its synthetic placeholder -- measured, not inferred, so
 # do not read ``managed_subentries["core_tracking"]`` as "the subentry the
 # index describes" without checking the type. Within
-# the manager itself, ``_deduplicate_subentries`` and
-# ``_async_adopt_existing_unique_id`` do not consult this table at all. Saying
-# both "resolve by iteration order" was the shorthand here, and it hides the
-# part that now carries weight: ``_async_adopt_existing_unique_id`` does take
-# the first match (``break``), but ``_deduplicate_subentries``'s
-# ``_select_canonical`` sorts identifier *presence* first and the identifier
-# itself second, reaching the iteration index only third. On its
-# ``(group_key, subentry_type)`` axis that keeps the *higher* identifier of a
-# pair whose lower one carries ``unique_id=None`` -- the opposite of what all
-# three rankers above pick for it -- and it *removes* the loser, with
-# ``async_sync`` calling it unconditionally before anything else. Those
-# remainders are tracked in ``PLAN_GFMY_SUBENTRY_DELETION_TYPE_AXIS``, where
-# that input shape is now measured rather than assumed.
+# the manager itself, ``_async_adopt_existing_unique_id`` does not consult this
+# table at all: it takes the first match (``break``). ``_deduplicate_subentries``
+# now does, on one of its two axes, and the asymmetry is the point.
+# ``_select_canonical`` sorts identifier *presence* first, the identifier itself
+# second, then the type against this table, and reaches the iteration index only
+# fourth. That fourth field used to be third, and on the ``unique_id`` axis it
+# decided alone -- candidates grouped *by* ``unique_id`` tie on both fields above
+# it -- so the survivor was whichever subentry the entry happened to yield
+# first, and the loser's registry bindings went with it. The shape reaching that
+# axis in production is a ``hub`` and a ``service`` sharing
+# ``f"{entry_id}-service"``. Mind the direction when comparing, and note that
+# the four sites do not split two against two: the flow, the index and
+# ``_select_canonical`` all rank "lower wins" -- the last one because it picks
+# with ``min`` -- while ``_candidate_score`` alone spells it "higher wins"
+# (``candidate_score > existing_score``). A rank tuple copied from any of the
+# first three into that method, or the other way round, has to be inverted; a
+# tuple copied between the first three does not.
+# On the ``(group_key, subentry_type)`` axis the type is part of the grouping
+# key, so the new field is constant across a bucket and changes nothing: that
+# axis still keeps the *higher* identifier of a pair whose lower one carries
+# ``unique_id=None`` -- the opposite of what the three rankers above pick for it
+# -- and it still *removes* the loser, with ``async_sync`` calling it
+# unconditionally before anything else. That remainder is tracked in
+# ``PLAN_GFMY_SUBENTRY_DELETION_TYPE_AXIS``, where the input shape is measured
+# rather than assumed.
 # Read-only on purpose: unlike the plain ``dict`` constants elsewhere in this
 # module, this one is imported by two packages at once, and an in-place mutation
 # in either would silently reach the other.

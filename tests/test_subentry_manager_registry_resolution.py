@@ -603,6 +603,12 @@ def test_update_visible_device_ids_refuses_a_non_device_bearing_type(
 #   Class B -- characterisation. AP3 (rank) or AP4 (reading side) turns
 #              exactly these over.
 #
+# That A2 reservation was drawn on by PR #1236, which is what it was held for:
+# the ``unique_id`` case of ``::test_dedup_type_ranks_on_one_axis_and_groups_on
+# _the_other`` carried the load-order survivor as A2 and now carries the type
+# owner as A1. Nothing else moved with it; the remaining A2 cases are still
+# reserved.
+#
 # Substitution declared: PR #1230 asked the second Class B case to pin the
 # reading side (``_refresh_subentry_index`` and
 # ``metadata[TRACKER_SUBENTRY_KEY].config_subentry_id``). It is pinned here on
@@ -1140,7 +1146,7 @@ async def test_ap1_stale_sweep_is_decided_by_the_resolved_key(
             "unique_id",
             (SUBENTRY_TYPE_TRACKER, SUBENTRY_TYPE_HUB),
             ("e1-shared-uid", "e1-shared-uid"),
-            "load-order-loser",
+            "id-b",
         ),
         (
             "group",
@@ -1163,58 +1169,54 @@ async def test_ap1_stale_sweep_is_decided_by_the_resolved_key(
     ],
     ids=["unique_id", "group", "group-type-separates", "group-no-unique-id"],
 )
-async def test_ap1_deduplicate_reads_type_only_on_the_group_axis(
+async def test_dedup_type_ranks_on_one_axis_and_groups_on_the_other(
     axis: str,
     types: tuple[str, str],
     unique_ids: tuple[str | None, str | None],
     expected: str,
     reverse: bool,
 ) -> None:
-    """Class A2 (standing assertion, behaviour we carry).
+    """Class A1 for the ``unique_id`` case, A2 for the other three.
 
-    ``_deduplicate_subentries`` runs *two* grouping passes that feed one shared
-    ``removal_targets`` set, and only one of them is type-blind:
+    Both axes read ``subentry_type`` now, but they read it differently.
 
-    * the ``unique_id`` axis groups by ``unique_id`` alone. The survivor comes
-      from ``_select_canonical``, whose sort key is
-      ``(0 if unique_part else 1, unique_part, index, subentry_part)``; with the
-      ``unique_id`` equal, the first two fields are constant and ``index`` --
-      the load order -- decides who is removed. No type is read here.
+    ``_deduplicate_subentries`` runs *two* grouping passes feeding one shared
+    ``removal_targets`` set:
+
+    * the ``unique_id`` axis groups by ``unique_id`` alone, so the type cannot
+      be part of the key. It enters as a *rank field* in ``_select_canonical``
+      instead: the candidate whose ``subentry_type`` literally owns its stored
+      ``group_key`` (per ``LITERAL_CORE_KEY_OWNER``) sorts first, and load
+      order only decides when that field ties.
     * the ``group`` axis groups by ``(key_value, subentry_type)``, so the type
       *is* part of the key. Two subentries sharing a ``group_key`` collapse only
       when their types match; differing types put them in separate buckets and
       nothing is removed.
 
-    The two axes also differ in *which* field decides the survivor, and this is
-    the part that keeps getting stated too broadly. Load order decides exactly
-    when field 2 (``unique_part``) ties, and that happens in two situations,
-    not one: always on the ``unique_id`` axis, because there the shared
-    ``unique_id`` *is* the grouping key; and on the group axis whenever both
-    subentries carry ``unique_id=None``, since ``unique_part`` then falls back
-    to ``""`` for both. With distinct ``unique_id``s on the group axis the tie
-    breaks lexicographically instead and the outcome is load-order
-    *independent*: ``id-b`` (``e1-uid-b``) loses in both orders.
+    The name of this test and its first case were both inverted on 2026-08-06.
+    Before that the rank field did not exist, the first two sort fields were
+    constant across a ``unique_id`` bucket, and the survivor was whichever
+    subentry the entry happened to yield first. The case below pinned that, and
+    the docstring called itself a standing assertion while closing with "either
+    way AP3 requires them to stay green" -- a claim its own first case could not
+    survive, because the change it was written to guard is precisely the one
+    that inverts it. What it actually was, for that one parameter, is a
+    characterisation.
 
-    Two drafts of this docstring got that wrong in opposite directions and both
-    were corrected by a measurement rather than by reading -- first by claiming
-    load order everywhere, then by tying it to the ``unique_id`` axis alone.
-    The ``group-no-unique-id`` case exists so the second error cannot recur
-    silently: subentries without a ``unique_id`` are a real production shape,
-    they never enter the ``unique_id`` grouping at all (it filters on
-    ``isinstance(subentry_unique_id, str)``), and they are load-order decided
-    on the group axis.
+    Load order still decides wherever the rank ties, and that is worth stating
+    exactly, because two earlier drafts got it wrong in opposite directions and
+    both were corrected by measurement rather than by reading. It ties when
+    neither candidate owns its key, and it ties on the group axis whenever both
+    carry ``unique_id=None`` (``unique_part`` falls back to ``""`` for both).
+    The ``group-no-unique-id`` case exists so that second error cannot recur
+    silently: subentries without a ``unique_id`` are a real production shape and
+    never enter the ``unique_id`` grouping at all, since it filters on
+    ``isinstance(subentry_unique_id, str)``.
 
-    That second axis is also why the older, narrower claim ("no type is read")
-    was wrong, and it is the axis AP3 will pull on: a rank change that also
-    moves a subentry's *type* would silently regroup here. Four cases pin the
-    distinction, each in both load orders.
-
-    Scope of the claim, stated because it stays narrower than it looks:
-    ``_deduplicate_subentries`` never calls ``_candidate_score``, so a pure rank
-    change cannot turn these red by construction. They are a *negative control*
-    proving AP3 leaves this removal path untouched, and they become a guard in
-    the strong sense only once someone touches ``_select_canonical`` or unifies
-    the two rankers. Either way AP3 requires them to stay green.
+    Scope of the claim: ``_deduplicate_subentries`` never calls
+    ``_candidate_score``, so a change to *that* ranker still cannot turn these
+    red. Against ``_select_canonical`` they are a guard in the strong sense, and
+    the killing mutation is named in the case table below.
     """
 
     first = _ap1_subentry("id-a", TRACKER_SUBENTRY_KEY, types[0], unique_ids[0])
@@ -1229,8 +1231,126 @@ async def test_ap1_deduplicate_reads_type_only_on_the_group_axis(
     elif expected == "none":
         assert recorder.removed == [], axis
     else:
-        # Lexicographic on ``unique_id``; identical in both load orders.
+        # Identical in both load orders, for two different reasons: on the
+        # ``group`` axis the tie breaks lexicographically on ``unique_id``; on
+        # the ``unique_id`` axis the type rank breaks it before load order is
+        # ever consulted, and ``id-a`` is the ``tracker`` that owns
+        # ``core_tracking``. Killing mutation for the latter: pin ``type_part``
+        # to a constant in ``_select_canonical`` and this case alone falls back
+        # to the load-order loser.
         assert recorder.removed == [expected], axis
+
+
+# --- The production collision shape, characterised before it is changed ----
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reverse", [False, True], ids=["fwd", "rev"])
+async def test_dedup_keeps_the_service_group_in_either_load_order(
+    reverse: bool,
+) -> None:
+    """Class A1. The production collision shape, and the one this PR exists for.
+
+    The parametrised case above uses ``core_tracking`` for both candidates,
+    which is a *constructed* collision. This is the shape production actually
+    builds: ``HubSubentryFlowHandler`` and ``ServiceSubentryFlowHandler`` both
+    derive ``unique_id`` as ``f"{entry_id}-{self._group_key}"`` from the same
+    ``_group_key = SERVICE_SUBENTRY_KEY``, so two subentries differing *only* in
+    ``subentry_type`` land in one ``grouped_by_unique`` bucket.
+
+    Measured before the change, with the type rank absent from the sort key:
+
+    * ``fwd`` (service stored first) removed ``id-hub``;
+    * ``rev`` (hub stored first) removed ``id-service`` -- **the canonical
+      service group**, registry bindings included.
+
+    That second outcome is the defect ``agents/config_flow/AGENTS.md`` records
+    for the flow side, where "taking whichever came first" turned an
+    ``AbortFlow`` into a silent removal of exactly this group. It was fixed
+    there; here it survived because nothing asserted on it.
+
+    Now the type rank decides first, ``service`` owns ``service`` per
+    ``LITERAL_CORE_KEY_OWNER``, and the hub loses in both orders. Killing
+    mutation: pin ``type_part`` to a constant in ``_select_canonical`` and the
+    ``rev`` case alone goes back to removing ``id-service``.
+
+    Two subentries can only reach this state from storage, never through a
+    write: the core refuses a colliding ``unique_id`` in both
+    ``async_add_subentry`` and ``async_update_subentry``. Restoration from
+    ``.storage`` runs neither check.
+
+    Scope of the claim: this pins *which* identifier is removed, not whether
+    removing one is right. Collapsing a duplicate is the deduplicator's job;
+    picking the survivor by iteration order was not.
+    """
+
+    service = _ap1_subentry(
+        "id-service", SERVICE_SUBENTRY_KEY, SUBENTRY_TYPE_SERVICE, "e1-service"
+    )
+    hub = _ap1_subentry("id-hub", SERVICE_SUBENTRY_KEY, SUBENTRY_TYPE_HUB, "e1-service")
+    order = [hub, service] if reverse else [service, hub]
+    _entry, recorder, manager = _ap1_setup("e1", order)
+
+    await manager._deduplicate_subentries()
+
+    # Load-order independent, which is the whole point; asserted as a literal
+    # rather than via ``order`` so a future reshuffle of the fixture cannot make
+    # the expectation follow the defect back.
+    assert recorder.removed == ["id-hub"]
+
+
+@pytest.mark.asyncio
+async def test_dedup_a_moved_survivor_can_change_the_removal_count() -> None:
+    """Class A1. The type rank is not count-neutral across the two axes.
+
+    Within one bucket the rank only decides *who* survives. Across buckets it
+    can also change *how many* subentries go, because both grouping passes feed
+    the same ``removal_targets`` set and moving a survivor moves the overlap.
+    An earlier draft of the comment on ``_select_canonical`` asserted the
+    opposite -- "it never changes how many subentries are removed" -- under the
+    heading "fail-safe on a removal path", which is the worst place to be wrong.
+    A reviewer's exhaustive sweep of the three-subentry shapes found 84 of
+    19 683 where the count differs, evenly split between more and fewer.
+
+    This fixture is one of them, measured in both directions:
+
+    * with the type field ranked below the index (the pre-PR order), the unique
+      bucket ``{hub, service}`` keeps the load-order winner ``id-hub``, and only
+      ``id-service`` is removed -- once, by both axes at the same time;
+    * with it ranked above, the unique bucket keeps the owner ``id-service``, so
+      ``id-hub`` is removed *and* ``id-service`` still loses the group bucket to
+      ``id-decoy``, whose identifier sorts first. Two removals.
+
+    ``id-decoy`` is what makes the group bucket bite: it stores the same
+    ``(service, service)`` pair but a *different* ``unique_id``, so it never
+    enters the unique grouping and competes only on the group axis, where the
+    lexicographically smaller identifier wins.
+
+    The direction stays coherent -- across all three-subentry shapes the new
+    order never newly removes a canonically keyed owner, only non-owners -- but
+    "coherent" is not "count-neutral", and this pins the difference so the
+    comment cannot drift back.
+
+    Reachability, stated rather than assumed: no writer in ``custom_components``
+    produces ``id-decoy``'s shape, because both flow handlers derive
+    ``unique_id`` from the very key they store. It is a legacy or hand-edited
+    shape, which is also the only way two subentries share a ``unique_id`` at
+    all. Killing mutation: move ``type_part`` behind ``index`` in
+    ``_select_canonical`` and this test drops to a single removal.
+    """
+
+    decoy = _ap1_subentry(
+        "id-decoy", SERVICE_SUBENTRY_KEY, SUBENTRY_TYPE_SERVICE, "e1-core_tracking"
+    )
+    hub = _ap1_subentry("id-hub", SERVICE_SUBENTRY_KEY, SUBENTRY_TYPE_HUB, "e1-service")
+    service = _ap1_subentry(
+        "id-service", SERVICE_SUBENTRY_KEY, SUBENTRY_TYPE_SERVICE, "e1-service"
+    )
+    _entry, recorder, manager = _ap1_setup("e1", [decoy, hub, service])
+
+    await manager._deduplicate_subentries()
+
+    assert sorted(recorder.removed) == ["id-hub", "id-service"]
 
 
 # ---------------------------------------------------------------------------
