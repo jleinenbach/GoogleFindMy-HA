@@ -2299,3 +2299,245 @@ def test_ap4_no_record_for_a_subentry_that_lost_its_core_slot(
         "the loser does not describe the group, so its reading is not what "
         "the operator sees and there is nothing to report about it"
     )
+
+
+def test_ap6_a_synthesised_tracker_leaves_a_foreign_group_its_devices() -> None:
+    """No tracker subentry stored: the synthesised one must still not take everything.
+
+    ``runtime_patterns/AGENTS.md`` remainder ``U-25``. Every other reader of a
+    device assignment had been taught that "no restriction known" is not the
+    same as "no restriction"; this branch was the last one that still equated
+    them, and it did so at the *widest* possible point: with no tracker
+    subentry stored, it seeded the synthesised one from the whole device index.
+    A group that owns ``device-3`` therefore shared it with the tracker, and
+    the manager write-back persisted that widening, so one device was exposed
+    through two subentries.
+
+    The assertion on ``manager.calls`` is not decoration, and it is a
+    *negative* one on purpose. The metadata alone is recomputed on every
+    refresh and would repair itself; what made this a data defect rather than
+    a display one is that the list was written back. Narrowing it was not
+    enough: the write-back does not reach this group at all, because the
+    manager canonicalises every ``tracker``-typed subentry onto
+    ``TRACKER_SUBENTRY_KEY`` whatever key it stored, so the only subentry
+    holding that slot here is ``other_group``'s. Measured on 2026-08-06
+    against the real ``ConfigEntrySubEntryManager``: writing the narrowed list
+    left that subentry storing ``['device-1', 'device-2']`` and having lost
+    the ``device-3`` it owns. A synthesised group has nothing of its own to
+    persist into, so it persists nothing.
+
+    Killing mutations: restoring ``tuple(sorted(device_index.keys()))`` in the
+    synthesis branch puts ``device-3`` back into the metadata; restoring the
+    ``manager_visible[TRACKER_SUBENTRY_KEY]`` assignment in that branch brings
+    the misdirected write back.
+    """
+
+    foreign = _ap4_subentry(
+        "id-foreign", "other_group", SUBENTRY_TYPE_TRACKER, ["device-3"]
+    )
+    coordinator, _entry, manager = _ap4_coordinator_with_a_foreign_group(
+        "e-ap6-foreign", [foreign]
+    )
+
+    coordinator._refresh_subentry_index(coordinator.data, skip_repair=True)
+
+    tracker_meta = coordinator.get_subentry_metadata(key=TRACKER_SUBENTRY_KEY)
+    foreign_meta = coordinator.get_subentry_metadata(key="other_group")
+    assert tracker_meta is not None and foreign_meta is not None
+    assert tracker_meta.visible_device_ids == ("device-1", "device-2"), (
+        "the synthesised tracker takes what no other group claims, not the "
+        "whole device index"
+    )
+    assert foreign_meta.visible_device_ids == ("device-3",), (
+        "the owning group is untouched; if this changes the fixture stopped "
+        "separating ownership from visibility and the finding above is moot"
+    )
+    assert [key for key, _ids in manager.calls if key == TRACKER_SUBENTRY_KEY] == [], (
+        "a synthesised tracker persists nothing: the only subentry the "
+        "manager files under this key belongs to another group, and writing "
+        "there replaces that group's stored assignment with this list"
+    )
+    assert ("other_group", ("device-3",)) in manager.calls, (
+        "the owning group's own write-back is untouched; without it the "
+        "assertion above could pass by writing nothing at all"
+    )
+
+
+def test_ap6_a_synthesised_tracker_still_takes_every_unclaimed_device() -> None:
+    """Negative control: without a foreign owner nothing narrows.
+
+    The fix above must not be readable as "the synthesised tracker starts
+    empty". An installation with no other group is the common case, and there
+    the tracker is still the group every device belongs to.
+
+    The fixture carries a service subentry rather than nothing at all, and
+    that is load-bearing: an empty subentry list makes the reader append a
+    ``core_tracking`` placeholder, which puts the tracker key into ``metadata``
+    and skips the synthesised branch entirely. Written that way the case never
+    reached the lines it claims to guard -- measured with ``sys.settrace`` on
+    2026-08-06, hit count zero. The service group contributes no ownership, so
+    the branch runs with an empty ``stored_assigned_ids``, which is the input
+    this case is about.
+
+    Its two assertions do different work, and only the second is sharp on its
+    own. The visibility one is carried twice: with nothing owned, the
+    unassigned-device merge hands the whole index back however the branch
+    seeded it, so a mutation of the exclusion alone leaves it green. The
+    write-back one is not, and that asymmetry is measured, not assumed --
+    seeding the branch from the empty tuple routes the group through the merge
+    instead, which *does* fill ``manager_visible``, and the assertion fails
+    with ``['core_tracking'] != []``. The case that pins the exclusion itself
+    is the ownership one below.
+    """
+
+    service = _ap4_subentry(
+        "id-svc-alone", SERVICE_SUBENTRY_KEY, SUBENTRY_TYPE_SERVICE, None
+    )
+    coordinator, _entry, manager = _ap4_coordinator_with_a_foreign_group(
+        "e-ap6-alone", [service]
+    )
+
+    coordinator._refresh_subentry_index(coordinator.data, skip_repair=True)
+
+    tracker_meta = coordinator.get_subentry_metadata(key=TRACKER_SUBENTRY_KEY)
+    assert tracker_meta is not None
+    assert tracker_meta.visible_device_ids == ("device-1", "device-2", "device-3"), (
+        "with nobody else claiming anything the synthesised tracker still "
+        "holds the whole index"
+    )
+    assert [key for key, _ids in manager.calls if key == TRACKER_SUBENTRY_KEY] == [], (
+        "still nothing to persist into: whether the synthesised group ends up "
+        "wide or narrow, no stored subentry carries its key"
+    )
+
+
+def test_ap6_a_device_moved_to_the_service_group_is_not_reclaimed() -> None:
+    """The *stored* claim counts, not only the computed one.
+
+    A device the user moved onto the service subentry keeps its entry in that
+    subentry's stored allow-list, while the service metadata has its visible
+    ids forced to empty a few lines earlier. Asking only the metadata would
+    therefore call the device unassigned and hand it to the synthesised
+    tracker -- quietly undoing the move. This is why the exclusion reads
+    ``stored_assigned_ids`` and not the metadata views.
+
+    Killing mutation: excluding what the metadata views name instead of what
+    ``stored_assigned_ids`` records puts ``device-3`` back into the tracker,
+    because the service metadata is empty by then -- which is exactly the
+    undone move.
+    """
+
+    service = _ap4_subentry(
+        "id-svc", SERVICE_SUBENTRY_KEY, SUBENTRY_TYPE_SERVICE, ["device-3"]
+    )
+    coordinator, _entry, _manager = _ap4_coordinator_with_a_foreign_group(
+        "e-ap6-moved", [service]
+    )
+
+    coordinator._refresh_subentry_index(coordinator.data, skip_repair=True)
+
+    tracker_meta = coordinator.get_subentry_metadata(key=TRACKER_SUBENTRY_KEY)
+    service_meta = coordinator.get_subentry_metadata(key=SERVICE_SUBENTRY_KEY)
+    assert tracker_meta is not None and service_meta is not None
+    assert service_meta.visible_device_ids == (), (
+        "the service group's computed view is empty by construction -- if it "
+        "were not, the metadata source alone would already cover this case "
+        "and the assertion below would prove nothing"
+    )
+    assert "device-3" not in tracker_meta.visible_device_ids, (
+        "the stored claim survives the empty computed view; otherwise the "
+        "move is undone on the next refresh"
+    )
+    assert tracker_meta.visible_device_ids == ("device-1", "device-2")
+
+
+def test_ap6_a_group_that_only_sees_devices_does_not_own_them() -> None:
+    """Seeing is not owning, and the exclusion must not confuse the two.
+
+    A group that stored no allow-list is unrestricted, so its computed view is
+    the whole device index -- while it owns nothing. Excluding what such a
+    group *sees* would hand every device to it and leave the synthesised
+    tracker empty: the same defect as ``U-25``, pointing the other way. The
+    exclusion therefore reads the stored assignment only.
+
+    This is also the control that separates the fix from doing nothing. Seeding
+    the branch from the empty tuple and letting the unassigned-device merge
+    fill it back in produces the identical result in every other case here,
+    because that merge subtracts what any group already sees -- which is
+    exactly the wider question that goes wrong in this one.
+
+    Killing mutations, both of which pass every other test in this group:
+    adding the metadata views to the exclusion, and replacing the whole branch
+    with the empty tuple.
+    """
+
+    unrestricted = _ap4_subentry(
+        "id-unrestricted", "other_group", SUBENTRY_TYPE_TRACKER, None
+    )
+    coordinator, _entry, manager = _ap4_coordinator_with_a_foreign_group(
+        "e-ap6-sees", [unrestricted]
+    )
+
+    coordinator._refresh_subentry_index(coordinator.data, skip_repair=True)
+
+    tracker_meta = coordinator.get_subentry_metadata(key=TRACKER_SUBENTRY_KEY)
+    other_meta = coordinator.get_subentry_metadata(key="other_group")
+    assert tracker_meta is not None and other_meta is not None
+    assert other_meta.visible_device_ids == ("device-1", "device-2", "device-3"), (
+        "the unrestricted group sees everything -- if it did not, this case "
+        "would not tell ownership and visibility apart and would prove nothing"
+    )
+    assert tracker_meta.visible_device_ids == ("device-1", "device-2", "device-3"), (
+        "nobody owns anything, so the synthesised tracker keeps the whole "
+        "index; a group's mere view must not take devices away from it"
+    )
+    assert [key for key, _ids in manager.calls if key == TRACKER_SUBENTRY_KEY] == [], (
+        "and it still persists nothing, the synthesised group having no "
+        "subentry of its own to write into"
+    )
+
+
+def test_ap6_a_fully_owned_index_leaves_the_synthesised_tracker_empty() -> None:
+    """The widest new outcome, stated rather than left to the reader.
+
+    When every device is owned through a stored list, the exclusion leaves
+    nothing, and the synthesised tracker comes out empty. That is the correct
+    answer -- the group owns none of them -- and it is the outcome furthest
+    from the previous behaviour, which handed it all three. It is spelled out
+    here because an untested extreme is where a later reader assumes the
+    branch cannot produce it.
+
+    Nothing of this is persisted, for the reason the first case measures, so
+    the empty tuple stays a view and never becomes a stored "shows nothing".
+    That distinction matters under the semantics this branch of work
+    introduced elsewhere: a *stored* empty list would mean the group shows no
+    device, permanently.
+    """
+
+    owner = _ap4_subentry(
+        "id-owner",
+        "other_group",
+        SUBENTRY_TYPE_TRACKER,
+        ["device-1", "device-2", "device-3"],
+    )
+    coordinator, _entry, manager = _ap4_coordinator_with_a_foreign_group(
+        "e-ap6-owned", [owner]
+    )
+
+    coordinator._refresh_subentry_index(coordinator.data, skip_repair=True)
+
+    tracker_meta = coordinator.get_subentry_metadata(key=TRACKER_SUBENTRY_KEY)
+    owner_meta = coordinator.get_subentry_metadata(key="other_group")
+    assert tracker_meta is not None and owner_meta is not None
+    assert owner_meta.visible_device_ids == ("device-1", "device-2", "device-3")
+    assert tracker_meta.visible_device_ids == (), (
+        "every device is owned elsewhere, so the synthesised group holds none"
+    )
+    assert tracker_meta.enabled_device_ids == (), (
+        "and polls none of them either -- the enabled set is derived from the "
+        "visible one, so a widened view here would widen polling too"
+    )
+    assert [key for key, _ids in manager.calls if key == TRACKER_SUBENTRY_KEY] == [], (
+        "and above all it is not stored: a persisted empty list would mean "
+        "'shows nothing' for good, on a subentry belonging to another group"
+    )

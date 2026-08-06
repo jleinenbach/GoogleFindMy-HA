@@ -674,9 +674,11 @@ class SubentryOperations(_MixinBase):
                     # width, and saying otherwise would misplace the blame:
                     # measured against `f7c9eb47`, the same shape already
                     # produced the whole index through the branch that
-                    # synthesises a missing tracker subentry (``U-25``). The
-                    # fold changes which subentry that width is attributed to,
-                    # from the synthesised placeholder to this stored one.
+                    # synthesises a missing tracker subentry (``U-25``, since
+                    # closed: that branch now excludes what another group
+                    # owns). The fold changes which subentry that width is
+                    # attributed to, from the synthesised placeholder to this
+                    # stored one.
                     ids_are_rehomable = True
                 identifier = _sanitize_subentry_identifier(subentry_id_raw)
 
@@ -1228,7 +1230,38 @@ class SubentryOperations(_MixinBase):
                 stable_tracker_id = None
 
             if device_index:
-                tracker_visible_ids = tuple(sorted(device_index.keys()))
+                # Everything no other group *owns*. Taking the whole index
+                # here was the last place that read "no tracker subentry
+                # known" as "the tracker owns every device": a group that had
+                # been given ``device-3`` saw it handed to the synthesised
+                # tracker as well, and the manager write-back below persisted
+                # that widening, exposing one device through two subentries.
+                #
+                # ``stored_assigned_ids`` is the whole test, and deliberately
+                # *not* the wider question the unassigned-device merge asks a
+                # few lines down. That one adds "does anybody already see
+                # this", which is right for deciding whether a device is
+                # homeless, and wrong here: a group that stored no allow-list
+                # at all is unrestricted and therefore *sees* every device
+                # while owning none of them. Excluding what such a group sees
+                # would leave the synthesised tracker empty and hand the whole
+                # index to a group that never claimed it -- the same defect in
+                # the opposite direction. Ownership is what a subentry stored,
+                # visibility is what it ended up seeing; only the first one
+                # survives being handed to someone else.
+                #
+                # The merge is left a no-op by this: the tracker holds exactly
+                # the unowned remainder, so nothing is homeless afterwards. It
+                # stays the single place that *grows* a list, and this branch
+                # stays the place that decides what an absent subentry starts
+                # with.
+                tracker_visible_ids = tuple(
+                    sorted(
+                        dev_id
+                        for dev_id in device_index
+                        if dev_id not in stored_assigned_ids
+                    )
+                )
             else:
                 tracker_visible_ids = previous_tracker_visible
             metadata[TRACKER_SUBENTRY_KEY] = SubentryMetadata(
@@ -1246,12 +1279,19 @@ class SubentryOperations(_MixinBase):
                     if dev_id in self._enabled_poll_device_ids
                 ),
             )
-            manager_visible[TRACKER_SUBENTRY_KEY] = tuple(
-                dict.fromkeys(
-                    canonical_to_registry_id.get(dev_id, dev_id)
-                    for dev_id in tracker_visible_ids
-                )
-            )
+            # No write-back for a group that has no subentry. Reaching this
+            # branch *means* no stored subentry carries the tracker key, so a
+            # write aimed at it cannot land on its own group -- but it does not
+            # land nowhere either: the manager canonicalises **every**
+            # ``tracker``-typed subentry onto ``TRACKER_SUBENTRY_KEY``
+            # regardless of the key it stored (``ConfigEntrySubEntryManager
+            # ._refresh_from_entry``), so a legacy group keyed by an email
+            # address owns that slot. Writing there overwrote its stored
+            # assignment with this group's list: measured on 2026-08-06, a
+            # group storing ``device-3`` came out holding ``device-1`` and
+            # ``device-2`` instead. The metadata above is still built -- the
+            # readers need a tracker group -- only its persistence is not,
+            # because a synthesised group has nothing to persist into.
             for feature in tracker_features:
                 feature_map.setdefault(feature, TRACKER_SUBENTRY_KEY)
 
@@ -1263,7 +1303,8 @@ class SubentryOperations(_MixinBase):
         # filled it. Two places already treat "assigned to nobody" as "belongs to
         # the tracker": ``group_devices_by_subentry`` routes such a device to the
         # default key, and the branch above that builds a missing tracker subentry
-        # uses the full device index. The stored list has to agree, or the metadata
+        # takes every device no other group owns. The stored list has to agree,
+        # or the metadata
         # would keep calling a device invisible while its entity already exists --
         # which is exactly what the silent-add path produces.
         #
