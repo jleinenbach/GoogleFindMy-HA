@@ -934,9 +934,12 @@ def test_ap3_candidate_score_type_axis_is_neutral_off_the_core_keys() -> None:
 
     That candidate is a ``SimpleNamespace`` rather than a ``ConfigSubentry``,
     deliberately and against the file's usual rule: the core declares
-    ``subentry_type: str``, so the shape cannot be built from the real class,
-    and ``_candidate_score`` reads every attribute through ``getattr`` without
-    narrowing. The tree treats untyped subentries as a real if defensive shape
+    ``subentry_type: str``, so the shape is not one the *type* allows, and
+    ``_candidate_score`` reads every attribute through ``getattr`` without
+    narrowing. Not that it is impossible to construct -- dataclasses do not
+    validate at runtime, and ``_ap5_manager_removes`` builds exactly this shape
+    from the real class for the ``untyped-on-email-key`` row. An earlier
+    wording said "cannot be built", which that row falsified. The tree treats untyped subentries as a real if defensive shape
     (``agents/config_flow/AGENTS.md`` on the stale sweep,
     ``_canonical_core_key_of``), which is why the guard exists at all.
     """
@@ -1846,4 +1849,175 @@ async def test_ap5_the_exemption_reads_both_non_device_axes(
     )
     assert stored_after.get("feature_flags") == {"odd": 1}, (
         "and the exemption stays one field wide on either axis"
+    )
+
+
+# --- AP5 / A-6: the two sweeps carry their opposite polarity as an assertion ---
+
+
+# The verdict pair per shape, measured rather than reasoned. Read as
+# ``(flow sweep removes?, manager sweep removes?)``.
+_AP5_COHERENCE_TABLE: dict[str, tuple[bool, bool]] = {
+    "hub-on-service-key": (False, False),
+    "hub-on-empty-key": (False, True),
+    "hub-on-email-key": (False, True),
+    "tracker-on-email-key": (False, False),
+    "untyped-on-email-key": (False, True),
+}
+
+
+def _ap5_shape(shape: str) -> tuple[str | None, str]:
+    """Return ``(subentry_type, stored group key)`` for a table row.
+
+    The stored key is a plain string on both sides on purpose. An earlier draft
+    used ``None`` for the keyless row and let each side spell it differently:
+    the manager fixture then stored *no* ``group_key`` field while the flow
+    fixture stored an empty string. Both happen to end at the same barrier
+    today, so the row was green under a name that described only one of the two
+    shapes. Narrow the barrier to ``group_key is None`` and the columns would
+    drift apart silently.
+    """
+
+    return {
+        "hub-on-service-key": (SUBENTRY_TYPE_HUB, SERVICE_SUBENTRY_KEY),
+        "hub-on-empty-key": (SUBENTRY_TYPE_HUB, ""),
+        "hub-on-email-key": (SUBENTRY_TYPE_HUB, _LEGACY_EMAIL_KEY),
+        "tracker-on-email-key": (SUBENTRY_TYPE_TRACKER, _LEGACY_EMAIL_KEY),
+        "untyped-on-email-key": (None, _LEGACY_EMAIL_KEY),
+    }[shape]
+
+
+async def _ap5_manager_removes(subentry_type: str | None, group_key: str) -> bool:
+    tracker = _ap1_subentry(
+        "id-tracker", TRACKER_SUBENTRY_KEY, SUBENTRY_TYPE_TRACKER, "e1-t"
+    )
+    service = _ap1_subentry(
+        "id-service", SERVICE_SUBENTRY_KEY, SUBENTRY_TYPE_SERVICE, "e1-s"
+    )
+    third = _ap1_subentry("id-third", group_key, subentry_type, "e1-third")
+    _entry, recorder, manager = _ap1_setup("e1", [tracker, service, third])
+    await manager.async_sync(_ap1_core_definitions("e1"))
+    return "id-third" in recorder.removed
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("shape", sorted(_AP5_COHERENCE_TABLE))
+async def test_ap5_both_sweeps_agree_with_the_recorded_polarity_table(
+    shape: str,
+) -> None:
+    """Class A2 (standing assertion), the AP5 coherence probe for ``A-6``.
+
+    ``ConfigFlow._async_cleanup_stale_subentries`` and the stale sweep inside
+    ``ConfigEntrySubEntryManager.async_sync`` run *opposite* polarities on the
+    same axis and never read each other. There a non-core stored key is the
+    skipped one; here ``desired`` **is** the core key set, so a non-core key is
+    the removal candidate. Two sweeps of one axis that do not read each other
+    are the starting position of PR #1229, and the plan's answer is deliberately
+    not a shared reader but a shared *assertion*: this table.
+
+    What each column is worth is not the same, and saying so keeps the pin
+    honest. The flow column is a property of that sweep's own barriers. The
+    manager column is not: two of its ``False`` values are decided before the
+    sweep runs at all. ``tracker-on-email-key`` is folded onto ``core_tracking``
+    by ``_refresh_from_entry``, and ``hub-on-service-key`` loses the collision
+    against the canonical service group and is never managed in the first place
+    (``test_ap1_stale_sweep_is_decided_by_the_resolved_key`` says the same about
+    its kept cases). ``hub`` is left on its stored key by that same fold, which
+    is the whole asymmetry the table exists to make visible.
+
+    This shares its manager-side fixture shape with
+    ``test_ap1_stale_sweep_is_decided_by_the_resolved_key`` rather than
+    extracting a common helper. That is a choice, not an oversight: the other
+    test is a standing pin on an irreversible removal path, and reshaping its
+    fixture to serve this table is the kind of edit that changes what a pin
+    pins. If the two ever disagree, the pin is right and this table is wrong.
+
+    The three ``(False, True)`` rows are the open gap, carried rather than
+    wanted: a stored ``hub`` under a non-core key, or an untyped leftover,
+    survives the flow and is removed by the manager, registry bindings included.
+    ``PLAN_GFMY_SUBENTRY_DELETION_TYPE_AXIS`` decides against a local guard
+    there; these rows are what make that decision observable instead of a
+    sentence in a plan file.
+
+    Which row carries which barrier, measured by mutation rather than asserted,
+    because a table can be green while measuring nothing:
+
+    * neutralise the flow sweep's *type* guard and ``hub-on-service-key`` fails,
+      alone. That is the shape the Codex finding on PR #1236 named: a ``hub``
+      beside a real ``service`` is a group of its own.
+    * neutralise the flow sweep's *stored key* barrier and
+      ``untyped-on-email-key`` fails, alone. It is the only shape here the type
+      guard does not already spare, since ``None`` compares unequal to every
+      literal owner.
+    * neutralise the manager sweep's removal loop and exactly the three
+      ``(False, True)`` rows fail, none of the others. Flipping a ``True`` in
+      the table instead would be trivially true for any table and proves
+      nothing about what it measures.
+
+    An earlier draft omitted the untyped row, and the key barrier then had no
+    witness at all: every other shape is spared by the type guard first, so the
+    barrier could be deleted with the suite still green.
+    """
+
+    from tests.test_config_flow_subentry_sync import (
+        _build_flow,
+        _context_map_for,
+        _entry_with_subentries,
+        _legacy_twin,
+        _run_sync,
+        _subentry_store,
+    )
+
+    subentry_type, group_key = _ap5_shape(shape)
+    expected_flow, expected_manager = _AP5_COHERENCE_TABLE[shape]
+
+    entry = _entry_with_subentries()
+    store = _subentry_store(entry)
+    # A real service subentry beside the twin, and it is load-bearing rather
+    # than scenery: without it ``_run_sync`` *adopts* the twin onto the service
+    # slot, rewrites its stored key to ``service`` and puts its id into
+    # ``context_map``. Every barrier below is then skipped by the
+    # ``subentry_id in expected_ids`` short-cut, and the flow column reads
+    # ``False`` for a reason that has nothing to do with the sweep. An earlier
+    # draft of this test did exactly that and was green while neutralising
+    # either flow-side barrier in production killed nothing.
+    #
+    # Built through the *flow* module's own helper rather than this module's
+    # ``_ap1_subentry``: the two bind different classes on purpose. This module
+    # pins the genuine frozen core class, the flow module takes whatever
+    # ``conftest`` bound, and the flow's fake manager writes fields in place --
+    # a genuine frozen instance raises ``FrozenInstanceError`` there.
+    real_service = _legacy_twin(
+        entry.entry_id,
+        subentry_type=SUBENTRY_TYPE_SERVICE,
+        group_key=SERVICE_SUBENTRY_KEY,
+        unique_id=f"{entry.entry_id}-{SERVICE_SUBENTRY_KEY}",
+    )
+    store[real_service.subentry_id] = real_service
+    twin = _legacy_twin(
+        entry.entry_id,
+        subentry_type=subentry_type,
+        group_key=group_key,
+    )
+    store[twin.subentry_id] = twin
+    flow = _build_flow(entry)
+    context_map = _context_map_for(flow, entry, "migration")
+    await _run_sync(flow, entry, context_map)
+    assert twin.subentry_id not in set(context_map.values()), (
+        "the twin must stay outside ``expected_ids``, otherwise the flow sweep "
+        "skips it before reaching any barrier and this column measures nothing"
+    )
+    await flow._async_cleanup_stale_subentries(entry, context_map)  # type: ignore[attr-defined]
+    flow_removed = twin.subentry_id in flow.hass.config_entries.removed  # type: ignore[attr-defined]
+
+    manager_removed = await _ap5_manager_removes(subentry_type, group_key)
+
+    assert (flow_removed, manager_removed) == (expected_flow, expected_manager), (
+        f"The verdict pair for {shape} changed: recorded "
+        f"{(expected_flow, expected_manager)}, observed "
+        f"{(flow_removed, manager_removed)}. The two sweeps share no reader, "
+        "only this table, so a drift on either side shows up here or nowhere. "
+        "Next step: decide which sweep changed and whether the new pair is "
+        "intended; PLAN_GFMY_SUBENTRY_DELETION_TYPE_AXIS carries the reasoning "
+        "for the recorded one."
     )
