@@ -41,7 +41,7 @@ Three design choices keep it honest, each one a lesson paid for elsewhere:
   invisible to a value-only freeze, and rebinding a value while keeping the name
   is invisible to a name-only one.
 
-Two deliberate blind spots, stated rather than implied, and both wider than an
+Three deliberate blind spots, stated rather than implied, and all wider than an
 earlier draft of this docstring admitted:
 
 * the repair path in ``config_flow.py`` calls
@@ -53,14 +53,40 @@ earlier draft of this docstring admitted:
 * ``ConfigEntrySubEntryManager.update_visible_device_ids`` writes the group key
   onto an existing subentry of arbitrary type, so it too forms a pair no static
   census can read.
+* the collectors recognise the definition by the *name* ``ConfigEntrySubentry-
+  Definition``, a handler by its ``class`` statement, and a field by an
+  assignment inside that statement. Ten constructions reaching the same runtime
+  shape are therefore invisible, each measured against the collectors rather
+  than assumed. Six replace the *call*: a local alias
+  (``Def = ConfigEntrySubentryDefinition``), an import alias
+  (``import X as Def``), ``dataclasses.replace``, ``functools.partial``, a
+  ``@dataclass`` subclass overriding the default, and ``type(...)`` as a class
+  factory. Two replace the *class body*: ``setattr`` or a plain assignment onto
+  a handler after its ``class`` statement. **The likeliest of the ten is the
+  ninth**: a handler subclass overriding one field and inheriting the other, for
+  instance ``class Archive(TrackerSubentryFlowHandler): _group_key = ...``. The
+  pair census needs both halves in one class body, so it reads the parent's
+  shape and stays green -- and subclassing a handler is the most ordinary
+  extension of this tree, not an exotic one. The tenth is a binding form no
+  assignment statement carries: a walrus, a starred target, a ``for`` or
+  ``with`` target. Closing the first nine needs alias and dataflow resolution,
+  which is a different tool; ``async_sync`` itself type-checks nothing (it reads
+  attributes off whatever it is handed), so no runtime check narrows this
+  either. What holds the line instead is that all four definition call sites
+  construct the class directly and all three handlers declare both fields in
+  their own body today, and every one of the ten would be a visible, unusual
+  edit in review.
 
 What the census does cover is the *creation* of a group, which is where a new
-shape enters the tree. Both blind spots rewrite an existing one.
+shape enters the tree. The first two blind spots rewrite an existing group
+rather than create one; the third is a limit of static name matching and is the
+only one that could hide a creation.
 """
 
 from __future__ import annotations
 
 import ast
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -70,9 +96,15 @@ PACKAGE = REPO_ROOT / "custom_components" / "googlefindmy"
 CONST_MODULE = PACKAGE / "const.py"
 
 # Observation 1: the (subentry_type, group_key) pairs a production writer can
-# produce, as constant *names*. Statically complete for the two forms that carry
-# both halves in one place: a flow-handler class body, and a
-# ``ConfigEntrySubentryDefinition(...)`` call.
+# produce, as constant *names*. For the two forms that carry both halves in one
+# place -- a flow-handler class body, and a ``ConfigEntrySubentryDefinition(...)``
+# call -- no *value* escapes: a half this census cannot read becomes a marker
+# rather than a dropped entry, whether it is a literal, an expression, a
+# positional argument, an omitted keyword or a rebinding. What it does not
+# survive is a different *construction*, nor a binding form no assignment
+# statement carries; the module docstring states both as the third blind spot.
+# An entry starting with ``<`` is such a marker and never belongs in this set:
+# freezing one would silence the very construction it reports.
 FROZEN_PAIRS: frozenset[tuple[str, str]] = frozenset(
     {
         ("SUBENTRY_TYPE_TRACKER", "TRACKER_SUBENTRY_KEY"),
@@ -144,6 +176,20 @@ def _parse(path: Path) -> ast.Module:
         )
 
 
+# Markers for a binding that exists but this census cannot read. They are shapes
+# like any other: absent from the frozen sets, so the ratchet fails and *names*
+# the construction instead of skipping it. The policy they encode is one rule,
+# applied by every collector below: a binding that exists and cannot be read is
+# reported; a binding that does not exist stays silent. Only the second half is a
+# genuine non-event, and the distinction is load-bearing -- ``_BaseSubentryFlow``
+# annotates both fields without assigning them (``_group_key: str``), which binds
+# nothing and must not be reported.
+_OPAQUE = "<opaque>"
+_POSITIONAL = "<positional>"
+_TYPE_DEFAULTED = "<subentry_type defaulted>"
+_KWARGS = "<**kwargs>"
+
+
 def _bound_name(value: ast.expr | None) -> str | None:
     """Render an assigned value as a comparable token, or ``None`` if opaque.
 
@@ -151,6 +197,12 @@ def _bound_name(value: ast.expr | None) -> str | None:
     dangerous direction: a handler written with string literals instead of the
     shared constants would vanish from the census entirely, and the ratchet
     would stay green while a fourth shape entered the tree.
+
+    ``None`` means *unreadable*, not *absent*. Callers must distinguish the two:
+    every one of them turns ``None`` into a marker, and only a missing statement
+    is allowed to produce nothing. An earlier draft let three of the four
+    collectors drop unreadable bindings silently, which is the very direction
+    this docstring warns about.
     """
 
     if isinstance(value, ast.Name):
@@ -160,6 +212,90 @@ def _bound_name(value: ast.expr | None) -> str | None:
     return None
 
 
+_PAIR_FIELDS = frozenset({"_subentry_type", "_group_key"})
+
+
+def _class_body_statements(node: ast.ClassDef) -> Iterator[ast.stmt]:
+    """Statements binding attributes of *this* class, nested blocks included.
+
+    ``node.body`` alone misses a field written inside an ``if``, ``try``, ``with``
+    or ``match`` block in the class body, and ``ast.walk`` would over-collect: it
+    descends into methods, where a local of the same name is not a class
+    attribute, and into inner classes, whose fields belong to them. Both are
+    walked separately by the caller's own ``ast.walk`` over the module, so
+    skipping them here loses nothing.
+
+    Yielded in **source order**, which is load-bearing rather than cosmetic: a
+    field bound twice is resolved by the last binding at runtime, and a draft of
+    this helper used a LIFO stack, so the *first* binding won. A class rebinding
+    ``_group_key`` to a fresh value then read as its old one -- a shape that was
+    loud before this helper existed went quiet. The caller no longer depends on
+    the order (it reports a divergent rebinding as opaque), but a reader does.
+    """
+
+    def walk(body: list[ast.stmt]) -> Iterator[ast.stmt]:
+        for stmt in body:
+            yield stmt
+            if isinstance(stmt, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            for field in ("body", "orelse", "finalbody"):
+                yield from walk(getattr(stmt, field, None) or [])
+            for handler in getattr(stmt, "handlers", None) or []:
+                yield from walk(handler.body)
+            for case in getattr(stmt, "cases", None) or []:
+                yield from walk(case.body)
+
+    yield from walk(node.body)
+
+
+def _assignment_bindings(stmt: ast.stmt) -> Iterator[tuple[ast.expr, ast.expr | None]]:
+    """Yield ``(target, value)`` for every name a statement binds.
+
+    Four forms, and the third is why this helper exists rather than an inline
+    branch: ``x = V``, ``x: str = V``, ``a, b = V1, V2``, and ``x += V``. The
+    tuple form passed the earlier ``len(stmt.targets) == 1`` check and then
+    failed the ``isinstance(target, ast.Name)`` one, so a handler written that
+    way vanished. A bare ``x: str`` yields nothing on purpose: it binds no
+    value, which is a real non-event rather than an unreadable one.
+
+    Four further binding forms are *not* read, and the module docstring names
+    them as part of the third blind spot: a walrus inside an expression, a
+    starred tuple target, and ``for``/``with`` targets. All four bind a class
+    attribute in principle and none is a plausible spelling for these two fields
+    -- measured as silent rather than assumed, and stated instead of covered,
+    because enumerating statement shapes is the same pattern-guessing this file
+    exists to warn about.
+    """
+
+    if isinstance(stmt, ast.AnnAssign):
+        if stmt.value is not None:
+            yield stmt.target, stmt.value
+        return
+    if isinstance(stmt, ast.AugAssign):
+        # ``_group_key += SUFFIX`` rebinds the field to a value derived from the
+        # old one. The result is unreadable, and reporting nothing would let the
+        # rebinding hide behind the earlier plain assignment.
+        yield stmt.target, None
+        return
+    if not isinstance(stmt, ast.Assign):
+        return
+    for target in stmt.targets:
+        if not isinstance(target, ast.Tuple):
+            yield target, stmt.value
+            continue
+        values: list[ast.expr | None]
+        if isinstance(stmt.value, ast.Tuple) and len(stmt.value.elts) == len(
+            target.elts
+        ):
+            values = list(stmt.value.elts)
+        else:
+            # ``a, b = build()`` binds both names to values this census cannot
+            # read. Reporting them as opaque is the point; dropping them is what
+            # ``_bound_name`` warns about.
+            values = [None] * len(target.elts)
+        yield from zip(target.elts, values)
+
+
 def _class_attribute_pairs(tree: ast.Module) -> set[tuple[str, str]]:
     """Pairs written as sibling class attributes (the flow handlers).
 
@@ -167,6 +303,17 @@ def _class_attribute_pairs(tree: ast.Module) -> set[tuple[str, str]]:
     not hypothetical: ``_BaseSubentryFlow`` already annotates both fields, so a
     subclass repeating the annotation is the likelier spelling, and an earlier
     draft of this census saw only the bare form.
+
+    An unreadable value (``const.ARCHIVE_KEY``, an f-string, a call) is recorded
+    as ``<opaque>`` rather than dropped. Dropping it lost the whole handler,
+    because the pair needs both halves, so a single unreadable field hid a
+    complete new shape.
+
+    A field bound twice with *different* tokens is opaque too. Reporting the
+    survivor would mean choosing a reading this census cannot justify: a second
+    plain assignment rebinds (last wins), while two assignments in opposite
+    branches of an ``if`` are two possible runtime values and neither is *the*
+    shape.
     """
 
     pairs: set[tuple[str, str]] = set()
@@ -174,24 +321,26 @@ def _class_attribute_pairs(tree: ast.Module) -> set[tuple[str, str]]:
         if not isinstance(node, ast.ClassDef):
             continue
         attrs: dict[str, str] = {}
-        for stmt in node.body:
-            target: ast.expr | None = None
-            if isinstance(stmt, ast.Assign) and len(stmt.targets) == 1:
-                target = stmt.targets[0]
-            elif isinstance(stmt, ast.AnnAssign):
-                target = stmt.target
-            if not isinstance(target, ast.Name):
-                continue
-            bound = _bound_name(stmt.value)
-            if bound is not None:
-                attrs[target.id] = bound
+        for stmt in _class_body_statements(node):
+            for target, value in _assignment_bindings(stmt):
+                if not (isinstance(target, ast.Name) and target.id in _PAIR_FIELDS):
+                    continue
+                token = _bound_name(value) or _OPAQUE
+                previous = attrs.get(target.id)
+                attrs[target.id] = token if previous in (None, token) else _OPAQUE
         if "_subentry_type" in attrs and "_group_key" in attrs:
             pairs.add((attrs["_subentry_type"], attrs["_group_key"]))
     return pairs
 
 
 def _definition_call_pairs(tree: ast.Module) -> set[tuple[str, str]]:
-    """Pairs written as keywords of a ``ConfigEntrySubentryDefinition`` call."""
+    """Pairs carried by a ``ConfigEntrySubentryDefinition`` call.
+
+    Keyword arguments are read; every other construction of the *same* call is
+    reported as a marker rather than skipped -- ``**kwargs``, positional
+    arguments, an omitted ``subentry_type`` (which has a dataclass default), and
+    an argument whose value is an expression.
+    """
 
     pairs: set[tuple[str, str]] = set()
     for node in ast.walk(tree):
@@ -206,17 +355,38 @@ def _definition_call_pairs(tree: ast.Module) -> set[tuple[str, str]]:
             # census cannot read. Surfacing it as a shape keeps the ratchet
             # loud: the frozen set will not contain it, so the guard fails and
             # names the construction instead of silently skipping it.
-            pairs.add(("<**kwargs>", "<**kwargs>"))
+            pairs.add((_KWARGS, _KWARGS))
+            continue
+        if node.args:
+            # Positional construction. ``key`` is the first field today, but
+            # reading ``args[0]`` as the key would freeze the field *order* into
+            # this census, and a reordered dataclass would then mislabel shapes
+            # rather than fail. Report the construction instead.
+            pairs.add((_POSITIONAL, _POSITIONAL))
             continue
         kwargs = {
             kw.arg: kw.value
             for kw in node.keywords
             if kw.arg in {"key", "subentry_type"}
         }
-        key = _bound_name(kwargs.get("key"))
-        subentry_type = _bound_name(kwargs.get("subentry_type"))
-        if key is not None and subentry_type is not None:
-            pairs.add((subentry_type, key))
+        # ``_bound_name(None)`` is ``None``, so a missing and an unreadable key
+        # collapse into the same marker on purpose: neither tells the census
+        # which group is being built.
+        key = _bound_name(kwargs.get("key")) or _OPAQUE
+        if "subentry_type" not in kwargs:
+            # The field carries a dataclass default, so omitting it is a valid
+            # construction that still produces a pair. The earlier version
+            # required both keywords and dropped this call entirely. Resolving
+            # the default statically was considered and rejected: it lives in
+            # another module than two of the four call sites, so it would need
+            # cross-file resolution plus the fresh assumption that the default
+            # stays an ``ast.Name`` -- and it would fail *silently* the day it
+            # becomes a ``field(default_factory=...)``. The readable half is
+            # kept so the failure message names the key rather than only the
+            # omission.
+            pairs.add((_TYPE_DEFAULTED, key))
+            continue
+        pairs.add((_bound_name(kwargs["subentry_type"]) or _OPAQUE, key))
     return pairs
 
 
@@ -269,6 +439,12 @@ def _observed_sync_callers() -> set[tuple[str, str]]:
     two of the three. That is the same shape as the near miss the module
     docstring records for ``subentry_type=``: a pattern derived from the
     conspicuous spelling.
+
+    One form is knowingly *not* covered: ``getattr(manager, name, None)`` where
+    the attribute is a variable. Covering it means reporting every dynamic
+    ``getattr`` as a possible call site, and there are 25 of them in the package
+    (measured), none related to this manager. A ratchet that cries 25 times is
+    one an allowlist silences, so the limit is stated here instead of widened.
     """
 
     callers: set[tuple[str, str]] = set()
@@ -296,8 +472,13 @@ def _observed_sync_callers() -> set[tuple[str, str]]:
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 stack.append(node.name)
                 pushed = True
-            if names_async_sync(node) and stack:
-                callers.add((rel, stack[-1]))
+            if names_async_sync(node):
+                # A call outside any function (module level, a ``lambda``, a
+                # comprehension) used to be dropped for having an empty stack,
+                # which is the same silent direction as the collectors above.
+                # There is none today, so naming it costs nothing and the frozen
+                # set will reject the first one.
+                callers.add((rel, stack[-1] if stack else "<module>"))
             for child in ast.iter_child_nodes(node):
                 visit(child)
             if pushed:
@@ -308,7 +489,15 @@ def _observed_sync_callers() -> set[tuple[str, str]]:
 
 
 def _observed_definition_keys() -> set[str]:
-    """Every ``key=`` name passed to a definition anywhere in the package."""
+    """Every ``key`` passed to a definition anywhere in the package.
+
+    Read through ``_bound_name`` like every other collector. An earlier version
+    accepted ``ast.Name`` only, so ``key="archive"`` left no trace here, and
+    when that call also omitted ``subentry_type`` the pair census dropped it
+    too: a new group key entered the runtime path with both ratchets green. The
+    rule the helper's own docstring states was written two hundred lines above
+    the one collector that did not follow it.
+    """
 
     keys: set[str] = set()
     for path in sorted(PACKAGE.rglob("*.py")):
@@ -323,9 +512,15 @@ def _observed_definition_keys() -> set[str]:
             )
             if name != _DEFINITION_FACTORY:
                 continue
+            if any(kw.arg is None for kw in node.keywords):
+                keys.add(_KWARGS)
+                continue
+            if node.args:
+                keys.add(_POSITIONAL)
+                continue
             for kw in node.keywords:
-                if kw.arg == "key" and isinstance(kw.value, ast.Name):
-                    keys.add(kw.value.id)
+                if kw.arg == "key":
+                    keys.add(_bound_name(kw.value) or _OPAQUE)
     return keys
 
 
@@ -336,6 +531,11 @@ def test_producible_subentry_pairs_are_frozen() -> None:
     added = observed - FROZEN_PAIRS
     assert not added, (
         f"A new (subentry_type, group_key) pair appeared: {sorted(added)}. "
+        "An entry starting with ``<`` is not a pair at all but a binding this "
+        "census could not read (a positional call, an omitted ``subentry_type``, "
+        "an expression, a rebinding). Never freeze one: that silences the "
+        "construction instead of the drift. Change the spelling so both halves "
+        "are readable, or widen the collector. For a real pair: "
         f"{_PLAN} leaves the stale sweep in "
         "``ConfigEntrySubEntryManager.async_sync`` without a type guard because "
         "every producible pair resolves onto a core key, so no writer hands the "
@@ -421,8 +621,166 @@ def test_definition_keys_are_frozen() -> None:
         f"The definition key census changed.\n"
         f"  expected: {sorted(FROZEN_DEFINITION_KEYS)}\n"
         f"  observed: {sorted(observed)}\n"
-        f"{_PLAN} rests on ``desired`` being exactly the core key set. Next "
+        f"{_PLAN} rests on ``desired`` being exactly the core key set. An "
+        "observed entry starting with ``<`` is an unreadable binding, not a "
+        "key, and freezing it would hide the call site that produced it. Next "
         "step: if a key was added, check that the pair census above knows its "
         "``(subentry_type, group_key)`` shape; if one vanished, every managed "
         "group under it just became a removal candidate."
+    )
+
+
+# The collectors' own contract: an unreadable binding is reported, an absent one
+# is not. Without this table the rule lives only in prose, and prose did not
+# protect the sibling function: ``_bound_name`` stated it two hundred lines
+# above the one collector that ignored it, and the gap was found by an external
+# reviewer rather than by this file. Each row is a spelling that reaches the
+# same runtime shape as a supported one; ``expected`` is what the census must
+# make of it.
+_SPELLINGS: tuple[tuple[str, str, set[tuple[str, str]]], ...] = (
+    (
+        "keyword names, the four production call sites",
+        "ConfigEntrySubentryDefinition(key=K, title=t, data=d, subentry_type=T)",
+        {("T", "K")},
+    ),
+    (
+        "literal key, type named",
+        'ConfigEntrySubentryDefinition(key="a", title=t, data=d, subentry_type=T)',
+        {("T", "'a'")},
+    ),
+    (
+        "subentry_type omitted, so its dataclass default applies",
+        "ConfigEntrySubentryDefinition(key=K, title=t, data=d)",
+        {(_TYPE_DEFAULTED, "K")},
+    ),
+    (
+        "literal key and omitted type, the reported shape: both halves were "
+        "dropped before, the readable one is kept now",
+        'ConfigEntrySubentryDefinition(key="a", title=t, data=d)',
+        {(_TYPE_DEFAULTED, "'a'")},
+    ),
+    (
+        "positional construction",
+        'ConfigEntrySubentryDefinition("a", t, d, T)',
+        {(_POSITIONAL, _POSITIONAL)},
+    ),
+    (
+        "key behind an attribute expression",
+        "ConfigEntrySubentryDefinition(key=const.K, title=t, data=d, subentry_type=T)",
+        {("T", _OPAQUE)},
+    ),
+    (
+        "type behind an attribute expression",
+        "ConfigEntrySubentryDefinition(key=K, title=t, data=d, subentry_type=const.T)",
+        {(_OPAQUE, "K")},
+    ),
+    (
+        "handler fields behind attribute expressions",
+        "class F:\n    _subentry_type = const.T\n    _group_key = const.K\n",
+        {(_OPAQUE, _OPAQUE)},
+    ),
+    (
+        "handler field built by an f-string",
+        'class F:\n    _subentry_type = T\n    _group_key = f"{P}_a"\n',
+        {("T", _OPAQUE)},
+    ),
+    (
+        "handler fields bound by one tuple assignment",
+        "class F:\n    _subentry_type, _group_key = T, K\n",
+        {("T", "K")},
+    ),
+    (
+        "handler fields inside a conditional block",
+        "class F:\n    if True:\n        _subentry_type = T\n        _group_key = K\n",
+        {("T", "K")},
+    ),
+    (
+        "handler fields inside a match case",
+        "class F:\n    match FLAG:\n        case 1:\n"
+        "            _subentry_type = T\n            _group_key = K\n",
+        {("T", "K")},
+    ),
+    (
+        "a field rebound to a different value is not resolvable statically",
+        "class F:\n    _subentry_type = T\n    _group_key = K\n    _group_key = A\n",
+        {("T", _OPAQUE)},
+    ),
+    (
+        "a field rebound in a conditional branch, same reason",
+        "class F:\n    _subentry_type = T\n    _group_key = K\n"
+        "    if FLAG:\n        _group_key = A\n",
+        {("T", _OPAQUE)},
+    ),
+    (
+        "an augmented assignment rebinds to an unreadable value",
+        "class F:\n    _subentry_type = T\n    _group_key = K\n    _group_key += S\n",
+        {("T", _OPAQUE)},
+    ),
+    (
+        "rebinding to the same token is not a second shape",
+        "class F:\n    _subentry_type = T\n    _group_key = K\n    _group_key = K\n",
+        {("T", "K")},
+    ),
+    (
+        "bare annotations bind nothing, so they are a real non-event",
+        "class F:\n    _subentry_type: str\n    _group_key: str\n",
+        set(),
+    ),
+    (
+        "a subclass inheriting one half is silent: the ninth blind construction, "
+        "pinned here so the gap is documented rather than believed closed",
+        "class Archive(TrackerSubentryFlowHandler):\n    _group_key = A\n",
+        set(),
+    ),
+    (
+        "locals inside a method are not class attributes",
+        "class F:\n    def m(self):\n        _subentry_type = T\n        _group_key = K\n",
+        set(),
+    ),
+)
+
+
+@pytest.mark.parametrize(
+    ("label", "source", "expected"),
+    list(_SPELLINGS),
+    ids=[label for label, _, _ in _SPELLINGS],
+)
+def test_collectors_report_unreadable_bindings_instead_of_dropping_them(
+    label: str, source: str, expected: set[tuple[str, str]]
+) -> None:
+    """Class A2 (standing assertion). The policy, not a single collector.
+
+    Eight mutations, each run against this table rather than assumed, and each
+    killing exactly the rows named and no others:
+
+    * neutralising the rebinding check in ``_class_attribute_pairs``
+      (``previous in (None, token)``) kills the two rebinding rows;
+    * replacing its ``or _OPAQUE`` with a ``continue`` kills the two
+      expression rows and the augmented-assignment row;
+    * dropping the ``ast.AugAssign`` branch of ``_assignment_bindings`` kills
+      the augmented-assignment row;
+    * dropping the ``cases`` traversal in ``_class_body_statements`` kills the
+      match-case row;
+    * dropping its tuple-target branch kills the tuple row;
+    * dropping the ``node.args`` branch of ``_definition_call_pairs`` kills the
+      positional row;
+    * dropping its ``_TYPE_DEFAULTED`` branch kills the two omitted-type rows;
+    * replacing its ``or _OPAQUE`` on ``subentry_type`` kills the
+      ``type behind an attribute expression`` row.
+
+    That last one killed *nothing* on its first run, which is how the row it now
+    covers was found: the fallback existed with no case exercising it. The three
+    silent rows stay green under all eight, since they assert silence rather
+    than a marker -- and one of them, the inheriting subclass, pins a gap the
+    module docstring declares rather than a behaviour it closes.
+    """
+
+    tree = ast.parse(source)
+    observed = _class_attribute_pairs(tree) | _definition_call_pairs(tree)
+    assert observed == expected, (
+        f"The census read {sorted(observed)} from the {label!r} spelling, "
+        f"expected {sorted(expected)}. Its collectors must report a binding "
+        "they cannot read as a marker and stay silent only where no binding "
+        "exists; a dropped binding is a shape entering the tree with the "
+        f"ratchet green, which is what {_PLAN} exists to notice."
     )
