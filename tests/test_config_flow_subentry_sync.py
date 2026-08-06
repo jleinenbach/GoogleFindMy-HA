@@ -2084,7 +2084,7 @@ async def test_ap5_the_service_branch_still_clears_a_legacy_assignment(
 async def test_ap5_an_emptied_tracker_list_is_not_refilled_by_the_flow(
     path: str,
 ) -> None:
-    """The tracker branch was betroffen too, in a shape the plan had excluded.
+    """The tracker branch was affected too, in a shape the plan had excluded.
 
     Measured on 2026-08-06: a tracker group whose stored list is *present and
     empty* -- the state the user reaches by pulling its last device out through
@@ -2096,6 +2096,15 @@ async def test_ap5_an_emptied_tracker_list_is_not_refilled_by_the_flow(
     Both outcomes contradict the target semantics, in which a present empty
     list means "this group shows nothing". Killing mutation: drop the
     ``not _stores_visible(tracker_subentry)`` conjunct.
+
+    **What this pins is the stored shape after this writer, not what the group
+    ends up seeing.** For the tracker group those are not the same thing: the
+    coordinator's unassigned-device merge hands it every device no other group
+    owns and persists that as its new stored list, so the empty list survives
+    this flow and not the next refresh (``U-35`` in
+    ``agents/config_flow/AGENTS.md``). The assertion is still worth making --
+    a writer that undoes the user's assignment on the spot is a defect on its
+    own -- but reading it as an end-to-end guarantee would be wrong.
     """
 
     service = _ap5_group(
@@ -2118,8 +2127,50 @@ async def test_ap5_an_emptied_tracker_list_is_not_refilled_by_the_flow(
         "the emptied list must survive rather than be deleted"
     )
     assert tuple(tracker_after["visible_device_ids"]) == (), (
-        "an explicitly emptied tracker group shows nothing; refilling it from "
-        "the probe undoes the assignment the user just made"
+        "an explicitly emptied tracker group must leave this writer empty; "
+        "refilling it from the probe undoes the assignment the user just made"
+    )
+
+
+@pytest.mark.parametrize("path", ["migration", "reconfigure"])
+@pytest.mark.asyncio
+async def test_ap7_the_carry_over_keeps_the_stored_container_type(
+    path: str,
+) -> None:
+    """Carrying a list back as a tuple would make every run write.
+
+    The core writes only when ``subentry.data != data``, and a ``list`` is
+    never equal to a ``tuple`` holding the same items. After a restart the
+    stored value comes back from JSON as a ``list``, so a carry-over that
+    converted the shape would mark the entry as changed on every single sync,
+    save it and fire the update listeners -- for a group nothing changed
+    about. The value is the same either way, which is exactly why this needs
+    an assertion of its own rather than an equality check.
+
+    Killing mutation: ``payload["visible_device_ids"] = tuple(raw_visible)``
+    in ``_carry_over_visible``.
+    """
+
+    service = _ap5_group(
+        "id-s", SERVICE_SUBENTRY_KEY, SUBENTRY_TYPE_SERVICE, visible=None
+    )
+    tracker = _ap5_group(
+        "id-t", TRACKER_SUBENTRY_KEY, SUBENTRY_TYPE_TRACKER, visible=[]
+    )
+    entry = _entry_with_subentries(service, tracker)
+    before = _subentry_store(entry)["id-t"].data["visible_device_ids"]
+    assert isinstance(before, list), (
+        "the fixture has to start from the shape JSON hands back, or this "
+        "test measures nothing"
+    )
+
+    flow = _build_flow(entry)
+    await _run_sync(flow, entry, _context_map_for(flow, entry, path))
+
+    after = _subentry_store(entry)["id-t"].data["visible_device_ids"]
+    assert isinstance(after, list), (
+        "the carry-over must hand back the container type it found; a tuple "
+        "compares unequal to the stored list and turns every sync into a write"
     )
 
 
@@ -2128,12 +2179,16 @@ async def test_ap5_an_emptied_tracker_list_is_not_refilled_by_the_flow(
 async def test_ap5_a_tracker_that_never_stored_a_list_is_still_filled(
     path: str,
 ) -> None:
-    """Negative control for the test above: the refill itself must survive.
+    """Negative control for the refill narrowing: the refill itself survives.
 
     The initial config-flow sync is the only writer that ever *adds* to the
     tracker allow-list, so narrowing its condition to "no key stored" is only
     correct if that case still fills. Without this control the narrowing could
-    be tightened to a no-op and the test above would stay green.
+    be tightened to a no-op and
+    ``test_ap5_an_emptied_tracker_list_is_not_refilled_by_the_flow`` would stay
+    green. Named rather than called "the test above" because a test inserted
+    between the two would silently retarget that phrase, which is what
+    happened once already.
     """
 
     service = _ap5_group(

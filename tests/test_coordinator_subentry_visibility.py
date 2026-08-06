@@ -2119,6 +2119,43 @@ def test_ap4_the_migration_record_leaks_neither_group_key_nor_device_ids(
 
 
 @pytest.mark.parametrize(
+    ("stored", "expected"),
+    [
+        (["one:"], "of 1 entry"),
+        (["one:", "two:"], "of 2 entries"),
+        ([], "of 0 entries"),
+    ],
+)
+def test_ap7_the_migration_record_counts_in_readable_english(
+    caplog: pytest.LogCaptureFixture, stored: list[str], expected: str
+) -> None:
+    """A single discarded entry reads as "1 entry", not as "1 entries".
+
+    The count is the only substance this record carries -- everything else is
+    withheld by the privacy rule -- so a reader who meets "1 entries" has to
+    decide whether the message or the integration is broken. Cheap to get
+    right, and the singular is the only branch a plural-only format never
+    reaches.
+
+    The zero case is here as the boundary rather than for the grammar: it is
+    the value that distinguishes a deliberate emptying from a migration
+    artefact, and it must stay plural.
+
+    Killing mutation: collapsing the branch back to a bare ``%d entries``.
+    """
+
+    caplog.set_level(logging.WARNING)
+    _ap4_refresh_with_shape("e-ap7-count", "plain_group", stored)
+
+    lines = _ap4_reinterpretation_lines(caplog)
+    assert len(lines) == 1
+    assert expected in lines[0], (
+        "the count is formatted for a human reader, and the singular is a "
+        "reachable case: one stored entry that the normalisation discards"
+    )
+
+
+@pytest.mark.parametrize(
     ("case", "key", "stored"),
     [
         ("folded", SERVICE_SUBENTRY_KEY, []),
@@ -2304,7 +2341,9 @@ def test_ap4_no_record_for_a_subentry_that_lost_its_core_slot(
 def test_ap6_a_synthesised_tracker_leaves_a_foreign_group_its_devices() -> None:
     """No tracker subentry stored: the synthesised one must still not take everything.
 
-    ``runtime_patterns/AGENTS.md`` remainder ``U-25``. Every other reader of a
+    ``runtime_patterns/AGENTS.md`` remainder ``U-25``, closed by the branch
+    this test pins; the register entry in ``config_flow/AGENTS.md`` names the
+    commit. Every other reader of a
     device assignment had been taught that "no restriction known" is not the
     same as "no restriction"; this branch was the last one that still equated
     them, and it did so at the *widest* possible point: with no tracker

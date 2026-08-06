@@ -1223,12 +1223,17 @@ class ConfigEntrySubEntryManager:
         The preservation is deliberately **not** an allow-list of named keys:
         an allow-list has to be extended whenever a writer stores a new field,
         and forgetting to extend it is precisely the silent-deletion failure
-        this fixes. The cost is named rather than hidden -- a field a
-        definition wants to *remove* can no longer be removed by omission and
-        has to be written explicitly, and clearing stale keys belongs to the
-        migration path (``_migrate_entry_identifier_namespaces``), which
-        rewrites stored data on purpose, rather than to a setup sync that
-        deletes as a side effect of not mentioning something.
+        this fixes. The cost is named rather than hidden, and it currently has
+        no owner: a field a definition wants to *remove* can no longer be
+        removed by omission and would have to be written explicitly, and no
+        path in this integration removes a stored subentry key today. The
+        migration path is **not** that owner, although an earlier version of
+        this sentence named it: ``_migrate_entry_identifier_namespaces``
+        normalises ``visible_device_ids`` and ``OPT_IGNORED_DEVICES`` and
+        removes no key at all. Naming a place that cannot do the work would
+        read as tracked while nothing tracks it, so the gap is stated instead:
+        a deletion that must happen belongs in a path that deletes on purpose,
+        and that path has still to be written.
 
         ``target`` is the subentry the payload is about to be written to, and
         the argument exists because that is not always the subentry the loop

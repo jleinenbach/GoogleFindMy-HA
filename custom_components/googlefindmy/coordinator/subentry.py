@@ -374,16 +374,32 @@ class SubentryOperations(_MixinBase):
         operator reading a fresh log must still find out that this entry is
         affected.
 
+        **Only the first emission carries a meaningful count, and that is a
+        carried limitation rather than a design.** The same refresh that reads
+        the stored list writes a derived one back through the subentry manager,
+        which normalises it: a list of unusable entries becomes ``[]`` on disk.
+        A later run therefore reports ``0`` for a group that arrived with
+        ``> 0``, which is the reading the sentence above assigns to a
+        deliberate emptying -- the diagnosis inverts. Whoever reads a repeated
+        emission has to treat the count as "at most what is stored now", not as
+        the shape the group arrived in. Tracked as ``U-35`` in
+        ``agents/config_flow/AGENTS.md``; closing it means changing what the
+        write-back persists, which is a wider question than this record.
+
         The id is nominally optional, and a subentry whose identifier did not
-        survive sanitising would arrive with ``None``. Such a subentry never
-        gets this far in practice: the caller compares the collected id
-        against the one the metadata carries, and for a core key that one is
-        substituted with a synthesised handle further up, so a nameless
-        candidate is filtered out rather than reported. Home Assistant always
-        supplies an identifier, so this is a latent ordering dependency and
-        not a live gap -- named here because moving either block past the
-        other would change which case is reported, and no test pins that
-        order.
+        survive sanitising would arrive with ``None``. That filter is narrower
+        than an earlier version of this paragraph claimed, and the difference
+        is measurable: the caller compares the collected id against the one
+        the metadata carries, and only for a **core** key is that one
+        substituted with a synthesised handle further up, so only there is a
+        nameless candidate filtered out rather than reported. Under any other
+        key the record is emitted as ``Subentry None``, which names precisely
+        what an operator cannot act on, and all such candidates share the one
+        ``None`` deduplication slot, so the second is swallowed. What keeps
+        this from being a live gap is not the filter but the source: Home
+        Assistant supplies a ULID for every subentry. It stays named here
+        because moving either block past the other would change which case is
+        reported, and no test pins that order.
         """
 
         seen: set[str | None] | None = getattr(
@@ -397,12 +413,12 @@ class SubentryOperations(_MixinBase):
         seen.add(subentry_id)
 
         _LOGGER.warning(
-            "Subentry %s stores a device allow-list of %d entries that "
+            "Subentry %s stores a device allow-list of %s that "
             "selects no device, so this group now shows fewer devices than "
             "before. If it should show a particular set of devices, assign "
             "them to it again through the integration's device selection.",
             subentry_id,
-            stored_entry_count,
+            ("1 entry" if stored_entry_count == 1 else f"{stored_entry_count} entries"),
         )
 
     def _refresh_subentry_index(

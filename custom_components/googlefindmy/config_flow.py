@@ -7271,23 +7271,32 @@ class ConfigFlow(
             nothing and ``_build_subentry_payload`` then omits the key, which
             loses it just as thoroughly.
 
-            Deliberately **verbatim** rather than normalised, and the reason is
-            *not* that this module's ``_normalize_visible_ids`` would change
-            the meaning: measured, it drops only non-strings and empty strings,
-            so an entry such as ``"prefix:"`` survives it untouched. The
-            entry-shaped folding happens later and elsewhere, on the reading
-            side. The reason is narrower and holds anyway: a step whose job is
-            to keep a value must not also rewrite it, because the reading side
-            reports a reinterpretation from the **raw** stored value, and a
-            rewrite here would quietly remove its evidence.
+            Deliberately **verbatim** rather than normalised. Normalising would
+            not change which devices the group ends up with -- measured,
+            ``_normalize_visible_ids`` strips each entry, drops non-strings and
+            entries that end up empty, deduplicates and sorts, so an entry such
+            as ``"prefix:"`` survives it, merely possibly reordered; the
+            entry-shaped folding that turns such an entry into nothing happens
+            later and elsewhere, on the reading side. The reason is narrower
+            and holds anyway: a step whose job is to keep a value must not also
+            rewrite it, because the reading side reports a reinterpretation
+            from the **raw** stored value, and a rewrite here would quietly
+            remove its evidence.
 
-            Restricted to the sequence shapes the readers accept. A ``set``
-            among them is accepted for symmetry with ``_existing_visible`` but
-            **sorted** rather than carried as-is: ``tuple(some_set)`` has no
-            defined order, so carrying it verbatim would rewrite the stored
-            order on every run and make the write non-idempotent. Sorting is
-            the one deviation from verbatim, and it is confined to a shape that
-            has no order to preserve in the first place.
+            Restricted to the sequence shapes the readers accept, and the
+            **container type is preserved** along with the contents. That is
+            not cosmetic: the core writes only when ``subentry.data != data``,
+            and a ``list`` is never equal to a ``tuple`` holding the same
+            items, so converting the shape here would make every single run
+            write and fire the update listeners on a group nothing changed
+            about. Both shapes occur in stored data -- ``_normalize_visible_ids``
+            and ``_migrate_entry_identifier_namespaces`` write a ``list``, the
+            options assignment writes a ``tuple`` -- and after a restart the
+            core hands back whatever JSON can carry, which is a ``list``.
+            A ``set`` is the one exception, accepted for symmetry with
+            ``_existing_visible`` but **sorted** into a ``tuple``:
+            ``tuple(some_set)`` has no defined order, so carrying it as-is
+            would rewrite the stored order on every run for the same reason.
             """
 
             if subentry_obj is None:
@@ -7298,7 +7307,9 @@ class ConfigFlow(
             if not isinstance(data, Mapping):
                 return
             raw_visible = data.get("visible_device_ids")
-            if isinstance(raw_visible, (list, tuple)):
+            if isinstance(raw_visible, list):
+                payload["visible_device_ids"] = list(raw_visible)
+            elif isinstance(raw_visible, tuple):
                 payload["visible_device_ids"] = tuple(raw_visible)
             elif isinstance(raw_visible, set):  # pragma: no cover - unreachable
                 # Accepted for symmetry with ``_existing_visible``, which takes
