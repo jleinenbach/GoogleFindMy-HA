@@ -139,6 +139,7 @@ from .const import (
     # Core domain & credential keys
     DOMAIN,
     LITERAL_CORE_KEY_OWNER,
+    NON_DEVICE_SUBENTRY_KEYS,
     NON_DEVICE_SUBENTRY_TYPES,
     OPT_CONTRIBUTOR_MODE,
     OPT_DELETE_CACHES_ON_REMOVE,
@@ -1273,7 +1274,10 @@ class _SubentryOption:
 # still the one that carries the argument, because the manager canonicalises
 # primarily by type and keeps the stored key as an alias: a group offered
 # under an alias is one the manager may move out from under the assignment.
-_NON_DEVICE_SUBENTRY_KEYS = frozenset({SERVICE_SUBENTRY_KEY})
+# Module-private name kept for the many references below; it is bound to the
+# shared object in ``const.py`` rather than to a second frozenset, so the
+# writing side in ``__init__.py`` and this predicate cannot drift apart.
+_NON_DEVICE_SUBENTRY_KEYS = NON_DEVICE_SUBENTRY_KEYS
 # The type axis is shared with the reading side rather than restated here:
 # ``coordinator/subentry.py`` folds exactly these types onto the service key
 # and exempts their mis-keyed ids from its in-memory assignment bookkeeping,
@@ -7245,9 +7249,101 @@ class ConfigFlow(
                 return tuple(_normalize_visible_ids(raw_visible))
             return ()
 
+        def _carry_over_visible(
+            payload: dict[str, Any], subentry_obj: ConfigSubentry | None
+        ) -> None:
+            """Keep a stored allow-list the payload does not carry.
+
+            ``_async_update_subentry`` hands the core a full ``data`` mapping
+            and the core replaces the stored one wholesale, so a payload built
+            without ``visible_device_ids`` *deletes* the group's device
+            assignment.
+
+            **Only the tracker branch calls this, and the service branch
+            deliberately does not.** The service branch's omission looks like
+            the same defect and is the opposite: the service and hub groups are
+            non-device groups (``_NON_DEVICE_SUBENTRY_KEYS``,
+            ``_accepts_device_assignment``), so a list stored there is legacy
+            residue rather than an assignment, and clearing it at the next run
+            is what keeps a wrong assignment from becoming permanent. The
+            tracker branch reads its list back through ``_existing_visible``
+            and so looked immune, but that read normalises an empty list to
+            nothing and ``_build_subentry_payload`` then omits the key, which
+            loses it just as thoroughly.
+
+            Deliberately **verbatim** rather than normalised, and the reason is
+            *not* that this module's ``_normalize_visible_ids`` would change
+            the meaning: measured, it drops only non-strings and empty strings,
+            so an entry such as ``"prefix:"`` survives it untouched. The
+            entry-shaped folding happens later and elsewhere, on the reading
+            side. The reason is narrower and holds anyway: a step whose job is
+            to keep a value must not also rewrite it, because the reading side
+            reports a reinterpretation from the **raw** stored value, and a
+            rewrite here would quietly remove its evidence.
+
+            Restricted to the sequence shapes the readers accept. A ``set``
+            among them is accepted for symmetry with ``_existing_visible`` but
+            **sorted** rather than carried as-is: ``tuple(some_set)`` has no
+            defined order, so carrying it verbatim would rewrite the stored
+            order on every run and make the write non-idempotent. Sorting is
+            the one deviation from verbatim, and it is confined to a shape that
+            has no order to preserve in the first place.
+            """
+
+            if subentry_obj is None:
+                return
+            if "visible_device_ids" in payload:
+                return
+            data = getattr(subentry_obj, "data", None)
+            if not isinstance(data, Mapping):
+                return
+            raw_visible = data.get("visible_device_ids")
+            if isinstance(raw_visible, (list, tuple)):
+                payload["visible_device_ids"] = tuple(raw_visible)
+            elif isinstance(raw_visible, set):  # pragma: no cover - unreachable
+                # Accepted for symmetry with ``_existing_visible``, which takes
+                # the same three shapes, and sorted because ``tuple(some_set)``
+                # has no defined order and would make the write non-idempotent.
+                # Marked rather than tested: no writer in the tree stores a set
+                # (every one produces ``list`` or ``tuple``, measured), and the
+                # core persists entry data as JSON, which cannot carry one. A
+                # fixture for it would model a state the core does not reach.
+                # Kept rather than dropped because dropping the shape would omit
+                # the key, and an absent key reads as unrestricted.
+                payload["visible_device_ids"] = tuple(sorted(raw_visible))
+
+        def _stores_visible(subentry_obj: ConfigSubentry | None) -> bool:
+            """Return whether the subentry stores the key *at all*.
+
+            Deliberately not ``bool(_existing_visible(...))``: that folds "no
+            key stored" and "key stored, empty" into the same answer, and those
+            two carry different meanings. A missing key means the group was
+            never assigned anything, an empty one means it was assigned
+            nothing.
+            """
+
+            if subentry_obj is None:
+                return False
+            data = getattr(subentry_obj, "data", None)
+            if not isinstance(data, Mapping):
+                return False
+            return isinstance(data.get("visible_device_ids"), (list, tuple, set))
+
         tracker_subentry = _resolve_existing(tracker_key)
         tracker_visible = _existing_visible(tracker_subentry)
-        if not tracker_visible and self._available_devices:
+        # The fill-up is what makes the initial sync the only writer that ever
+        # *adds* to the tracker allow-list, and it stays -- but only for a
+        # group that never carried the key. Filling up a group whose stored
+        # list is present and empty would silently turn "this group shows
+        # nothing" back into "this group shows everything", which is the same
+        # fail-open direction the empty-allow-list fix closed on the reading
+        # side, arriving here through the very flow the user just used to
+        # empty it.
+        if (
+            not tracker_visible
+            and self._available_devices
+            and not _stores_visible(tracker_subentry)
+        ):
             tracker_visible = tuple(
                 _normalize_visible_ids(
                     device_id for _, device_id in self._available_devices
@@ -7294,6 +7390,12 @@ class ConfigFlow(
             if created_service is not None:
                 context_map[service_key] = created_service.subentry_id
         else:
+            # No carry-over here, and the asymmetry with the tracker branch
+            # below is the point rather than an oversight: this payload's
+            # missing ``visible_device_ids`` clears a legacy assignment on a
+            # group that must not hold one, which is the repair
+            # ``test_service_subentry_visibility_is_cleared_by_the_setup_
+            # roundtrip`` measures.
             await type(self)._async_update_subentry(
                 self,
                 entry,
@@ -7320,6 +7422,13 @@ class ConfigFlow(
             if created_tracker is not None:
                 context_map[tracker_key] = created_tracker.subentry_id
         else:
+            # The tracker branch reads its stored list back through
+            # ``_existing_visible``, so it looks immune -- and is, for a
+            # non-empty list. A stored *empty* list normalises to nothing, and
+            # ``_build_subentry_payload`` then omits the key entirely, so the
+            # group loses it altogether. Measured on 2026-08-06 with an empty
+            # probe set.
+            _carry_over_visible(tracker_payload, tracker_subentry)
             await type(self)._async_update_subentry(
                 self,
                 entry,
@@ -8394,6 +8503,14 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin, _ContainerLoginMixi
         # none of them is a checkpoint. The guard sits here rather than in each
         # calling step because this is where every assignment in this module
         # passes, including any future caller.
+        #
+        # The service payload's omission is not merely defensive, it is also
+        # the only thing that clears a legacy assignment on a group that must
+        # not hold one, so it is load-bearing in both directions and must not
+        # be "fixed" into a carry-over the way the tracker branch has one.
+        # ``test_ap5_the_service_branch_still_clears_a_legacy_assignment`` and
+        # ``test_service_subentry_visibility_is_cleared_by_the_setup_roundtrip``
+        # pin that on the flow side and on the manager side respectively.
         #
         # The predicate is decided per *option* and must therefore be consumed
         # per option. Resolving the first holder of the key and then writing to

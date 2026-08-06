@@ -145,6 +145,13 @@ SUBENTRY_TYPE_TRACKER: str = "tracker"
 NON_DEVICE_SUBENTRY_TYPES: frozenset[str] = frozenset(
     {SUBENTRY_TYPE_SERVICE, SUBENTRY_TYPE_HUB}
 )
+# The *key* axis of the same judgement, shared for the same reason the type
+# axis is: ``config_flow._accepts_device_assignment`` reads the group key
+# before the type, and a second spelling of that set on the writing side is
+# exactly the drift ``LITERAL_CORE_KEY_OWNER`` below was extracted to prevent.
+# The two axes are not redundant: a subentry can be managed under a non-device
+# key while its type says nothing useful, and only the key catches that.
+NON_DEVICE_SUBENTRY_KEYS: frozenset[str] = frozenset({SERVICE_SUBENTRY_KEY})
 # The type that *literally* owns each core key, as opposed to folding onto it.
 # ``hub`` folds onto ``SERVICE_SUBENTRY_KEY`` for the assignment predicate, the
 # feature sync and the runtime index, but the entity platforms match
@@ -902,6 +909,7 @@ __all__ = [
     "SUBENTRY_TYPE_HUB",
     "SUBENTRY_TYPE_TRACKER",
     "NON_DEVICE_SUBENTRY_TYPES",
+    "NON_DEVICE_SUBENTRY_KEYS",
     "LITERAL_CORE_KEY_OWNER",
     "service_device_identifier",
     "CONF_OAUTH_TOKEN",
