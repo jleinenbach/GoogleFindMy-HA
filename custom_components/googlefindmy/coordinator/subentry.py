@@ -331,6 +331,80 @@ class SubentryOperations(_MixinBase):
 
         self._pending_subentry_repair = None
 
+    def _record_allow_list_reinterpretation(
+        self, subentry_id: str | None, stored_entry_count: int
+    ) -> None:
+        """Log once per subentry that a stored allow-list now means "nothing".
+
+        The reading of a *present but empty* allow-list changed: it used to
+        collapse to "no restriction" and now restricts to nothing. For a user
+        who emptied the list on purpose that is the repair; for a list that
+        emptied itself -- the identifier-namespace migration rewriting entries
+        it cannot map, or the registry sync writing back a derived empty list
+        -- the group goes from seeing everything to seeing nothing without the
+        user having asked for either reading.
+
+        Those two cannot be told apart from the stored value, which is why this
+        records rather than decides. It is the data source for the roll-back
+        path, not the mechanism: the log names the subentry, which is what an
+        operator needs to find it again and reassign its devices through the
+        device-selection flow. Emitted at ``WARNING`` because a silent
+        visibility change is exactly what a user would otherwise report as
+        devices having disappeared.
+
+        **The caller decides whether the change is real**, and it does so after
+        the unassigned-device merge, because before that it cannot know. This
+        method only formats what it is handed; the wording therefore says what
+        holds for every group that gets this far -- fewer devices than before
+        -- rather than "no devices", which is true for a group the merge does
+        not feed and false for the default one.
+
+        **What is deliberately not logged**, per the "never log ... email
+        addresses, device IDs, or raw API payloads" rule in the repository
+        contract: the group key, which for a legacy per-account group *is* an
+        email address, and the stored list itself, whose entries are namespaced
+        device identifiers. Only how many entries were stored is reported; that
+        separates the empty list (``0``) from one whose entries were all
+        unusable (``> 0``), which is the distinction an operator needs to tell
+        a deliberate emptying from a migration artefact.
+
+        Once per subentry, keyed by subentry id. The set lives on the
+        coordinator instance, so a restart *and* a config-entry reload both
+        re-emit; that is wider than "once per start" and is meant to be: an
+        operator reading a fresh log must still find out that this entry is
+        affected.
+
+        The id is nominally optional, and a subentry whose identifier did not
+        survive sanitising would arrive with ``None``. Such a subentry never
+        gets this far in practice: the caller compares the collected id
+        against the one the metadata carries, and for a core key that one is
+        substituted with a synthesised handle further up, so a nameless
+        candidate is filtered out rather than reported. Home Assistant always
+        supplies an identifier, so this is a latent ordering dependency and
+        not a live gap -- named here because moving either block past the
+        other would change which case is reported, and no test pins that
+        order.
+        """
+
+        seen: set[str | None] | None = getattr(
+            self, "_allow_list_reinterpretations", None
+        )
+        if seen is None:
+            seen = set()
+            self._allow_list_reinterpretations = seen
+        if subentry_id in seen:
+            return
+        seen.add(subentry_id)
+
+        _LOGGER.warning(
+            "Subentry %s stores a device allow-list of %d entries that "
+            "selects no device, so this group now shows fewer devices than "
+            "before. If it should show a particular set of devices, assign "
+            "them to it again through the integration's device selection.",
+            subentry_id,
+            stored_entry_count,
+        )
+
     def _refresh_subentry_index(
         self,
         visible_devices: Sequence[Mapping[str, Any]] | None = None,
@@ -590,10 +664,11 @@ class SubentryOperations(_MixinBase):
                     # a stored ``()`` normalises to nothing and collapses into
                     # the same absent-filter reading, so the promise held for
                     # every list except the empty one. The normalisation keeps
-                    # an empty set for folded groups instead
+                    # an empty set instead
                     # (``::test_ap4_a_parked_tracker_with_an_empty_allow_list_
-                    # stays_empty``); the general collapse is untouched and
-                    # stays ``U-26``.
+                    # stays_empty``), and it does so for *every* group since
+                    # ``U-26`` was closed -- what was written here as a
+                    # fold-only exception is now the general case.
                     #
                     # What the fold did *not* newly break is the observable
                     # width, and saying otherwise would misplace the blame:
@@ -784,6 +859,11 @@ class SubentryOperations(_MixinBase):
         # measured against the service incumbent.
         core_slot_rank: dict[str, tuple[int, int, bool, str]] = {}
 
+        # Subentries whose stored allow-list selects nothing, collected while
+        # the loop runs and judged after the merge (see the branch that fills
+        # this and the block that drains it).
+        pending_reinterpretations: list[tuple[str | None, str, int]] = []
+
         for (
             group_key,
             subentry_id,
@@ -830,8 +910,42 @@ class SubentryOperations(_MixinBase):
                     cleaned = item.rsplit(":", 1)[-1] if ":" in item else item
                     if cleaned:
                         collected.add(cleaned)
+                # A *present* key of a sequence type is an assignment; an
+                # absent one is not. The type qualifier is not pedantry: a key
+                # holding something else entirely (a string, a mapping,
+                # ``None``) never reaches here, stays ``None`` and is therefore
+                # read as unrestricted. No writer in this repository produces
+                # that shape, so the branch is defensive rather than reachable,
+                # but a future schema change would land in it silently, which
+                # is why it is named rather than implied.
+                #
+                # That asymmetry is the whole distinction this block keeps, and
+                # ``set(collected)`` is what keeps it: the empty case stays an
+                # empty set, so a stored list saying "this group owns nothing"
+                # -- written empty, or emptied here because every entry was
+                # unusable -- reaches ``allow_filter`` as a filter admitting
+                # nothing. It used to collapse into ``None`` and be read as *no
+                # restriction*, handing the group the whole device index; that
+                # is ``U-26``, and it failed open in the direction that exposes
+                # devices rather than hiding them.
+                #
+                # An absent key still yields ``None`` and stays unrestricted,
+                # because a group that was never assigned anything must not be
+                # blinded -- a freshly created subentry stores no key at all.
+                # The two shapes are therefore *not* equated; equating them
+                # would break creation, which is why the plan behind this
+                # change rejected that reading after measuring it.
+                #
+                # The fold above relies on this too. It moves a subentry onto a
+                # key it does not store and promises the winner "sees its own
+                # ids plus whatever the merge hands it"; with the old collapse
+                # that promise was false for an empty list. It is now true for
+                # every group, not only the re-homable ones, so the branch that
+                # used to single them out is gone.
+                #
+                # See ``U-26`` in ``agents/runtime_patterns/AGENTS.md``.
+                normalized_allowed = set(collected)
                 if collected:
-                    normalized_allowed = set(collected)
                     if registry_lookup is not None:
                         resolved: set[str] = set()
                         for candidate in collected:
@@ -846,37 +960,24 @@ class SubentryOperations(_MixinBase):
                                 resolved.add(canonical)
                         if resolved:
                             normalized_allowed.update(resolved)
-                elif ids_are_rehomable:
-                    # A stored list that is *present but empty* says "this
-                    # group owns nothing". Everywhere else in this loop that
-                    # statement is lost: it collapses into ``None`` below, and
-                    # ``allow_filter`` reads ``None`` as *no restriction*, so
-                    # the group is handed the whole device index. That reading
-                    # is older and wider than this pass and is carried as
-                    # ``U-26`` (see ``agents/runtime_patterns/AGENTS.md``);
-                    # changing it for every group needs its own migration
-                    # reasoning, because a user whose list emptied through the
-                    # repairs move would go from seeing everything to seeing
-                    # nothing.
+                elif not ids_are_rehomable and group_key != SERVICE_SUBENTRY_KEY:
+                    # A *candidate* for the migration record, not the record
+                    # itself. Two shapes are excluded here because their
+                    # reading did not change at all: a group the fold above
+                    # moved onto a key it does not store already kept the
+                    # empty set, and the service branch forces its visible ids
+                    # to ``()`` further down regardless of any filter.
                     #
-                    # For a *folded* group it is not a matter of taste. The
-                    # branches above moved this subentry onto a key it does not
-                    # store, and the comment there promises the winner "sees
-                    # its own ids plus whatever the merge hands it". With an
-                    # empty list and the collapse to ``None`` that promise is
-                    # false: it sees every device, including what another group
-                    # owns, and ``manager.update_visible_device_ids`` is handed
-                    # that widened list. Keeping the empty set makes the
-                    # promise true for the one shape this pass created, and no
-                    # further -- the loser half is unaffected, because a group
-                    # owning nothing has nothing to re-home.
-                    #
-                    # On the service fold this is inert: that branch forces the
-                    # visible ids to ``()`` regardless. Written for both anyway,
-                    # so the two folds keep the same shape.
-                    normalized_allowed = set()
-                else:
-                    normalized_allowed = None
+                    # The remaining shapes cannot be decided here, because
+                    # what a group ends up seeing is not settled until the
+                    # unassigned-device merge has run. That is why this only
+                    # collects; the decision is taken after the merge, against
+                    # what the group actually sees. An earlier revision logged
+                    # straight from this branch and told the default group it
+                    # "now shows no devices", which the merge makes false.
+                    pending_reinterpretations.append(
+                        (subentry_id, group_key, len(raw_allowed))
+                    )
 
             if normalized_allowed and not ids_are_rehomable:
                 # Every id a subentry claims as its own, in both spellings the
@@ -1221,6 +1322,36 @@ class SubentryOperations(_MixinBase):
                     continue
 
                 metadata[key] = replace(meta, config_subentry_id=default_id)
+
+        for pending_id, pending_key, pending_count in pending_reinterpretations:
+            # Judge the collected candidates against what their group actually
+            # ends up seeing, rather than against the branch they came from.
+            # Two conditions, each of which excludes a group that lost
+            # nothing:
+            #
+            # * the subentry still describes its group -- a candidate that
+            #   lost the rank for a core key is *replaced* in ``metadata`` by
+            #   the winner, so the identity comparison is what excludes it;
+            #   the ``is None`` half beside it is defensive and unreachable
+            #   today, because every key a candidate can carry is written to
+            #   ``metadata`` either by its own group or by the core synthesis;
+            # * the group ends up seeing less than the whole index -- for the
+            #   default group the unassigned-device merge hands back
+            #   everything no other group claims, so a single-group
+            #   installation comes out exactly as it went in and has nothing
+            #   to be told about. The empty index falls under the same
+            #   comparison, which then holds trivially -- and deliberately so:
+            #   with no devices the group *has* lost its previous view to the
+            #   filter, but the loss is transient and repairs itself on the
+            #   first populated refresh, so reporting it would be noise. The
+            #   dedup set is only filled when a record is actually written, so
+            #   suppressing here does not swallow a later real one.
+            pending_meta = metadata.get(pending_key)
+            if pending_meta is None or pending_meta.config_subentry_id != pending_id:
+                continue
+            if set(pending_meta.visible_device_ids) >= set(device_index):
+                continue
+            self._record_allow_list_reinterpretation(pending_id, pending_count)
 
         self._subentry_metadata = metadata
         self._feature_to_subentry = feature_map

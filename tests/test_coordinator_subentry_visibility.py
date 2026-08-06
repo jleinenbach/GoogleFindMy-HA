@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import logging
 from types import MappingProxyType, SimpleNamespace
 from typing import cast
 
@@ -1131,10 +1132,11 @@ def _ap4_subentry(
 
     ``visible`` is written whenever it is not ``None``, so ``[]`` stores an
     *explicitly empty* allow-list and ``None`` stores no key at all. The
-    distinction is not academic: it is the very one the reading side loses
-    (``runtime_patterns/AGENTS.md`` remainder ``U-26``), so a helper that
-    tested truthiness here would have made the empty case unrepresentable and
-    the conflation untestable.
+    distinction is not academic: it is the very one the reading side used to
+    lose (``runtime_patterns/AGENTS.md`` remainder ``U-26``, since closed), so
+    a helper that tested truthiness here would have made the empty case
+    unrepresentable and the conflation untestable. It matters more now, not
+    less: the two shapes carry opposite meanings rather than the same one.
 
     ``_service_twin_coordinator`` cannot serve these cases: it always adds a
     canonical tracker and gives every twin the *same* type, while the tracker
@@ -1728,10 +1730,11 @@ def test_ap4_a_parked_tracker_with_an_empty_allow_list_stays_empty(
 
     Class A, and the second half of the regression the sibling test above
     repairs. Keeping a non-empty ``visible_device_ids`` through the fold is not
-    enough, because the reading side normalises a list that ends up empty to
-    ``None``, and ``allow_filter`` reads ``None`` as *no restriction*. A parked
-    tracker whose stored list is ``()`` therefore arrives on the tracker key
-    unfiltered and is handed the entire device index, ``device-3`` included,
+    enough, because the reading side used to normalise a list that ends up
+    empty to ``None``, and ``allow_filter`` reads ``None`` as *no restriction*.
+    A parked tracker whose stored list is ``()`` therefore arrived on the
+    tracker key unfiltered and was handed the entire device index,
+    ``device-3`` included,
     although ``other_group`` owns it -- and ``manager.update_visible_device_ids``
     makes that durable.
 
@@ -1746,13 +1749,17 @@ def test_ap4_a_parked_tracker_with_an_empty_allow_list_stays_empty(
 
     That is the boundary of this fix. The absent-filter reading itself is
     older and wider (``runtime_patterns/AGENTS.md`` remainder ``U-26``, owned by
-    ``PLAN_GFMY_VISIBILITY_ASSIGNMENT_BOOKKEEPING``); changing it for *every*
-    group needs its own migration reasoning. Repaired here is only what the
-    fold newly exposed.
+    ``PLAN_GFMY_VISIBILITY_ASSIGNMENT_BOOKKEEPING``) and has since been closed
+    for every group, so what this test pins is no longer an exception carved
+    out for the fold but the general reading. It is kept as the fold's own
+    guard: it is the only place asserting that a *folded* group reaches the
+    normalisation with its stored list intact.
 
-    Killing mutation: replacing ``normalized_allowed = set()`` in the
-    ``elif ids_are_rehomable`` arm of the normalisation with ``None`` -- or
-    deleting the arm outright -- puts ``device-3`` back into both assertions.
+    Killing mutation: making the normalisation leave ``normalized_allowed`` at
+    ``None`` when nothing survived -- i.e. restoring the collapse -- puts
+    ``device-3`` back into both assertions. The arm-specific mutation this
+    docstring named before the closure no longer exists, because the arm does
+    not.
     """
 
     entry_id = f"e-ap4-empty-{int(parked_first)}"
@@ -1792,11 +1799,19 @@ def test_ap4_a_parked_tracker_with_an_empty_allow_list_stays_empty(
 #
 # Four shapes reach the normalisation in ``_refresh_subentry_index``, and the
 # reading side answers them in only two distinct ways: unrestricted (E1, E2,
-# E4) or filtered (E3). That collapse is the point -- three shapes carrying
-# three different statements share one answer. The table below pins today's
-# answer per shape so that the semantics change in
-# ``PLAN_GFMY_VISIBILITY_ASSIGNMENT_BOOKKEEPING`` has to face each one
+# E4) or filtered (E3) -- past tense throughout, see below. That collapse
+# *was* the point: three shapes carrying
+# three different statements shared one answer, and the table below pinned it
+# per shape so the semantics change in
+# ``PLAN_GFMY_VISIBILITY_ASSIGNMENT_BOOKKEEPING`` had to face each one
 # separately instead of moving them as a block.
+#
+# That change has since landed, and the table now pins its result. Two of the
+# four answers moved, and only those two: a *present* key -- empty, or emptied
+# because none of its entries survived normalisation -- restricts to nothing
+# instead of collapsing into "unrestricted". An absent key is still
+# unrestricted, and a key that normalises to a non-empty set still filters to
+# it, which is the property that keeps freshly created groups working.
 _AP3_STORED_SHAPES: dict[str, list[str] | None] = {
     # present and empty -- "this group owns nothing"
     "E1": [],
@@ -1809,13 +1824,32 @@ _AP3_STORED_SHAPES: dict[str, list[str] | None] = {
     "E4": ["e-ap3:"],
 }
 
-# What the tracker group sees today, per shape. ``None`` means "the whole
-# device index", which is what an absent filter yields.
-_AP3_TODAYS_ANSWER: dict[str, tuple[str, ...]] = {
-    "E1": ("device-1", "device-2", "device-3"),
+# What the *tracker* group -- the default one -- sees per shape. Read this
+# together with ``_AP3_ANSWER_FOR_A_NON_DEFAULT_GROUP`` below: the default
+# group is fed by the unassigned-device merge, so a restricting filter does not
+# leave it empty here. ``device-1`` and ``device-2`` belong to no group and
+# return through that merge; ``device-3`` belongs to ``other_group`` and is the
+# one the filter has to keep out.
+_AP3_ANSWER_FOR_THE_DEFAULT_GROUP: dict[str, tuple[str, ...]] = {
+    # restricted to nothing -- what remains is the merge's doing, not the
+    # filter's
+    "E1": ("device-1", "device-2"),
+    # unrestricted: never assigned, so the whole index
     "E2": ("device-1", "device-2", "device-3"),
+    # filtered to its own id; ``device-2`` joins through the merge
     "E3": ("device-1", "device-2"),
-    "E4": ("device-1", "device-2", "device-3"),
+    # same as E1: present, but nothing survived normalisation
+    "E4": ("device-1", "device-2"),
+}
+
+# The same shapes on a group the merge does *not* feed. This is where the
+# change is visible without the merge cushioning it, and where "restricts to
+# nothing" and "unrestricted" are furthest apart.
+_AP3_ANSWER_FOR_A_NON_DEFAULT_GROUP: dict[str, tuple[str, ...]] = {
+    "E1": (),
+    "E2": ("device-1", "device-2", "device-3"),
+    "E3": ("device-1",),
+    "E4": (),
 }
 
 
@@ -1823,8 +1857,9 @@ _AP3_TODAYS_ANSWER: dict[str, tuple[str, ...]] = {
 def test_ap3_a_stored_shape_decides_what_a_group_may_see(shape: str) -> None:
     """Pin, per stored shape, whether the allow-list still restricts anything.
 
-    This is the characterisation the semantics change measures against, and it
-    is deliberately built so that the *merge* is not what supplies the answer.
+    This started as the characterisation the semantics change measured against
+    and now pins its outcome. It is deliberately built so that the *merge* is
+    not what supplies the answer.
     The sibling guard in ``test_coordinator_visibility_availability.py`` wires
     a single device into the tracker group; that device returns through the
     unassigned-device merge whether or not a filter is applied, so the two
@@ -1842,18 +1877,27 @@ def test_ap3_a_stored_shape_decides_what_a_group_may_see(shape: str) -> None:
     buy is that no single change to the filter can be mistaken for the merge
     or the other way round.
 
-    Two of the four shapes end up unrestricted for different reasons. For
-    ``E2`` that is intended -- a group that was never assigned anything is
-    unrestricted, which is how a freshly created group is meant to work. For
-    ``E1`` and ``E4`` it is the reading this plan is about: a list that says
-    "nothing" and a list whose entries are all unusable both collapse to the
-    same absent filter as "never assigned".
+    Only ``E2`` still ends up unrestricted, and that is intended: a group that
+    was never assigned anything is unrestricted, which is how a freshly
+    created group is meant to work. ``E1`` and ``E4`` used to share that answer
+    for a different reason -- a list saying "nothing" and a list whose entries
+    are all unusable both collapsed into the same absent filter -- and no
+    longer do.
+
+    Each shape is checked on *two* groups, because the default group is a poor
+    place to read the change off. It is fed by the unassigned-device merge, so
+    restricting its filter to nothing still leaves it the two devices no group
+    claims; what changes there is that ``device-3`` stays out. The non-default
+    group is the plain reading: it goes to the empty tuple under ``E1`` and
+    ``E4``, and stays at the whole index under ``E2``. Both are asserted, so a
+    later change cannot fix one reading while quietly breaking the other.
 
     Note the boundary against the fold: the parked-tracker tests above cover
-    ``E1`` and a non-empty list on the *re-homable* arm, where an empty list is
-    already kept as an empty set. ``E2`` and ``E4`` have no counterpart there.
-    Everything here is the ordinary arm, where the group stores its own key,
-    and on which no such arm exists.
+    ``E1`` and a non-empty list on the *re-homable* arm, which used to be the
+    only arm where an empty list was kept. That arm no longer exists as a
+    special case -- keeping the empty set is now what every group gets -- and
+    those tests are the fold's own guard rather than a statement about this
+    shape.
 
     Killing mutations, one per shape, because a single mutation cannot cover
     all four. Which assertion each one trips was measured, not assumed, and
@@ -1861,24 +1905,26 @@ def test_ap3_a_stored_shape_decides_what_a_group_may_see(shape: str) -> None:
     says the separation broke, while a case killed through the shape
     assertion says this shape's answer really depends on the mutated code.
 
-    * ``E1``/``E4`` -- make the normalisation keep an empty set for every
-      group, not only the re-homable ones. Both fail on the shape assertion
-      (``device-3`` leaves their view); ``E2`` and ``E3`` stay green, which is
-      what makes this the mutation the semantics change has to survive.
+    * ``E1``/``E4`` -- restore the collapse, i.e. leave ``normalized_allowed``
+      at ``None`` when nothing survived normalisation. Both fail on the default
+      group's shape assertion (``device-3`` re-enters); ``E2`` and ``E3`` stay
+      green, which is what makes this the mutation that separates the change
+      from its neighbours.
     * ``E2`` -- treat an absent key as an empty set (the equivalence the plan
-      measured and rejected). Only ``E2`` fails, and what it loses is
-      ``device-3``; ``device-1`` and ``device-2`` stay, because the merge
-      re-homes them. The *tracker* group is therefore cushioned by the merge,
-      and the "sees nothing" breakage that motivates the rejection lands on
-      groups the merge does not feed: a separately measured non-default group
-      with no stored key goes from three devices to none under the same
-      mutation. Stated precisely here because an earlier revision of this
-      docstring claimed ``device-1`` was lost, which a review disproved.
-    * ``E3`` -- force ``allow_filter`` to ``None``. ``E3`` fails on its shape
-      assertion (``device-3`` enters), the other three on the fixture guard,
-      because the mutation also unfilters ``other_group``. A narrower mutation
-      is not available here: every arm of the normalisation is shared by both
-      groups, so nothing distinguishes them at that point.
+      measured and rejected). Only ``E2`` fails, on the default group's shape
+      assertion: it loses ``device-3`` while ``device-1`` and ``device-2``
+      stay, because the merge re-homes them. The non-default assertion would
+      catch it too, and more starkly -- that group loses everything, which is
+      the breakage that motivates the rejection -- but the default one is
+      reached first. An earlier revision of this docstring claimed ``device-1``
+      was lost on the default group, which a review disproved.
+    * ``E3`` -- force ``allow_filter`` to ``None``. All four fail, and *which*
+      assertion catches them was measured: ``E1``, ``E3`` and ``E4`` on the
+      default group's shape assertion, ``E2`` on the fixture guard, because for
+      ``E2`` the default group's answer is unrestricted either way and only
+      ``other_group`` changes. A narrower mutation is not available here: every
+      arm of the normalisation is shared by all groups, so nothing
+      distinguishes them at that point.
     """
 
     entry_id = f"e-ap3-{shape.lower()}"
@@ -1888,21 +1934,35 @@ def test_ap3_a_stored_shape_decides_what_a_group_may_see(shape: str) -> None:
         SUBENTRY_TYPE_TRACKER,
         _AP3_STORED_SHAPES[shape],
     )
+    plain = _ap4_subentry(
+        "id-plain", "plain_group", SUBENTRY_TYPE_TRACKER, _AP3_STORED_SHAPES[shape]
+    )
     foreign = _ap4_subentry(
         "id-foreign", "other_group", SUBENTRY_TYPE_TRACKER, ["device-3"]
     )
     coordinator, _entry, manager = _ap4_coordinator_with_a_foreign_group(
-        entry_id, [canonical, foreign]
+        entry_id, [canonical, plain, foreign]
     )
 
     coordinator._refresh_subentry_index(coordinator.data, skip_repair=True)
 
     tracker_meta = coordinator.get_subentry_metadata(key=TRACKER_SUBENTRY_KEY)
+    plain_meta = coordinator.get_subentry_metadata(key="plain_group")
     foreign_meta = coordinator.get_subentry_metadata(key="other_group")
     assert tracker_meta is not None and foreign_meta is not None
-    assert tracker_meta.visible_device_ids == _AP3_TODAYS_ANSWER[shape], (
-        f"shape {shape} decides what the group may see, and the answer has to "
-        "change deliberately rather than as a side effect"
+    assert plain_meta is not None
+    assert (
+        tracker_meta.visible_device_ids == _AP3_ANSWER_FOR_THE_DEFAULT_GROUP[shape]
+    ), (
+        f"shape {shape} decides what the default group may see, and the answer "
+        "has to change deliberately rather than as a side effect"
+    )
+    assert (
+        plain_meta.visible_device_ids == _AP3_ANSWER_FOR_A_NON_DEFAULT_GROUP[shape]
+    ), (
+        f"shape {shape} on a group the merge does not feed -- this is where "
+        "'restricts to nothing' and 'unrestricted' are furthest apart, and "
+        "where a regression would otherwise hide behind the merge"
     )
     assert foreign_meta.visible_device_ids == ("device-3",), (
         "the owning group keeps its device under every shape; a change here "
@@ -1920,4 +1980,322 @@ def test_ap3_a_stored_shape_decides_what_a_group_may_see(shape: str) -> None:
     assert ("device-3" in persisted) is reaches_foreign_device, (
         "and the write-back mirrors the view: that is how a widened list "
         "becomes durable instead of lasting one refresh"
+    )
+
+
+# --- AP4: the migration record the semantics change owes its users ----------
+
+
+def _ap4_refresh_with_shape(
+    entry_id: str,
+    key: str,
+    stored: list[str] | None,
+    *,
+    subentry_id: str = "id-under-test",
+) -> GoogleFindMyCoordinator:
+    """Run one refresh with a single group holding ``stored``, plus an owner."""
+
+    under_test = _ap4_subentry(subentry_id, key, SUBENTRY_TYPE_TRACKER, stored)
+    foreign = _ap4_subentry(
+        "id-foreign", "other_group", SUBENTRY_TYPE_TRACKER, ["device-3"]
+    )
+    coordinator, _entry, _manager = _ap4_coordinator_with_a_foreign_group(
+        entry_id, [under_test, foreign]
+    )
+    coordinator._refresh_subentry_index(coordinator.data, skip_repair=True)
+    return coordinator
+
+
+def _ap4_reinterpretation_lines(caplog: pytest.LogCaptureFixture) -> list[str]:
+    """Return the migration-record lines captured so far."""
+
+    return [
+        record.getMessage()
+        for record in caplog.records
+        if "selects no device" in record.getMessage()
+    ]
+
+
+def test_ap4_a_reinterpreted_allow_list_is_recorded_once(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The semantics change owes an operator a record, and this is it.
+
+    ``agents/runtime_patterns/AGENTS.md`` names this log line as the migration
+    reasoning that `U-26` was waiting for, which makes it a contract rather
+    than a convenience: a group whose stored list is empty stops claiming any
+    device, and where nothing else hands them back it shows none of them. If
+    that happens silently the user reports devices as having disappeared.
+    Because it is a contract, it is pinned here rather than left to survive by
+    accident. The group under test is deliberately *not* the default one --
+    that shape is covered by its own negative test below, because the merge
+    hands it everything back and there is nothing to report.
+
+    Four properties, each with its own killing mutation:
+
+    * it is emitted at all -- deleting the call makes this red;
+    * at ``WARNING`` -- and which assertion catches a level change was
+      measured, not assumed: *lowering* it to ``info`` or ``debug`` trips the
+      presence assertion first, because ``caplog`` is set to ``WARNING`` and
+      never captures the record at all. The level assertion itself guards the
+      other direction, against a record loud enough to look like a failure. A
+      record an operator never sees is not a record, which is why the presence
+      assertion is the one that matters here;
+    * once per subentry -- removing the dedup set makes the second refresh
+      emit again, which matters because refreshes are frequent;
+    * it names the subentry -- an operator needs to find the group again.
+    """
+
+    caplog.set_level(logging.WARNING)
+    coordinator = _ap4_refresh_with_shape("e-ap4-log", "plain_group", [])
+
+    lines = _ap4_reinterpretation_lines(caplog)
+    assert len(lines) == 1, (
+        "exactly one migration record for the one affected subentry -- none "
+        "means the change is silent, more than one means the dedup is gone"
+    )
+    assert "id-under-test" in lines[0], (
+        "the record has to name the subentry, because that is what an "
+        "operator uses to find the group and reassign its devices"
+    )
+    levels = {
+        record.levelno
+        for record in caplog.records
+        if "selects no device" in record.getMessage()
+    }
+    assert levels == {logging.WARNING}, (
+        "a visibility change the user did not ask for belongs above debug; at "
+        "debug it is invisible in a default installation"
+    )
+
+    coordinator._refresh_subentry_index(coordinator.data, skip_repair=True)
+    assert len(_ap4_reinterpretation_lines(caplog)) == 1, (
+        "a second refresh must not repeat it -- refreshes run on every poll, "
+        "so without the dedup this floods the log"
+    )
+
+
+def test_ap4_the_migration_record_leaks_neither_group_key_nor_device_ids(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The record must not carry an email address or a device identifier.
+
+    The repository contract says plainly: never log tokens, email addresses,
+    precise coordinates, device IDs, or raw API payloads. Both forbidden shapes
+    are reachable right here. A legacy per-account group stores its owner's
+    address *as* its ``group_key`` (``agents/config_flow/AGENTS.md``, B13), and
+    the stored allow-list holds namespaced device identifiers. An earlier
+    revision of this record logged both, which is what this test exists to
+    prevent from coming back.
+
+    What survives is the subentry id -- an internal handle, not a device
+    identifier -- and a count, which is enough to tell a deliberately emptied
+    list (``0``) from one whose entries were all discarded (``> 0``).
+
+    Killing mutation: putting ``group_key`` or ``raw_allowed`` back into the
+    log call.
+    """
+
+    caplog.set_level(logging.WARNING)
+    # Both entries are discarded by the normalisation: ``rsplit(":", 1)[-1]``
+    # leaves the empty string for a bare prefix. The device name is still in
+    # the *stored* value, which is exactly what must not reach the log.
+    _ap4_refresh_with_shape(
+        "e-ap4-leak", "owner@example.com", ["device-9:", "e-ap4-leak:"]
+    )
+
+    lines = _ap4_reinterpretation_lines(caplog)
+    assert len(lines) == 1
+    assert "owner@example.com" not in lines[0], (
+        "a legacy group key is an email address, and the contract forbids logging one"
+    )
+    assert "device-9" not in lines[0], (
+        "the stored list holds device identifiers, which the same rule forbids"
+    )
+    assert "of 2 entries" in lines[0], (
+        "the count is what replaces the values: it separates a deliberately "
+        "emptied list from one the normalisation discarded"
+    )
+
+
+@pytest.mark.parametrize(
+    ("case", "key", "stored"),
+    [
+        ("folded", SERVICE_SUBENTRY_KEY, []),
+        ("service", SERVICE_SUBENTRY_KEY, []),
+    ],
+)
+def test_ap4_no_record_where_the_reading_did_not_change(
+    caplog: pytest.LogCaptureFixture, case: str, key: str, stored: list[str]
+) -> None:
+    """Only groups whose reading actually changed get a record.
+
+    Two shapes reach the same branch without having changed. A tracker parked
+    on the service key is folded onto the tracker key, and for folded groups an
+    empty list was already kept as an empty set before this change. A group on
+    the canonical service key has its visible ids forced to ``()`` a few lines
+    further down regardless of any filter.
+
+    Telling an operator that either of them "now shows no devices instead of
+    all of them" would be false, and this line is the migration record, so it
+    has to be true. That is the whole point of the guard, and a review found it
+    missing from the first revision.
+
+    Killing mutation: dropping the ``not ids_are_rehomable and group_key !=
+    SERVICE_SUBENTRY_KEY`` condition from the call site.
+    """
+
+    caplog.set_level(logging.WARNING)
+    subentry_type = (
+        SUBENTRY_TYPE_SERVICE if case == "service" else SUBENTRY_TYPE_TRACKER
+    )
+    under_test = _ap4_subentry("id-quiet", key, subentry_type, stored)
+    foreign = _ap4_subentry(
+        "id-foreign", "other_group", SUBENTRY_TYPE_TRACKER, ["device-3"]
+    )
+    coordinator, _entry, _manager = _ap4_coordinator_with_a_foreign_group(
+        f"e-ap4-quiet-{case}", [under_test, foreign]
+    )
+    coordinator._refresh_subentry_index(coordinator.data, skip_repair=True)
+
+    assert _ap4_reinterpretation_lines(caplog) == [], (
+        f"the {case} shape reached the branch without its reading having "
+        "changed, so a record claiming a change would be a false statement"
+    )
+
+
+def test_ap4_an_empty_allow_list_survives_an_empty_poll_as_empty() -> None:
+    """A restricting filter keeps restricting when the device index is empty.
+
+    Consequence of the change, asserted so it cannot flip back unnoticed. The
+    continuity fallback (``previous_visible`` when ``device_index`` is empty)
+    exists so a transient empty poll does not blank a group's view. It is
+    filtered by ``allow_filter`` like everything else, so for a group whose
+    stored list selects nothing it now yields nothing, where the collapsed
+    ``None`` used to let the previous view through.
+
+    That is the correct reading and not a regression to repair: the group owns
+    nothing, and the devices it showed on the populated refresh reached it
+    solely through the unassigned-device merge, which has nothing to hand over
+    when there are no devices. It is asserted because the alternative reading
+    -- "the fallback should win" -- is tempting and would quietly restore the
+    fail-open behaviour for exactly the shape this change is about.
+
+    No data is lost either way: the write-back compares the derived ``()``
+    against the stored empty list, finds them equal and does not write.
+
+    Killing mutation: restoring the collapse, which lets the previous view
+    through the fallback and makes the second assertion red.
+    """
+
+    coordinator = _ap4_refresh_with_shape("e-ap4-poll", TRACKER_SUBENTRY_KEY, [])
+    populated = coordinator.get_subentry_metadata(key=TRACKER_SUBENTRY_KEY)
+    assert populated is not None
+    assert populated.visible_device_ids == ("device-1", "device-2"), (
+        "with a device index the merge still hands over what no group claims; "
+        "only the foreign-owned device stays out"
+    )
+
+    coordinator.data = []
+    coordinator._refresh_subentry_index([], skip_repair=True)
+    drained = coordinator.get_subentry_metadata(key=TRACKER_SUBENTRY_KEY)
+    assert drained is not None
+    assert drained.visible_device_ids == (), (
+        "and with no device index there is nothing unclaimed to hand over, so "
+        "a group owning nothing sees nothing -- the continuity fallback must "
+        "not be read as a licence to ignore the filter"
+    )
+
+
+def test_ap4_no_record_where_the_merge_hands_everything_back(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The default group in a single-group installation loses nothing.
+
+    The third and most common shape that reaches the same branch without a
+    change worth reporting, and the one a first revision of the guard missed.
+    Where no other group claims anything, the unassigned-device merge hands the
+    default group every device back, so the result is bit-for-bit what it was
+    before the semantics changed: the filter excluded everything, and the merge
+    put everything back.
+
+    Telling that operator "this group now shows fewer devices" would be false,
+    and it is the likeliest installation shape there is. The guard therefore
+    does not enumerate exempt shapes -- an earlier revision tried that and had
+    to grow a third case -- but measures what the group actually ends up
+    seeing, after the merge, against the device index.
+
+    Killing mutation: moving the record back into the normalisation branch, or
+    dropping the ``>= set(device_index)`` comparison from the block that drains
+    the collected candidates.
+    """
+
+    caplog.set_level(logging.WARNING)
+    lone = _ap4_subentry("id-lone", TRACKER_SUBENTRY_KEY, SUBENTRY_TYPE_TRACKER, [])
+    coordinator, _entry, _manager = _ap4_coordinator_with_a_foreign_group(
+        "e-ap4-lone", [lone]
+    )
+    coordinator._refresh_subentry_index(coordinator.data, skip_repair=True)
+
+    meta = coordinator.get_subentry_metadata(key=TRACKER_SUBENTRY_KEY)
+    assert meta is not None
+    assert meta.visible_device_ids == ("device-1", "device-2", "device-3"), (
+        "precondition: with nobody else claiming anything the merge hands the "
+        "whole index back, so nothing was lost"
+    )
+    assert _ap4_reinterpretation_lines(caplog) == [], (
+        "and where nothing was lost there is nothing to report -- a record "
+        "here would tell the most common installation shape that its devices "
+        "went missing when they did not"
+    )
+
+
+def test_ap4_no_record_for_a_subentry_that_lost_its_core_slot(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A candidate that does not end up describing its group says nothing.
+
+    Two tracker subentries storing the same core key are the reachable
+    collision the rank exists for; only one of them ends up in the index. The
+    loser's reading never becomes visible to anyone, so a record telling its
+    operator that "this group now shows fewer devices" would be about a group
+    the loser does not describe -- and the winner's own list is untouched.
+
+    This is the third exemption, and unlike the first two it is not a shape but
+    an outcome: it can only be decided after the rank has run, which is the
+    other reason the record is drained at the end rather than emitted inline.
+
+    Killing mutation: dropping the ``config_subentry_id != pending_id`` check
+    from the block that drains the collected candidates.
+    """
+
+    caplog.set_level(logging.WARNING)
+    # Which of the two takes the slot was measured, not assumed: the tie is
+    # broken on the lower identifier, and neither the listing order nor the
+    # stored list enters into it. The candidate -- the one whose list selects
+    # nothing, and which would report if it counted -- therefore gets the
+    # higher identifier so that it loses.
+    winner = _ap4_subentry(
+        "id-a-keeps-slot", TRACKER_SUBENTRY_KEY, SUBENTRY_TYPE_TRACKER, ["device-1"]
+    )
+    loser = _ap4_subentry(
+        "id-z-loses-slot", TRACKER_SUBENTRY_KEY, SUBENTRY_TYPE_TRACKER, []
+    )
+    foreign = _ap4_subentry(
+        "id-foreign", "other_group", SUBENTRY_TYPE_TRACKER, ["device-3"]
+    )
+    coordinator, _entry, _manager = _ap4_coordinator_with_a_foreign_group(
+        "e-ap4-slot", [winner, loser, foreign]
+    )
+    coordinator._refresh_subentry_index(coordinator.data, skip_repair=True)
+
+    meta = coordinator.get_subentry_metadata(key=TRACKER_SUBENTRY_KEY)
+    assert meta is not None
+    assert meta.config_subentry_id == "id-a-keeps-slot", (
+        "precondition: the rank has to have picked one of the two, otherwise "
+        "this test measures something else"
+    )
+    assert _ap4_reinterpretation_lines(caplog) == [], (
+        "the loser does not describe the group, so its reading is not what "
+        "the operator sees and there is nothing to report about it"
     )

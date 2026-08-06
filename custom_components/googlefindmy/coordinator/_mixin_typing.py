@@ -75,6 +75,12 @@ class _MixinBase:
     _round_trip_anchors: dict[str, dict[str, Any]]
     _device_caps: dict[str, dict[str, Any]]
     _present_last_seen: dict[str, float]
+    # Subentry ids already reported as holding an allow-list that selects
+    # nothing. Unlike its neighbours here this one is created lazily on first
+    # use rather than in ``__init__``, because it is a diagnostic ledger with
+    # no meaningful empty-state behaviour; declared all the same, so the union
+    # this module exists to provide stays complete.
+    _allow_list_reinterpretations: set[str | None]
     _poll_lock: asyncio.Lock
     _push_cooldown_until: float
     _locate_inflight: set[str]
