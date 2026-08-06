@@ -2041,8 +2041,13 @@ def test_ap4_a_reinterpreted_allow_list_is_recorded_once(
       other direction, against a record loud enough to look like a failure. A
       record an operator never sees is not a record, which is why the presence
       assertion is the one that matters here;
-    * once per subentry -- removing the dedup set makes the second refresh
-      emit again, which matters because refreshes are frequent;
+    * once per **refresh of the same** subentry -- removing the dedup set makes
+      the second refresh emit again, which matters because refreshes are
+      frequent. This shape deliberately proves only that much: it cannot tell a
+      per-subentry dedup from a per-coordinator one, because it never has two
+      affected groups at once. That half is pinned separately by
+      ``::test_ap4_the_record_is_deduplicated_per_subentry_not_per_coordinator``,
+      which is therefore not a duplicate of this test;
     * it names the subentry -- an operator needs to find the group again.
     """
 
@@ -2072,6 +2077,69 @@ def test_ap4_a_reinterpreted_allow_list_is_recorded_once(
     assert len(_ap4_reinterpretation_lines(caplog)) == 1, (
         "a second refresh must not repeat it -- refreshes run on every poll, "
         "so without the dedup this floods the log"
+    )
+
+
+def test_ap4_the_record_is_deduplicated_per_subentry_not_per_coordinator(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Two reinterpreted groups in one refresh owe an operator two records.
+
+    The sibling test above pins "once per subentry" by refreshing the *same*
+    group twice. That shape cannot tell a per-subentry dedup from a per-instance
+    one: a set that swallowed every record after the first would keep it green.
+    Since an operator has to reassign the devices of *each* affected group, a
+    record for only one of them names the wrong scope, and the plan's fit
+    criterion asks for two groups for exactly this reason.
+
+    Both groups are deliberately non-core: the unassigned-device merge feeds the
+    tracker group and would hand it everything back, so there would be nothing
+    to report there (see ``::test_ap4_no_record_where_the_merge_hands_everything_back``).
+    That is a *precondition* of reading anything off the record count, so it is
+    asserted rather than assumed: if the merge ever fed these groups too, the
+    suppression would fire and the count assertion below would blame the dedup
+    scope for a change in the merge.
+
+    Killing mutation: widen the dedup from the subentry id to the coordinator,
+    for instance by returning early once ``self._allow_list_reinterpretations``
+    is non-empty. Measured 2026-08-06: only this test turns red -- every other
+    assertion on this record in the repository expects at most one entry per
+    coordinator, so a wider dedup leaves them all green.
+    """
+
+    caplog.set_level(logging.WARNING)
+    first = _ap4_subentry("id-first", "plain_group_a", SUBENTRY_TYPE_TRACKER, [])
+    second = _ap4_subentry("id-second", "plain_group_b", SUBENTRY_TYPE_TRACKER, [])
+    foreign = _ap4_subentry(
+        "id-foreign", "other_group", SUBENTRY_TYPE_TRACKER, ["device-3"]
+    )
+    coordinator, _entry, _manager = _ap4_coordinator_with_a_foreign_group(
+        "e-ap4-log-two", [first, second, foreign]
+    )
+    coordinator._refresh_subentry_index(coordinator.data, skip_repair=True)
+
+    for key in ("plain_group_a", "plain_group_b"):
+        meta = coordinator.get_subentry_metadata(key=key)
+        assert meta is not None and meta.visible_device_ids == (), (
+            "precondition: neither group may be fed by the unassigned-device "
+            f"merge, otherwise the record is suppressed for a different reason: {key}"
+        )
+    owner_meta = coordinator.get_subentry_metadata(key="other_group")
+    assert owner_meta is not None and owner_meta.visible_device_ids == ("device-3",), (
+        "the owning group keeps its own device: this is what stops the merge "
+        "from handing device-3 to anyone else, and the fixture relies on it"
+    )
+
+    lines = _ap4_reinterpretation_lines(caplog)
+    assert len(lines) == 2, (
+        f"one record per reinterpreted subentry, not one per coordinator: got {lines}"
+    )
+    assert all(
+        sum(subentry_id in line for line in lines) == 1
+        for subentry_id in ("id-first", "id-second")
+    ), (
+        "each affected subentry must be named in exactly one record, so that a "
+        f"per-coordinator dedup writing both ids into every line still fails: {lines}"
     )
 
 
