@@ -894,6 +894,50 @@ the helper now expects retries **per platform** as part of the cleanup
 scheduling. Guard the recorded platform set so regressions neither skip
 forwarding nor double-schedule retries.
 
+### Allow-list tests must rule out the unassigned-device merge
+
+A test that pins what a group *may see* through its stored ``visible_device_ids``
+**must** make sure the observed view comes from ``allow_filter`` and not from the
+unassigned-device merge, which hands the tracker group every device no other
+group already **owns or sees**. Both halves are load-bearing: in
+``coordinator/subentry.py::_refresh_subentry_index`` the merge subtracts
+``stored_assigned_ids`` *and* the ``visible_device_ids`` of every group's
+metadata, so a group that stored no key at all sees everything and thereby
+blocks the merge without owning anything. (The narrower ownership-only question
+belongs to the branch that synthesises a missing tracker subentry; see
+``agents/runtime_patterns/AGENTS.md``, which keeps the two apart deliberately.)
+
+Otherwise the test measures the wrong mechanism, and that is not hypothetical:
+``tests/test_coordinator_visibility_availability.py::test_refresh_returns_an_unowned_device_through_the_merge``
+-- named ``test_refresh_recovers_devices_from_empty_visible_list`` before this
+branch, and the old name carried exactly this confusion -- stayed green across
+the reading change of ``ffde3fc6``, because its single device came back through
+the merge either way.
+
+Two shapes satisfy the requirement, and at least one **must** be present:
+
+* Assert on a group whose stored key neither *is* nor *folds onto* a core key.
+  "Not the tracker group" is **not** sufficient, and two measured shapes show
+  why: a group storing ``SERVICE_SUBENTRY_KEY`` has its metadata visible ids
+  forced to ``()`` regardless of any filter, so ``== ()`` there is vacuously
+  true; and a ``tracker``-typed subentry storing ``SERVICE_SUBENTRY_KEY`` is
+  folded onto ``TRACKER_SUBENTRY_KEY`` and *is* fed by the merge. So: not
+  ``TRACKER_SUBENTRY_KEY``, not in ``NON_DEVICE_SUBENTRY_KEYS``, and not a
+  mis-keyed twin that the fold moves onto a core key; or
+* give a second group a **non-empty** stored list holding the device under test,
+  so the merge cannot return it because that group both owns and sees it.
+
+Prefer both when the assertion is about a shape rather than a group: pinning the
+same stored shape on the default group *and* on a group the merge does not feed
+is what separates "unrestricted" from "restricted to nothing"
+(``tests/test_coordinator_subentry_visibility.py::test_ap3_a_stored_shape_decides_what_a_group_may_see``).
+Where a fixture relies on either shape, guard it: assert that the owning group
+still sees only its own device, and that the group under test is really not fed
+by the merge, so a test that accidentally destroys the separation fails instead
+of reporting a false positive
+(``::test_ap4_the_record_is_deduplicated_per_subentry_not_per_coordinator``
+carries both guards).
+
 ## AST extraction helper
 
 The :mod:`tests.helpers.ast_extract` module exposes

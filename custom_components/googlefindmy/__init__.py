@@ -182,6 +182,7 @@ from .const import (
     ISSUE_RESTART_REQUIRED_KEY,
     LEGACY_SERVICE_IDENTIFIER,
     LITERAL_CORE_KEY_OWNER,
+    NON_DEVICE_SUBENTRY_KEYS,
     NON_DEVICE_SUBENTRY_TYPES,
     OPT_ALLOW_HISTORY_FALLBACK,
     OPT_CONTRIBUTOR_MODE,
@@ -1197,6 +1198,88 @@ class ConfigEntrySubEntryManager:
 
         return entry_id, subentry_id, unique_id
 
+    def _payload_preserving_stored_fields(
+        self,
+        target: ConfigSubentry | Any,
+        payload: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Return ``payload`` widened by the stored fields it does not govern.
+
+        The core replaces ``ConfigSubentry.data`` wholesale, so handing it a
+        payload built from a definition alone *deletes* every stored field the
+        definition happens not to carry. A definition is a **partial**
+        description of the desired state: it names the fields it owns and is
+        silent about the rest, and treating that silence as "delete" is the
+        defect this helper closes.
+
+        Measured on 2026-08-06 against the production definitions, the fields
+        lost that way were exactly two, and both have owners elsewhere:
+        ``visible_device_ids`` (the device-to-subentry assignment, written by
+        the options flow and read by the coordinator) and ``feature_flags``
+        (written by ``_build_subentry_payload`` in ``config_flow.py`` and read
+        by ``SubentryOperations``). Neither is derivable from a definition, so
+        neither can be repaired by adding it to one.
+
+        The preservation is deliberately **not** an allow-list of named keys:
+        an allow-list has to be extended whenever a writer stores a new field,
+        and forgetting to extend it is precisely the silent-deletion failure
+        this fixes. The cost is named rather than hidden, and it currently has
+        no owner: a field a definition wants to *remove* can no longer be
+        removed by omission and would have to be written explicitly, and no
+        path in this integration removes a stored subentry key today. The
+        migration path is **not** that owner, although an earlier version of
+        this sentence named it: ``_migrate_entry_identifier_namespaces``
+        normalises ``visible_device_ids`` and ``OPT_IGNORED_DEVICES`` and
+        removes no key at all. Naming a place that cannot do the work would
+        read as tracked while nothing tracks it, so the gap is stated instead:
+        a deletion that must happen belongs in a path that deletes on purpose,
+        and that path has still to be written.
+
+        ``target`` is the subentry the payload is about to be written to, and
+        the argument exists because that is not always the subentry the loop
+        started from: the unique-id adoption path writes the payload onto a
+        *different* owner. Computing the merge once per loop iteration would
+        graft one subentry's stored fields onto another.
+
+        One field is exempt, and the exemption is an invariant rather than a
+        taste: a non-device group must not hold a device assignment at all. A
+        ``visible_device_ids`` stored on one is therefore legacy residue from
+        the flow that used to offer it as a target, and clearing it on the next
+        sync is the repair that keeps a wrong assignment from becoming
+        permanent -- measured by
+        ``test_service_subentry_visibility_is_cleared_by_the_setup_roundtrip``.
+        Preserving it would resurrect state the integration forbids, which is
+        the one thing a preservation must not do.
+
+        "Non-device" is decided on **both** axes, mirroring
+        ``config_flow._accepts_device_assignment``, which refuses such a
+        target: the group key first (``NON_DEVICE_SUBENTRY_KEYS``) and the
+        subentry type second (``NON_DEVICE_SUBENTRY_TYPES``). Reading only the
+        type would let a subentry that carries no usable type slip past while
+        being managed under a non-device key, and the key is the axis that
+        predicate reads first.
+        """
+
+        merged = dict(payload)
+        stored = getattr(target, "data", None)
+        if not isinstance(stored, Mapping):
+            return merged
+
+        skip: set[str] = set()
+        group_key = merged.get(self._key_field)
+        if (
+            getattr(target, "subentry_type", None) in NON_DEVICE_SUBENTRY_TYPES
+            or group_key in NON_DEVICE_SUBENTRY_KEYS
+        ):
+            skip.add("visible_device_ids")
+
+        for stored_key, stored_value in stored.items():
+            if stored_key in skip:
+                continue
+            if stored_key not in merged:
+                merged[stored_key] = stored_value
+        return merged
+
     @staticmethod
     def _is_subentry_like(candidate: Any) -> TypeGuard[ConfigSubentry]:
         """Return ``True`` when ``candidate`` exposes a subentry-like interface."""
@@ -1848,10 +1931,13 @@ class ConfigEntrySubEntryManager:
             self._pop_managed(old_key)
             self._cleanup.pop(old_key, None)
 
+        # Against ``owner``, not against the subentry the caller started from:
+        # this path adopts a *different* subentry, so the fields to preserve
+        # are the ones stored on the adoptee.
         update_result = self._hass.config_entries.async_update_subentry(
             self._entry,
             owner,
-            data=payload,
+            data=self._payload_preserving_stored_fields(owner, payload),
             title=definition.title,
         )
         resolved = await self._await_subentry_result(update_result)
@@ -2419,7 +2505,14 @@ class ConfigEntrySubEntryManager:
                     break
                 try:
                     update_kwargs: dict[str, Any] = {
-                        "data": payload,
+                        # ``existing`` and not ``payload`` alone: the core
+                        # replaces ``data`` wholesale, so a definition-built
+                        # payload would delete every stored field the
+                        # definition does not carry (measured: the device
+                        # assignment and the feature flags).
+                        "data": self._payload_preserving_stored_fields(
+                            existing, payload
+                        ),
                         "title": definition.title,
                         "unique_id": unique_id,
                     }

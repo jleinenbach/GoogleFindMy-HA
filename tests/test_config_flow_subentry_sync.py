@@ -1989,3 +1989,326 @@ async def test_two_folded_twins_resolve_deterministically() -> None:
     assert first == second == "aaa", (
         "the folded winner is the lowest subentry_id, whatever the insert order"
     )
+
+
+# --- AP5: the flow must not delete what it does not carry -------------------
+
+
+def _ap5_group(
+    subentry_id: str,
+    group_key: str,
+    subentry_type: str,
+    *,
+    visible: Any,
+) -> ConfigSubentry:
+    """A group whose stored allow-list shape is chosen by the caller.
+
+    Not :func:`_legacy_twin`, which drops an empty list (``if
+    visible_device_ids:``) and so cannot express the very shape these tests are
+    about: present and empty.
+    """
+
+    data: dict[str, Any] = {"group_key": group_key, "feature_flags": {}}
+    if visible is not None:
+        data["visible_device_ids"] = visible
+    return ConfigSubentry(
+        data=MappingProxyType(data),
+        subentry_type=subentry_type,
+        title=f"{subentry_type}:{group_key}",
+        unique_id=f"entry-1-{group_key}",
+        subentry_id=subentry_id,
+    )
+
+
+@pytest.mark.parametrize(
+    ("stored_visible", "label"),
+    [(["svc-1"], "E3"), ([], "E1"), (["svc-bad:"], "E4")],
+    ids=["E3-listed", "E1-empty", "E4-unusable"],
+)
+@pytest.mark.parametrize("path", ["migration", "reconfigure"])
+@pytest.mark.asyncio
+async def test_ap5_the_service_branch_still_clears_a_legacy_assignment(
+    stored_visible: list[str], label: str, path: str
+) -> None:
+    """The service branch must keep deleting, and this pins it as intended.
+
+    This branch was first raised as the mirror of the setup-path deletion: it
+    builds its ``service_payload`` without ``visible_device_ids`` and the core
+    replaces ``data`` wholesale, so the service group's stored list disappears
+    on every run. Measured against the invariant, that is the repair rather
+    than the defect. The service and hub groups are non-device groups
+    (``_NON_DEVICE_SUBENTRY_KEYS``) and ``_accepts_device_assignment`` refuses
+    them as a target, so no *new* assignment can be created there and
+    everything the deletion removes is residue from the flow that used to offer
+    such a target. ``test_service_subentry_visibility_is_cleared_by_the_setup_
+    roundtrip`` measures the same repair on the manager side and was the test
+    that caught the attempt to "fix" this branch.
+
+    Written as its own test rather than left to that one: the two live in
+    different modules and reach the deletion by different routes, and the
+    manager-side test would stay green while this branch grew a carry-over.
+
+    All three stored shapes are covered because the branch must not become
+    shape-sensitive; ``E1`` in particular must not be read as "nothing to
+    clear" and left in place.
+    """
+
+    service = _ap5_group(
+        "id-s", SERVICE_SUBENTRY_KEY, SUBENTRY_TYPE_SERVICE, visible=stored_visible
+    )
+    tracker = _ap5_group(
+        "id-t",
+        TRACKER_SUBENTRY_KEY,
+        SUBENTRY_TYPE_TRACKER,
+        visible=["dev-outside-probe"],
+    )
+    entry = _entry_with_subentries(service, tracker)
+
+    flow = _build_flow(entry)
+    await _run_sync(flow, entry, _context_map_for(flow, entry, path))
+
+    store = _subentry_store(entry)
+    assert "visible_device_ids" not in dict(store["id-s"].data), (
+        f"{label}: a non-device group must not keep a device assignment; "
+        "leaving it there makes a wrong legacy assignment permanent"
+    )
+    assert _stored_visible(store["id-t"]) == ("dev-outside-probe",), (
+        "the tracker branch is the device group and keeps its list -- the "
+        "asymmetry between the two branches is deliberate. The id sits "
+        "outside the probe set so this cannot pass by refill"
+    )
+
+
+@pytest.mark.parametrize("path", ["migration", "reconfigure"])
+@pytest.mark.asyncio
+async def test_ap5_an_emptied_tracker_list_is_not_refilled_by_the_flow(
+    path: str,
+) -> None:
+    """The tracker branch was affected too, in a shape the plan had excluded.
+
+    Measured on 2026-08-06: a tracker group whose stored list is *present and
+    empty* -- the state the user reaches by pulling its last device out through
+    this very flow -- was handled by ``if not tracker_visible and
+    self._available_devices``, which cannot tell "no key stored" from "key
+    stored, empty" and refilled the group with every probed device. With an
+    empty probe set the key vanished outright instead.
+
+    Both outcomes contradict the target semantics, in which a present empty
+    list means "this group shows nothing". Killing mutation: drop the
+    ``not _stores_visible(tracker_subentry)`` conjunct.
+
+    **What this pins is the stored shape after this writer, not what the group
+    ends up seeing.** For the tracker group those are not the same thing: the
+    coordinator's unassigned-device merge hands it every device no other group
+    owns and persists that as its new stored list, so the empty list survives
+    this flow and not the next refresh (``U-35`` in
+    ``agents/config_flow/AGENTS.md``). The assertion is still worth making --
+    a writer that undoes the user's assignment on the spot is a defect on its
+    own -- but reading it as an end-to-end guarantee would be wrong.
+    """
+
+    service = _ap5_group(
+        "id-s", SERVICE_SUBENTRY_KEY, SUBENTRY_TYPE_SERVICE, visible=None
+    )
+    tracker = _ap5_group(
+        "id-t", TRACKER_SUBENTRY_KEY, SUBENTRY_TYPE_TRACKER, visible=[]
+    )
+    entry = _entry_with_subentries(service, tracker)
+
+    flow = _build_flow(entry)
+    assert flow._available_devices, (  # type: ignore[attr-defined]
+        "the probe set must be non-empty, or the refill branch is not reached "
+        "and this test would pass without exercising it"
+    )
+    await _run_sync(flow, entry, _context_map_for(flow, entry, path))
+
+    tracker_after = dict(_subentry_store(entry)["id-t"].data)
+    assert "visible_device_ids" in tracker_after, (
+        "the emptied list must survive rather than be deleted"
+    )
+    assert tuple(tracker_after["visible_device_ids"]) == (), (
+        "an explicitly emptied tracker group must leave this writer empty; "
+        "refilling it from the probe undoes the assignment the user just made"
+    )
+
+
+@pytest.mark.parametrize("path", ["migration", "reconfigure"])
+@pytest.mark.asyncio
+async def test_ap7_the_carry_over_keeps_the_stored_container_type(
+    path: str,
+) -> None:
+    """Carrying a list back as a tuple would make every run write.
+
+    The core writes only when ``subentry.data != data``, and a ``list`` is
+    never equal to a ``tuple`` holding the same items. After a restart the
+    stored value comes back from JSON as a ``list``, so a carry-over that
+    converted the shape would mark the entry as changed on every single sync,
+    save it and fire the update listeners -- for a group nothing changed
+    about. The value is the same either way, which is exactly why this needs
+    an assertion of its own rather than an equality check.
+
+    Killing mutation: ``payload["visible_device_ids"] = tuple(raw_visible)``
+    in ``_carry_over_visible``.
+    """
+
+    service = _ap5_group(
+        "id-s", SERVICE_SUBENTRY_KEY, SUBENTRY_TYPE_SERVICE, visible=None
+    )
+    tracker = _ap5_group(
+        "id-t", TRACKER_SUBENTRY_KEY, SUBENTRY_TYPE_TRACKER, visible=[]
+    )
+    entry = _entry_with_subentries(service, tracker)
+    before = _subentry_store(entry)["id-t"].data["visible_device_ids"]
+    assert isinstance(before, list), (
+        "the fixture has to start from the shape JSON hands back, or this "
+        "test measures nothing"
+    )
+
+    flow = _build_flow(entry)
+    await _run_sync(flow, entry, _context_map_for(flow, entry, path))
+
+    after = _subentry_store(entry)["id-t"].data["visible_device_ids"]
+    assert isinstance(after, list), (
+        "the carry-over must hand back the container type it found; a tuple "
+        "compares unequal to the stored list and turns every sync into a write"
+    )
+
+
+@pytest.mark.parametrize("path", ["migration", "reconfigure"])
+@pytest.mark.asyncio
+async def test_ap5_a_tracker_that_never_stored_a_list_is_still_filled(
+    path: str,
+) -> None:
+    """Negative control for the refill narrowing: the refill itself survives.
+
+    The initial config-flow sync is the only writer that ever *adds* to the
+    tracker allow-list, so narrowing its condition to "no key stored" is only
+    correct if that case still fills. Without this control the narrowing could
+    be tightened to a no-op and
+    ``test_ap5_an_emptied_tracker_list_is_not_refilled_by_the_flow`` would stay
+    green. Named rather than called "the test above" because a test inserted
+    between the two would silently retarget that phrase, which is what
+    happened once already.
+    """
+
+    service = _ap5_group(
+        "id-s", SERVICE_SUBENTRY_KEY, SUBENTRY_TYPE_SERVICE, visible=None
+    )
+    tracker = _ap5_group(
+        "id-t", TRACKER_SUBENTRY_KEY, SUBENTRY_TYPE_TRACKER, visible=None
+    )
+    entry = _entry_with_subentries(service, tracker)
+
+    flow = _build_flow(entry)
+    await _run_sync(flow, entry, _context_map_for(flow, entry, path))
+
+    assert _stored_visible(_subentry_store(entry)["id-t"]) == ("dev-1",), (
+        "a group that never stored the key was never assigned anything, so "
+        "the probe set is the right answer for it"
+    )
+
+
+@pytest.mark.asyncio
+async def test_ap5_adoption_preserves_the_adoptees_own_stored_fields(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The preservation must read the subentry it writes to, not the loop's.
+
+    ``async_sync`` computes one payload per desired key and then, on a repeated
+    unique-id collision, hands it to ``_async_adopt_existing_unique_id``, which
+    writes it onto a **different** subentry -- the one that already owns the
+    unique id. A preservation computed once from the subentry the loop started
+    with would graft that subentry's stored fields onto the adoptee.
+
+    The two subentries therefore store *different* values for the same fields.
+    Asserting only "the adoptee kept something" would pass under the grafting
+    bug as well, because both carry a value; only distinct values tell "kept
+    its own" apart from "received the other's".
+
+    Killing mutation: pass ``payload`` straight through in
+    ``_async_adopt_existing_unique_id`` instead of widening it against
+    ``owner``.
+    """
+
+    entry = make_config_entry(
+        entry_id="entry-1",
+        title="Find My",
+        subentries={},
+        runtime_data=SimpleNamespace(),
+    )
+    shared_unique_id = f"{entry.entry_id}-{TRACKER_SUBENTRY_KEY}"
+    owner = ConfigSubentry(
+        data=MappingProxyType(
+            {
+                "group_key": "tracker-legacy",
+                "visible_device_ids": ("owner-dev",),
+                "feature_flags": {"owner": True},
+            }
+        ),
+        subentry_type=SUBENTRY_TYPE_TRACKER,
+        title="Legacy tracker",
+        unique_id=shared_unique_id,
+        subentry_id=_stable_subentry_id(entry.entry_id, "tracker-owner"),
+    )
+    starter = ConfigSubentry(
+        data=MappingProxyType(
+            {
+                "group_key": TRACKER_SUBENTRY_KEY,
+                "visible_device_ids": ("starter-dev",),
+                "feature_flags": {"starter": True},
+            }
+        ),
+        subentry_type=SUBENTRY_TYPE_TRACKER,
+        title="Tracker placeholder",
+        unique_id=f"{shared_unique_id}-old",
+        subentry_id=_stable_subentry_id(entry.entry_id, "tracker-starter"),
+    )
+    entry.subentries[owner.subentry_id] = owner
+    entry.subentries[starter.subentry_id] = starter
+
+    hass = _HassStub(entry)
+    manager = ConfigEntrySubEntryManager(hass, entry)
+    definition = ConfigEntrySubentryDefinition(
+        key=TRACKER_SUBENTRY_KEY,
+        title="Google Find My devices",
+        data={"features": ["device_tracker"]},
+        subentry_type=SUBENTRY_TYPE_TRACKER,
+        unique_id=shared_unique_id,
+    )
+
+    adoption_calls: list[str] = []
+    original_adopt = ConfigEntrySubEntryManager._async_adopt_existing_unique_id
+
+    async def _instrumented_adopt(
+        self: ConfigEntrySubEntryManager,
+        key: str,
+        adopt_definition: ConfigEntrySubentryDefinition,
+        unique_id: str,
+        payload: dict[str, Any],
+    ) -> ConfigSubentry:
+        adoption_calls.append(unique_id)
+        return await original_adopt(self, key, adopt_definition, unique_id, payload)
+
+    monkeypatch.setattr(
+        ConfigEntrySubEntryManager,
+        "_async_adopt_existing_unique_id",
+        _instrumented_adopt,
+    )
+
+    await manager.async_sync([definition])
+
+    assert adoption_calls, (
+        "the adoption path must actually be reached, or this test asserts "
+        "nothing about it"
+    )
+    written = hass.config_entries.updated[-1]["data"]
+    assert tuple(written["visible_device_ids"]) == ("owner-dev",), (
+        "the adoptee keeps its own assignment; 'starter-dev' here would mean "
+        "the loop's subentry was grafted onto it"
+    )
+    assert written["feature_flags"] == {"owner": True}, (
+        "and its own flags, for the same reason"
+    )
+    assert written["features"] == ["device_tracker"], (
+        "while the definition still governs what it governs"
+    )

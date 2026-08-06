@@ -1278,3 +1278,260 @@ def test_ap4_the_reverse_index_drops_a_displaced_subentry(reverse: bool) -> None
     assert manager._managed_key_for_subentry_id("id-a") == TRACKER_SUBENTRY_KEY, (
         "and the winner keeps its own entry"
     )
+
+
+# --- AP5: the setup sync must not delete what no definition governs ---------
+
+
+def _ap5_subentry(
+    subentry_id: str,
+    group_key: str,
+    subentry_type: str,
+    unique_id: str,
+    *,
+    stored: Mapping[str, Any],
+) -> Any:
+    """A subentry carrying fields beyond the ones a definition ever names.
+
+    Built on the same real ``ConfigSubentry`` as :func:`_ap1_subentry` and for
+    the same reason: the core replaces ``data`` wholesale, and only the frozen
+    dataclass with its ``MappingProxyType`` makes that replacement observable
+    the way production performs it.
+    """
+
+    assert _RealConfigSubentry is not None, "core config_entries not importable"
+    data: dict[str, Any] = {"group_key": group_key}
+    data.update(stored)
+    return _RealConfigSubentry(
+        data=MappingProxyType(data),
+        subentry_type=subentry_type,
+        title=f"{subentry_type}:{group_key}",
+        unique_id=unique_id,
+        subentry_id=subentry_id,
+    )
+
+
+def _ap5_production_definitions(entry_id: str) -> list[ConfigEntrySubentryDefinition]:
+    """The definitions ``async_setup_entry`` really passes.
+
+    Not :func:`_ap1_core_definitions`, whose ``data`` is empty: an empty
+    definition cannot show that the *governed* fields still win over the
+    preserved ones, and that half of the behaviour is what keeps the
+    preservation from freezing the subentry. The four keys mirror the two
+    production builders (``__init__.py`` setup step 2 and
+    ``coordinator/subentry.py`` core repair), which carry the same set.
+    """
+
+    return [
+        ConfigEntrySubentryDefinition(
+            key=TRACKER_SUBENTRY_KEY,
+            title="Google Find My devices",
+            data={
+                "features": ["device_tracker"],
+                "fcm_push_enabled": False,
+                "has_google_home_filter": True,
+                "entry_title": "Find My",
+            },
+            subentry_type=SUBENTRY_TYPE_TRACKER,
+            unique_id=f"{entry_id}-{TRACKER_SUBENTRY_KEY}",
+        ),
+        ConfigEntrySubentryDefinition(
+            key=SERVICE_SUBENTRY_KEY,
+            title="Google Find Hub Service",
+            data={
+                "features": ["sensor"],
+                "fcm_push_enabled": False,
+                "has_google_home_filter": True,
+                "entry_title": "Find My",
+            },
+            subentry_type=SUBENTRY_TYPE_SERVICE,
+            unique_id=f"{entry_id}-{SERVICE_SUBENTRY_KEY}",
+        ),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("stored_visible", "label"),
+    [
+        (("dev-1", "dev-2"), "E3"),
+        ((), "E1"),
+        (("dev-bad:",), "E4"),
+    ],
+    ids=["E3-listed", "E1-empty", "E4-unusable"],
+)
+@pytest.mark.asyncio
+async def test_ap5_a_stored_allow_list_survives_the_setup_sync(
+    stored_visible: tuple[str, ...], label: str
+) -> None:
+    """F-7: ``async_sync`` must not delete the group's device assignment.
+
+    The setup sync builds its payload from the definition alone and the core
+    replaces ``ConfigSubentry.data`` wholesale, so every stored field the
+    definition does not name used to be deleted -- at *every* start, before the
+    first refresh.
+
+    Carried as the setup-path half of the visibility-assignment bookkeeping
+    remainders; the identifier lives in the register of
+    ``agents/config_flow/AGENTS.md`` rather than here, so this docstring names
+    the behaviour instead of a code the reader would have to look up.
+
+    All three shapes that can be stored are asserted, not just the listed one,
+    because they mean different things under the target semantics and the
+    failure collapses them: a deleted key reads as "never assigned" and
+    therefore as unrestricted, so an empty list ("this group shows nothing")
+    would come back as "this group shows everything". Asserting only the
+    listed shape would leave exactly the fail-open direction untested.
+
+    Verbatim rather than normalised is asserted on purpose for ``E4``: the
+    reinterpretation report reads the raw stored value, and a preservation
+    that quietly normalised it would erase its own evidence.
+
+    Killing mutation: drop ``_payload_preserving_stored_fields`` from the
+    update branch of ``async_sync`` and pass ``payload`` straight through.
+    """
+
+    tracker = _ap5_subentry(
+        "id-t",
+        TRACKER_SUBENTRY_KEY,
+        SUBENTRY_TYPE_TRACKER,
+        "e1-core_tracking",
+        stored={
+            "visible_device_ids": stored_visible,
+            "feature_flags": {"probe": True},
+            # A *governed* field, seeded with a stale value on purpose. Without
+            # it the "the definition still wins" assertion below is vacuously
+            # true: reversing the merge precedence leaves it green when the
+            # stored mapping simply has no ``features`` key to win with.
+            "features": ["stale_platform"],
+        },
+    )
+    entry, _recorder, manager = _ap5_setup_with(tracker)
+
+    await manager.async_sync(_ap5_production_definitions("e1"))
+
+    stored_after = dict(entry.subentries["id-t"].data)
+    assert "visible_device_ids" in stored_after, (
+        f"{label}: the assignment key must survive the sync; losing it reads as "
+        "'never assigned' and therefore as unrestricted"
+    )
+    assert tuple(stored_after["visible_device_ids"]) == stored_visible, (
+        f"{label}: the stored value is preserved verbatim, not normalised"
+    )
+    assert stored_after.get("feature_flags") == {"probe": True}, (
+        "the same deletion took the feature flags with it; the fix is the "
+        "field-agnostic one, so this is asserted rather than assumed"
+    )
+    assert stored_after["features"] == ["device_tracker"], (
+        "a field the definition *does* govern still wins -- preservation must "
+        "not freeze the subentry against its own definition"
+    )
+
+    service_after = dict(entry.subentries["id-s"].data)
+    assert "visible_device_ids" not in service_after, (
+        "the exemption: a non-device group must not have its legacy device "
+        "assignment preserved, because clearing it is the repair that keeps a "
+        "wrong assignment from becoming permanent"
+    )
+    assert service_after.get("feature_flags") == {"svc": 1}, (
+        "the exemption is one field wide, not a blanket opt-out for the "
+        "service group -- its other stored fields are preserved like anyone's"
+    )
+
+
+def _ap5_setup_with(*subentries: Any) -> tuple[Any, Any, Any]:
+    """``_ap1_setup`` with both core groups present.
+
+    ``async_sync`` sweeps managed subentries that fall out of ``desired``, so a
+    fixture carrying only one core group would exercise the create branch for
+    the other and cloud what the update branch does.
+    """
+
+    service = _ap5_subentry(
+        "id-s",
+        SERVICE_SUBENTRY_KEY,
+        SUBENTRY_TYPE_SERVICE,
+        "e1-service",
+        # Seeded with a legacy assignment on purpose: the preservation must
+        # *not* reach it, and an empty service fixture could not tell a
+        # working exemption from a missing one.
+        stored={"visible_device_ids": ("dev-legacy",), "feature_flags": {"svc": 1}},
+    )
+    return _ap1_setup("e1", [*subentries, service])
+
+
+@pytest.mark.parametrize(
+    ("group_key", "subentry_type", "axis"),
+    [
+        (SERVICE_SUBENTRY_KEY, "a_type_this_build_does_not_know", "key"),
+        (TRACKER_SUBENTRY_KEY, SUBENTRY_TYPE_HUB, "type"),
+    ],
+    ids=["key-axis", "type-axis"],
+)
+@pytest.mark.asyncio
+async def test_ap5_the_exemption_reads_both_non_device_axes(
+    group_key: str, subentry_type: str, axis: str
+) -> None:
+    """The non-device judgement has two axes, and each catches its own shape.
+
+    ``config_flow._accepts_device_assignment`` reads the group key first
+    (``NON_DEVICE_SUBENTRY_KEYS``) and the subentry type second
+    (``NON_DEVICE_SUBENTRY_TYPES``). The preservation mirrors both, and both
+    parameters here are reachable shapes that the *other* axis alone would miss
+    -- measured on 2026-08-06 rather than argued:
+
+    * key axis: a subentry carrying a type this build does not know (an older
+      or newer build, a hand-edited store) storing the service key **is**
+      managed under ``service``, and its type classifies nothing. A ``tracker``
+      storing that key is *not* a counter-example: the fold moves it to the
+      tracker key before it gets here.
+    * type axis: a ``hub`` storing the tracker key **is** managed under
+      ``core_tracking`` -- ``_refresh_from_entry`` canonicalises ``service``
+      and ``tracker`` by type but leaves ``hub`` on its stored key -- so the
+      key says "device group" and only the type says otherwise. That shape is
+      the carried remainder ``B10``, not a hypothetical.
+
+    Killing mutations: drop either disjunct; each kills exactly its own
+    parameter and leaves the other green, which is what makes the two axes
+    non-redundant rather than belt-and-braces.
+    """
+
+    odd = _ap5_subentry(
+        "id-odd",
+        group_key,
+        subentry_type,
+        f"e1-{group_key}",
+        stored={"visible_device_ids": ("legacy-dev",), "feature_flags": {"odd": 1}},
+    )
+    companion_key = (
+        TRACKER_SUBENTRY_KEY
+        if group_key == SERVICE_SUBENTRY_KEY
+        else SERVICE_SUBENTRY_KEY
+    )
+    companion_type = (
+        SUBENTRY_TYPE_TRACKER
+        if companion_key == TRACKER_SUBENTRY_KEY
+        else SUBENTRY_TYPE_SERVICE
+    )
+    companion = _ap5_subentry(
+        "id-companion",
+        companion_key,
+        companion_type,
+        f"e1-{companion_key}",
+        stored={},
+    )
+    entry, _recorder, manager = _ap1_setup("e1", [odd, companion])
+    assert manager.get(group_key) is odd, (
+        f"precondition ({axis} axis): the subentry must really be managed under "
+        f"'{group_key}', or this parameter asserts nothing about that axis"
+    )
+
+    await manager.async_sync(_ap5_production_definitions("e1"))
+
+    stored_after = dict(entry.subentries["id-odd"].data)
+    assert "visible_device_ids" not in stored_after, (
+        f"the {axis} axis classifies this as a non-device group, so its legacy "
+        "assignment is cleared"
+    )
+    assert stored_after.get("feature_flags") == {"odd": 1}, (
+        "and the exemption stays one field wide on either axis"
+    )
