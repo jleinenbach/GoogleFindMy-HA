@@ -2069,7 +2069,17 @@ class ConfigEntrySubEntryManager:
                 #
                 # Fail-safe on unknown input: an unknown group key, a missing
                 # one and a missing ``subentry_type`` all yield 1, so every
-                # candidate ties and the previous order decides.
+                # candidate ties and the previous order decides. A fourth shape
+                # ties the same way and is the common one rather than the exotic
+                # one, so listing only the three unknowns understated it: a
+                # *known* core key held by a type that does not own it also
+                # yields 1. Two ``hub``s sharing an identifier are the reachable
+                # case -- ``LITERAL_CORE_KEY_OWNER`` maps no key to ``hub`` at
+                # all -- so they tie on this field, the guard below spares
+                # neither (their types match), and load order still decides.
+                # That shape is unchanged from before this field existed,
+                # measured in both directions, and is carried as ``B24`` rather
+                # than fixed.
                 #
                 # An earlier version of this paragraph went on to say the field
                 # "only ever breaks a tie, never adds or drops a removal" inside
@@ -2096,11 +2106,29 @@ class ConfigEntrySubEntryManager:
                 # through the group axis, which is a pre-existing defect of its
                 # own (``B20``). The exhaustive three-subentry sweep behind the
                 # "never newly removes a canonically keyed owner" claim was run
-                # against the rank-only stage and has not been repeated for the
-                # guard; the claim is therefore carried as unverified for the
-                # current stage rather than dropped. What holds either way: the
-                # count is not invariant, and a reader on a removal path should
-                # not be told that it is.
+                # against the rank-only stage; it has since been repeated
+                # against this stage, so the claim is no longer carried as
+                # unverified. Over all 19 683 three-subentry shapes, comparing
+                # ``c835d6b6`` against the guard: 6 978 shapes remove *less*,
+                # 12 remove more in total, and 548 remove at least one id the
+                # earlier stage left standing -- of which **0** carry a type
+                # that owns its stored key literally. The claim holds; what the
+                # 548 are is the other half of the trade and is named rather
+                # than buried: a same-typed loser on a *foreign* key inside a
+                # shared-identifier bucket used to survive in one of the two
+                # load orders and now loses in both, because field 3 decides
+                # where load order used to. That is an ordering the group axis
+                # already applies to every same-typed pair it sees, but on the
+                # ``unique_id`` axis the loser can be a legitimate separate
+                # group (``agents/config_flow/AGENTS.md``: several tracker
+                # groups with distinct keys are a supported shape). Carried as
+                # ``B23`` rather than fixed here: closing it means guarding on
+                # the full ``(group_key, subentry_type)`` identity, which makes
+                # this axis a strict subset of the group axis and therefore
+                # switches identifier-collision cleanup off, a decision with
+                # its own deferred-rename trade that belongs in the plan.
+                # What holds either way: the count is not invariant, and a
+                # reader on a removal path should not be told that it is.
                 stored_key = stored_group_keys.get(id(candidate))
                 literal_owner = (
                     LITERAL_CORE_KEY_OWNER.get(stored_key)
@@ -2227,7 +2255,11 @@ class ConfigEntrySubEntryManager:
             # as one that was cleaned up. The group loop below keeps setting its
             # descriptor unconditionally, and that asymmetry is intended: its
             # grouping key carries the type, so a multi-candidate bucket there
-            # is always same-typed and always contributes.
+            # is always same-typed. It is *not* guaranteed to contribute -- the
+            # same ``str``-identifier proviso named above applies there too --
+            # and an earlier draft of this sentence said "always contributes",
+            # which would have made the descriptor the reliable half of a pair
+            # whose other half it is not.
             if removed_here:
                 duplicate_descriptors.add(f"unique_id={unique_id}")
 

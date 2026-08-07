@@ -11,9 +11,14 @@ properties of today's tree:
   no writer hands the sweep a removal candidate; and
 * all three production callers of ``async_sync`` pass exactly the two core keys
   as ``desired``, so ``desired`` is the core key set rather than an arbitrary
-  one. Two build the definitions inline; the options-flow repair delegates to
+  one. **One** builds the definitions inline (``async_setup_entry``); the other
+  two -- the coordinator's ``_repair`` and the options-flow repair -- delegate to
   ``_build_core_subentry_definitions``, which returns both core definitions or
-  an empty list, and its caller returns early on empty.
+  an empty list, and both return early on empty. An earlier draft of this
+  sentence had the split the other way round ("two build inline"), and the
+  miscount was load-bearing rather than cosmetic: it is exactly the reason the
+  caller-to-keys edge was written off as unreadable for all three, when it is
+  readable for the one that builds inline. Observation 3c reads it there.
 
 Both are latent premises: nothing in the code enforces either, and a fourth pair
 or a caller with a narrower ``desired`` would silently turn a group into a
@@ -47,7 +52,7 @@ earlier draft of this docstring admitted:
 * the repair path in ``config_flow.py`` calls
   ``_async_create_subentry(..., subentry_type=...)`` without passing the group
   key as an argument. **Neither** half is read at that call site: swapping its
-  ``subentry_type`` argument leaves all four observations unchanged. Its types
+  ``subentry_type`` argument leaves all five observations unchanged. Its types
   are covered only indirectly, through the handler-class pairs, and its keys
   only through behaviour tests.
 * ``ConfigEntrySubEntryManager.update_visible_device_ids`` writes the group key
@@ -141,15 +146,53 @@ FROZEN_SYNC_CALLERS: frozenset[tuple[str, str]] = frozenset(
 # package. Together with 3a this brackets ``desired`` from both sides: 3a
 # catches a new consumer, 3b a new or vanished key.
 #
-# Why two observations instead of one mapping caller to keys: the repair caller
-# receives its definitions as a parameter built in a *different* function
-# (``_build_core_subentry_definitions``), so the caller-to-keys edge is not
-# statically readable without dataflow. An earlier draft of this guard tried to
-# read it from the enclosing function body and simply lost that caller. The
-# split is narrower than the ideal and says so, rather than reporting a complete
-# census it cannot deliver.
+# Why a package-wide union rather than a caller-to-keys mapping: the repair
+# caller receives its definitions as a parameter built in a *different* function
+# (``_build_core_subentry_definitions``), and the options-flow repair reaches the
+# method through ``getattr(...)``, so for those two the edge is not statically
+# readable without dataflow. An earlier draft of this guard tried to read it from
+# the enclosing function body and simply lost that caller.
+#
+# That reason covers two of the three callers, and an earlier version of this
+# comment let it stand for all three. It does not: ``async_setup_entry`` builds
+# its definition list *inside* the ``async_sync(...)`` call, where the edge is
+# fully readable. Observation 3c below reads exactly that caller, so a narrowing
+# there -- dropping the service definition while leaving the caller and the
+# package-wide key set intact -- is caught rather than passed by both brackets.
+# The two callers whose edge stays unreadable are recorded as ``_NOT_INLINE``
+# rather than dropped, which is the same marker-not-silence rule the collectors
+# below follow.
 FROZEN_DEFINITION_KEYS: frozenset[str] = frozenset(
     {"TRACKER_SUBENTRY_KEY", "SERVICE_SUBENTRY_KEY"}
+)
+
+# Observation 3c: for every ``async_sync`` call site whose definition list is
+# built inline, the ``key=`` names it passes. This is the caller-to-keys edge
+# where it exists; the tuple is ``(file, innermost function, keys)``.
+#
+# ``_NOT_INLINE`` sits here rather than with the other markers below because a
+# frozen constant is evaluated at import time and cannot read a name defined
+# further down. It belongs to the same family and follows the same rule: an
+# edge that exists but cannot be read is reported, not dropped.
+_NOT_INLINE = "<not inline>"
+FROZEN_INLINE_SYNC_DEFINITIONS: frozenset[tuple[str, str, frozenset[str]]] = frozenset(
+    {
+        (
+            "custom_components/googlefindmy/__init__.py",
+            "async_setup_entry",
+            frozenset({"TRACKER_SUBENTRY_KEY", "SERVICE_SUBENTRY_KEY"}),
+        ),
+        (
+            "custom_components/googlefindmy/coordinator/subentry.py",
+            "_repair",
+            frozenset({_NOT_INLINE}),
+        ),
+        (
+            "custom_components/googlefindmy/config_flow.py",
+            "_async_trigger_core_subentry_repair",
+            frozenset({_NOT_INLINE}),
+        ),
+    }
 )
 
 _DEFINITION_FACTORY = "ConfigEntrySubentryDefinition"
@@ -488,6 +531,120 @@ def _observed_sync_callers() -> set[tuple[str, str]]:
     return callers
 
 
+def _observed_inline_sync_definition_keys() -> set[tuple[str, str, frozenset[str]]]:
+    """The caller-to-keys edge for every ``async_sync`` site that carries it.
+
+    ``_observed_definition_keys`` unions the keys package-wide and therefore
+    cannot see a caller that stops passing one while another function still
+    builds it. That gap is real for exactly one call site: ``async_setup_entry``
+    constructs its definition list inside the call, so removing the service
+    definition there would leave both other observations green while ``desired``
+    shrinks to tracker-only and the stale sweep hands the service subentry and
+    its registry bindings to ``async_remove``. External review found this; the
+    comment above ``FROZEN_DEFINITION_KEYS`` had generalised the repair caller's
+    unreadable edge to all three.
+
+    Where the list is not a literal -- the repair caller passes a parameter, the
+    options flow reaches the method through ``getattr`` and never shows this
+    matcher its arguments -- the entry is ``_NOT_INLINE``. That is a statement
+    about readability, not about the keys: freezing it pins that the edge is
+    still unreadable, so a caller that *becomes* inline shows up as drift and
+    gets its keys recorded rather than sliding in unobserved.
+
+    One limit the sibling observations share and this one inherits: the tokens
+    are constant *names*, and the name-to-value edge is covered only for
+    module-level bindings in ``const.py`` (observation 2). An import alias or a
+    rebinding of a key constant at the call site narrows ``desired`` with all
+    five observations green.
+    """
+
+    observed: set[tuple[str, str, frozenset[str]]] = set()
+    for path in sorted(PACKAGE.rglob("*.py")):
+        rel = path.relative_to(REPO_ROOT).as_posix()
+        observed |= _inline_keys_of(_parse(path), rel)
+    return observed
+
+
+def _inline_keys_of(
+    tree: ast.Module, rel: str = "<src>"
+) -> set[tuple[str, str, frozenset[str]]]:
+    """One parsed module's ``async_sync`` call sites and their readable keys.
+
+    Split from the walk above so the marker policy can be exercised against a
+    source fragment, the way ``_SPELLINGS`` exercises the sibling collectors.
+    """
+
+    observed: set[tuple[str, str, frozenset[str]]] = set()
+    stack: list[str] = []
+
+    def visit(node: ast.AST) -> None:
+        pushed = False
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            stack.append(node.name)
+            pushed = True
+        if isinstance(node, ast.Call):
+            func = node.func
+            direct = isinstance(func, ast.Attribute) and func.attr == "async_sync"
+            indirect = (
+                isinstance(func, ast.Name)
+                and func.id == "getattr"
+                and len(node.args) >= 2
+                and isinstance(node.args[1], ast.Constant)
+                and node.args[1].value == "async_sync"
+            )
+            if direct or indirect:
+                caller = (rel, stack[-1] if stack else "<module>")
+                observed.add((*caller, _inline_definition_keys(node, direct)))
+        for child in ast.iter_child_nodes(node):
+            visit(child)
+        if pushed:
+            stack.pop()
+
+    visit(tree)
+    return observed
+
+
+def _inline_definition_keys(node: ast.Call, direct: bool) -> frozenset[str]:
+    """The ``key=`` names of a literal definition list, or ``_NOT_INLINE``.
+
+    Only a direct ``manager.async_sync([...])`` can carry a readable list. The
+    ``getattr`` spelling matches on the lookup, not on the later call, so its
+    arguments are out of reach by construction rather than by omission.
+    """
+
+    if not direct or not node.args:
+        return frozenset({_NOT_INLINE})
+    first = node.args[0]
+    if not isinstance(first, (ast.List, ast.Tuple)):
+        return frozenset({_NOT_INLINE})
+    keys: set[str] = set()
+    for element in first.elts:
+        if not isinstance(element, ast.Call):
+            keys.add(_OPAQUE)
+            continue
+        func = element.func
+        name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
+        if name != _DEFINITION_FACTORY:
+            keys.add(_OPAQUE)
+            continue
+        if any(kw.arg is None for kw in element.keywords):
+            keys.add(_KWARGS)
+            continue
+        if element.args:
+            keys.add(_POSITIONAL)
+            continue
+        bound = [kw.value for kw in element.keywords if kw.arg == "key"]
+        if not bound:
+            keys.add(_OPAQUE)
+            continue
+        keys.add(_bound_name(bound[0]) or _OPAQUE)
+    # An empty literal list is deliberately *not* collapsed into a marker. It is
+    # the most dangerous shape this observation exists for -- ``desired`` empty
+    # means the stale sweep removes every managed group -- so it stays an empty
+    # set, which no frozen entry matches and which therefore reports as drift.
+    return frozenset(keys)
+
+
 def _observed_definition_keys() -> set[str]:
     """Every ``key`` passed to a definition anywhere in the package.
 
@@ -597,11 +754,16 @@ def test_async_sync_caller_census_is_frozen() -> None:
         f"The ``async_sync`` caller census changed.\n"
         f"  expected: {sorted(FROZEN_SYNC_CALLERS)}\n"
         f"  observed: {sorted(observed)}\n"
-        "A new caller, or one whose ``desired`` is narrower than the core key "
-        "set, turns every key outside that set into a removal candidate in "
-        "``ConfigEntrySubEntryManager.async_sync``, registry bindings included. "
-        f"{_PLAN} defers the type guard on that sweep precisely because both "
-        "known callers pass the full core key set. Next step: read the new "
+        "A new caller turns every key outside its ``desired`` into a removal "
+        "candidate in ``ConfigEntrySubEntryManager.async_sync``, registry "
+        "bindings included. This observation sees the caller, not the width of "
+        "its ``desired``: an existing caller that narrows its own key set is "
+        "invisible here and is watched by "
+        "``::test_inline_sync_definition_keys_are_frozen`` wherever the "
+        "definition list is readable. An earlier version of this message "
+        "claimed both, at a time when nothing measured the second. "
+        f"{_PLAN} defers the type guard on that sweep precisely because all "
+        "three known callers pass the full core key set. Next step: read the new "
         "caller's ``desired``. If it is the full core key set, record it here "
         "with that reason. If it is narrower, the deferred guard is now owed, "
         "and that decision belongs in the plan rather than in this allowlist."
@@ -627,6 +789,47 @@ def test_definition_keys_are_frozen() -> None:
         "step: if a key was added, check that the pair census above knows its "
         "``(subentry_type, group_key)`` shape; if one vanished, every managed "
         "group under it just became a removal candidate."
+    )
+
+
+def _inline_order(entry: tuple[str, str, frozenset[str]]) -> tuple[str, str, list[str]]:
+    """A total order for the 3c triples.
+
+    ``sorted`` on the raw triple would compare two ``frozenset``s with ``<``,
+    which is subset containment and therefore only a partial order. No two
+    frozen entries share a file today, so it never bites; the very drift this
+    test watches for -- one function holding two ``async_sync`` sites with
+    different key sets -- would produce it, and a non-deterministic failure
+    message is the one thing a ratchet must not have.
+    """
+
+    return (entry[0], entry[1], sorted(entry[2]))
+
+
+def test_inline_sync_definition_keys_are_frozen() -> None:
+    """Class A2. The bracket the other two leave open: per-caller narrowing.
+
+    3a sees a new caller, 3b a new or vanished key package-wide. Neither sees a
+    caller that stops passing a key another function still builds, and for
+    ``async_setup_entry`` that edge is readable, so not reading it was a gap
+    rather than a limit.
+    """
+
+    observed = _observed_inline_sync_definition_keys()
+    assert observed == set(FROZEN_INLINE_SYNC_DEFINITIONS), (
+        f"The inline ``async_sync`` definition census changed.\n"
+        f"  expected: {sorted(FROZEN_INLINE_SYNC_DEFINITIONS, key=_inline_order)}\n"
+        f"  observed: {sorted(observed, key=_inline_order)}\n"
+        "A caller whose key set shrank now passes a narrower ``desired`` than "
+        "the core key set, and ``ConfigEntrySubEntryManager.async_sync`` hands "
+        "every managed key outside it to ``async_remove``, registry bindings "
+        f"included. {_PLAN} defers the type guard on that sweep precisely "
+        "because every caller passes the full core key set. Next step: if a "
+        f"caller turned from {_NOT_INLINE} into a readable list, record its "
+        "keys here. If a key disappeared from a readable list, the deferred "
+        "guard is now owed and that decision belongs in the plan rather than "
+        "in this allowlist. An empty key set is not a marker but the shape "
+        "this observation exists for: it means that caller sweeps everything."
     )
 
 
@@ -783,4 +986,89 @@ def test_collectors_report_unreadable_bindings_instead_of_dropping_them(
         "they cannot read as a marker and stay silent only where no binding "
         "exists; a dropped binding is a shape entering the tree with the "
         f"ratchet green, which is what {_PLAN} exists to notice."
+    )
+
+
+# The same policy for observation 3c, in its own table rather than folded into
+# ``_SPELLINGS``: that table's rows are ``(subentry_type, group_key)`` pairs read
+# out of a class body or a definition call, and 3c reads a *key set* out of an
+# ``async_sync`` argument list. Sharing one table would mean widening its type to
+# hold two unrelated shapes, which is the mixture this file avoids elsewhere.
+# Each row is a spelling that reaches the same runtime effect as a supported one.
+_INLINE_SPELLINGS: tuple[tuple[str, str, set[tuple[str, str, frozenset[str]]]], ...] = (
+    (
+        "the production spelling: a literal list of direct constructions",
+        "m.async_sync([ConfigEntrySubentryDefinition(key=K),"
+        " ConfigEntrySubentryDefinition(key=S)])",
+        {("<src>", "<module>", frozenset({"K", "S"}))},
+    ),
+    (
+        "a list element that is not a definition call at all",
+        "m.async_sync([ConfigEntrySubentryDefinition(key=K), helper()])",
+        {("<src>", "<module>", frozenset({"K", _OPAQUE}))},
+    ),
+    (
+        "a conditionally spliced element, the narrowing an earlier draft "
+        "would have passed",
+        "m.async_sync([ConfigEntrySubentryDefinition(key=K), *extra])",
+        {("<src>", "<module>", frozenset({"K", _OPAQUE}))},
+    ),
+    (
+        "a positional definition",
+        "m.async_sync([ConfigEntrySubentryDefinition(K)])",
+        {("<src>", "<module>", frozenset({_POSITIONAL}))},
+    ),
+    (
+        "a definition splatted from a mapping",
+        "m.async_sync([ConfigEntrySubentryDefinition(**kw)])",
+        {("<src>", "<module>", frozenset({_KWARGS}))},
+    ),
+    (
+        "the list bound elsewhere: readable as unreadable, not as empty",
+        "m.async_sync(definitions)",
+        {("<src>", "<module>", frozenset({_NOT_INLINE}))},
+    ),
+    (
+        "the ``getattr`` spelling, whose arguments this matcher never sees",
+        'getattr(m, "async_sync", None)',
+        {("<src>", "<module>", frozenset({_NOT_INLINE}))},
+    ),
+    (
+        "an empty literal list: the most dangerous shape, and deliberately "
+        "not a marker -- an empty set matches no frozen entry and reports",
+        "m.async_sync([])",
+        {("<src>", "<module>", frozenset())},
+    ),
+)
+
+
+@pytest.mark.parametrize(("label", "source", "expected"), _INLINE_SPELLINGS)
+def test_inline_collector_reports_unreadable_lists_instead_of_dropping_them(
+    label: str, source: str, expected: set[tuple[str, str, frozenset[str]]]
+) -> None:
+    """Class A2 (standing assertion). Observation 3c's own marker policy.
+
+    Without this the policy of the newest collector lived in prose only, which
+    is exactly the failure the sibling table above records: ``_bound_name``
+    stated the rule two hundred lines above the one collector that ignored it,
+    and an external reviewer found the gap rather than this file.
+
+    Killing mutations, each run against this table:
+
+    * replacing the ``_OPAQUE`` fallback for a non-definition element with a
+      ``continue`` kills the two element rows;
+    * dropping the ``ast.List | ast.Tuple`` check kills the two ``_NOT_INLINE``
+      rows by turning them into empty sets;
+    * collapsing the empty list into a marker kills the last row, which is the
+      one that keeps a caller sweeping everything from reading as unreadable.
+    """
+
+    observed = _inline_keys_of(ast.parse(source))
+    assert observed == expected, (
+        f"Observation 3c read {sorted(observed)} from the {label!r} spelling, "
+        f"expected {sorted(expected)}. A list it cannot read must be reported "
+        f"as {_NOT_INLINE} and an unreadable element as {_OPAQUE}; the one set "
+        "that is neither is the empty one, which means that caller hands "
+        f"``async_sync`` nothing and sweeps every managed group. {_PLAN} rests "
+        "on that never happening silently."
     )
