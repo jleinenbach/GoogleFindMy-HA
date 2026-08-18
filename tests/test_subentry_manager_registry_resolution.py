@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import ast
 import logging
+import pathlib
 from collections.abc import Mapping
 from dataclasses import dataclass, is_dataclass
 from types import MappingProxyType, SimpleNamespace
@@ -2082,4 +2084,134 @@ async def test_ap5_both_sweeps_agree_with_the_recorded_polarity_table(
         "Next step: decide which sweep changed and whether the new pair is "
         "intended; PLAN_GFMY_SUBENTRY_DELETION_TYPE_AXIS carries the reasoning "
         "for the recorded one."
+    )
+
+
+# ---------------------------------------------------------------------------
+# Shape ratchet over ``_select_canonical``'s sort tuple.
+#
+# Why a structural guard beside all the behavioural ones above: the rejected
+# behaviour is *behaviourally invisible*. PR #1236 ranked ``LITERAL_CORE_KEY_OWNER``
+# inside that tuple, Codex flagged it, and the fix was moved into the removal
+# guard instead -- which spares every candidate of a different
+# ``(group_key, subentry_type)`` identity, and thereby leaves the rank with
+# nothing to decide. Measured on this tree: reinstating the type field keeps
+# *all 130* behavioural tests in this file and
+# ``test_coordinator_subentry_visibility.py`` green -- the count as it stood
+# before this ratchet joined them, which is the state that measurement
+# describes. So every barrier against the rejected algorithm returning was, until
+# this ratchet, a paragraph of prose -- in ``const.py``, in
+# ``agents/config_flow/AGENTS.md`` and in ``agents/runtime_patterns/AGENTS.md``,
+# each of which had to be corrected once after describing an intermediate
+# stage as if it were the implementation. Three corrections in three review
+# rounds is the signal that the prose was carrying a load it cannot carry.
+#
+# AST over text, for the reason the census docstring gives: a text pattern
+# derived from one spelling misses the others. The tuple is read where it is
+# built, and an unreadable shape fails loudly instead of passing quietly.
+FROZEN_SELECT_CANONICAL_SORT_FIELDS: int = 4
+
+
+def _select_canonical_sort_key() -> ast.FunctionDef | ast.AsyncFunctionDef:
+    """Return the ``_sort_key`` node nested in ``_select_canonical``.
+
+    Resolved by walking the nesting rather than by name alone: all three names
+    are local, and a same-named helper elsewhere in the module would otherwise
+    be able to answer for this one.
+    """
+
+    source = pathlib.Path("custom_components/googlefindmy/__init__.py").read_text(
+        encoding="utf-8"
+    )
+    tree = ast.parse(source)
+
+    def _named(node: ast.AST, name: str) -> ast.FunctionDef | ast.AsyncFunctionDef:
+        found = [
+            child
+            for child in ast.walk(node)
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and child.name == name
+        ]
+        assert len(found) == 1, (
+            f"Expected exactly one ``{name}`` in this scope, found "
+            f"{len(found)}. This ratchet reads the sort tuple through the "
+            "nesting ``_deduplicate_subentries`` -> ``_select_canonical`` -> "
+            "``_sort_key``; a second definition means the nesting moved and "
+            "the guard would otherwise silently read the wrong one."
+        )
+        return found[0]
+
+    dedup = _named(tree, "_deduplicate_subentries")
+    select = _named(dedup, "_select_canonical")
+    sort_key = _named(select, "_sort_key")
+
+    returns = [node for node in ast.walk(sort_key) if isinstance(node, ast.Return)]
+    assert len(returns) == 1, (
+        f"``_sort_key`` now has {len(returns)} return statements. It ranks "
+        "candidates on an irreversible removal path, so a second exit is a "
+        "second ordering; decide which one this ratchet should freeze rather "
+        "than widening it to accept both."
+    )
+    return sort_key
+
+
+def test_select_canonical_ranks_no_subentry_type() -> None:
+    """The removal ranker must not read the type, in any spelling.
+
+    Killing mutation: re-add a ``type_part`` field scored against
+    ``LITERAL_CORE_KEY_OWNER`` -- the exact shape PR #1236 carried for one
+    stage and dropped again. That mutation leaves every behavioural test in
+    this file green, which is why this assertion exists at all.
+
+    What this does *not* assert is that a type rank would be wrong in general.
+    It asserts that reinstating one is a decision, not a drift: the three
+    contract paragraphs naming this tuple have to be corrected in the same
+    change, and a red test is what forces that.
+    """
+
+    # The whole function body, not just the ``return``. Scanning the return
+    # expression alone would freeze the *holder* of the criterion rather than
+    # the criterion -- the same defeat the census docstring records one level
+    # down, and the one Codex flagged there in this very PR. A rank computed
+    # into a local above the return and spliced in by name would leave a
+    # return-only scan green; measured, that mutation is exactly M-R3 below.
+    sort_key = _select_canonical_sort_key()
+    node = next(child for child in ast.walk(sort_key) if isinstance(child, ast.Return))
+    value = node.value
+    assert isinstance(value, ast.Tuple), (
+        "``_sort_key`` no longer returns a tuple literal, so the field list is "
+        "not readable here. Restore the literal or move this ratchet onto "
+        "whatever now expresses the ordering -- do not delete it: the rank it "
+        "guards against is invisible to every behavioural test in this file."
+    )
+    assert len(value.elts) == FROZEN_SELECT_CANONICAL_SORT_FIELDS, (
+        f"The sort tuple now has {len(value.elts)} fields rather than "
+        f"{FROZEN_SELECT_CANONICAL_SORT_FIELDS} (identifier presence, the "
+        "identifier, the iteration index, ``subentry_id``). A field added "
+        "here changes which subentry ``async_remove_subentry`` takes, "
+        "registry bindings included. If the change is intended, update this "
+        "constant *and* the three paragraphs that describe the tuple: "
+        "``const.py`` above ``LITERAL_CORE_KEY_OWNER``, "
+        "``agents/config_flow/AGENTS.md`` and "
+        "``agents/runtime_patterns/AGENTS.md``."
+    )
+
+    names = {
+        child.id for child in ast.walk(sort_key) if isinstance(child, ast.Name)
+    } | {child.attr for child in ast.walk(sort_key) if isinstance(child, ast.Attribute)}
+    constants = {
+        child.value
+        for child in ast.walk(sort_key)
+        if isinstance(child, ast.Constant) and isinstance(child.value, str)
+    }
+    forbidden = {"subentry_type", "LITERAL_CORE_KEY_OWNER", "_LITERAL_CORE_KEY_OWNER"}
+    offenders = sorted((names | constants) & forbidden)
+    assert not offenders, (
+        f"``_sort_key`` reads {offenders} again. That is the rank PR #1236 "
+        "introduced and withdrew: with the removal guard comparing the full "
+        "``(group_key, subentry_type)`` identity, a type field decides nothing "
+        "on either axis, and a ranking field on a removal path reads as "
+        "load-bearing to the next maintainer. Codex flagged the original twice "
+        "and the stale descriptions of it once more; see "
+        "``PLAN_GFMY_SUBENTRY_DELETION_TYPE_AXIS``."
     )

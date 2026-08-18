@@ -247,6 +247,20 @@ NON_DEVICE_SUBENTRY_KEYS: frozenset[str] = frozenset({SERVICE_SUBENTRY_KEY})
 # ``tests/test_subentry_manager_registry_resolution.py``: narrowing it back to
 # the type comparison kills three tests, neutralising it entirely kills nine.
 #
+# The absence of the rank has an observer of its own, and it needs one for a
+# specific reason: putting the field back changes no behaviour any test can
+# see. Measured -- with it reinstated, all 130 *behavioural* tests across
+# ``test_subentry_manager_registry_resolution.py`` and
+# ``test_coordinator_subentry_visibility.py`` stay green (the count is the
+# one before the ratchet below was added, which is the state the
+# measurement describes), which is precisely
+# the property that made three separate paragraphs (this one, and both scoped
+# ``AGENTS.md`` files) drift into describing an intermediate stage as the
+# implementation. ``::test_select_canonical_ranks_no_subentry_type`` freezes
+# the tuple's field count and rejects any read of ``subentry_type`` or this
+# table anywhere in ``_sort_key``, its body included, so a rank computed into a
+# local above the ``return`` does not slip past it either.
+#
 # Mind the direction when comparing, and note that the sites do not split two
 # against one: the flow and the index rank "lower wins" while
 # ``_candidate_score`` alone spells it "higher wins"
