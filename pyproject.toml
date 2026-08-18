@@ -395,7 +395,11 @@ skip_covered = true
 # c7443b47, so ~0.72 Pp headroom here. Keep in step with the CI-side
 # --cov-fail-under flag: tests/test_platinum_compliance.py asserts the two
 # gates declare the same floor.
-fail_under = 77
+# Raised to 78 per maintainer request to lock in the coverage gained across the
+# subentry-deletion type-axis series (owner-key ranking, the type guard and the
+# frozen-observation regression tests); measured CI total is 78.36 % on
+# 04a66fc2, so ~0.36 Pp headroom here.
+fail_under = 78
 exclude_lines = [
     "if __name__ == \"__main__\":",
     "pragma: no cover",
