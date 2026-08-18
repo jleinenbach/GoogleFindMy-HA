@@ -421,6 +421,29 @@ export GOOGLEFINDMY_CHROME_PATH=/usr/bin/google-chrome
 
 Run any of the scripts with `--help` to list the available options.
 
+### The standalone login closes your other Chrome windows
+
+**Before it starts its own browser, the standalone login terminates the Chrome
+processes it finds running.** This is deliberate, not a bug: the login has to
+drive a browser session it controls end to end, and an already running Chrome
+would otherwise capture the sign-in and keep the credentials out of reach.
+
+What that means in practice:
+
+- **Close your Chrome windows before you run any of the helper scripts**
+  (`get_oauth_token.py`, `Auth/auth_flow.py`, `KeyBackup/shared_key_flow.py`,
+  or `main.py`). Unsaved tabs are lost as with any forced quit.
+- **Do not start a login while other automation is using Chrome** on the same
+  machine and user account (scraping jobs, kiosk displays, printing services).
+- The scripts protect their own process and its parents, so running them from a
+  terminal or a test runner does not terminate that terminal.
+- Inside the provided login container the cleanup is skipped, because there it
+  would tear down the container's own browser stack.
+- **None of this happens in Home Assistant.** No Home Assistant code path starts
+  a browser or terminates a process; the cleanup is reached only through
+  `create_driver`, and `create_driver` is reached only from the manual
+  command-line scripts above.
+
 ### Standalone login refuses to start (attended terminal required)
 The desktop login opens Chrome **on your own screen** and prints a "Press Enter
 to continue" prompt first, so you decide when a browser window takes over. When
