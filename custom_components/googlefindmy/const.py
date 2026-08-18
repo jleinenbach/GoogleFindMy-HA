@@ -210,37 +210,58 @@ NON_DEVICE_SUBENTRY_KEYS: frozenset[str] = frozenset({SERVICE_SUBENTRY_KEY})
 # a ``hub`` storing ``core_tracking``, the manager names the stored subentry
 # while the index names its synthetic placeholder -- measured, not inferred, so
 # do not read ``managed_subentries["core_tracking"]`` as "the subentry the
-# index describes" without checking the type. Within
-# the manager itself, ``_async_adopt_existing_unique_id`` does not consult this
-# table at all: it takes the first match (``break``). ``_deduplicate_subentries``
-# now does, on one of its two axes, and the asymmetry is the point.
-# ``_select_canonical`` sorts identifier *presence* first, the identifier itself
-# second, then the type against this table, and reaches the iteration index only
-# fourth. That fourth field used to be third, and on the ``unique_id`` axis it
-# decided alone -- candidates grouped *by* ``unique_id`` tie on both fields above
-# it -- so the survivor was whichever subentry the entry happened to yield
-# first, and the loser's registry bindings went with it. The shape reaching that
-# axis in production is a ``hub`` and a ``service`` sharing
-# ``f"{entry_id}-service"``. The rank is only half of what that axis needed: on
-# top of it the removal is *guarded* by type, so a candidate whose
-# ``subentry_type`` differs from the canonical one is spared entirely rather
-# than merely ranked below it. Without that guard the rank made the foreign
-# type the reliable loser instead of a random one, which is the wrong direction
-# on an irreversible path; with it, only the rank decides which type the guard
-# then compares against. Both halves have their own killing mutation in
-# ``tests/test_subentry_manager_registry_resolution.py``. Mind the direction when comparing, and note that
-# the four sites do not split two against two: the flow, the index and
-# ``_select_canonical`` all rank "lower wins" -- the last one because it picks
-# with ``min`` -- while ``_candidate_score`` alone spells it "higher wins"
-# (``candidate_score > existing_score``). A rank tuple copied from any of the
-# first three into that method, or the other way round, has to be inverted; a
-# tuple copied between the first three does not.
+# index describes" without checking the type.
+#
+# Within the manager itself, ``_candidate_score`` is the only reader of this
+# table. ``_async_adopt_existing_unique_id`` is not: it takes the first match
+# (``break``). Neither is ``_deduplicate_subentries``, and that is a correction
+# rather than a standing fact -- a type rank against this table sat in its
+# ``_select_canonical`` for two stages of PR #1236, and the version of this
+# paragraph written then described that rank as the resting shape. It is gone.
+# What ``_select_canonical`` sorts on is identifier *presence*, then the
+# identifier itself, then the iteration index, then the ``subentry_id``: the
+# index is the third field, not the fourth, and no type is compared anywhere in
+# that tuple.
+#
+# Why it went is worth keeping, because it is the argument against putting one
+# back. On the ``unique_id`` axis the two fields above the index tie by
+# construction -- the candidates are grouped *by* ``unique_id`` -- so the
+# survivor was whichever subentry the entry happened to yield first and the
+# loser went to ``async_remove_subentry``, registry bindings included. The
+# production shape reaching that axis is a ``hub`` and a ``service`` sharing
+# ``f"{entry_id}-service"``. Ranking the literal key owner first made that
+# deterministic rather than random, which on an irreversible path fixes the
+# noise and not the deletion: it turned the foreign type into the *reliable*
+# loser. What fixes the deletion is the guard on the removal itself, and it
+# compares the full ``(group_key, subentry_type)`` identity -- the same pair the
+# group axis keys on -- so a candidate differing in *either* half is spared
+# entirely instead of merely ranked below. A type-only form of that guard was
+# the stage in between and had a victim of its own: two ``tracker`` groups with
+# distinct keys sharing one identifier read as duplicate copies, though several
+# tracker groups are a supported shape. With the full identity compared, every
+# foreign candidate is spared and the rank therefore decides nothing at all --
+# measured over all 19 683 three-subentry shapes and a 19 987-shape sample of
+# four- and five-subentry ones, not reasoned about -- and a ranking field on a
+# removal path that decides nothing still reads as load-bearing to the next
+# reader. The guard's own halves are graded in
+# ``tests/test_subentry_manager_registry_resolution.py``: narrowing it back to
+# the type comparison kills three tests, neutralising it entirely kills nine.
+#
+# Mind the direction when comparing, and note that the sites do not split two
+# against one: the flow and the index rank "lower wins" while
+# ``_candidate_score`` alone spells it "higher wins"
+# (``candidate_score > existing_score``). A rank tuple copied from either of the
+# first two into that method, or the other way round, has to be inverted; one
+# copied between the first two does not. ``_select_canonical`` is deliberately
+# absent from that list: it picks with ``min``, but it ranks no type, so it is
+# not a fourth reader of this table and a tuple must not be copied into it.
+#
 # On the ``(group_key, subentry_type)`` axis the type is part of the grouping
-# key, so the new field is constant across a bucket and changes nothing: that
-# axis still keeps the *higher* identifier of a pair whose lower one carries
-# ``unique_id=None`` -- the opposite of what the three rankers above pick for it
-# -- and it still *removes* the loser, with ``async_sync`` calling it
-# unconditionally before anything else. That remainder is tracked in
+# key, so no type rank could discriminate there in the first place. That axis
+# still keeps the *higher* identifier of a pair whose lower one carries
+# ``unique_id=None`` -- the opposite of what the rankers above pick for it --
+# and it still *removes* the loser, with ``async_sync`` calling it
+# unconditionally before anything else. That remainder is tracked as ``B16`` in
 # ``PLAN_GFMY_SUBENTRY_DELETION_TYPE_AXIS``, where the input shape is measured
 # rather than assumed.
 # Read-only on purpose: unlike the plain ``dict`` constants elsewhere in this

@@ -27,7 +27,7 @@ plan's trigger ``T-B`` names that drift; this guard is its observer, and
 ``grep -rn "stale_keys" tests/`` returning nothing was the evidence that no
 observer existed.
 
-Three design choices keep it honest, each one a lesson paid for elsewhere:
+Four design choices keep it honest, each one a lesson paid for elsewhere:
 
 * **AST over text.** The census must not grep for ``subentry_type=``. The flow
   handlers write that field as a dict item
@@ -45,6 +45,13 @@ Three design choices keep it honest, each one a lesson paid for elsewhere:
   Either alone is defeatable: renaming a constant while keeping its value is
   invisible to a value-only freeze, and rebinding a value while keeping the name
   is invisible to a name-only one.
+* **A site, not a function.** Observations 3a and 3c identify each
+  ``async_sync`` call by an ordinal within its enclosing function, not by the
+  function alone. Without it two sites in one body collapse into one set
+  member: ``_repair`` keeping its current call and adding a narrower one beside
+  it left both observations green while ``desired`` shrank for one of the two
+  paths. That is the same defeat a bare count suffers one bullet up, one level
+  down -- the set froze the *holder* of the call rather than the call.
 
 Three deliberate blind spots, stated rather than implied, and all wider than an
 earlier draft of this docstring admitted:
@@ -91,7 +98,7 @@ only one that could hide a creation.
 from __future__ import annotations
 
 import ast
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from pathlib import Path
 
 import pytest
@@ -128,16 +135,40 @@ FROZEN_CONSTANT_VALUES: dict[str, str] = {
     "SUBENTRY_TYPE_HUB": "hub",
 }
 
-# Observation 3a: every production call site of ``async_sync``, by file and
-# enclosing function. This is what ``desired`` originates from, and a *new*
-# caller is the drift the plan's trigger ``T-B`` names.
-FROZEN_SYNC_CALLERS: frozenset[tuple[str, str]] = frozenset(
+# Observation 3a: every production call site of ``async_sync``, by file,
+# enclosing function and ordinal within that function. This is what ``desired``
+# originates from, and a *new* caller is the drift the plan's trigger ``T-B``
+# names.
+#
+# The ordinal is a field rather than a detail, because the first two do not
+# identify a *site*. A function that gains a **second** ``async_sync`` call --
+# ``_repair`` keeping its current one and adding a narrower call beside it --
+# produced the tuple already frozen here, so the set swallowed the new site and
+# the census stayed green while ``desired`` shrank for one of the two paths.
+# External review found it and it is measured rather than argued: that mutation
+# is green across this file at ``44faf7ba`` and red from here on.
+#
+# Counting within the function rather than freezing a source position is
+# deliberate. A position moves whenever anything above it is edited, so a
+# position-keyed ratchet fires on unrelated changes and teaches the next reader
+# to re-freeze it without reading -- the failure mode an allowlist dies of. An
+# ordinal moves only when a site is added, removed or reordered inside its own
+# function, which is the drift this observation exists for. Two functions of the
+# same name in one file share the counter; they are then numbered in source
+# order, which is stable for the same reason.
+#
+# The counters are per observation: 3a matches an attribute *reference* and 3c a
+# *call*, so ordinal 1 here need not be ordinal 1 there. Today every function
+# holds exactly one site and both read 0, and nothing joins the two sets by that
+# field.
+FROZEN_SYNC_CALLERS: frozenset[tuple[str, str, int]] = frozenset(
     {
-        ("custom_components/googlefindmy/__init__.py", "async_setup_entry"),
-        ("custom_components/googlefindmy/coordinator/subentry.py", "_repair"),
+        ("custom_components/googlefindmy/__init__.py", "async_setup_entry", 0),
+        ("custom_components/googlefindmy/coordinator/subentry.py", "_repair", 0),
         (
             "custom_components/googlefindmy/config_flow.py",
             "_async_trigger_core_subentry_repair",
+            0,
         ),
     }
 )
@@ -168,31 +199,40 @@ FROZEN_DEFINITION_KEYS: frozenset[str] = frozenset(
 
 # Observation 3c: for every ``async_sync`` call site whose definition list is
 # built inline, the ``key=`` names it passes. This is the caller-to-keys edge
-# where it exists; the tuple is ``(file, innermost function, keys)``.
+# where it exists; the tuple is ``(file, innermost function, ordinal, keys)``,
+# and the ordinal is there for the reason given at 3a, plus one of its own: two
+# sites in one function whose lists are *both* unreadable produce the identical
+# triple, so without it the second ``_NOT_INLINE`` entry vanished into the
+# first and the narrowing it stood for went unobserved.
 #
 # ``_NOT_INLINE`` sits here rather than with the other markers below because a
 # frozen constant is evaluated at import time and cannot read a name defined
 # further down. It belongs to the same family and follows the same rule: an
 # edge that exists but cannot be read is reported, not dropped.
 _NOT_INLINE = "<not inline>"
-FROZEN_INLINE_SYNC_DEFINITIONS: frozenset[tuple[str, str, frozenset[str]]] = frozenset(
-    {
-        (
-            "custom_components/googlefindmy/__init__.py",
-            "async_setup_entry",
-            frozenset({"TRACKER_SUBENTRY_KEY", "SERVICE_SUBENTRY_KEY"}),
-        ),
-        (
-            "custom_components/googlefindmy/coordinator/subentry.py",
-            "_repair",
-            frozenset({_NOT_INLINE}),
-        ),
-        (
-            "custom_components/googlefindmy/config_flow.py",
-            "_async_trigger_core_subentry_repair",
-            frozenset({_NOT_INLINE}),
-        ),
-    }
+FROZEN_INLINE_SYNC_DEFINITIONS: frozenset[tuple[str, str, int, frozenset[str]]] = (
+    frozenset(
+        {
+            (
+                "custom_components/googlefindmy/__init__.py",
+                "async_setup_entry",
+                0,
+                frozenset({"TRACKER_SUBENTRY_KEY", "SERVICE_SUBENTRY_KEY"}),
+            ),
+            (
+                "custom_components/googlefindmy/coordinator/subentry.py",
+                "_repair",
+                0,
+                frozenset({_NOT_INLINE}),
+            ),
+            (
+                "custom_components/googlefindmy/config_flow.py",
+                "_async_trigger_core_subentry_repair",
+                0,
+                frozenset({_NOT_INLINE}),
+            ),
+        }
+    )
 )
 
 _DEFINITION_FACTORY = "ConfigEntrySubentryDefinition"
@@ -464,13 +504,69 @@ def _observed_constant_values() -> dict[str, str]:
     return values
 
 
-def _observed_sync_callers() -> set[tuple[str, str]]:
-    """Production ``async_sync(...)`` call sites, by file and enclosing function.
+def _position(node: ast.AST) -> tuple[int, int]:
+    """Where a node starts, as a sort key only.
+
+    Never frozen and never compared against an expectation: it orders the sites
+    of one function so their ordinals are source order rather than traversal
+    order. ``ast.iter_child_nodes`` is deterministic but not documented to be
+    positional, and an ordinal that depends on how the walk descends would be a
+    number no reader can predict from the file.
+    """
+
+    line: int = getattr(node, "lineno", 0)
+    column: int = getattr(node, "col_offset", 0)
+    return (line, column)
+
+
+def _numbered_by_function[Payload](
+    sites: Iterable[tuple[str, tuple[int, int], Payload]],
+) -> list[tuple[str, int, Payload]]:
+    """Number every call site within its enclosing function, in source order.
+
+    The identity a census freezes has to be the identity of the *thing* it
+    watches. Both callers of this helper watch call sites and used to key on
+    the function holding them, so a second site in an existing body was read as
+    the site already frozen. Numbering restores the missing half without
+    freezing a position, which would move on every edit above it.
+    """
+
+    numbered: list[tuple[str, int, Payload]] = []
+    seen: dict[str, int] = {}
+    for func, _site_position, payload in sorted(
+        sites, key=lambda site: (site[0], site[1])
+    ):
+        ordinal = seen.get(func, 0)
+        seen[func] = ordinal + 1
+        numbered.append((func, ordinal, payload))
+    return numbered
+
+
+def _observed_sync_callers() -> set[tuple[str, str, int]]:
+    """Production ``async_sync(...)`` call sites, package-wide.
+
+    Split from the walk below for the reason ``_inline_keys_of`` states for its
+    own sibling: the ordinal policy has to be exercisable against a source
+    fragment, and a collector that only ever runs over the real package can be
+    tested for what it finds there but not for what it would do with a shape
+    the package does not contain yet.
+    """
+
+    callers: set[tuple[str, str, int]] = set()
+    for path in sorted(PACKAGE.rglob("*.py")):
+        rel = path.relative_to(REPO_ROOT).as_posix()
+        callers |= _sync_callers_of(_parse(path), rel)
+    return callers
+
+
+def _sync_callers_of(tree: ast.Module, rel: str = "<src>") -> set[tuple[str, str, int]]:
+    """One parsed module's ``async_sync`` sites, by function and ordinal.
 
     The *innermost* enclosing function is reported, which matters where a nested
     helper carries the call: ``coordinator/subentry.py`` has ``_repair`` inside
     ``_schedule_core_subentry_repair``, and naming the outer one would let the
-    inner be replaced unnoticed.
+    inner be replaced unnoticed. The ordinal beside it is what keeps two sites
+    in one such body two observations; see ``FROZEN_SYNC_CALLERS``.
 
     Two spellings count, and the second one is why this census exists in the
     form it does. A direct ``manager.async_sync(...)`` is an ``ast.Attribute``.
@@ -490,48 +586,47 @@ def _observed_sync_callers() -> set[tuple[str, str]]:
     one an allowlist silences, so the limit is stated here instead of widened.
     """
 
-    callers: set[tuple[str, str]] = set()
-    for path in sorted(PACKAGE.rglob("*.py")):
-        tree = _parse(path)
-        rel = path.relative_to(REPO_ROOT).as_posix()
-        stack: list[str] = []
+    sites: list[tuple[str, tuple[int, int], None]] = []
+    stack: list[str] = []
 
-        def names_async_sync(node: ast.AST) -> bool:
-            if isinstance(node, ast.Attribute) and node.attr == "async_sync":
-                return True
-            if (
-                isinstance(node, ast.Call)
-                and isinstance(node.func, ast.Name)
-                and node.func.id == "getattr"
-                and len(node.args) >= 2
-                and isinstance(node.args[1], ast.Constant)
-                and node.args[1].value == "async_sync"
-            ):
-                return True
-            return False
+    def names_async_sync(node: ast.AST) -> bool:
+        if isinstance(node, ast.Attribute) and node.attr == "async_sync":
+            return True
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "getattr"
+            and len(node.args) >= 2
+            and isinstance(node.args[1], ast.Constant)
+            and node.args[1].value == "async_sync"
+        ):
+            return True
+        return False
 
-        def visit(node: ast.AST, rel: str = rel, stack: list[str] = stack) -> None:
-            pushed = False
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                stack.append(node.name)
-                pushed = True
-            if names_async_sync(node):
-                # A call outside any function (module level, a ``lambda``, a
-                # comprehension) used to be dropped for having an empty stack,
-                # which is the same silent direction as the collectors above.
-                # There is none today, so naming it costs nothing and the frozen
-                # set will reject the first one.
-                callers.add((rel, stack[-1] if stack else "<module>"))
-            for child in ast.iter_child_nodes(node):
-                visit(child)
-            if pushed:
-                stack.pop()
+    def visit(node: ast.AST) -> None:
+        pushed = False
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            stack.append(node.name)
+            pushed = True
+        if names_async_sync(node):
+            # A call outside any function (module level, a ``lambda``, a
+            # comprehension) used to be dropped for having an empty stack,
+            # which is the same silent direction as the collectors above.
+            # There is none today, so naming it costs nothing and the frozen
+            # set will reject the first one.
+            sites.append((stack[-1] if stack else "<module>", _position(node), None))
+        for child in ast.iter_child_nodes(node):
+            visit(child)
+        if pushed:
+            stack.pop()
 
-        visit(tree)
-    return callers
+    visit(tree)
+    return {(rel, func, ordinal) for func, ordinal, _ in _numbered_by_function(sites)}
 
 
-def _observed_inline_sync_definition_keys() -> set[tuple[str, str, frozenset[str]]]:
+def _observed_inline_sync_definition_keys() -> set[
+    tuple[str, str, int, frozenset[str]]
+]:
     """The caller-to-keys edge for every ``async_sync`` site that carries it.
 
     ``_observed_definition_keys`` unions the keys package-wide and therefore
@@ -558,7 +653,7 @@ def _observed_inline_sync_definition_keys() -> set[tuple[str, str, frozenset[str
     five observations green.
     """
 
-    observed: set[tuple[str, str, frozenset[str]]] = set()
+    observed: set[tuple[str, str, int, frozenset[str]]] = set()
     for path in sorted(PACKAGE.rglob("*.py")):
         rel = path.relative_to(REPO_ROOT).as_posix()
         observed |= _inline_keys_of(_parse(path), rel)
@@ -567,14 +662,20 @@ def _observed_inline_sync_definition_keys() -> set[tuple[str, str, frozenset[str
 
 def _inline_keys_of(
     tree: ast.Module, rel: str = "<src>"
-) -> set[tuple[str, str, frozenset[str]]]:
+) -> set[tuple[str, str, int, frozenset[str]]]:
     """One parsed module's ``async_sync`` call sites and their readable keys.
 
     Split from the walk above so the marker policy can be exercised against a
     source fragment, the way ``_SPELLINGS`` exercises the sibling collectors.
+
+    Every site is numbered within its enclosing function before it becomes a set
+    member. Without that number two sites in one body whose lists are both
+    unreadable are the *same* triple, and the second one -- the narrower call
+    added beside an existing one, which is the shape this observation is here to
+    catch -- disappears into the first.
     """
 
-    observed: set[tuple[str, str, frozenset[str]]] = set()
+    sites: list[tuple[str, tuple[int, int], frozenset[str]]] = []
     stack: list[str] = []
 
     def visit(node: ast.AST) -> None:
@@ -593,15 +694,23 @@ def _inline_keys_of(
                 and node.args[1].value == "async_sync"
             )
             if direct or indirect:
-                caller = (rel, stack[-1] if stack else "<module>")
-                observed.add((*caller, _inline_definition_keys(node, direct)))
+                sites.append(
+                    (
+                        stack[-1] if stack else "<module>",
+                        _position(node),
+                        _inline_definition_keys(node, direct),
+                    )
+                )
         for child in ast.iter_child_nodes(node):
             visit(child)
         if pushed:
             stack.pop()
 
     visit(tree)
-    return observed
+    return {
+        (rel, func, ordinal, keys)
+        for func, ordinal, keys in _numbered_by_function(sites)
+    }
 
 
 def _inline_definition_keys(node: ast.Call, direct: bool) -> frozenset[str]:
@@ -756,12 +865,16 @@ def test_async_sync_caller_census_is_frozen() -> None:
         f"  observed: {sorted(observed)}\n"
         "A new caller turns every key outside its ``desired`` into a removal "
         "candidate in ``ConfigEntrySubEntryManager.async_sync``, registry "
-        "bindings included. This observation sees the caller, not the width of "
-        "its ``desired``: an existing caller that narrows its own key set is "
-        "invisible here and is watched by "
+        "bindings included. This observation sees the call *site*, not the "
+        "width of its ``desired``: the third field is the site's ordinal within "
+        "its function, so a second call added to an existing body reports here "
+        "even though the file and the function are already frozen, while a site "
+        "that narrows its own key set is invisible here and is watched by "
         "``::test_inline_sync_definition_keys_are_frozen`` wherever the "
-        "definition list is readable. An earlier version of this message "
-        "claimed both, at a time when nothing measured the second. "
+        "definition list is readable. Both halves of that sentence were wrong "
+        "once: an earlier version claimed the width too, at a time when nothing "
+        "measured it, and until external review the ordinal was missing, so a "
+        "second site in a frozen function collapsed into the first. "
         f"{_PLAN} defers the type guard on that sweep precisely because all "
         "three known callers pass the full core key set. Next step: read the new "
         "caller's ``desired``. If it is the full core key set, record it here "
@@ -792,18 +905,23 @@ def test_definition_keys_are_frozen() -> None:
     )
 
 
-def _inline_order(entry: tuple[str, str, frozenset[str]]) -> tuple[str, str, list[str]]:
-    """A total order for the 3c triples.
+def _inline_order(
+    entry: tuple[str, str, int, frozenset[str]],
+) -> tuple[str, str, int, list[str]]:
+    """A total order for the 3c entries.
 
-    ``sorted`` on the raw triple would compare two ``frozenset``s with ``<``,
-    which is subset containment and therefore only a partial order. No two
-    frozen entries share a file today, so it never bites; the very drift this
-    test watches for -- one function holding two ``async_sync`` sites with
-    different key sets -- would produce it, and a non-deterministic failure
-    message is the one thing a ratchet must not have.
+    ``sorted`` on the raw tuple would compare two ``frozenset``s with ``<``,
+    which is subset containment and therefore only a partial order. The ordinal
+    makes the three fields in front of the key set a total order on its own, so
+    the fallback is now unreachable through the drift that used to produce it --
+    one function holding two ``async_sync`` sites with different key sets, which
+    those sites' ordinals already separate. It is kept because "unreachable"
+    here means "no two entries tie on the first three fields", which is a
+    property of today's collector rather than of the type, and a
+    non-deterministic failure message is the one thing a ratchet must not have.
     """
 
-    return (entry[0], entry[1], sorted(entry[2]))
+    return (entry[0], entry[1], entry[2], sorted(entry[3]))
 
 
 def test_inline_sync_definition_keys_are_frozen() -> None:
@@ -826,7 +944,9 @@ def test_inline_sync_definition_keys_are_frozen() -> None:
         f"included. {_PLAN} defers the type guard on that sweep precisely "
         "because every caller passes the full core key set. Next step: if a "
         f"caller turned from {_NOT_INLINE} into a readable list, record its "
-        "keys here. If a key disappeared from a readable list, the deferred "
+        "keys here. If an ordinal appeared, an existing function grew a second "
+        "call site: read *its* ``desired`` rather than the one already frozen "
+        "beside it. If a key disappeared from a readable list, the deferred "
         "guard is now owed and that decision belongs in the plan rather than "
         "in this allowlist. An empty key set is not a marker but the shape "
         "this observation exists for: it means that caller sweeps everything."
@@ -995,56 +1115,68 @@ def test_collectors_report_unreadable_bindings_instead_of_dropping_them(
 # ``async_sync`` argument list. Sharing one table would mean widening its type to
 # hold two unrelated shapes, which is the mixture this file avoids elsewhere.
 # Each row is a spelling that reaches the same runtime effect as a supported one.
-_INLINE_SPELLINGS: tuple[tuple[str, str, set[tuple[str, str, frozenset[str]]]], ...] = (
+_INLINE_SPELLINGS: tuple[
+    tuple[str, str, set[tuple[str, str, int, frozenset[str]]]], ...
+] = (
     (
         "the production spelling: a literal list of direct constructions",
         "m.async_sync([ConfigEntrySubentryDefinition(key=K),"
         " ConfigEntrySubentryDefinition(key=S)])",
-        {("<src>", "<module>", frozenset({"K", "S"}))},
+        {("<src>", "<module>", 0, frozenset({"K", "S"}))},
     ),
     (
         "a list element that is not a definition call at all",
         "m.async_sync([ConfigEntrySubentryDefinition(key=K), helper()])",
-        {("<src>", "<module>", frozenset({"K", _OPAQUE}))},
+        {("<src>", "<module>", 0, frozenset({"K", _OPAQUE}))},
     ),
     (
         "a conditionally spliced element, the narrowing an earlier draft "
         "would have passed",
         "m.async_sync([ConfigEntrySubentryDefinition(key=K), *extra])",
-        {("<src>", "<module>", frozenset({"K", _OPAQUE}))},
+        {("<src>", "<module>", 0, frozenset({"K", _OPAQUE}))},
     ),
     (
         "a positional definition",
         "m.async_sync([ConfigEntrySubentryDefinition(K)])",
-        {("<src>", "<module>", frozenset({_POSITIONAL}))},
+        {("<src>", "<module>", 0, frozenset({_POSITIONAL}))},
     ),
     (
         "a definition splatted from a mapping",
         "m.async_sync([ConfigEntrySubentryDefinition(**kw)])",
-        {("<src>", "<module>", frozenset({_KWARGS}))},
+        {("<src>", "<module>", 0, frozenset({_KWARGS}))},
     ),
     (
         "the list bound elsewhere: readable as unreadable, not as empty",
         "m.async_sync(definitions)",
-        {("<src>", "<module>", frozenset({_NOT_INLINE}))},
+        {("<src>", "<module>", 0, frozenset({_NOT_INLINE}))},
     ),
     (
         "the ``getattr`` spelling, whose arguments this matcher never sees",
         'getattr(m, "async_sync", None)',
-        {("<src>", "<module>", frozenset({_NOT_INLINE}))},
+        {("<src>", "<module>", 0, frozenset({_NOT_INLINE}))},
     ),
     (
         "an empty literal list: the most dangerous shape, and deliberately "
         "not a marker -- an empty set matches no frozen entry and reports",
         "m.async_sync([])",
-        {("<src>", "<module>", frozenset())},
+        {("<src>", "<module>", 0, frozenset())},
+    ),
+    (
+        "two unreadable sites in one function are two observations, not one: "
+        "the collapse external review found, and the shape it named -- an "
+        "existing call kept, a narrower one added beside it",
+        "def f():\n    m.async_sync(definitions)\n    m.async_sync(narrowed)\n",
+        {
+            ("<src>", "f", 0, frozenset({_NOT_INLINE})),
+            ("<src>", "f", 1, frozenset({_NOT_INLINE})),
+        },
     ),
 )
 
 
 @pytest.mark.parametrize(("label", "source", "expected"), _INLINE_SPELLINGS)
 def test_inline_collector_reports_unreadable_lists_instead_of_dropping_them(
-    label: str, source: str, expected: set[tuple[str, str, frozenset[str]]]
+    label: str, source: str, expected: set[tuple[str, str, int, frozenset[str]]]
 ) -> None:
     """Class A2 (standing assertion). Observation 3c's own marker policy.
 
@@ -1059,8 +1191,15 @@ def test_inline_collector_reports_unreadable_lists_instead_of_dropping_them(
       ``continue`` kills the two element rows;
     * dropping the ``ast.List | ast.Tuple`` check kills the two ``_NOT_INLINE``
       rows by turning them into empty sets;
-    * collapsing the empty list into a marker kills the last row, which is the
-      one that keeps a caller sweeping everything from reading as unreadable.
+    * collapsing the empty list into a marker kills the empty-list row, which
+      is the one that keeps a caller sweeping everything from reading as
+      unreadable;
+    * neutralising the ordinal (every site numbered ``0``, which is the
+      collapse itself rather than a type change) kills the two-site row here
+      and the three two-site rows of the sibling table below, four in all, and
+      no other row in either. That row is the whole of Codex's second finding:
+      with the sites collapsed the census reported one entry where the package
+      had two, and a narrowing inside the second was unobservable.
     """
 
     observed = _inline_keys_of(ast.parse(source))
@@ -1071,4 +1210,91 @@ def test_inline_collector_reports_unreadable_lists_instead_of_dropping_them(
         "that is neither is the empty one, which means that caller hands "
         f"``async_sync`` nothing and sweeps every managed group. {_PLAN} rests "
         "on that never happening silently."
+    )
+
+
+# The same policy for observation 3a. It has no marker family of its own -- a
+# call site is either matched or it is not -- so what this table pins is the
+# other half of a site's identity: which function it is attributed to, and
+# which number it carries inside that function. Both halves have been wrong
+# once. The function used to be the outer one of a nested pair, and the number
+# did not exist at all until external review pointed at two sites collapsing
+# into one set member.
+_CALLER_SITE_SPELLINGS: tuple[tuple[str, str, set[tuple[str, str, int]]], ...] = (
+    (
+        "the direct spelling",
+        "def f():\n    m.async_sync(definitions)\n",
+        {("<src>", "f", 0)},
+    ),
+    (
+        "the ``getattr`` spelling, matched on the lookup rather than the call",
+        'def f():\n    getattr(m, "async_sync", None)\n',
+        {("<src>", "f", 0)},
+    ),
+    (
+        "two sites in one function are two observations, not one",
+        "def f():\n    m.async_sync(definitions)\n    m.async_sync(narrowed)\n",
+        {("<src>", "f", 0), ("<src>", "f", 1)},
+    ),
+    (
+        "the two spellings side by side still number both",
+        'def f():\n    m.async_sync(definitions)\n    getattr(m, "async_sync", None)\n',
+        {("<src>", "f", 0), ("<src>", "f", 1)},
+    ),
+    (
+        "the innermost function names the site, so an inner helper cannot be "
+        "replaced under cover of its outer one",
+        "def outer():\n    def inner():\n        m.async_sync(definitions)\n",
+        {("<src>", "inner", 0)},
+    ),
+    (
+        "a site outside any function is named rather than dropped",
+        "m.async_sync(definitions)\n",
+        {("<src>", "<module>", 0)},
+    ),
+    (
+        "two functions of the same name share one counter, numbered in source "
+        "order: coarser than the truth, and stable, which is what a ratchet "
+        "needs more",
+        "class A:\n    def f(self):\n        m.async_sync(definitions)\n"
+        "class B:\n    def f(self):\n        m.async_sync(definitions)\n",
+        {("<src>", "f", 0), ("<src>", "f", 1)},
+    ),
+)
+
+
+@pytest.mark.parametrize(("label", "source", "expected"), _CALLER_SITE_SPELLINGS)
+def test_caller_collector_numbers_sites_within_their_function(
+    label: str, source: str, expected: set[tuple[str, str, int]]
+) -> None:
+    """Class A2 (standing assertion). Observation 3a's site identity.
+
+    Killing mutations, each run against this table:
+
+    * neutralising the ordinal (every site numbered ``0``) kills the three
+      two-site rows here and the sibling table's one, four in all, and nothing
+      else -- in particular neither package-wide freeze, because the package
+      holds one site per function, which is the measurement behind Codex's
+      finding: the tree's own shape could not have revealed the gap, only a
+      fragment carrying the shape it does not have yet;
+    * naming the outer function instead of the innermost kills the nested row;
+    * dropping the ``<module>`` fallback kills the module-level row;
+    * dropping either spelling from the matcher kills the row that uses it and
+      halves the mixed row.
+
+    Ordering by traversal instead of by source position leaves every row green,
+    which is why ``_position`` says it is a sort key rather than an assurance:
+    the fragments here are too shallow to separate the two orders, and the
+    package has one site per function. It is the predictability of the number
+    for a *reader* that the sort buys, not a behaviour this table can pin.
+    """
+
+    observed = _sync_callers_of(ast.parse(source))
+    assert observed == expected, (
+        f"Observation 3a read {sorted(observed)} from the {label!r} spelling, "
+        f"expected {sorted(expected)}. A site is identified by its file, its "
+        "innermost enclosing function and its ordinal within that function; "
+        "collapsing two sites into one member hides the narrower of the two "
+        f"``desired`` sets, which is exactly the removal {_PLAN} exists to "
+        "notice."
     )
