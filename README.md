@@ -547,8 +547,16 @@ configuration.
 
 - All location data uses Google's end-to-end encryption
 - Authentication tokens are securely cached
-- No location data is transmitted to third parties
-- Local processing of all GPS coordinates
+- All GPS coordinates are processed locally. The integration itself sends no
+  location data anywhere except to Google, which is where it comes from.
+- **One exception, and it is yours to trigger:** the Map View page loads its map
+  tiles from OpenStreetMap (`https://{s}.tile.openstreetmap.org/...`). While a
+  Map View page is open, your browser therefore asks that provider for the tiles
+  covering the area you are looking at, which is an area centred on your device.
+  The request contains no device name, no account and no coordinates as such,
+  but the requested tiles do describe the viewport. Nothing is requested while
+  no Map View page is open, and no other page of this integration loads map
+  tiles.
 
 ## Contributing
 
