@@ -233,6 +233,23 @@ Accessible via the ⚙️ cogwheel button on the main Google Find My Device Inte
 | `stale_threshold` | 3900 | seconds | After this many seconds (default: 65 minutes) without a location update, the tracker state becomes `unknown`. Use the "Last Location" entity to always see the last known position. |
 | `show_location_age` | true | toggle | Adds a `location_age` attribute (in seconds, rounded to 60s) to each tracker entity. Excluded from Recorder history to keep DB size predictable. |
 
+### Map View link expiry (`map_view_token_expiration`)
+
+With this option **off** (the default), the Map View link on a device page is
+stable and keeps working indefinitely.
+
+With it **on**, the token rotates weekly. The map accepts the current and the
+previous week, so there is a full week of grace, but the link stored on the
+device page is only rebuilt when the integration starts up. If Home Assistant
+runs for more than two week boundaries without a restart and without a reload of
+the entry, the device page's own Map View link goes stale and returns
+"Unauthorized".
+
+You do not have to restart to fix that. Call the service
+**`googlefindmy.refresh_device_urls`** (Developer tools → Actions → *Refresh
+Device URLs*); it rewrites the configuration URL of every device with a current
+token, and the link works again immediately.
+
 ### Google Home filter behavior
 
 The Google Home filter helps prevent noisy location updates from speakers and displays that frequently report "Home":
