@@ -1573,14 +1573,14 @@ class ConfigEntrySubEntryManager:
         # the provenance fields made the other half load-bearing:
         # ``_async_adopt_existing_unique_id`` does take the first match, but
         # ``_select_canonical`` sorts on identifier *presence* first, then the
-        # identifier itself, then the type against ``LITERAL_CORE_KEY_OWNER``,
-        # and only then falls to the index. That third field is constant on the
-        # ``(group_key, subentry_type)`` axis, because the type is part of that
-        # axis's grouping key, so nothing there changed: the first two fields
-        # are still a real criterion, and they still point the opposite way from
-        # all three rankers for a pair whose lower identifier carries
-        # ``unique_id=None``. The field decides on the ``unique_id`` axis, where
-        # everything above it ties by construction.
+        # identifier itself, and only then falls to the index. A type field sat
+        # between those two for two stages of PR #1236 and was dropped again
+        # once the removal guard there began comparing the full ``(group_key,
+        # subentry_type)`` identity, which left the field deciding nothing
+        # (measured over every three-subentry shape). Neither direction changed
+        # anything here: the first two fields are still a real criterion, and
+        # they still point the opposite way from all three rankers for a pair
+        # whose lower identifier carries ``unique_id=None``.
         #
         # The both-ids-missing case never reaches this point: ``subentry_id``
         # is read through the same ``getattr`` in ``_is_subentry_like``, which
@@ -1994,10 +1994,13 @@ class ConfigEntrySubEntryManager:
             defaultdict(list)
         )
         # Reuse the key this loop already resolved instead of re-reading it in
-        # the sort helper below. A second reading form is exactly the drift this
-        # module keeps paying for: the flow-side and manager-side sweeps answer
-        # the same question through two readers, and neither notices when they
-        # disagree.
+        # the removal guard below. A second reading form is exactly the drift
+        # this module keeps paying for: the flow-side and manager-side sweeps
+        # answer the same question through two readers, and neither notices
+        # when they disagree. Reading it here also keeps the guard's identity
+        # and ``grouped_by_group``'s key literally the same expression, which
+        # is what makes the subset property below checkable rather than
+        # plausible.
         #
         # Keyed by object identity rather than by ``subentry_id``: the loop
         # above appends every candidate, including one whose id is missing or
@@ -2029,7 +2032,7 @@ class ConfigEntrySubEntryManager:
         def _select_canonical(candidates: list[ConfigSubentry]) -> ConfigSubentry:
             def _sort_key(
                 item: tuple[int, ConfigSubentry],
-            ) -> tuple[int, str, int, int, str]:
+            ) -> tuple[int, str, int, str]:
                 index, candidate = item
                 candidate_unique_id = getattr(candidate, "unique_id", None)
                 unique_part = (
@@ -2041,110 +2044,41 @@ class ConfigEntrySubEntryManager:
                     if isinstance(candidate_subentry_id, str)
                     else ""
                 )
-                # Field 3, the type axis, decides *before* load order.
+                # No type field here, and the absence is the measured half
+                # of the removal guard below rather than an omission.
                 #
-                # Why it is needed at all: on the ``unique_id`` axis the
-                # candidates were grouped *by* ``unique_id``, so fields 1 and 2
-                # are constant across the bucket and field 5 is unreachable
-                # because ``index`` cannot tie. Without this field the survivor
-                # is whichever subentry ``entry.subentries`` happens to yield
-                # first, and the loser's device and entity registry bindings are
-                # cleared. ``agents/config_flow/AGENTS.md`` records that exact
-                # semantics as a defect on the flow side, where "taking
-                # whichever came first" silently removed the canonical service
-                # group; the production shape reaching this bucket is the same
-                # one, ``hub`` and ``service`` sharing ``f"{entry_id}-service"``.
+                # A type rank did sit in this tuple for two stages of PR #1236.
+                # It existed for the ``unique_id`` axis alone: candidates there
+                # are grouped *by* ``unique_id``, so fields 1 and 2 tie by
+                # construction and the survivor was whichever subentry
+                # ``entry.subentries`` happened to yield first -- the same
+                # "taking whichever came first" that
+                # ``agents/config_flow/AGENTS.md`` records as a defect on the
+                # flow side, where it silently removed the canonical service
+                # group. Ranking the literal key owner first made that
+                # deterministic, and the type guard below then decided which
+                # siblings the winner could take with it.
                 #
-                # ``LITERAL_CORE_KEY_OWNER`` rather than a new table: the flow
-                # sweep and ``_candidate_score`` already rank against it, and a
-                # fourth answer to "which type owns this key" is the drift this
-                # module is still paying for.
+                # Once that guard compares the **full** identity, the rank
+                # stops deciding anything: the surviving removals are exactly
+                # those the ``grouped_by_group`` pass makes anyway, whichever
+                # candidate this helper calls canonical. Measured rather than
+                # reasoned about, because the previous stage of this comment
+                # was wrong about a related claim in the same place: over all
+                # 19 683 three-subentry shapes, and over a 19 987-shape random
+                # sample of four- and five-subentry ones, the removal sets with
+                # the rank and with the rank neutralised are identical. It is
+                # dropped rather than left in place with a note, because a
+                # ranking field on a removal path reads as load-bearing.
                 #
-                # Mind the direction. ``_candidate_score`` compares with ``>``,
-                # so a *higher* number wins there; this helper picks with
-                # ``min``, so the owner has to sort *low*. A rank tuple copied
-                # over from that method would be inverted here. The flow's
-                # ``_resolve_existing`` and the runtime index rank "lower wins"
-                # like this helper, so only ``_candidate_score`` is the odd one.
-                #
-                # Fail-safe on unknown input: an unknown group key, a missing
-                # one and a missing ``subentry_type`` all yield 1, so every
-                # candidate ties and the previous order decides. A fourth shape
-                # ties the same way and is the common one rather than the exotic
-                # one, so listing only the three unknowns understated it: a
-                # *known* core key held by a type that does not own it also
-                # yields 1. Two ``hub``s sharing an identifier are the reachable
-                # case -- ``LITERAL_CORE_KEY_OWNER`` maps no key to ``hub`` at
-                # all -- so they tie on this field, the guard below spares
-                # neither (their types match), and load order still decides.
-                # That shape is unchanged from before this field existed,
-                # measured in both directions, and is carried as ``B24`` rather
-                # than fixed.
-                #
-                # An earlier version of this paragraph went on to say the field
-                # "only ever breaks a tie, never adds or drops a removal" inside
-                # one bucket. That was true while the loser was removed
-                # unconditionally and stopped being true the moment the removal
-                # gained the type guard below: which candidate wins now also
-                # decides *which type* the guard compares against, and therefore
-                # how many siblings it spares. Measured in a single bucket by
-                # ``::test_dedup_the_guard_still_needs_the_rank`` -- ranked, one
-                # removal; rank neutralised, none.
-                #
-                # Across buckets that is *not* true, and the difference was
-                # measured rather than reasoned about, because an earlier draft
-                # of this comment claimed the count could never change. The two
-                # grouping passes feed one shared ``removal_targets`` set, so
-                # moving a survivor on the ``unique_id`` axis can move the
-                # overlap with the group axis. Concretely, with three subentries
-                # all storing ``service`` -- a ``service`` carrying the tracker
-                # key's identifier, a ``hub`` and a ``service`` sharing
-                # ``e1-service`` -- the count went from one at ``c835d6b6``
-                # to two with the rank alone, and back to one once the guard
-                # spared the hub. Not the *same* one: the first stage removed
-                # the canonical service group, this one removes it too but only
-                # through the group axis, which is a pre-existing defect of its
-                # own (``B20``). The exhaustive three-subentry sweep behind the
-                # "never newly removes a canonically keyed owner" claim was run
-                # against the rank-only stage; it has since been repeated
-                # against this stage, so the claim is no longer carried as
-                # unverified. Over all 19 683 three-subentry shapes, comparing
-                # ``c835d6b6`` against the guard: 6 978 shapes remove *less*,
-                # 12 remove more in total, and 548 remove at least one id the
-                # earlier stage left standing -- of which **0** carry a type
-                # that owns its stored key literally. The claim holds; what the
-                # 548 are is the other half of the trade and is named rather
-                # than buried: a same-typed loser on a *foreign* key inside a
-                # shared-identifier bucket used to survive in one of the two
-                # load orders and now loses in both, because field 3 decides
-                # where load order used to. That is an ordering the group axis
-                # already applies to every same-typed pair it sees, but on the
-                # ``unique_id`` axis the loser can be a legitimate separate
-                # group (``agents/config_flow/AGENTS.md``: several tracker
-                # groups with distinct keys are a supported shape). Carried as
-                # ``B23`` rather than fixed here: closing it means guarding on
-                # the full ``(group_key, subentry_type)`` identity, which makes
-                # this axis a strict subset of the group axis and therefore
-                # switches identifier-collision cleanup off, a decision with
-                # its own deferred-rename trade that belongs in the plan.
-                # What holds either way: the count is not invariant, and a
-                # reader on a removal path should not be told that it is.
-                stored_key = stored_group_keys.get(id(candidate))
-                literal_owner = (
-                    LITERAL_CORE_KEY_OWNER.get(stored_key)
-                    if stored_key is not None
-                    else None
-                )
-                type_part = (
-                    0
-                    if literal_owner is not None
-                    and getattr(candidate, "subentry_type", None) == literal_owner
-                    else 1
-                )
+                # What still decides, in order: identifier *presence*, then the
+                # identifier itself, then load order, then ``subentry_id``. The
+                # first two are the fields ``_candidate_score`` disagrees with
+                # for a pair whose lower identifier is missing, which is
+                # ``B16`` and unchanged here.
                 return (
                     0 if unique_part else 1,
                     unique_part,
-                    type_part,
                     index,
                     subentry_part,
                 )
@@ -2158,90 +2092,80 @@ class ConfigEntrySubEntryManager:
             if len(candidates) <= 1:
                 continue
             canonical = _select_canonical(candidates)
-            canonical_type = getattr(canonical, "subentry_type", None)
+            canonical_identity = (
+                stored_group_keys.get(id(canonical)),
+                getattr(canonical, "subentry_type", None),
+            )
             removed_here = False
             for candidate in candidates:
                 if candidate is canonical:
                     continue
-                # Only a *same-typed* sibling can be a duplicate copy of the
-                # group ``canonical`` stands for; a different type sharing the
-                # identifier is a group of its own and is left alone.
+                # Sharing an identifier does not make two subentries the
+                # same logical group, so what is removed here is decided on
+                # the full ``(group_key, subentry_type)`` identity -- the same
+                # pair ``grouped_by_group`` keys on -- and not on the type
+                # alone.
                 #
-                # This is the manager-side half of a rule the flow side already
-                # states, and the halves were split for a while: this axis is
-                # the only one where two types can meet at all, because
-                # ``grouped_by_group`` carries ``subentry_type`` in its key.
-                # ``_async_cleanup_stale_subentries`` in ``config_flow.py``
-                # skips a subentry whose type does not literally own the key it
-                # stores, with the reasoning spelled out in
-                # ``agents/config_flow/AGENTS.md``: a ``hub`` writes
-                # ``SERVICE_SUBENTRY_KEY`` by design, so beside a real service
-                # subentry it is not mis-keyed but simply a different group,
-                # and it keeps its title, its key and its stored ids. Both
-                # handlers derive ``unique_id`` from that same key, so the pair
-                # lands in one bucket here, where the type rank above makes the
-                # hub the deterministic loser. Ranking without this guard
-                # therefore traded a *random* silent removal for a *reliable*
-                # one, which is the trade Codex flagged on PR #1236.
+                # The type-only form was the second stage of PR #1236 and
+                # Codex flagged it against ``agents/config_flow/AGENTS.md``:
+                # two ``tracker``-typed subentries with *distinct* group keys,
+                # restored from storage under one ``unique_id``, were read as
+                # duplicate copies of each other. The rank then handed the slot
+                # to whichever tracker literally owns ``core_tracking`` and the
+                # other went to ``async_remove_subentry``, device and entity
+                # registry bindings included -- while the contract states the
+                # opposite for exactly that shape: several tracker groups with
+                # distinct keys are supported, so a shared identifier is a
+                # collision between two groups, not evidence of one group
+                # stored twice. The first stage had the same defect one axis
+                # over, with a ``hub`` beside a ``service``; both are gone now
+                # for one reason instead of two.
                 #
-                # The rank is still load-bearing, and the guard is why: the
-                # guard removes only what matches ``canonical_type``, so which
-                # type wins decides which duplicates are still collapsed. An
-                # unranked load-order winner can be the hub, and then *no*
-                # candidate matches its type and a genuine duplicate survives
-                # with it. Rank first, then remove same-typed only.
-                #
-                # The shape that shows this needs all three to sit in *distinct*
-                # ``grouped_by_group`` buckets, which was measured rather than
-                # assumed: a first draft of this sentence used two ``service``
-                # twins on the same stored key, and neutralising the rank
-                # changed nothing there, because that pair collides on the group
-                # axis and is collapsed by it regardless. The witness is
-                # ``::test_dedup_the_guard_still_needs_the_rank``: a ``hub`` and
-                # two ``service`` subentries sharing ``e1-service`` but storing
-                # three different keys. Ranked, the key-owning ``service`` wins
-                # and the other ``service`` goes; unranked, the hub wins the
-                # bucket and nothing is removed at all.
+                # What is *not* resolved by leaving the pair alone: the
+                # colliding identifier stays. ``_claim_unique_id`` renames such
+                # a holder, and it runs only inside
+                # ``ConfigFlow._async_sync_feature_subentries`` -- never from
+                # this manager -- so the collision persists until the next flow
+                # pass. That is the deliberate direction, and it is the same
+                # one the flow-side sweep takes: a removal takes registry
+                # bindings with it and cannot be undone, a deferred rename can.
                 #
                 # ``getattr`` on both sides for the same reason the sort key
                 # uses it: a missing type is ``None`` on both, so two untyped
-                # siblings still collapse. The two guards are deliberately *not*
-                # identical here, and the difference is stated rather than
-                # papered over: the flow guard reads ``subentry_type is not None
-                # and != owner``, so it never spares an untyped subentry, while
-                # this one is plain equality and therefore *does* spare an
-                # untyped subentry beside a typed canonical. Unreachable in the
-                # installed core (``ConfigSubentry.subentry_type`` is a required
-                # ``str``), and equality is the right shape for an axis that has
-                # no notion of key ownership, but the flow's reasoning does not
-                # carry over and is not borrowed.
+                # siblings on one key still collapse.
                 #
-                # What is *not* resolved by skipping: the colliding identifier
-                # stays. ``_claim_unique_id`` displaces such a holder by
-                # renaming it, and it runs only inside
-                # ``ConfigFlow._async_sync_feature_subentries`` -- never from
-                # this manager. Leaving the pair intact therefore defers the
-                # collision rather than curing it here. That is the deliberate
-                # direction: a removal takes device and entity registry
-                # bindings with it and cannot be undone, while a deferred
-                # rename can.
+                # The cost of this axis, stated because it is easy to overread
+                # what remains: the identity compared here is precisely the
+                # grouping key of the pass below, so this loop can no longer
+                # contribute a removal the group pass would not make on its
+                # own. Measured across all 19 683 three-subentry shapes and a
+                # 19 987-shape random sample of four- and five-subentry ones,
+                # its output is identical to switching the loop off entirely.
+                # It is kept for its descriptor -- the log line still names the
+                # identifier a duplicate was found under, which the group pass
+                # cannot report -- and the type rank that used to aim it was
+                # dropped in the same change.
                 #
-                # Two limits on "left alone", both measured, because the first
+                # Two limits on "left alone", both measured, because an earlier
                 # draft of the contract text overstated them:
                 #
-                # * it is a statement about *this helper*. ``async_sync`` runs a
-                #   type-blind stale sweep afterwards which still removes a
+                # * it is a statement about *this helper*. ``async_sync`` runs
+                #   a type-blind stale sweep afterwards which still removes a
                 #   spared ``hub`` that stores a legacy or absent key. Only the
                 #   production shape is verified through a whole call, by
                 #   ``::test_dedup_a_spared_hub_survives_a_whole_sync_not_just_the_helper``.
                 # * sparing is not free. Where the spared twin is the one that
                 #   then holds a core slot through its stored key, the sync's
-                #   write-back changes an identifier after all, aborts twice and
-                #   ends in ``_async_adopt_existing_unique_id``
+                #   write-back changes an identifier after all, aborts twice
+                #   and ends in ``_async_adopt_existing_unique_id``
                 #   (``::test_dedup_sparing_a_twin_can_route_a_sync_through_the_adoption_exit``).
                 #   Same holder either way, so the trade stands, but it is a
                 #   trade.
-                if getattr(candidate, "subentry_type", None) != canonical_type:
+                candidate_identity = (
+                    stored_group_keys.get(id(candidate)),
+                    getattr(candidate, "subentry_type", None),
+                )
+                if candidate_identity != canonical_identity:
                     continue
                 candidate_id = getattr(candidate, "subentry_id", None)
                 if isinstance(candidate_id, str):
