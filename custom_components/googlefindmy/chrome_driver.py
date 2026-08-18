@@ -583,6 +583,32 @@ def get_options(*, headless: bool = False) -> ChromeOptions:
     chrome_options.add_argument("--disable-gpu")
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
+    # The two flags below relax the browser's own origin isolation. They are
+    # under discussion (BSkando/GoogleFindMy-HA#214), so here is what is known:
+    #
+    # * Scope. ``get_options`` is reached only through ``create_driver``, and
+    #   ``create_driver`` only from the manual command-line entry points
+    #   (``Auth/auth_flow.py``, ``KeyBackup/shared_key_flow.py``,
+    #   ``get_oauth_token.py``). No Home Assistant code path imports this module,
+    #   so these flags never apply to a running Home Assistant instance. They
+    #   apply to a browser the user starts themselves, for the minutes it takes
+    #   to sign in to their own Google account.
+    # * Provenance. They arrived with commit 5219da9f, described as taken from
+    #   the upstream tool. That is not accurate: leonboe1/GoogleFindMyTools sets
+    #   exactly three arguments in its own ``get_options`` (``--start-maximized``,
+    #   ``--no-sandbox``, ``--disable-dev-shm-usage``) and obtains the same keys
+    #   through the same flow without these two.
+    # * Second sign that they may be dispensable: our own fallback path,
+    #   ``_try_webdriver_manager_fallback``, starts Chrome for the same purpose
+    #   and sets neither.
+    #
+    # Not removed on that evidence alone. Verifying a removal takes a real Google
+    # sign-in with 2FA on a real desktop; it cannot be automated, cannot be
+    # repeated in CI, and one successful run would not prove it holds for every
+    # account and Chrome build. The gain would be zero (no attack path in the
+    # Home Assistant runtime, see scope), the loss on a mistake is every user's
+    # only route to their own credentials. Whoever removes them owes that
+    # measurement.
     chrome_options.add_argument("--disable-web-security")
     chrome_options.add_argument("--allow-running-insecure-content")
 
