@@ -22,10 +22,10 @@ from __future__ import annotations
 
 import re
 import time
-from collections.abc import Iterable, Mapping
+from collections.abc import Mapping
 from dataclasses import asdict, is_dataclass
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any, TypeVar, cast
+from typing import TYPE_CHECKING, Any
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
@@ -56,7 +56,7 @@ from .const import (
     OPT_MAP_VIEW_TOKEN_EXPIRATION,
     OPT_MIN_POLL_INTERVAL,
 )
-from .ha_typing import callback
+from .redaction import REDACTED, async_redact_data
 from .shared_helpers import normalize_fcm_entry_snapshot, safe_fcm_health_snapshots
 
 if TYPE_CHECKING:
@@ -783,35 +783,3 @@ async def async_get_config_entry_diagnostics(
     # (We already avoided including secrets, but this keeps us safe against future extensions.)
     return async_redact_data(payload, TO_REDACT)
 
-
-# Consistent placeholder used when redacting fields.
-REDACTED = "**REDACTED**"
-
-_T = TypeVar("_T")
-
-
-@callback
-def async_redact_data(data: _T, to_redact: Iterable[Any]) -> _T:
-    """Redact sensitive keys from mappings or lists without importing HA's HTTP stack."""
-
-    if not isinstance(data, (Mapping, list)):
-        return data
-
-    if isinstance(data, list):
-        return cast(_T, [async_redact_data(item, to_redact) for item in data])
-
-    redacted = dict(data)
-
-    for key, value in list(redacted.items()):
-        if value is None:
-            continue
-        if isinstance(value, str) and not value:
-            continue
-        if key in to_redact:
-            redacted[key] = REDACTED
-        elif isinstance(value, Mapping):
-            redacted[key] = async_redact_data(value, to_redact)
-        elif isinstance(value, list):
-            redacted[key] = [async_redact_data(item, to_redact) for item in value]
-
-    return cast(_T, redacted)
