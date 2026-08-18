@@ -71,7 +71,7 @@ jobs:
 
       - name: Wait for hassfest auto-fix workflow to finish
         if: steps.hassfest_autofix.outputs.found == 'true'
-        uses: lewagon/wait-on-check-action@v1.3.3
+        uses: lewagon/wait-on-check-action@v1.9.1
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           check-regexp: '^[Hh]assfest( \(auto-fix\)( / hassfest.*)?)?$'
