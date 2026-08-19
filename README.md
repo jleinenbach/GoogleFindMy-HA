@@ -550,6 +550,57 @@ configuration.
 - No location data is transmitted to third parties
 - Local processing of all GPS coordinates
 
+## Security considerations
+
+### What is stored, and where
+
+| What | Where | Notes |
+| --- | --- | --- |
+| The credential bundle you paste during setup | Home Assistant's storage, one file per config entry: `.storage/googlefindmy_secrets_<entry_id>` | Written by the integration's token cache, not by you |
+| Google account e-mail and the OAuth token | The config entry itself (`.storage/core.config_entries`) | Needed to restart without asking you again |
+| Derived tokens (AAS, ADM, SPOT), FCM push identity, the shared key and the owner key | Same per-entry storage file | Refreshed automatically; the long-lived ones are what make the integration work after a restart |
+| The Map View access token | Not stored as a secret: it is derived on demand from the instance UUID and the entry id, and it appears inside each device's `configuration_url` in `.storage/core.device_registry` | See [Map View link expiry](#map-view-link-expiry-map_view_token_expiration) |
+
+`secrets.json` is **not** part of the running integration. It is produced by the
+manual command-line login, you paste its contents once, and after that the file
+on your own machine is the only copy. If an old `Auth/secrets.json` is found next
+to the integration it is imported once and then deleted (`Auth/token_cache.py`,
+`os.remove(legacy_path)`).
+
+### Who can read it
+
+Anyone with **administrator access to Home Assistant** or **read access to its
+configuration directory**. That is not a property of this integration: the
+`.storage` directory holds the credentials of every integration you have
+installed, and the recorder database holds their history. Protect the Home
+Assistant instance and you protect these credentials; do not protect it and no
+choice this integration could make would help.
+
+Diagnostics downloads are redacted before they leave Home Assistant
+(`diagnostics.py`, `TO_REDACT`), so an attached diagnostics file does not contain
+your tokens. It does contain the entry id in clear.
+
+### What is *not* part of the Home Assistant runtime
+
+Chrome and Selenium. The browser-based credential extraction is a manual step
+you run yourself, from a terminal, on your own machine. Home Assistant executes
+no code path that imports Selenium or starts a browser, and
+`selenium`/`undetected_chromedriver` are deliberately absent from
+`manifest.json`, so Home Assistant does not even install them.
+
+One qualification, because it is real: the interactive key-backup fallback is
+guarded by a terminal check (`KeyBackup/shared_key_retrieval.py` →
+`_retrieve_shared_key_hex`, `is_tty = sys.stdin and sys.stdin.isatty()`), not by
+a check for "am I the CLI". A Home Assistant process running in the foreground
+on a terminal, whose bundle carries no shared key, can therefore reach it. The
+guard is being replaced by a signal the command-line process sets for itself.
+
+### Reporting a security issue
+
+See [SECURITY.md](SECURITY.md). Short version: use private vulnerability
+reporting for anything with an attacker in it, and a normal issue — one per
+item — for hardening suggestions.
+
 ## Contributing
 
 Contributions are welcome and encouraged!
