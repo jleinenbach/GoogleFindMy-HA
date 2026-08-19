@@ -620,9 +620,12 @@ def get_options(*, headless: bool = False) -> ChromeOptions:
     #   a terminal was attached, and a foreground Home Assistant answers yes, so
     #   these flags *could* be applied inside the Home Assistant process. That
     #   guard now asks two questions instead: ``GOOGLEFINDMY_CLI_PROCESS``, which
-    #   only ``main.py`` sets on its own process, and whether somebody is there to
-    #   answer the browser prompt. Either one alone is refused, so "CLI only" is
-    #   the guarantee it was previously only the intent of.
+    #   ``main.py`` sets on its own process and Home Assistant never sets, and
+    #   whether somebody is there to answer the browser prompt. Either one alone
+    #   is refused. That is a default, not a guarantee: the variable is inherited
+    #   like any other, and the refusal message deliberately tells an unforeseen
+    #   command-line wrapper to set it. Someone who exports it into a Home
+    #   Assistant process is answering the question the guard asks.
     # * Provenance. They arrived with commit 5219da9f, described as taken from
     #   the upstream tool. That is not accurate: leonboe1/GoogleFindMyTools sets
     #   exactly three arguments in its own ``get_options`` (``--start-maximized``,

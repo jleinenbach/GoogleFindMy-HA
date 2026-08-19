@@ -686,11 +686,13 @@ you run yourself, from a terminal, on your own machine. No module Home Assistant
 loads imports Selenium or starts a browser: an import-graph walk from every
 module Home Assistant loads on its own reaches no browser package, while the
 same walk from `chrome_driver.py` does — so the check can fire. "Every module"
-means: the six Home Assistant looks up by filename (`__init__.py`,
-`config_flow.py`, `diagnostics.py`, `repairs.py`, `system_health.py`,
-`eid_resolver.py`), which the check lists explicitly because that convention is
-Home Assistant's rather than ours, plus the platform modules, which it reads
-from `PLATFORMS` because that list does change. From each of them it follows
+means: `__init__.py`, the entry point; the four Home Assistant looks up by
+filename (`config_flow.py`, `diagnostics.py`, `repairs.py`,
+`system_health.py`), which the check lists explicitly because that convention
+is Home Assistant's rather than ours; `eid_resolver.py`, which is an ordinary
+import of `__init__.py` and would be crawled anyway, seeded as its own entry
+because it is where the decryption path starts; and the platform modules, which
+the check reads from `PLATFORMS` because that list does change. From each of them it follows
 imports inside function bodies as well, and `importlib.import_module` calls
 whose target is a literal string, because a module reached only that way is
 reached all the same. A dynamic import whose target is assembled at run time
