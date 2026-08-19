@@ -541,51 +541,123 @@ def test_the_chain_surfaces_the_typed_failure_instead_of_its_own(
         chrome_driver._create_driver_inner(headless=True)
 
 
-def _function_body_imports(path: Path) -> set[str]:
-    """Return top-level packages imported inside function bodies of one module.
+def _all_imports(path: Path, root: Path = PACKAGE_ROOT) -> tuple[set[str], set[str]]:
+    """Return (external packages, internal modules) from *every* import in a file.
 
-    The load-time crawl above deliberately ignores these, and for its own
-    question that is right: they do not run on import. They do run when Home
-    Assistant calls the function, though, so a browser import placed in
-    `async_setup_entry` or a coordinator helper would break at setup time
-    while the load-time check stayed green.
+    Unlike `_module_level_imports`, this does not care whether an import runs
+    at load time: it also reads function bodies, because Home Assistant calls
+    those functions. Relative imports are resolved, so a callback that reaches
+    another module with `from .discovery import ...` extends the search
+    instead of ending it.
 
-    Only literal `import` statements are collected. The one deliberate dynamic
-    route, `importlib.import_module` in `shared_key_retrieval`, is not an
-    import statement and is covered separately by `_dynamic_edges`.
+    Only literal import statements. The one deliberate dynamic route,
+    `importlib.import_module` in `shared_key_retrieval`, is not one and stays
+    with `_dynamic_edges`, which is what keeps `chrome_driver` out of this
+    closure -- exactly where the browser packages are supposed to live.
     """
 
-    found: set[str] = set()
-    tree = ast.parse(path.read_text(encoding="utf-8"))
-    for node in ast.walk(tree):
-        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+    prefix = "custom_components.googlefindmy"
+    external: set[str] = set()
+    internal: set[str] = set()
+    rel = path.relative_to(root)
+
+    for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name.startswith(prefix):
+                    internal.add(alias.name[len(prefix) :].strip("."))
+                else:
+                    external.add(alias.name.split(".")[0])
+        elif isinstance(node, ast.ImportFrom):
+            if node.level:
+                base = rel.parent
+                for _ in range(node.level - 1):
+                    base = base.parent
+                parts = [p for p in list(base.parts) if p]
+                if node.module:
+                    parts += node.module.split(".")
+                internal.add(".".join(parts))
+                # `from . import discovery` binds a submodule, not a name.
+                internal.update(".".join(parts + [a.name]) for a in node.names)
+            elif node.module and node.module.startswith(prefix):
+                internal.add(node.module[len(prefix) :].strip("."))
+            elif node.module:
+                external.add(node.module.split(".")[0])
+    return external, internal
+
+
+def _resolve_internal(module: str) -> Path | None:
+    candidate = PACKAGE_ROOT.joinpath(*module.split("."))
+    if candidate.with_suffix(".py").is_file():
+        return candidate.with_suffix(".py").relative_to(PACKAGE_ROOT)
+    if (candidate / "__init__.py").is_file():
+        return (candidate / "__init__.py").relative_to(PACKAGE_ROOT)
+    return None
+
+
+def _closure_including_function_bodies(entry: str) -> dict[str, set[str]]:
+    """Walk from one entry point, following imports wherever they are written."""
+
+    offenders: dict[str, set[str]] = {}
+    seen: set[str] = set()
+    queue = [Path(entry)]
+    while queue:
+        rel = queue.pop()
+        if str(rel) in seen:
             continue
-        for sub in ast.walk(node):
-            if isinstance(sub, ast.Import):
-                found.update(alias.name.split(".")[0] for alias in sub.names)
-            elif isinstance(sub, ast.ImportFrom) and sub.module and not sub.level:
-                found.add(sub.module.split(".")[0])
-    return found
+        seen.add(str(rel))
+        external, internal = _all_imports(PACKAGE_ROOT / rel)
+        if external & BROWSER_PACKAGES:
+            offenders[str(rel)] = external & BROWSER_PACKAGES
+        for module in internal:
+            resolved = _resolve_internal(module)
+            if resolved is not None and str(resolved) not in seen:
+                queue.append(resolved)
+    return offenders
 
 
 @pytest.mark.parametrize("entry", _ha_entry_points())
 def test_no_browser_import_hides_in_a_function_home_assistant_calls(
     entry: str,
 ) -> None:
-    """Every module reachable from a Home Assistant entry point, not just its imports."""
+    """A function Home Assistant calls runs, wherever its imports are written."""
 
-    reachable, _external, _dynamic = _reachable(entry)
-
-    offenders = {
-        module
-        for module in reachable
-        if _function_body_imports(PACKAGE_ROOT / module) & BROWSER_PACKAGES
-    }
+    offenders = _closure_including_function_bodies(entry)
 
     assert not offenders, (
-        f"{sorted(offenders)} import a browser package inside a function body, "
-        "and Home Assistant reaches them; manifest.json no longer installs it"
+        f"{sorted(offenders)} import a browser package, and Home Assistant "
+        "reaches them; manifest.json no longer installs it"
     )
+
+
+def test_the_closure_follows_a_relative_import_inside_a_function(
+    tmp_path: Path,
+) -> None:
+    """Positive control for the edge that made the first version incomplete.
+
+    `config_flow.py` reaches `discovery.py` through `from . import discovery`
+    inside a callback. An import graph that drops relative edges written in
+    function bodies would call that module unreachable and miss anything in
+    it.
+    """
+
+    module = tmp_path / "caller.py"
+    module.write_text(
+        textwrap.dedent(
+            """\
+            def callback():
+                from . import discovery
+                from .helpers import thing
+                return discovery, thing
+            """
+        ),
+        encoding="utf-8",
+    )
+
+    _external, internal = _all_imports(module, tmp_path)
+
+    assert "discovery" in internal
+    assert "helpers" in internal or "helpers.thing" in internal
 
 
 def test_the_function_body_scan_can_see_an_import(tmp_path: Path) -> None:
@@ -603,4 +675,6 @@ def test_the_function_body_scan_can_see_an_import(tmp_path: Path) -> None:
         encoding="utf-8",
     )
 
-    assert _function_body_imports(module) & BROWSER_PACKAGES
+    external, _internal = _all_imports(module, tmp_path)
+
+    assert external & BROWSER_PACKAGES
