@@ -39,7 +39,14 @@ REDACTED = "**REDACTED**"
 # (``aas_token_issued_at_...``) intact even for a local part containing an
 # underscore. Whatever still looks like an address afterwards is removed
 # greedily: correctness of the redaction outranks readability of the key.
-_EMAIL_VALUE = re.compile(r"^[^\s@/\\]+@[^\s@/\\]+\.[^\s@/\\]+$")
+#
+# The two patterns are deliberately not the same. The first anchors on the
+# whole string, so it can accept every character a local part may carry,
+# `/` among them (`first/last@example.com` is a valid address and does occur
+# on hosted domains). The second has to find an address *inside* a longer
+# name and stops at `/` and a backslash on purpose, so a path-shaped key name
+# cannot be swallowed whole.
+_EMAIL_VALUE = re.compile(r"^[^\s@]+@[^\s@/\\]+\.[^\s@/\\]+$")
 _EMAIL_IN_KEY = re.compile(r"[^\s@/\\]+@[^\s@/\\]+\.[^\s@/\\]+")
 
 

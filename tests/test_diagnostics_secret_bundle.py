@@ -107,6 +107,30 @@ def test_an_underscored_local_part_leaves_no_fragment() -> None:
     assert "aas_token_issued_at_<account-1>" in redacted
 
 
+def test_a_slash_in_the_local_part_does_not_survive() -> None:
+    """`first/last@example.com` is a valid address, and hosted domains use it.
+
+    The pattern that searches *inside* a key name stops at a slash on purpose,
+    so that a path-shaped name cannot be swallowed whole. That made it reject
+    such an address outright and leave `adm_token_first/` standing. The
+    whole-string pattern that reads the payload's own values has no such
+    constraint and does the exact replacement.
+    """
+
+    payload = {
+        "username": "first/last@example.com",
+        "adm_token_first/last@example.com": _SECRET,
+        "aas_token_issued_at_first/last@example.com": 1,
+    }
+
+    redacted = _redact(payload)
+
+    text = str(redacted)
+    for fragment in ("first", "last", "example.com"):
+        assert fragment not in text, fragment
+    assert "aas_token_issued_at_<account-1>" in redacted
+
+
 def test_run_time_key_names_are_redacted_by_prefix() -> None:
     """These names are built from the account e-mail and cannot be listed."""
 
