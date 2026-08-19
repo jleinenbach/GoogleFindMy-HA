@@ -595,6 +595,54 @@ a check for "am I the CLI". A Home Assistant process running in the foreground
 on a terminal, whose bundle carries no shared key, can therefore reach it. The
 guard is being replaced by a signal the command-line process sets for itself.
 
+### If your credential bundle leaks
+
+Treat a leaked bundle as a full compromise of what this integration can reach,
+and assume the location access cannot be taken back. The honest reason for that
+assumption is in the last column below.
+
+| What is in the bundle | What it opens | Can you revoke it? |
+| --- | --- | --- |
+| `aas_token` (long-lived Android account credential) | Mints fresh API tokens at will, without your password and without 2-Step Verification | Not documented. See the caveat below |
+| `adm_token_*` (short-lived API token) | Lists your devices, requests locations, rings them — but returns **ciphertext** without the keys below | Expires by itself within hours; a holder of the `aas_token` just mints another |
+| `fcm_credentials` (push identity) | Receives and decrypts the push responses, i.e. reads incoming location reports, and presents to Google as the same device | Not documented for a third party's copy |
+| `shared_key` and `owner_key` | **Decrypt** location reports. This is the step that turns "can list and ring your devices" into "can see where you are" | Not documented |
+| Your Google account e-mail, the device identifier, usage timestamps | Identifies the account and the device the tokens were issued for | Not applicable |
+
+**What to do, in this order.** Every step below is something Google documents;
+where the documentation stops, this says so instead of guessing.
+
+1. **Change your Google password.** Google states you are then "signed out
+   everywhere except … some devices with third-party apps that you've given
+   account access"
+   ([support](https://support.google.com/accounts/answer/41078)). Whether the
+   `aas_token` falls under that exception is *not documented*, so do not treat
+   this step as sufficient.
+2. **Review your devices and sign out anything you do not recognise**
+   ([support](https://support.google.com/accounts/answer/3067630)). The page
+   does not state what signing out does to already issued tokens.
+3. **Review third-party access and remove what you do not want.** "If you remove
+   access, the app can't access your Google Account"
+   ([support](https://support.google.com/accounts/answer/13533235)). Whether a
+   grant made this way appears in that list is not documented.
+4. **Check your account's security activity and turn on 2-Step Verification**
+   ([support](https://support.google.com/accounts/answer/6294825)).
+5. **If the location itself is what you need to protect, remove the tracker from
+   Find Hub**: removing it deletes its associated data
+   ([support](https://support.google.com/android/answer/14800516)). This is the
+   only step in the list that touches the device-side of the key material.
+6. **Locally:** delete your copy of `secrets.json`, remove the config entry, and
+   run the login again. This gives *you* fresh credentials; it does nothing to
+   the thief's copy.
+
+**The uncomfortable part, stated plainly:** steps 1 to 4 all act on account and
+token access. The two items that decrypt your location, `shared_key` and
+`owner_key`, are key material the holder already has locally, and no Google
+documentation we could find describes a way for an account owner to rotate or
+revoke them. Until that changes, a leaked bundle should be assumed to keep
+decrypting whatever it already received, and the practical remedy for the
+location itself is step 5.
+
 ### Reporting a security issue
 
 See [SECURITY.md](SECURITY.md). Short version: use private vulnerability
