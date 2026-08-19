@@ -311,7 +311,13 @@ def test_the_only_dynamic_route_to_the_browser_is_the_guarded_one() -> None:
         encoding="utf-8"
     )
     assert "MISSING_BROWSER_PACKAGES_HINT" in source
-    assert "is_tty = sys.stdin and sys.stdin.isatty()" in source
+    # The guard in front of that route is the marker the command-line tool sets
+    # for itself. #1254 replaced the terminal test that used to stand here: a
+    # Home Assistant instance started in the foreground of a terminal answers
+    # `isatty()` with True and is still not the CLI, so a session check alone
+    # is a necessary condition, never a sufficient one.
+    assert '_ENV_CLI_PROCESS = "GOOGLEFINDMY_CLI_PROCESS"' in source
+    assert "is_cli = _cli_process()" in source
 
 
 def test_the_hint_names_the_install_command() -> None:

@@ -73,7 +73,16 @@ def _reset_uc(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_get_options_headless_uses_expected_arguments(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Ensure headless options populate the expected Chrome arguments."""
+    """Ensure headless options populate the expected Chrome arguments.
+
+    The list is frozen deliberately, including the last two entries. Those relax
+    the browser's origin isolation and are periodically proposed for removal;
+    ``chrome_driver.get_options`` carries the reasoning. Short version: they only
+    ever apply to the manual, user-started extraction browser, never to a Home
+    Assistant runtime, and removing them cannot be verified without a real Google
+    sign-in with 2FA. If this assertion fails, the flags were changed without
+    that measurement.
+    """
 
     uc_module = chrome_driver._get_uc_module()
     monkeypatch.setattr(uc_module, "ChromeOptions", FakeChromeOptions)

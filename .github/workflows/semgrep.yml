@@ -4,9 +4,10 @@ on:
   push:
     branches:
       - main
+  # No branch filter: development happens on the version branches (1.7), not on
+  # main, and a pull request there must be scanned like any other. Matches the
+  # `on:` blocks of ci.yml and pip-audit.yml.
   pull_request:
-    branches:
-      - main
   schedule:
     # Runs daily at 02:12 UTC-only
     - cron: '12 2 * * *'
