@@ -455,9 +455,19 @@ def _run_oauth_flow_or_exit(
         # strategy chain in a generic "Failed to start ChromeDriver" message, so
         # matching on the text alone would let exactly the case this boundary
         # exists for slip past. Ask the packages instead.
+        #
+        # The failure is reported first and the packages second, deliberately.
+        # Not every error on this path comes from loading the driver: the flow
+        # refuses an unattended run before it ever gets there. Leading with the
+        # install command would answer a question that user did not ask, and
+        # they would install the packages and fail again for the same reason.
         if browser_packages_missing():
-            print(f"\n{MISSING_BROWSER_PACKAGES_HINT}\n")
-            print(f"Details: {err}")
+            print(f"\n{err}\n")
+            print(
+                "The browser packages are also missing, so this run could not "
+                "have succeeded either way:\n"
+                f"\n{MISSING_BROWSER_PACKAGES_HINT}\n"
+            )
             raise SystemExit(1) from err
         raise
 
@@ -713,8 +723,13 @@ async def _ensure_vault_keys(cache: object) -> None:
             print(f"\n{err}\n", file=sys.stderr)
             sys.exit(1)
         if browser_packages_missing():
-            print(f"\n{MISSING_BROWSER_PACKAGES_HINT}\n", file=sys.stderr)
-            print(f"Details: {err}", file=sys.stderr)
+            print(f"\n{err}\n", file=sys.stderr)
+            print(
+                "The browser packages are also missing, so this run could not "
+                "have succeeded either way:\n"
+                f"\n{MISSING_BROWSER_PACKAGES_HINT}\n",
+                file=sys.stderr,
+            )
             sys.exit(1)
         print(
             "\nError: vault key retrieval failed.\n"

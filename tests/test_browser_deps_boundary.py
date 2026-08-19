@@ -416,6 +416,31 @@ def test_the_translated_failure_still_reaches_the_user(
     assert excinfo.value.code == 1
 
 
+def test_the_original_failure_is_reported_before_the_packages(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Not every failure on this path comes from loading the driver.
+
+    `Auth/auth_flow.py` refuses an unattended run before `create_driver()` is
+    reached. Leading with the install command would answer a question that
+    user did not ask: they would install the packages and fail again for the
+    same reason. The failure comes first, the packages second.
+    """
+
+    from custom_components.googlefindmy import main
+
+    monkeypatch.setattr(browser_deps, "browser_packages_missing", lambda: True)
+
+    def _unattended() -> tuple[str, str | None]:
+        raise RuntimeError("The interactive Chrome login needs an attended terminal")
+
+    with pytest.raises(SystemExit):
+        main._run_oauth_flow_or_exit(_unattended)
+
+    out = capsys.readouterr().out
+    assert out.index("attended terminal") < out.index(browser_deps.INSTALL_COMMAND)
+
+
 def test_a_real_driver_failure_keeps_its_traceback(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
