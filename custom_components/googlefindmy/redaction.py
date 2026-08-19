@@ -28,15 +28,27 @@ from typing import Any, cast
 REDACTED = "**REDACTED**"
 
 
-def async_redact_data[T](data: T, to_redact: Iterable[Any]) -> T:
-    """Redact sensitive keys from mappings or lists without importing HA's HTTP stack."""
+def async_redact_data[T](
+    data: T, to_redact: Iterable[Any], to_redact_prefixes: Iterable[str] = ()
+) -> T:
+    """Redact sensitive keys from mappings or lists without importing HA's HTTP stack.
+
+    ``to_redact`` matches key names exactly. ``to_redact_prefixes`` exists for the
+    keys whose names are built at runtime and can therefore never appear in a
+    fixed list: the token cache stores entries such as ``adm_token_<e-mail>`` and
+    ``android_id_<e-mail>``. Without a prefix rule those names pass an exact-match
+    filter untouched.
+    """
 
     if not isinstance(data, (Mapping, list)):
         return data
 
     if isinstance(data, list):
-        return cast(T, [async_redact_data(item, to_redact) for item in data])
+        return cast(
+            T, [async_redact_data(item, to_redact, to_redact_prefixes) for item in data]
+        )
 
+    prefixes = tuple(to_redact_prefixes)
     redacted = dict(data)
 
     for key, value in list(redacted.items()):
@@ -44,12 +56,16 @@ def async_redact_data[T](data: T, to_redact: Iterable[Any]) -> T:
             continue
         if isinstance(value, str) and not value:
             continue
-        if key in to_redact:
+        if key in to_redact or (
+            prefixes and isinstance(key, str) and key.startswith(prefixes)
+        ):
             redacted[key] = REDACTED
         elif isinstance(value, Mapping):
-            redacted[key] = async_redact_data(value, to_redact)
+            redacted[key] = async_redact_data(value, to_redact, prefixes)
         elif isinstance(value, list):
-            redacted[key] = [async_redact_data(item, to_redact) for item in value]
+            redacted[key] = [
+                async_redact_data(item, to_redact, prefixes) for item in value
+            ]
 
     return cast(T, redacted)
 
