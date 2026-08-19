@@ -33,12 +33,14 @@ REDACTED = "**REDACTED**"
 # leaves the address standing in the property name, in a file people attach to
 # public issues. The address is replaced in the name as well; the rest of the
 # name is kept, because ``issued_at`` is what makes the entry readable.
-# The local part deliberately stops at an underscore: the names are built as
-# ``<what>_<address>``, so a greedy local part would swallow ``issued_at`` and
-# make two different entries collide. An address that itself contains an
-# underscore therefore leaves the fragment before it standing; that is a
-# fragment, not an address, and the domain is gone either way.
-_EMAIL_IN_KEY = re.compile(r"[^\s@/\\_]+@[^\s@/\\]+\.[^\s@/\\]+")
+# Two passes, because guessing where a name ends and an address begins cannot
+# be done safely. First the addresses actually present in the payload are
+# removed from key names verbatim, which keeps the readable part of the name
+# (``aas_token_issued_at_...``) intact even for a local part containing an
+# underscore. Whatever still looks like an address afterwards is removed
+# greedily: correctness of the redaction outranks readability of the key.
+_EMAIL_VALUE = re.compile(r"^[^\s@/\\]+@[^\s@/\\]+\.[^\s@/\\]+$")
+_EMAIL_IN_KEY = re.compile(r"[^\s@/\\]+@[^\s@/\\]+\.[^\s@/\\]+")
 
 
 def async_redact_data[T](
@@ -60,6 +62,8 @@ def async_redact_data[T](
         return data
 
     accounts = {} if _accounts is None else _accounts
+    if _accounts is None:
+        _register_addresses(data, accounts)
 
     if isinstance(data, list):
         return cast(
@@ -96,6 +100,26 @@ def async_redact_data[T](
     return cast(T, redacted)
 
 
+def _register_addresses(data: Any, accounts: dict[str, str]) -> None:
+    """Collect the e-mail addresses that appear as *values*, before redaction.
+
+    The key names are built from the account address, so knowing the address
+    lets the name be cleaned exactly instead of by pattern guessing. Run once,
+    on the whole payload, before any value has been replaced.
+    """
+
+    if isinstance(data, Mapping):
+        for value in data.values():
+            _register_addresses(value, accounts)
+        return
+    if isinstance(data, list):
+        for item in data:
+            _register_addresses(item, accounts)
+        return
+    if isinstance(data, str) and _EMAIL_VALUE.match(data) and data not in accounts:
+        accounts[data] = f"<account-{len(accounts) + 1}>"
+
+
 def _anonymise_key(key: Any, accounts: dict[str, str]) -> Any:
     """Replace an account address inside a key *name* with a stable placeholder.
 
@@ -106,6 +130,14 @@ def _anonymise_key(key: Any, accounts: dict[str, str]) -> Any:
 
     if not isinstance(key, str) or "@" not in key:
         return key
+
+    # Longest first, so a shorter address that is a suffix of a longer one
+    # cannot claim the match.
+    for address in sorted(accounts, key=len, reverse=True):
+        if address in key:
+            key = key.replace(address, accounts[address])
+            if "@" not in key:
+                return key
 
     def _replace(match: re.Match[str]) -> str:
         address = match.group(0)

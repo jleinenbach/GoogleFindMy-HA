@@ -60,6 +60,10 @@ def test_the_account_address_does_not_survive_in_the_key_name() -> None:
     """
 
     payload = {
+        # The address is in the payload, as it is in a real diagnostics file
+        # (`entry.data` carries the account e-mail), so the key name can be
+        # cleaned exactly instead of by guessing.
+        "username": "user@example.com",
         "adm_token_user@example.com": _SECRET,
         "aas_token_issued_at_user@example.com": 1,
         "nested": {"spot_token_other@example.org": _SECRET},
@@ -72,7 +76,35 @@ def test_the_account_address_does_not_survive_in_the_key_name() -> None:
     assert "adm_token_<account-1>" in redacted
     # The same account keeps the same number, and `issued_at` survives.
     assert "aas_token_issued_at_<account-1>" in redacted
-    assert "spot_token_<account-2>" in redacted["nested"]
+    # `other@example.org` appears nowhere as a value, so the greedy fallback
+    # takes the whole key: unreadable, but nothing leaks.
+    assert "<account-2>" in redacted["nested"]
+
+
+def test_an_underscored_local_part_leaves_no_fragment() -> None:
+    """`john_doe@example.com` must not become `adm_token_john_<account-1>`.
+
+    Guessing where the name ends and the address begins is what produced that
+    fragment. The address is taken from the payload's own values instead, and
+    anything still address-shaped afterwards is removed greedily, even at the
+    cost of an unreadable key.
+    """
+
+    payload = {
+        "username": "john_doe@example.com",
+        "adm_token_john_doe@example.com": _SECRET,
+        "aas_token_issued_at_john_doe@example.com": 1,
+        # No matching value anywhere: the greedy fallback has to take it.
+        "spot_token_jane_roe@example.org": _SECRET,
+    }
+
+    redacted = _redact(payload)
+
+    text = str(redacted)
+    for fragment in ("john", "doe", "jane", "roe", "example.com", "example.org"):
+        assert fragment not in text, fragment
+    # The readable part survives where the address was known.
+    assert "aas_token_issued_at_<account-1>" in redacted
 
 
 def test_run_time_key_names_are_redacted_by_prefix() -> None:
