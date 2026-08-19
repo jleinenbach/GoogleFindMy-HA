@@ -86,7 +86,11 @@ def async_redact_data[T](
 
     for key, value in dict(data).items():
         out_key = _anonymise_key(key, accounts)
-        while out_key != key and out_key in redacted:
+        # Not `out_key != key`: an anonymised name can also collide with a
+        # literal key that arrives *later*, and that one would then overwrite
+        # the earlier entry. Which field survives would depend on insertion
+        # order, in a file whose purpose is to show what is there.
+        while out_key in redacted:
             out_key = f"{out_key}-2"
         if value is None or (isinstance(value, str) and not value):
             redacted[out_key] = value
