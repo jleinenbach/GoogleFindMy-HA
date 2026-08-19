@@ -80,6 +80,13 @@ TO_REDACT: list[str] = [
     "scanned_data",
     "shared_key",
     "owner_key",
+    # FCM credential material carried inside the bundle. These are fixed key
+    # names, so exact matching is enough; the surrounding fcm_* diagnostics
+    # (status, receiver state, counters) are deliberately NOT redacted.
+    "fcm_credentials",
+    "fcm_creds",
+    "fcm_installation",
+    "fcm_registration",
     # Common token/email/credential shapes
     "aas_token",
     "access_token",
@@ -159,7 +166,6 @@ TO_REDACT_PREFIXES: tuple[str, ...] = (
     "owner_key",
     "shared_key",
     "oauth_token",
-    "fcm_",
 )
 
 

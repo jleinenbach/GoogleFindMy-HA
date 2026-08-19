@@ -60,7 +60,6 @@ def test_run_time_key_names_are_redacted_by_prefix() -> None:
         "aas_token_issued_at_user@example.com": 1,
         "owner_key_user@example.com": _SECRET,
         "shared_key_user@example.com": _SECRET,
-        "fcm_credentials": {"gcm": {"security_token": _SECRET}},
     }
 
     redacted = _redact(payload)
@@ -73,5 +72,40 @@ def test_harmless_keys_survive() -> None:
     """A diagnostics file that redacts everything is useless."""
 
     payload = {"poll_interval": 300, "enable_stats_entities": True, "nested": {"a": 1}}
+
+    assert _redact(payload) == payload
+
+
+def test_fcm_credential_material_is_redacted_by_name() -> None:
+    """These are fixed key names, so they are matched exactly, not by prefix."""
+
+    payload = {
+        "fcm_credentials": {"gcm": {"security_token": _SECRET}},
+        "fcm_creds": {"gcm": {"security_token": _SECRET}},
+        "fcm_installation": _SECRET,
+        "fcm_registration": _SECRET,
+    }
+
+    redacted = _redact(payload)
+
+    assert _SECRET not in str(redacted)
+    assert all(value == REDACTED for value in redacted.values())
+
+
+def test_fcm_health_fields_survive() -> None:
+    """The push diagnostics are the reason people download this file.
+
+    A blanket ``fcm_`` prefix rule would blank the receiver state, the status
+    snapshot and the counters this module builds itself, which is precisely the
+    information needed to explain a push failure.
+    """
+
+    payload = {
+        "fcm_receiver_state": "connected",
+        "fcm_status": {"connected": True, "last_error": None},
+        "fcm_lock_contention_count": 3,
+        "fcm_acquisition_duration_seconds": 1.25,
+        "fcm_push_enabled": True,
+    }
 
     assert _redact(payload) == payload
