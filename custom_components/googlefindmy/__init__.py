@@ -2968,6 +2968,8 @@ class GoogleFindMyDomainData(TypedDict, total=False):
     restart_check_registered: bool
     restart_check_unsub: Callable[[], None] | None
     restart_check_initial_unsub: Callable[[], None] | None
+    url_refresh_registered: bool
+    url_refresh_unsub: Callable[[], None] | None
     providers_registered: bool
     views_registered: bool
     _subentry_forward_helper_logs: set[str]
@@ -7061,6 +7063,53 @@ def _register_restart_required_check(
     )
 
 
+_URL_REFRESH_INTERVAL = timedelta(days=1)
+
+
+def _register_url_refresh_timer(
+    hass: HomeAssistant, bucket: GoogleFindMyDomainData
+) -> None:
+    """Refresh the device configuration URLs once a day.
+
+    Without this the URLs are rebuilt only during setup. With the weekly token
+    expiry enabled, an instance that runs across two week boundaries without a
+    restart or reload ends up with a dead Map View link on its own device page;
+    the map accepts the current and the previous week, so two boundaries is the
+    first point at which the stored link is certainly stale.
+
+    A run that changes nothing costs nothing: the device registry returns early
+    when the value is unchanged, and the periodic path reports an unreachable or
+    internal-only URL only when that situation *changes* (see
+    ``_async_refresh_device_urls``).
+    """
+
+    @callback
+    def _scheduled_refresh(_now: Any) -> None:
+        _async_create_task(
+            hass,
+            _async_refresh_device_urls(hass, periodic=True),
+            name=f"{DOMAIN}.refresh_device_urls",
+        )
+
+    bucket["url_refresh_unsub"] = async_track_time_interval(
+        hass, _scheduled_refresh, _URL_REFRESH_INTERVAL
+    )
+
+
+@callback
+def _teardown_url_refresh_timer(
+    hass: HomeAssistant, bucket: GoogleFindMyDomainData
+) -> None:
+    """Cancel the daily URL refresh (last-entry teardown)."""
+
+    unsub = bucket.pop("url_refresh_unsub", None)
+    if callable(unsub):
+        with suppress(Exception):
+            unsub()
+    bucket.pop("url_refresh_registered", None)
+    hass.data.pop(_URL_STATE_MARKER, None)
+
+
 @callback
 def _teardown_restart_required_check(
     hass: HomeAssistant, bucket: GoogleFindMyDomainData
@@ -7106,6 +7155,14 @@ async def _async_ensure_restart_required_check(
             _register_restart_required_check(hass, bucket)
             bucket["restart_check_registered"] = True
             _LOGGER.debug("Registered %s restart-required watchdog", DOMAIN)
+
+        url_refresh_registered = bucket.get("url_refresh_registered")
+        if not isinstance(url_refresh_registered, bool):
+            url_refresh_registered = False
+        if not url_refresh_registered:
+            _register_url_refresh_timer(hass, bucket)
+            bucket["url_refresh_registered"] = True
+            _LOGGER.debug("Registered %s daily map URL refresh", DOMAIN)
 
 
 def _log_ecdsa_acceleration(info: dict[str, str | None]) -> None:
@@ -8996,8 +9053,37 @@ async def _async_normalize_device_names(hass: HomeAssistant) -> None:
         _LOGGER.debug("Device name normalization skipped due to: %s", err)
 
 
-async def _async_refresh_device_urls(hass: HomeAssistant) -> None:
-    """Refresh configuration URLs for all Google Find My devices."""
+# Marker under which the last observed URL situation is remembered, so a periodic
+# refresh can report a *change* instead of repeating the same line every day.
+_URL_STATE_MARKER = f"{DOMAIN}_url_refresh_state"
+
+
+@callback
+def _url_state_changed(hass: HomeAssistant, state: str) -> bool:
+    """Return True when the URL situation differs from the previous refresh."""
+
+    previous: object = hass.data.get(_URL_STATE_MARKER)
+    hass.data[_URL_STATE_MARKER] = state
+    return bool(previous != state)
+
+
+async def _async_refresh_device_urls(
+    hass: HomeAssistant, *, periodic: bool = False
+) -> None:
+    """Refresh configuration URLs for all Google Find My devices.
+
+    ``periodic`` marks the daily timer run. Those runs report an unreachable or
+    internal-only URL once per state change instead of once per run: the two
+    messages were written for a single startup, and a timer would otherwise turn
+    each of them into a daily line in every installation that has no external
+    URL. A user-triggered refresh (the ``refresh_device_urls`` service) keeps
+    reporting unconditionally, because there somebody is waiting for the answer.
+    """
+
+    def _report_once(state: str) -> bool:
+        """Return True when this run should log above debug level."""
+
+        return not periodic or _url_state_changed(hass, state)
 
     try:
         base_url = cast(
@@ -9010,14 +9096,16 @@ async def _async_refresh_device_urls(hass: HomeAssistant) -> None:
             ),
         )
     except (HomeAssistantError, NoURLAvailableError) as err:
-        _LOGGER.warning(
+        _LOGGER.log(
+            logging.WARNING if _report_once("no-url") else logging.DEBUG,
             "Skipping configuration URL refresh; no reachable URL available: %s",
             err,
         )
         return
 
     if not base_url or "://" not in base_url:
-        _LOGGER.warning(
+        _LOGGER.log(
+            logging.WARNING if _report_once("no-url") else logging.DEBUG,
             "Skipping configuration URL refresh; no reachable URL available",
         )
         return
@@ -9032,10 +9120,13 @@ async def _async_refresh_device_urls(hass: HomeAssistant) -> None:
     except (HomeAssistantError, NoURLAvailableError):
         internal_url = None
     if base_url.rstrip("/") == (internal_url or "").rstrip("/"):
-        _LOGGER.info(
+        _LOGGER.log(
+            logging.INFO if _report_once("internal-only") else logging.DEBUG,
             "Using internal URL for map view links; "
             "set an external URL in Home Assistant settings for remote access",
         )
+    else:
+        _report_once("external")
 
     base_url = base_url.rstrip("/")
 
@@ -9679,6 +9770,7 @@ async def _async_unload_parent_entry(hass: HomeAssistant, entry: MyConfigEntry) 
             # and clear its issue, mirroring how other global singletons are released
             # here (Codex-P1 #1/#2).
             _teardown_restart_required_check(hass, bucket)
+            _teardown_url_refresh_timer(hass, bucket)
 
         try:
             await _maybe_close_spot_transport(entries_bucket)
