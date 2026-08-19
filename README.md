@@ -578,8 +578,13 @@ deleted once Home Assistant is observed to hold the imported credentials
 `async_setup_entry`). Until then — and indefinitely if you never confirm the
 flow, or if the import fails — the file stays on the Home Assistant machine in
 clear. Deletion is also best-effort: a path Home Assistant cannot write to
-keeps its copy, and nothing warns you about it. If you use that route, remove every
-such copy yourself when you abandon an import, including the ones behind
+keeps its copy. That one case does announce itself, in the Home Assistant log:
+`Failed to remove watched secrets file after import: <path>`
+(`config_flow.py` → `_remove_if_digest_matches`); search for it if you used a
+watched path, and remove the named file yourself. The other case is silent by
+construction: a flow you never confirmed never reaches the deletion at all, so
+no message will ever appear for it. If you use that route, remove every such
+copy yourself when you abandon an import, including the ones behind
 `secrets_extra_watch_paths`. A legacy `Auth/secrets.json` found by
 the token cache is imported once and then deleted (`Auth/token_cache.py`,
 `os.remove(legacy_path)`).
