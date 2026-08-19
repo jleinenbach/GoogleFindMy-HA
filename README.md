@@ -607,7 +607,9 @@ Two things have to be kept apart, because only one of them is hopeless:
   them are in the copy, and no documented way exists for you to rotate them.
 - **Reports from now on** are a different question. Removing a tracker from Find
   Hub is the step that touches its device-side key material, so containment is
-  not futile: step 5 below is what ends future location access.
+  not futile: step 5 below is what ends future location access, for as long as
+  the tracker stays removed. Re-pairing one to the same account can hand it
+  back; see the note under step 5.
 
 | What is in the bundle | What it opens | Can you revoke it? |
 | --- | --- | --- |
@@ -648,6 +650,18 @@ documentation stops, this says so instead of guessing.
    tracker deletes its associated data
    ([support](https://support.google.com/android/answer/14800516)). This is the
    only step in the list that touches the device-side of the key material.
+
+   **Do not pair a new tracker to that account while the bundle may still
+   work.** This step contains the trackers you removed, and only while they stay
+   removed: it does not rotate the account-level material. The `aas_token` can
+   still mint fresh Spot and ADM tokens (`Auth/spot_token_retrieval.py` →
+   `_async_generate_spot_token`), and registration encrypts a new tracker's
+   identity key with the *account's* owner key
+   (`SpotApi/CreateBleDevice/create_ble_device.py` → `register_esp32`,
+   `encrypt_aes_gcm(owner_key, eik)`) — the same owner key the leaked shared key
+   unwraps. A tracker paired after the leak is therefore readable again by the
+   same copy. Use a different Google account for new trackers until you have
+   confirmation from Google that the old credentials no longer work.
 6. **Locally:** delete your copy of `secrets.json`, remove the config entry, and
    run the login again. This gives *you* fresh credentials; it does nothing to
    the thief's copy. If you turned the *delete caches on remove* option off,
