@@ -25,6 +25,12 @@ from custom_components.googlefindmy import browser_deps
 
 PACKAGE_ROOT = Path(browser_deps.__file__).parent
 BROWSER_PACKAGES = {"selenium", "undetected_chromedriver", "webdriver_manager"}
+PACKAGE_PREFIX = "custom_components.googlefindmy"
+# The one dynamic route to the browser that is meant to exist. It sits behind
+# the command-line marker in `shared_key_retrieval._retrieve_shared_key_hex`;
+# `test_the_only_dynamic_route_to_the_browser_is_the_guarded_one` pins that it
+# stays the only one.
+INTENTIONAL_DYNAMIC_BROWSER_ROUTE = f"{PACKAGE_PREFIX}.KeyBackup.shared_key_flow"
 
 
 def _type_checking_polarity(test: ast.expr) -> bool | None:
@@ -117,7 +123,7 @@ def _dynamic_edges(path: Path) -> set[str]:
 def _reachable(entry: str) -> tuple[set[str], set[str], set[str]]:
     """Crawl module-level imports transitively; report dynamic edges separately."""
 
-    prefix = "custom_components.googlefindmy"
+    prefix = PACKAGE_PREFIX
     seen: set[str] = set()
     external: set[str] = set()
     dynamic: set[str] = set()
@@ -303,9 +309,7 @@ def test_the_only_dynamic_route_to_the_browser_is_the_guarded_one() -> None:
         or target.endswith("chrome_driver")
     }
 
-    assert browser_routes == {
-        "custom_components.googlefindmy.KeyBackup.shared_key_flow"
-    }
+    assert browser_routes == {INTENTIONAL_DYNAMIC_BROWSER_ROUTE}
 
     source = (PACKAGE_ROOT / "KeyBackup" / "shared_key_retrieval.py").read_text(
         encoding="utf-8"
@@ -605,7 +609,7 @@ def _all_imports(path: Path, root: Path = PACKAGE_ROOT) -> tuple[set[str], set[s
     closure -- exactly where the browser packages are supposed to live.
     """
 
-    prefix = "custom_components.googlefindmy"
+    prefix = PACKAGE_PREFIX
     external: set[str] = set()
     internal: set[str] = set()
     rel = path.relative_to(root)
@@ -629,7 +633,13 @@ def _all_imports(path: Path, root: Path = PACKAGE_ROOT) -> tuple[set[str], set[s
                 # `from . import discovery` binds a submodule, not a name.
                 internal.update(".".join(parts + [a.name]) for a in node.names)
             elif node.module and node.module.startswith(prefix):
-                internal.add(node.module[len(prefix) :].strip("."))
+                base = node.module[len(prefix) :].strip(".")
+                internal.add(base)
+                # `from custom_components.googlefindmy import chrome_driver`
+                # binds a submodule, exactly as the relative form above does.
+                internal.update(
+                    ".".join(p for p in (base, a.name) if p) for a in node.names
+                )
             elif node.module:
                 external.add(node.module.split(".")[0])
     return external, internal
@@ -652,6 +662,17 @@ def _modules_reached_including_function_bodies(entry: str) -> set[str]:
     among them -- are reached only through an import inside a function that
     Home Assistant calls. A check that crawls module level alone never looks
     at them.
+
+    A literal `import_module("custom_components.googlefindmy.x")` is followed
+    as well: five modules -- `create_ble_device`, `DeviceUpdate_pb2` and the
+    `upload_precomputed_public_key_ids` chain among them -- are reached that
+    way and no other, so a browser import placed in one of them used to be
+    invisible here. `INTENTIONAL_DYNAMIC_BROWSER_ROUTE` is the one target left
+    out, because it is the route this file pins by name in
+    `test_the_only_dynamic_route_to_the_browser_is_the_guarded_one`; enqueueing
+    it would drag `chrome_driver` in and turn the check red on the very design
+    it exists to protect. That omission is not blind: a *second* browser route
+    turns that other test red.
     """
 
     seen: set[str] = set()
@@ -662,7 +683,14 @@ def _modules_reached_including_function_bodies(entry: str) -> set[str]:
             continue
         seen.add(str(rel))
         _, internal = _all_imports(PACKAGE_ROOT / rel)
-        for module in internal:
+        targets = set(internal)
+        for target in _dynamic_edges(PACKAGE_ROOT / rel):
+            if (
+                target.startswith(PACKAGE_PREFIX)
+                and target != INTENTIONAL_DYNAMIC_BROWSER_ROUTE
+            ):
+                targets.add(target[len(PACKAGE_PREFIX) :].strip("."))
+        for module in targets:
             resolved = _resolve_internal(module)
             if resolved is not None and str(resolved) not in seen:
                 queue.append(resolved)
@@ -722,6 +750,60 @@ def test_the_closure_follows_a_relative_import_inside_a_function(
 
     assert "discovery" in internal
     assert "helpers" in internal or "helpers.thing" in internal
+
+
+def test_the_closure_follows_an_absolute_import_of_a_submodule(
+    tmp_path: Path,
+) -> None:
+    """The absolute spelling binds a submodule just like the relative one.
+
+    `from custom_components.googlefindmy import chrome_driver` names the
+    package in `node.module` and the submodule in `node.names`. Reading only
+    `node.module` records the package itself, so the walk loops back to
+    `__init__.py` and never opens the module that was actually imported --
+    with a browser dependency inside it staying green.
+    """
+
+    module = tmp_path / "caller.py"
+    module.write_text(
+        textwrap.dedent(
+            f"""\
+            def callback():
+                from {PACKAGE_PREFIX} import chrome_driver
+                from {PACKAGE_PREFIX}.KeyBackup import shared_key_flow
+                return chrome_driver, shared_key_flow
+            """
+        ),
+        encoding="utf-8",
+    )
+
+    _external, internal = _all_imports(module, tmp_path)
+
+    assert "chrome_driver" in internal
+    assert "KeyBackup.shared_key_flow" in internal
+
+
+def test_a_dynamically_loaded_module_is_part_of_the_closure() -> None:
+    """`import_module("...x")` reaches x, and x is scanned like any other.
+
+    Five modules are reached that way and no other way -- `create_ble_device`,
+    `DeviceUpdate_pb2`, `upload_precomputed_public_key_ids` and the two
+    `FMDNCrypto` helpers they pull in. A browser import placed in one of them
+    used to leave every check in this file green.
+    """
+
+    reached: set[str] = set()
+    for entry in _ha_entry_points():
+        reached |= _modules_reached_including_function_bodies(entry)
+
+    assert "SpotApi/CreateBleDevice/create_ble_device.py" in reached
+    assert "ProtoDecoders/DeviceUpdate_pb2.py" in reached
+
+    # The deliberate browser route stays outside, and stays *pinned* outside:
+    # a second one turns
+    # `test_the_only_dynamic_route_to_the_browser_is_the_guarded_one` red.
+    assert "KeyBackup/shared_key_flow.py" not in reached
+    assert "chrome_driver.py" not in reached
 
 
 def test_the_function_body_scan_can_see_an_import(tmp_path: Path) -> None:
