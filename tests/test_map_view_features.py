@@ -1142,8 +1142,61 @@ async def test_popup_coordinates_display_is_shortened_copy_stays_raw(
 
 
 # ---------------------------------------------------------------------------
+# Vendored Leaflet: no third-party JavaScript on the Home Assistant origin
 # Response hygiene headers: the map URL carries its token in the query string
 # ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_rendered_page_loads_nothing_from_a_cdn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No external script or stylesheet reference may survive in the page.
+
+    A CDN copy runs third-party JavaScript on the Home Assistant origin, and the
+    former tags carried no `integrity` attribute. Tile requests are a different
+    matter and stay: they are images, documented in the README, and the point of
+    the map.
+    """
+
+    device_id = "device123"
+    coordinator = SimpleNamespace(data=[{"id": device_id, "name": "Test Device"}])
+    entry = make_config_entry(entry_id="entry-id", runtime_data=coordinator)
+    hass = _StubHass([entry])
+
+    monkeypatch.setattr(map_view, "_resolve_coordinator_class", lambda: SimpleNamespace)
+
+    registry_entry = _StubRegistryEntry(
+        entity_id="device_tracker.device123",
+        unique_id=f"{entry.entry_id}:{device_id}",
+        config_entry_id=entry.entry_id,
+    )
+    monkeypatch.setattr(
+        map_view.er, "async_get", lambda _hass: _StubEntityRegistry([registry_entry])
+    )
+    _install_history_stub(
+        monkeypatch, registry_entry.entity_id, _StubState(latitude=10.0, longitude=20.0)
+    )
+
+    ha_uuid = hass.data["core.uuid"]
+    token = map_token_hex_digest(map_token_secret_seed(ha_uuid, entry.entry_id, False))
+
+    response = await map_view.GoogleFindMyMapView(hass).get(
+        SimpleNamespace(query={"token": token}), device_id=device_id
+    )
+    page = response.text
+
+    assert "unpkg.com" not in page
+    # no resource-loading tag at all: the anchor in Leaflet's own attribution
+    # control ("https://leafletjs.com") is a link, not a fetch, so the check is
+    # on the loading tags rather than on every http string in the document.
+    assert "<script src=" not in page
+    assert '<link rel="stylesheet"' not in page
+    # the library really is in the page, not merely absent from it
+    assert "Leaflet" in page
+    assert "L.circleMarker" in page
+    # tiles remain external and remain the only external request
+    assert "tile.openstreetmap.org" in page
 
 
 @pytest.mark.asyncio

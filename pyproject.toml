@@ -502,7 +502,7 @@ max-branches = 20
 max-statements = 100
 
 [tool.codespell]
-skip = ".git,*.lock,*.svg,*.png,*.jpg,*.ico,ProtoDecoders,firebase_messaging,*.pyi,translations,*.proto,*_pb2.py,package-lock.json"
+skip = ".git,*.lock,*.svg,*.png,*.jpg,*.ico,ProtoDecoders,firebase_messaging,*.pyi,translations,*.proto,*_pb2.py,package-lock.json,custom_components/googlefindmy/vendor"
 ignore-words-list = "hass,nd,ot,aas,bund,trough,te,ded,checkin,alpha-numeric,re-declaring,pre-emptive,titel"
 check-filenames = true
 

@@ -209,8 +209,9 @@ def test_style_and_details_tags_are_balanced_and_ordered() -> None:
     ``</head>``; ``<details>`` closes before ``</body>``).
     """
     html = _render()
-    assert html.count("<style>") == 1
-    assert html.count("</style>") == 1
+    # Two style blocks since Leaflet is embedded rather than pulled from a CDN:
+    # the vendored stylesheet first, the page's own rules second.
+    assert html.count("<style>") == html.count("</style>") == 2
     assert html.count("<details open>") == html.count("</details>") == 1
-    assert html.index("</style>") < html.index("</head>")
+    assert html.rindex("</style>") < html.index("</head>")
     assert html.index("</details>") < html.index("</body>")
