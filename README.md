@@ -26,7 +26,7 @@ A comprehensive Home Assistant custom integration for Google's FindMy Device net
 
 ### Continuous integration checks
 
-Our GitHub Actions pipeline now validates manifests with hassfest, runs the HACS integration checker, and executes Ruff, Codespell, Bandit, `mypy --strict`, and `pytest -q --cov` on Python 3.14 to protect code quality before merges. Python 3.14 is the axis Home Assistant Core itself requires from 2026.3.0 onwards. Python 3.13 stays covered by a second, lock-free test job that runs on two axes: the declared floor pinned in `constraints-test-stubs.txt`, and the last Home Assistant line that still supports 3.13. Together they cover what installations on Core 2025.9.1 through 2026.2.x actually run. The language level the code is written against remains 3.13 (`ruff target-version = "py313"`, `mypy python_version = "3.13"`).
+Our GitHub Actions pipeline now validates manifests with hassfest, runs the HACS integration checker, and executes Ruff, Codespell, Bandit, `mypy --strict`, and `pytest -q --cov` on Python 3.14 to protect code quality before merges. Python 3.14 is the axis Home Assistant Core itself requires from 2026.3.0 onwards. Python 3.13 stays covered by a second, lock-free test job that runs on two axes: the floor declared in `hacs.json` (2025.9.1), and the last Home Assistant line that still supports 3.13. Together they cover what installations on Core 2025.9.1 through 2026.2.x actually run. The language level the code is written against remains 3.13 (`ruff target-version = "py313"`, `mypy python_version = "3.13"`).
 
 For the quickest way to bootstrap Home Assistant test stubs before running `pytest -q`, see the Environment verification bullets in [AGENTS.md](AGENTS.md#environment-verification).
 

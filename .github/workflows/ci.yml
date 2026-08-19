@@ -322,13 +322,19 @@ jobs:
           virtualenvs-create: true
           virtualenvs-in-project: true
 
+      # The Python version belongs in both the key and the restore prefix. The
+      # cached artefact is a complete virtualenv, so an interpreter-agnostic
+      # prefix can restore a 3.13 `.venv` built before the lock moved to
+      # `^3.14.2`; Poetry then adopts that interpreter as the project
+      # environment and `poetry install` refuses it, taking all four lint jobs
+      # down before they run. The `test` job already keys this way.
       - name: Cache Poetry dependencies
         uses: actions/cache@v5
         with:
           path: .venv
-          key: ${{ runner.os }}-poetry-${{ hashFiles('poetry.lock') }}
+          key: ${{ runner.os }}-py3.14-poetry-${{ hashFiles('poetry.lock') }}
           restore-keys: |
-            ${{ runner.os }}-poetry-
+            ${{ runner.os }}-py3.14-poetry-
 
       - name: Install dependencies
         run: poetry install --with dev,test
@@ -537,20 +543,22 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # The declared floor. `requirements-dev.txt` starts with
-          # `-c constraints-test-stubs.txt`, which pins Home Assistant to
-          # 2025.12.1 -- close to the 2025.9.1 floor in hacs.json and the line
-          # where the backwards-compatibility shims (`# Home Assistant <2025.11`,
-          # `# HA < 2025.5`) actually fire.
+          # The floor hacs.json actually declares. The stub constraints in the
+          # repository pin 2025.12.1, which is a speed-up for local runs and not
+          # a compatibility claim; testing there would leave the pre-2025.11
+          # paths -- such as the `EntityCategory` import fallback in button.py --
+          # unexercised by every axis. 0.13.278 is the plugin release that
+          # carries Home Assistant 2025.9.1.
           - label: "declared floor"
-            drop_ha_pins: "false"
-          # The last Home Assistant line that supports Python 3.13 (2026.2.3).
-          # Without this axis the three final 3.13-era releases would go
-          # untested, because the stub constraints hold the floor axis at
-          # 2025.12.1. Only the two Home Assistant pins are dropped; the
-          # `pycares<5` constraint in the same file stays.
+            ha_pin: "2025.9.1"
+            plugin_pin: "0.13.278"
+          # The last Home Assistant line that still supports Python 3.13
+          # (2026.2.3). Without this axis the final three 3.13-era releases go
+          # untested. Both pins are dropped so pip resolves the newest release
+          # that satisfies the interpreter; `pycares<5` in the same file stays.
           - label: "last 3.13 line"
-            drop_ha_pins: "true"
+            ha_pin: ""
+            plugin_pin: ""
     steps:
       - name: Check out repository
         uses: actions/checkout@v5
@@ -571,13 +579,30 @@ jobs:
       # 2026.3.0 onwards. Installing from the plain requirement files keeps the
       # Python 3.13 axis under test, which is what users on Core 2025.9.1
       # through 2026.2.x run and where the backwards-compatibility shims fire.
-      - name: Drop the pinned Home Assistant stubs
-        if: matrix.drop_ha_pins == 'true'
+      # Guards against silent drift: if someone raises the floor in hacs.json,
+      # this axis would keep testing the old one and the label would lie.
+      - name: Verify the pinned floor still matches hacs.json
+        if: matrix.ha_pin != ''
         run: |
-          sed -i -E '/^(homeassistant|pytest-homeassistant-custom-component)==/d' \
-            custom_components/googlefindmy/constraints-test-stubs.txt
-          echo "Remaining constraints:"
-          cat custom_components/googlefindmy/constraints-test-stubs.txt
+          set -euo pipefail
+          declared="$(python -c 'import json;print(json.load(open("hacs.json"))["homeassistant"])')"
+          if [ "$declared" != "${{ matrix.ha_pin }}" ]; then
+            echo "::error::hacs.json declares Home Assistant $declared but this axis pins ${{ matrix.ha_pin }}. Update the matrix entry (and the pytest plugin release that carries it)."
+            exit 1
+          fi
+          echo "hacs.json floor: $declared"
+
+      - name: Rewrite the stub constraints for this axis
+        run: |
+          set -euo pipefail
+          constraints=custom_components/googlefindmy/constraints-test-stubs.txt
+          sed -i -E '/^(homeassistant|pytest-homeassistant-custom-component)==/d' "$constraints"
+          if [ -n "${{ matrix.ha_pin }}" ]; then
+            printf 'homeassistant==%s\n' "${{ matrix.ha_pin }}" >> "$constraints"
+            printf 'pytest-homeassistant-custom-component==%s\n' "${{ matrix.plugin_pin }}" >> "$constraints"
+          fi
+          echo "Constraints for this axis:"
+          cat "$constraints"
 
       - name: Install dependencies without the Poetry lock
         run: |
@@ -594,14 +619,14 @@ jobs:
           resolved="$(python -c 'from importlib.metadata import version; print(version("homeassistant"))')"
           echo "homeassistant==${resolved}"
           echo "pytest-homeassistant-custom-component==$(python -c 'from importlib.metadata import version; print(version("pytest-homeassistant-custom-component"))')"
-          if [ "${{ matrix.drop_ha_pins }}" = "true" ]; then
-            if [ "${resolved}" = "2025.12.1" ]; then
-              echo "::error::The unpinned axis resolved to the pinned floor (${resolved}); the two axes are testing the same thing."
+          if [ -n "${{ matrix.ha_pin }}" ]; then
+            if [ "${resolved}" != "${{ matrix.ha_pin }}" ]; then
+              echo "::error::The floor axis resolved to ${resolved}, not the pinned ${{ matrix.ha_pin }}."
               exit 1
             fi
           else
-            if [ "${resolved}" != "2025.12.1" ]; then
-              echo "::error::The floor axis resolved to ${resolved}, not the pinned 2025.12.1 from constraints-test-stubs.txt."
+            if [ "${resolved}" = "2025.9.1" ]; then
+              echo "::error::The unpinned axis resolved to the declared floor (${resolved}); both axes are testing the same release."
               exit 1
             fi
           fi
