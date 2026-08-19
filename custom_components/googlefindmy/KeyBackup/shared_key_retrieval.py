@@ -23,8 +23,10 @@ Normalization & validation:
 - Decoded key must be exactly 32 bytes (256 bit).
 
 Retrieval strategy (when not cached):
-- In CLI/TTY mode: interactive browser flow via ``shared_key_flow.py`` (the only
-  authoritative source — retrieves the real vault key from Google's Key Backup service).
+- In the command-line tool: interactive browser flow via ``shared_key_flow.py``
+  (the only authoritative source — retrieves the real vault key from Google's Key
+  Backup service). The command-line entry point marks its own process; a
+  terminal alone is not enough (see ``_cli_process``).
 - In non-interactive / HA mode: the key must be pre-populated from the secrets
   bundle during ``async_setup_entry()``.  If missing, a descriptive error is raised.
 """
@@ -34,6 +36,7 @@ from __future__ import annotations
 import base64
 import importlib
 import logging
+import os
 import re
 import sys
 from binascii import Error as BinasciiError
@@ -176,6 +179,37 @@ async def _interactive_flow_hex() -> str:
 _browser_flow_attempted = False
 
 
+# Set by the command-line entry point on its own process (``main.py`` does it
+# before anything else). Home Assistant never sets it, which is the whole point:
+# the previous guard asked "is a terminal attached", and a foreground Home
+# Assistant answers yes.
+_ENV_CLI_PROCESS = "GOOGLEFINDMY_CLI_PROCESS"
+
+# Same opt-in `Auth/auth_flow.py` already uses for consoles that carry a user but
+# report no tty (IDE run windows).
+_ENV_ASSUME_INTERACTIVE = "GOOGLEFINDMY_ASSUME_INTERACTIVE"
+
+
+def _cli_process() -> bool:
+    """Return True when this process identified itself as the CLI tool."""
+
+    return os.environ.get(_ENV_CLI_PROCESS) == "1"
+
+
+def _attended_session() -> bool:
+    """Return True when somebody can answer the browser prompt.
+
+    The browser flow waits for a human to sign in. A command-line run is a
+    necessary condition, not a sufficient one: `main.py` sets its marker
+    unconditionally, so an unattended run with redirected stdin (cron, a
+    container entrypoint) would otherwise open Chrome and wait forever.
+    """
+
+    if os.environ.get(_ENV_ASSUME_INTERACTIVE) == "1":
+        return True
+    return bool(sys.stdin and sys.stdin.isatty())
+
+
 async def _retrieve_shared_key_hex() -> str:
     """Obtain a hex-encoded shared key (32 bytes) via the interactive browser flow.
 
@@ -199,9 +233,33 @@ async def _retrieve_shared_key_hex() -> str:
     """
     global _browser_flow_attempted  # noqa: PLW0603
 
-    is_tty = sys.stdin and sys.stdin.isatty()
+    is_attended = _attended_session()
+    is_cli = _cli_process()
 
-    if is_tty:
+    if is_attended and not is_cli:
+        # A terminal is not a command line. Home Assistant started in the
+        # foreground of a terminal answers `isatty()` with True, and would then
+        # have opened a browser from inside the Home Assistant process. Say what
+        # is missing rather than failing silently: someone running an unforeseen
+        # command-line wrapper can set the marker themselves.
+        raise SharedKeyUnavailableError(
+            "Refusing to open the interactive browser flow: a terminal is "
+            "attached, but this process is not the Google Find My command-line "
+            f"tool. Run `python main.py`, or set {_ENV_CLI_PROCESS}=1 if you are "
+            "driving the extraction from your own wrapper."
+        )
+
+    if is_cli and not is_attended:
+        # The marker says "command-line tool", the session says "nobody here".
+        # Opening Chrome now would hang until the timeout with no way to answer.
+        raise SharedKeyUnavailableError(
+            "Refusing to open the interactive browser flow: this is the command-line "
+            "tool, but no terminal is attached. Run it from an interactive terminal, "
+            f"or set {_ENV_ASSUME_INTERACTIVE}=1 if you are at a console that reports "
+            "no tty."
+        )
+
+    if is_cli:
         if _browser_flow_attempted:
             raise RuntimeError(
                 "Shared key browser flow already attempted in this session. "

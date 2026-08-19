@@ -4,9 +4,11 @@
   "description": "Developer tooling for the Google Find My Home Assistant integration",
   "private": true,
   "devDependencies": {
-    "doctoc": "2.2.1"
+    "doctoc": "2.2.1",
+    "leaflet": "1.9.4"
   },
   "scripts": {
-    "doctoc": "doctoc"
+    "doctoc": "doctoc",
+    "vendor:leaflet": "python script/vendor_leaflet.py"
   }
 }

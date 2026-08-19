@@ -17,6 +17,7 @@ line/branch coverage and lock in three previously fixed bugs:
 from __future__ import annotations
 
 import base64
+import os
 import sys
 from collections.abc import Awaitable, Callable
 from types import ModuleType, SimpleNamespace
@@ -91,14 +92,30 @@ def _reset_browser_guard() -> Any:
 
 @pytest.fixture
 def tty_stdin(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Pretend we run in an interactive TTY (CLI mode)."""
+    """Pretend we are the command-line tool: a terminal *and* the CLI marker.
+
+    A terminal alone is no longer enough. `main.py` sets the marker on its own
+    process, because a foreground Home Assistant also has a terminal attached
+    and must not reach the browser flow through it.
+    """
     monkeypatch.setattr(sys, "stdin", SimpleNamespace(isatty=lambda: True))
+    monkeypatch.setenv(skr._ENV_CLI_PROCESS, "1")
+
+
+@pytest.fixture
+def tty_stdin_without_cli_marker(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A terminal, but not the CLI tool: the Home Assistant foreground case."""
+    monkeypatch.setattr(sys, "stdin", SimpleNamespace(isatty=lambda: True))
+    monkeypatch.delenv(skr._ENV_CLI_PROCESS, raising=False)
+    monkeypatch.delenv(skr._ENV_ASSUME_INTERACTIVE, raising=False)
 
 
 @pytest.fixture
 def no_tty_stdin(monkeypatch: pytest.MonkeyPatch) -> None:
     """Pretend we run head-less (Home Assistant / non-interactive mode)."""
     monkeypatch.setattr(sys, "stdin", SimpleNamespace(isatty=lambda: False))
+    monkeypatch.delenv(skr._ENV_CLI_PROCESS, raising=False)
+    monkeypatch.delenv(skr._ENV_ASSUME_INTERACTIVE, raising=False)
 
 
 # ---------------------------------------------------------------------------
@@ -389,3 +406,105 @@ async def test_async_get_shared_key_isolates_accounts() -> None:
     # Account B's read never wrote into account A's cache and vice versa.
     assert cache_a.set_calls == []
     assert cache_b.set_calls == []
+
+
+# ---------------------------------------------------------------------------
+# The CLI marker: a terminal is not a command line
+# ---------------------------------------------------------------------------
+
+
+async def test_foreground_home_assistant_cannot_open_the_browser_flow(
+    tty_stdin_without_cli_marker: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The regression this guard exists for.
+
+    Home Assistant run in the foreground of a terminal answers ``isatty()`` with
+    True. Under the old guard that was enough to open Chrome from inside the
+    Home Assistant process, on a bundle without a shared key.
+    """
+
+    async def must_not_run() -> str:
+        raise AssertionError("the browser flow must not be reached")
+
+    monkeypatch.setattr(skr, "_interactive_flow_hex", must_not_run)
+    skr._browser_flow_attempted = False
+
+    with pytest.raises(skr.SharedKeyUnavailableError, match="not the Google Find My"):
+        await skr._retrieve_shared_key_hex()
+
+
+async def test_the_refusal_names_the_way_out(
+    tty_stdin_without_cli_marker: None,
+) -> None:
+    """A silent loss would be the worse bug; the message has to be actionable."""
+
+    skr._browser_flow_attempted = False
+    with pytest.raises(skr.SharedKeyUnavailableError) as excinfo:
+        await skr._retrieve_shared_key_hex()
+
+    message = str(excinfo.value)
+    assert "main.py" in message
+    assert skr._ENV_CLI_PROCESS in message
+
+
+async def test_an_unattended_cli_run_is_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The marker is necessary, not sufficient.
+
+    `main.py` sets it unconditionally, so a cron job or a container entrypoint
+    with redirected stdin carries it too. Opening Chrome there would wait for a
+    sign-in nobody can perform.
+    """
+
+    monkeypatch.setattr(sys, "stdin", SimpleNamespace(isatty=lambda: False))
+    monkeypatch.setenv(skr._ENV_CLI_PROCESS, "1")
+    monkeypatch.delenv(skr._ENV_ASSUME_INTERACTIVE, raising=False)
+    skr._browser_flow_attempted = False
+
+    async def must_not_run() -> str:
+        raise AssertionError("the browser flow must not be reached unattended")
+
+    monkeypatch.setattr(skr, "_interactive_flow_hex", must_not_run)
+
+    with pytest.raises(skr.SharedKeyUnavailableError, match="no terminal is attached"):
+        await skr._retrieve_shared_key_hex()
+
+
+async def test_the_assume_interactive_opt_in_admits_a_tty_less_console(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Same opt-in `Auth/auth_flow.py` already offers for IDE run windows."""
+
+    monkeypatch.setattr(sys, "stdin", SimpleNamespace(isatty=lambda: False))
+    monkeypatch.setenv(skr._ENV_CLI_PROCESS, "1")
+    monkeypatch.setenv(skr._ENV_ASSUME_INTERACTIVE, "1")
+    skr._browser_flow_attempted = False
+
+    async def fake_flow() -> str:
+        return _HEX_KEY
+
+    monkeypatch.setattr(skr, "_interactive_flow_hex", fake_flow)
+
+    assert await skr._retrieve_shared_key_hex() == _HEX_KEY
+
+
+def test_the_cli_entry_point_sets_the_marker(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`main.py` marks its own process, so no user has to know the variable."""
+
+    from custom_components.googlefindmy import main as cli_main
+
+    monkeypatch.delenv(skr._ENV_CLI_PROCESS, raising=False)
+
+    class _Stop(Exception):
+        pass
+
+    def _stop_after_marker(_argv: object = None) -> object:
+        raise _Stop
+
+    monkeypatch.setattr(cli_main, "_build_cli_parser", _stop_after_marker)
+
+    with pytest.raises(_Stop):
+        cli_main._main([])
+
+    assert os.environ.get(skr._ENV_CLI_PROCESS) == "1"

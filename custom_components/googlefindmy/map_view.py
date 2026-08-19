@@ -9,6 +9,7 @@ import math
 import time
 from datetime import datetime, timedelta
 from html import escape
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode
 
@@ -307,6 +308,45 @@ def _resolve_parse_last_seen_timestamp() -> Any:
 # ------------------------------- HTML Helpers -------------------------------
 
 
+_LEAFLET_DIR = Path(__file__).parent / "vendor" / "leaflet"
+_LEAFLET_CACHE: dict[str, str] = {}
+
+
+def _leaflet_asset(name: str) -> str:
+    """Return the vendored Leaflet asset, read once per process.
+
+    The map page embeds Leaflet instead of pulling it from a CDN. A CDN copy
+    executes third-party JavaScript on the Home Assistant origin, and the tags
+    carried no `integrity` attribute, so a compromise there would have been
+    unnoticeable.
+
+    Embedding rather than registering a static path is deliberate: Home
+    Assistant's static paths are process-wide and cannot be unregistered, and
+    this integration registers none today, so serving the file would introduce a
+    mechanism (and a multi-entry collision) that the page does not need. The map
+    draws with `L.circleMarker` and uses no layers control, so the image assets
+    Leaflet's CSS references are never requested and nothing else has to be
+    served.
+    """
+
+    cached = _LEAFLET_CACHE.get(name)
+    if cached is None:
+        cached = (_LEAFLET_DIR / name).read_text(encoding="utf-8")
+        _LEAFLET_CACHE[name] = cached
+    return cached
+
+
+# The map URL carries its access token in the query string, so every response of
+# this view is as sensitive as the link itself. `no-store` keeps it out of shared
+# browser and proxy caches, `noindex, nofollow` keeps it out of search engines on
+# instances that are reachable from the internet. Both are pure response headers:
+# no migration, no effect on links already handed out.
+NO_STORE_HEADERS = {
+    "Cache-Control": "no-store",
+    "X-Robots-Tag": "noindex, nofollow",
+}
+
+
 def _html_response(title: str, body: str, status: int = 200) -> web.Response:
     """Return a minimal HTML response (no secrets, no stacktraces)."""
     return web.Response(
@@ -320,6 +360,7 @@ def _html_response(title: str, body: str, status: int = 200) -> web.Response:
 </html>""",
         content_type="text/html",
         status=status,
+        headers=NO_STORE_HEADERS,
     )
 
 
@@ -679,7 +720,12 @@ class GoogleFindMyMapView(HomeAssistantView):
         html = self._generate_map_html(
             device_name, locations, device_id, start_time, end_time, accuracy_filter
         )
-        return web.Response(text=html, content_type="text/html", charset="utf-8")
+        return web.Response(
+            text=html,
+            content_type="text/html",
+            charset="utf-8",
+            headers=NO_STORE_HEADERS,
+        )
 
     def _generate_map_html(
         self,
@@ -731,7 +777,7 @@ class GoogleFindMyMapView(HomeAssistantView):
     <title>{escape(device_name)} - {escape(labels["location_history"])}</title>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <style>{_leaflet_asset("leaflet.css")}</style>
     <style>
         body {{ margin: 0; padding: 0; font-family: system-ui, -apple-system, sans-serif; }}
         #map {{ height: 100vh; width: 100%; }}
@@ -798,7 +844,7 @@ class GoogleFindMyMapView(HomeAssistantView):
     </div>
     <div id="map"></div>
 
-    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script>{_leaflet_asset("leaflet.js")}</script>
     <script>
         var map = L.map('map').setView([{center_lat}, {center_lon}], 13);
         L.tileLayer('https://{{s}}.tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png', {{
@@ -1041,4 +1087,4 @@ class GoogleFindMyMapRedirectView(HomeAssistantView):
         redirect_url = f"/api/googlefindmy/map/{device_id}?{urlencode(query_dict)}"
         _LOGGER.debug("Relative redirect prepared for device_id=%s", device_id)
 
-        raise web.HTTPFound(location=redirect_url)
+        raise web.HTTPFound(location=redirect_url, headers=NO_STORE_HEADERS)

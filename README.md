@@ -160,7 +160,7 @@ Generate the `secrets.json` bundle with **this repository's own login tooling**.
 
 **Option A — Docker login helper (recommended).** Run the bundled one-command wrapper on your Docker host and complete the Google login through a browser tab: [`custom_components/googlefindmy/docker-login/`](custom_components/googlefindmy/docker-login/README.md). It runs Chrome **inside the container** at a controlled version, so you are not at the mercy of whatever Chrome your desktop auto-updates to — the exact failure that currently breaks the external browser flow ([BSkando#207](https://github.com/BSkando/GoogleFindMy-HA/issues/207)). No local Python or Chrome is required, and it works on ARM Linux too.
 
-**Option B — Bundled CLI (`main.py`).** Copy the *contents* of `custom_components/googlefindmy/` into a fresh, empty directory (so that `main.py`, `Auth/`, `NovaApi/`, etc. sit directly at its top level) and run `python main.py` from there. The flat layout is required because the script auto-detects its location: run in place at `custom_components/googlefindmy/main.py` it operates in Home Assistant mode and only lists devices from an **existing** `secrets.json`, so it will not open the Chrome login that creates the bundle. Run it from an **interactive terminal**: the desktop login opens Chrome on your own screen and asks you to confirm first, so it refuses to start when nobody can answer (see [Standalone login refuses to start](#standalone-login-refuses-to-start-attended-terminal-required)). If Chrome startup aborts with `only supports Chrome version …`, pin the version as described under [Chrome/ChromeDriver version mismatch](#chromechromedriver-version-mismatch-standalone-auth-scripts).
+**Option B — Bundled CLI (`main.py`).** Copy the *contents* of `custom_components/googlefindmy/` into a fresh, empty directory (so that `main.py`, `Auth/`, `NovaApi/`, etc. sit directly at its top level) and run `python main.py` from there. The flat layout is the supported way to run it: the script resolves `Auth/secrets.json` relative to its own directory, so a run in place at `custom_components/googlefindmy/main.py` writes into your Home Assistant configuration directory instead of a scratch folder. It does **not** behave differently otherwise: `main.py` runs the token bootstrap in either layout, so an in-place run without stored credentials opens the Chrome login just as a flat run does. (An earlier version of this paragraph promised the opposite; the directory-dependent branch it described no longer exists.) Note that "without credentials" means the file has no username or no token at all: a *stale* token counts as present, and the run then stops later with an instruction to repeat it as `python main.py --reauth`. The browser packages this needs are `selenium` and `undetected-chromedriver`; install them where you run the CLI (`pip install selenium undetected-chromedriver`) — the scripts name the command themselves if they are missing. Run it from an **interactive terminal**: the desktop login opens Chrome on your own screen and asks you to confirm first, so it refuses to start when nobody can answer (see [Standalone login refuses to start](#standalone-login-refuses-to-start-attended-terminal-required)). If Chrome startup aborts with `only supports Chrome version …`, pin the version as described under [Chrome/ChromeDriver version mismatch](#chromechromedriver-version-mismatch-standalone-auth-scripts).
 
 When either option finishes, copy the entire contents of the generated `secrets.json` (open it in a text editor, select all, copy) for Part 2.
 
@@ -232,6 +232,28 @@ Accessible via the ⚙️ cogwheel button on the main Google Find My Device Inte
 | `contributor_mode` | in_all_areas | selection | Chooses whether Google shares aggregated network-only data (`high_traffic`) or participates in full crowdsourced reporting (`in_all_areas`). |
 | `stale_threshold` | 3900 | seconds | After this many seconds (default: 65 minutes) without a location update, the tracker state becomes `unknown`. Use the "Last Location" entity to always see the last known position. |
 | `show_location_age` | true | toggle | Adds a `location_age` attribute (in seconds, rounded to 60s) to each tracker entity. Excluded from Recorder history to keep DB size predictable. |
+
+### Map View link expiry (`map_view_token_expiration`)
+
+With this option **off** (the default), the Map View link on a device page is
+stable and keeps working indefinitely.
+
+With it **on**, the token rotates weekly. The map accepts the current and the
+previous bucket, but the link stored on the device page is only rebuilt when the
+integration starts up. The stored link therefore dies the moment the **second**
+weekly boundary is crossed — if the instance started shortly before a boundary,
+that can be little more than a week later — and the device page's own Map View
+link then returns "Unauthorized".
+
+You do not have to restart to fix that. Call the service
+**`googlefindmy.refresh_device_urls`** (Developer tools → Actions → *Refresh
+Device URLs*); it rewrites the configuration URL of every device with a current
+token, and the link works again immediately.
+
+One prerequisite: Home Assistant must have a reachable base URL. If none is
+configured, the service logs a warning and updates nothing, so the stale link
+stays. If the action appears to do nothing, set an internal or external URL
+under Settings → System → Network and check the log.
 
 ### Google Home filter behavior
 
@@ -421,6 +443,36 @@ export GOOGLEFINDMY_CHROME_PATH=/usr/bin/google-chrome
 
 Run any of the scripts with `--help` to list the available options.
 
+### The standalone login closes your other Chrome windows
+
+**Before it starts its own browser, the standalone login terminates the Chrome
+processes it finds running.** This is deliberate, not a bug: the login has to
+drive a browser session it controls end to end, and an already running Chrome
+would otherwise capture the sign-in and keep the credentials out of reach.
+
+What that means in practice:
+
+- **Close your Chrome windows before you run any of the helper scripts**
+  (`get_oauth_token.py`, `Auth/auth_flow.py`, `KeyBackup/shared_key_flow.py`,
+  or `main.py`). Unsaved tabs are lost as with any forced quit.
+- **Do not start a login while other automation is using Chrome** on the same
+  machine and user account (scraping jobs, kiosk displays, printing services).
+- **The match is on the whole command line, not on the program name.** The
+  cleanup uses `pgrep -f chrome`, so anything whose command line contains
+  `chrome` is terminated too — a monitoring script called
+  `chrome_metrics.py`, for example. If you run such a process, stop it or rename
+  it before a login run.
+- The scripts protect their own process and its parents, so running them from a
+  terminal or a test runner does not terminate that terminal.
+- Inside the provided login container the cleanup is skipped, because there it
+  would tear down the container's own browser stack.
+- **In Home Assistant this does not happen — with one exception worth knowing.**
+  No module Home Assistant loads reaches `create_driver`. The exception is the
+  interactive key-backup fallback: it is loaded dynamically and, in a Home
+  Assistant process started in the foreground of a terminal whose bundle carries
+  no shared key, it could reach the same code. That guard is being tightened to
+  require the command-line tool itself.
+
 ### Standalone login refuses to start (attended terminal required)
 The desktop login opens Chrome **on your own screen** and prints a "Press Enter
 to continue" prompt first, so you decide when a browser window takes over. When
@@ -547,8 +599,23 @@ configuration.
 
 - All location data uses Google's end-to-end encryption
 - Authentication tokens are securely cached
-- No location data is transmitted to third parties
-- Local processing of all GPS coordinates
+- All GPS coordinates are processed locally. The integration itself sends no
+  location data anywhere except to Google, which is where it comes from.
+- **The exceptions, and they are yours to trigger.** Opening a Map View page
+  makes your browser talk to two third parties:
+  - **Map tiles** from OpenStreetMap (`https://{s}.tile.openstreetmap.org/...`).
+    The page fits its view to *all* locations it shows, so with the default
+    history window the requested area is the area your device moved through
+    during that window, not just its current position. The requests carry no
+    device name, no account and no coordinates as such, but the requested tiles
+    do describe that area.
+  - **The Leaflet library** from `unpkg.com`, which the page currently loads to
+    draw the map. That request carries no location data at all, only the fact
+    that the page was opened. It is being removed in favour of a copy shipped
+    with the integration.
+
+  Nothing is requested while no Map View page is open, and no other page of this
+  integration loads either.
 
 ## Security considerations
 
@@ -558,15 +625,43 @@ configuration.
 | --- | --- | --- |
 | The credential bundle you paste during setup | Home Assistant's storage, one file per config entry: `.storage/googlefindmy_secrets_<entry_id>` | Written by the integration's token cache, not by you |
 | Google account e-mail | The config entry itself (`.storage/core.config_entries`) | Needed to restart without asking you again |
-| The pasted bundle and the OAuth token, **during setup only** | Also the config entry, until the first successful start moves them into the token cache and removes them | If setup fails before that, they stay there; the diagnostics download redacts them |
+| The location history of every tracker | Home Assistant's recorder database (`home-assistant_v2.db` by default) | Not written by this integration but by Home Assistant, recording the entities it creates, including the recorder-only `last_latitude`/`last_longitude` attributes the Map View reads back (`map_view.py`, `get_significant_states`). It is kept for as long as your `recorder` `purge_keep_days` says, and it travels with any backup that includes the database (Home Assistant's backup manager offers that as a choice; a recorder pointed at an external database is not in the backup at all). Exclude the entities under `recorder:` if you do not want that history |
+| The pasted bundle and the OAuth token | Also the config entry (`.storage/core.config_entries`) | On **initial setup** they are moved into the token cache on the first successful start and removed from the entry. Two cases keep them there indefinitely: a setup that fails before that point, and any later credential replacement (reauth or the options flow), because `config_flow.py` → `_persist_secrets_bundle` writes them back and the reload then finds a primed cache and skips the removal (`__init__.py`, the `legacy_cache_primed` branch). The copy lives beside the token cache in the same `.storage` directory, so it widens no trust boundary, and the diagnostics download redacts it |
 | Derived tokens (AAS, ADM, SPOT), FCM push identity, the shared key and the owner key | Same per-entry storage file | Refreshed automatically; the long-lived ones are what make the integration work after a restart |
-| The Map View access token | Not stored as a secret: it is derived on demand from the instance UUID and the entry id, and it appears inside each device's `configuration_url` in `.storage/core.device_registry` | See the `map_view_token_expiration` option above |
+| The Map View access token | Derived on demand from the instance UUID and the entry id, and carried inside each device's `configuration_url` in `.storage/core.device_registry` | Treat that URL as long-lived bearer material: the map view is not behind Home Assistant's login, so whoever holds the link sees the device's location. The token authenticates the **config entry**, not one device (`map_view.py` → `_resolve_entry_by_token`), so a recipient who knows another device id of the same account can substitute it in the path. With the default `map_view_token_expiration` (off) the token never expires |
 
 `secrets.json` is **not** part of the running integration. It is produced by the
-manual command-line login, you paste its contents once, and after that the file
-on your own machine is the only copy. If an old `Auth/secrets.json` is found next
-to the integration it is imported once and then deleted (`Auth/token_cache.py`,
-`os.remove(legacy_path)`).
+manual command-line login, and if you paste its contents, no file by that name
+ever reaches the Home Assistant machine. Its *contents* do: `async_setup_entry`
+hands the normalised bundle to `_async_save_secrets_data`, which stores it in
+the per-entry file listed in the table above. What pasting avoids is a second,
+loose copy on disk, not storage as such.
+
+There is a second, optional hand-off that does put the file there, so it belongs
+in this list. The integration watches two paths for a dropped bundle
+(`discovery.py` → `_default_watch_paths`): the bundled `Auth/secrets.json` and
+the login container's `docker-login/data/secrets.json`. The advanced option
+`secrets_extra_watch_paths` adds any further paths you configure
+(`discovery.py` → `_collect_extra_watch_paths`), and those are watched the same
+way. A bundle found on any of them starts a discovery flow, and the copy is
+deleted once Home Assistant is observed to hold the imported credentials
+(`config_flow.py` → `_async_delete_watched_secrets`, armed by
+`async_setup_entry`). Until then — and indefinitely if you never confirm the
+flow, or if the import fails — the file stays on the Home Assistant machine in
+clear. Deletion is also best-effort: a path Home Assistant cannot write to
+keeps its copy. That one case does announce itself, in the Home Assistant log:
+`Failed to remove watched secrets file after import: <path>`
+(`config_flow.py` → `_remove_if_digest_matches`); search for it if you used a
+watched path, and remove the named file yourself. The other case is silent by
+construction: a flow you never confirmed never reaches the deletion at all, so
+no message will ever appear for it. If you use that route, remove every such
+copy yourself when you abandon an import, including the ones behind
+`secrets_extra_watch_paths`. A legacy `Auth/secrets.json` found by
+the token cache is imported once and then deleted (`Auth/token_cache.py`,
+`os.remove(legacy_path)`), best-effort in the same way: on a read-only mount
+the file stays, and the log says so
+(`Failed to remove legacy cache file after migration: <path>`). Search for that
+line too, and remove the file yourself if it appears.
 
 ### Who can read it
 

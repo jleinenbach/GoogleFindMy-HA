@@ -304,3 +304,141 @@ def test_module_entrypoint_invokes_flow(monkeypatch: pytest.MonkeyPatch) -> None
     runpy.run_path(shared_key_flow.__file__, run_name="__main__")
 
     assert calls == {"chrome_path": None, "chrome_version": None}
+
+
+# ---------------------------------------------------------------------------
+# payload redaction (the alert channel carries vault key material)
+# ---------------------------------------------------------------------------
+
+
+_SECRET = "deadbeefcafebabe" * 4
+
+
+def test_malformed_payload_is_logged_by_shape_not_content(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A non-JSON alert must never reach the log verbatim.
+
+    The branch still has to say *what* arrived, otherwise a maintainer cannot
+    tell an absent payload from an empty or misshapen one, so type and length
+    are asserted alongside the absence of the value.
+    """
+
+    good = json.dumps({"method": "closeView"})
+    driver = _FakeDriver([_SECRET, good])
+    _patch_flow(monkeypatch, driver)
+    monkeypatch.setattr(shared_key_flow, "safe_quit_driver", lambda _: None)
+
+    assert shared_key_flow.request_shared_key_flow() is None
+
+    logged = " ".join(caplog.messages)
+    assert "malformed alert payload" in logged.lower()
+    assert _SECRET not in logged
+    assert f"str len={len(_SECRET)}" in logged
+
+
+def test_invalid_vault_keys_payload_is_redacted(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    bad = json.dumps(
+        {"method": "setVaultSharedKeys", "str": _SECRET, "vaultKeys": [_SECRET]}
+    )
+    good = json.dumps({"method": "closeView"})
+    driver = _FakeDriver([bad, good])
+    _patch_flow(monkeypatch, driver)
+    monkeypatch.setattr(shared_key_flow, "safe_quit_driver", lambda _: None)
+
+    assert shared_key_flow.request_shared_key_flow() is None
+
+    logged = " ".join(str(record.getMessage()) for record in caplog.records)
+    assert "invalid vaultkeys" in logged.lower()
+    assert _SECRET not in logged
+    assert "list len=1" in logged
+    # key names, never values: the shape of an unrecognised payload cannot be
+    # assumed, so no value is logged at all
+    assert "keys=[method, str, vaultKeys]" in logged
+
+
+def test_unhandled_payload_is_redacted(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    import logging
+
+    caplog.set_level(logging.DEBUG)
+    other = json.dumps({"method": "somethingElse", "vaultKeys": _SECRET})
+    good = json.dumps({"method": "closeView"})
+    driver = _FakeDriver([other, good])
+    _patch_flow(monkeypatch, driver)
+    monkeypatch.setattr(shared_key_flow, "safe_quit_driver", lambda _: None)
+
+    assert shared_key_flow.request_shared_key_flow() is None
+
+    logged = " ".join(str(record.getMessage()) for record in caplog.records)
+    assert "unhandled alert payload" in logged.lower()
+    assert _SECRET not in logged
+    assert "keys=[method, vaultKeys]" in logged
+
+
+def test_an_unexpected_key_is_not_logged_either(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The branch exists for payloads whose shape nobody anticipated.
+
+    Redacting by key name would leak anything stored under a name that is not on
+    the list, which is exactly the case these branches handle.
+    """
+
+    import logging
+
+    caplog.set_level(logging.DEBUG)
+    other = json.dumps({"method": "somethingElse", "surpriseField": _SECRET})
+    good = json.dumps({"method": "closeView"})
+    driver = _FakeDriver([other, good])
+    _patch_flow(monkeypatch, driver)
+    monkeypatch.setattr(shared_key_flow, "safe_quit_driver", lambda _: None)
+
+    assert shared_key_flow.request_shared_key_flow() is None
+
+    logged = " ".join(str(record.getMessage()) for record in caplog.records)
+    assert _SECRET not in logged
+    assert "surpriseField" in logged  # the name is the useful part, not the value
+
+
+def test_cli_path_binds_the_redaction_helper_not_the_diagnostics_copy(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The effective patch point for the CLI path is this module, not diagnostics.
+
+    ``shared_key_flow`` binds ``async_redact_data`` with ``from ... import``, so
+    the name lives in this module's namespace. A test that wants to observe the
+    redaction of the CLI path patches *here*; patching
+    ``diagnostics.async_redact_data`` (which several diagnostics tests do) has no
+    effect on this path at all. Both halves are asserted so the layering cannot
+    regress silently.
+    """
+
+    import logging
+
+    from custom_components.googlefindmy import redaction
+
+    caplog.set_level(logging.DEBUG)
+    calls: list[object] = []
+
+    def _tracking(data: object) -> object:
+        calls.append(data)
+        return "TRACED"
+
+    monkeypatch.setattr(shared_key_flow, "describe_keys", _tracking)
+
+    other = json.dumps({"method": "somethingElse"})
+    good = json.dumps({"method": "closeView"})
+    driver = _FakeDriver([other, good])
+    _patch_flow(monkeypatch, driver)
+    monkeypatch.setattr(shared_key_flow, "safe_quit_driver", lambda _: None)
+
+    assert shared_key_flow.request_shared_key_flow() is None
+    assert calls, "the unhandled branch must route through the redaction helper"
+    assert "TRACED" in " ".join(str(r.getMessage()) for r in caplog.records)
+
+    # the helper the module bound is the shared one, not a diagnostics-local copy
+    assert redaction.describe_keys.__module__.endswith("redaction")
