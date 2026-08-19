@@ -255,6 +255,46 @@ jobs:
             fi
           } >> "$GITHUB_STEP_SUMMARY"
 
+  vendored_assets:
+    name: Vendored assets freshness
+    runs-on: ubuntu-latest
+    needs: hassfest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name || github.repository }}
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.ref || github.ref }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      # Dependabot reads manifests, never checked-in files. Without this gate a
+      # bump of the `leaflet` devDependency would leave the embedded copy behind
+      # and nothing would go red. No network and no Node needed: the check
+      # compares package.json against vendor/leaflet/VERSION and the recorded
+      # digests against the files themselves.
+      - name: Check the vendored Leaflet copy
+        id: vendor_leaflet
+        run: python script/vendor_leaflet.py --check
+
+      - name: Write vendored assets summary
+        if: always()
+        run: |
+          {
+            echo "## Vendored assets"
+            echo ""
+            if [ "${{ steps.vendor_leaflet.outcome }}" = "success" ]; then
+              echo "✅ **Leaflet copy matches the pinned version and its digests**"
+            else
+              echo "❌ **Vendored Leaflet is out of step**"
+              echo ""
+              echo "Run \`npm install && python script/vendor_leaflet.py\` and commit the result."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
   lint:
     name: Lint (${{ matrix.check }})
     runs-on: ubuntu-latest
@@ -489,7 +529,7 @@ jobs:
   ci-success:
     name: CI Success
     runs-on: ubuntu-latest
-    needs: [hassfest, hacs, lint, test, translations]
+    needs: [hassfest, hacs, lint, test, translations, vendored_assets]
     if: always()
     steps:
       - name: Check all jobs passed
@@ -499,7 +539,8 @@ jobs:
              [[ "${{ needs.hacs.result }}" != "success" ]] || \
              [[ "${{ needs.lint.result }}" != "success" ]] || \
              [[ "${{ needs.test.result }}" != "success" ]] || \
-             [[ "${{ needs.translations.result }}" != "success" ]]; then
+             [[ "${{ needs.translations.result }}" != "success" ]] || \
+             [[ "${{ needs.vendored_assets.result }}" != "success" ]]; then
             echo "One or more jobs failed"
             echo "passed=false" >> "$GITHUB_OUTPUT"
             exit 1
@@ -526,6 +567,12 @@ jobs:
               echo "| HACS | ✅ Pass |"
             else
               echo "| HACS | ❌ Fail |"
+            fi
+
+            if [ "${{ needs.vendored_assets.result }}" = "success" ]; then
+              echo "| Vendored assets | ✅ Pass |"
+            else
+              echo "| Vendored assets | ❌ Fail |"
             fi
 
             if [ "${{ needs.lint.result }}" = "success" ]; then
