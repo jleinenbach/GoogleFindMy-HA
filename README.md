@@ -600,9 +600,14 @@ guard is being replaced by a signal the command-line process sets for itself.
 
 ### If your credential bundle leaks
 
-Treat a leaked bundle as a full compromise of what this integration can reach,
-and assume the location access cannot be taken back. The honest reason for that
-assumption is in the last column below.
+Treat a leaked bundle as a full compromise of what this integration can reach.
+Two things have to be kept apart, because only one of them is hopeless:
+
+- **Reports the holder already received** stay readable. The keys that decrypt
+  them are in the copy, and no documented way exists for you to rotate them.
+- **Reports from now on** are a different question. Removing a tracker from Find
+  Hub is the step that touches its device-side key material, so containment is
+  not futile: step 5 below is what ends future location access.
 
 | What is in the bundle | What it opens | Can you revoke it? |
 | --- | --- | --- |
@@ -655,8 +660,8 @@ token access. The two items that decrypt your location, `shared_key` and
 `owner_key`, are key material the holder already has locally, and no Google
 documentation we could find describes a way for an account owner to rotate or
 revoke them. Until that changes, a leaked bundle should be assumed to keep
-decrypting whatever it already received, and the practical remedy for the
-location itself is step 5.
+decrypting whatever it already received. That is the part you cannot undo; the
+part you can is future access, and the remedy for it is step 5.
 
 ### Reporting a security issue
 
