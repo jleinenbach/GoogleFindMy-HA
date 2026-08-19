@@ -181,6 +181,15 @@ jobs:
                 echo "pip-audit failed with exit code $status" >&2
                 exit "$status"
               fi
+              # Same guard as before the first audit, and for the same reason
+              # one level down: an empty re-audit yields fixable_after=0, which
+              # is less than any real prior count, so the job would open a pull
+              # request announcing a fix it never measured.
+              audited_after=$(jq '.dependencies | length' audit.json)
+              if [ "$audited_after" -eq 0 ]; then
+                echo "::error title=pip-audit measured nothing after the update::The re-audit lists zero packages, so its count cannot be compared with the pre-update count." >&2
+                exit 1
+              fi
               fixable_after=$(jq '[.dependencies[].vulns[] | select((.fix_versions|length)>0)] | length' audit.json)
 
               if [ "$fixable_after" -lt "$fixable" ]; then
