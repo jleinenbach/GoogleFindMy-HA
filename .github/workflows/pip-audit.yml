@@ -64,6 +64,11 @@ jobs:
             echo "pip-audit failed with exit code $status" >&2
             exit "$status"
           fi
+          audited=$(jq '.dependencies | length' audit.json)
+          if [ "$audited" -eq 0 ]; then
+            echo "::error title=pip-audit measured nothing::The report lists zero packages. The exported requirements carry environment markers (python_full_version >= \"3.14.2\"); running pip-audit under an older interpreter discards every line and reports a clean result that means nothing. Check the python-version of this job against the constraint in pyproject.toml." >&2
+            exit 1
+          fi
           fixable=$(jq '[.dependencies[].vulns[] | select((.fix_versions|length)>0)] | length' audit.json)
           unfixable=$(jq '[.dependencies[].vulns[] | select((.fix_versions|length)==0)] | length' audit.json)
           printf " - Poetry dependencies: fixable=%s, unfixable=%s\n" "$fixable" "$unfixable" >> "$summary_tmp"
@@ -143,6 +148,11 @@ jobs:
             exit "$status"
           fi
 
+          audited=$(jq '.dependencies | length' audit.json)
+          if [ "$audited" -eq 0 ]; then
+            echo "::error title=pip-audit measured nothing::The report lists zero packages. The exported requirements carry environment markers (python_full_version >= \"3.14.2\"); running pip-audit under an older interpreter discards every line and reports a clean result that means nothing. Check the python-version of this job against the constraint in pyproject.toml." >&2
+            exit 1
+          fi
           fixable=$(jq '[.dependencies[].vulns[] | select((.fix_versions|length)>0)] | length' audit.json)
           unfixable=$(jq '[.dependencies[].vulns[] | select((.fix_versions|length)==0)] | length' audit.json)
 
