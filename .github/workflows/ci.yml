@@ -600,6 +600,14 @@ jobs:
           if [ -n "${{ matrix.ha_pin }}" ]; then
             printf 'homeassistant==%s\n' "${{ matrix.ha_pin }}" >> "$constraints"
             printf 'pytest-homeassistant-custom-component==%s\n' "${{ matrix.plugin_pin }}" >> "$constraints"
+            # The plugin release that carries an older Home Assistant also
+            # carries the pytest stack of its own era: 0.13.278 requires
+            # pytest-asyncio==1.1.0, while requirements-dev.txt pins 1.3.0.
+            # Keeping both makes the resolution impossible. Testing an old
+            # Home Assistant line means testing it with the test tooling that
+            # line shipped with, so the local pin steps aside on this axis.
+            sed -i -E '/^pytest-asyncio==/d' \
+              custom_components/googlefindmy/requirements-dev.txt
           fi
           echo "Constraints for this axis:"
           cat "$constraints"
