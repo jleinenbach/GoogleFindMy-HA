@@ -180,3 +180,35 @@ def test_the_hint_names_the_install_command() -> None:
     wrapped = browser_deps.missing_browser_dependency(ImportError("no module"))
     assert "pip install" in str(wrapped)
     assert "no module" in str(wrapped)
+
+
+def test_the_lazy_driver_import_carries_the_install_hint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Selenium fails loudly at import; undetected-chromedriver does not.
+
+    `chrome_driver._load_uc` imports it lazily and falls back to a stub, so an
+    environment with only Selenium installed gets past every import guard. The
+    stub is therefore where the hint has to appear, not in a preflight: an eager
+    import would also defeat the distutils fallback the stub exists for.
+    """
+
+    import importlib
+
+    from custom_components.googlefindmy import chrome_driver
+
+    real_import_module = importlib.import_module
+
+    def _hide_uc(name: str, *args: object, **kwargs: object) -> object:
+        if name == "undetected_chromedriver":
+            raise ImportError("No module named 'undetected_chromedriver'")
+        return real_import_module(name, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(chrome_driver.importlib, "import_module", _hide_uc)
+
+    stub = chrome_driver._load_uc()
+
+    with pytest.raises(RuntimeError) as excinfo:
+        stub.Chrome(options=object())
+
+    assert browser_deps.INSTALL_COMMAND in str(excinfo.value)

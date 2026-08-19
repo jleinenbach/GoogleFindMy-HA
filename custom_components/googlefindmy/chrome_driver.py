@@ -15,7 +15,10 @@ from collections.abc import Callable
 from types import ModuleType, SimpleNamespace
 from typing import Any, cast
 
-from custom_components.googlefindmy.browser_deps import missing_browser_dependency
+from custom_components.googlefindmy.browser_deps import (
+    MISSING_BROWSER_PACKAGES_HINT,
+    missing_browser_dependency,
+)
 
 try:
     from selenium.webdriver.chrome.webdriver import WebDriver
@@ -82,9 +85,16 @@ def _load_uc() -> Any:
                 self.arguments.append(argument)
 
         def _stub_chrome(*, options: object) -> WebDriver:
+            # This is where a selenium-only environment actually fails: the
+            # import above is lazy, so nothing earlier notices that
+            # undetected-chromedriver is absent. Carry the install hint here
+            # rather than leaving a generic driver error at the end of the
+            # strategy chain.
             raise RuntimeError(
-                "undetected_chromedriver could not be imported; install its runtime "
-                "dependencies (including setuptools' distutils module)"
+                f"{MISSING_BROWSER_PACKAGES_HINT}\n\n"
+                "undetected_chromedriver could not be imported; if it is "
+                "installed, check its runtime dependencies (including "
+                "setuptools' distutils module)"
             ) from error
 
         return SimpleNamespace(ChromeOptions=_StubChromeOptions, Chrome=_stub_chrome)
