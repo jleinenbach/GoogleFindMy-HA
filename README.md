@@ -612,7 +612,8 @@ assumption is in the last column below.
 | `shared_key` and `owner_key` | Open the **decryption chain**: the shared key unwraps the server-provided owner key, from which the tracker's identity key and finally the report key are derived. This is the step that turns "can list and ring your devices" into "can see where you are" | Not documented |
 | Your Google account e-mail, the device identifier, usage timestamps | Identifies the account and the device the tokens were issued for | Not applicable |
 
-**If you believe the leak is being used right now, do step 5 first.** It is the
+**If you believe the leak is being used right now, do step 5 first, for every
+tracker whose location must be protected.** It is the
 only step in this list that touches the device side of the key material, and
 steps 1 to 4 have documented effects on account access but undocumented effects
 on the copy somebody already holds. In the ordinary case, work through the list
@@ -636,13 +637,18 @@ documentation stops, this says so instead of guessing.
    grant made this way appears in that list is not documented.
 4. **Check your account's security activity and turn on 2-Step Verification**
    ([support](https://support.google.com/accounts/answer/6294825)).
-5. **If the location itself is what you need to protect, remove the tracker from
-   Find Hub**: removing it deletes its associated data
+5. **If the location itself is what you need to protect, remove every affected
+   tracker from Find Hub**: the stolen credentials list *your devices*, not one
+   of them, so removing a single tracker leaves the rest reachable. Removing a
+   tracker deletes its associated data
    ([support](https://support.google.com/android/answer/14800516)). This is the
    only step in the list that touches the device-side of the key material.
 6. **Locally:** delete your copy of `secrets.json`, remove the config entry, and
    run the login again. This gives *you* fresh credentials; it does nothing to
-   the thief's copy.
+   the thief's copy. If you turned the *delete caches on remove* option off,
+   removing the entry keeps `.storage/googlefindmy_secrets_<entry_id>` on disk
+   (`__init__.py` → `async_remove_entry`): turn the option back on before you
+   remove the entry, or delete that file yourself.
 
 **The uncomfortable part, stated plainly:** steps 1 to 4 all act on account and
 token access. The two items that decrypt your location, `shared_key` and
