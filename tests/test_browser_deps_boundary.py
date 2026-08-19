@@ -523,15 +523,18 @@ def test_the_chain_surfaces_the_typed_failure_instead_of_its_own(
 
     typed = browser_deps.BrowserPackagesUnusable("uc is installed but broken")
 
-    monkeypatch.setattr(
-        chrome_driver, "_try_strategy_default", lambda **_: (None, typed)
-    )
-    monkeypatch.setattr(
-        chrome_driver, "_try_strategy_headless", lambda **_: (None, typed)
-    )
-    monkeypatch.setattr(
-        chrome_driver, "_try_strategy_no_version", lambda **_: (None, typed)
-    )
+    # Every strategy, not just the ones that run here: which of them land in
+    # the attempt list depends on whether a Chrome binary and a version could
+    # be resolved, and that differs between a developer machine and the CI
+    # runner, where Chrome exists. The first version of this test patched
+    # three of the four and passed locally while failing in CI.
+    for strategy in (
+        "_try_strategy_default",
+        "_try_strategy_explicit_path",
+        "_try_strategy_no_version",
+        "_try_strategy_headless",
+    ):
+        monkeypatch.setattr(chrome_driver, strategy, lambda **_: (None, typed))
     monkeypatch.setattr(chrome_driver, "_try_webdriver_manager_fallback", lambda: None)
 
     with pytest.raises(browser_deps.BrowserPackagesUnusable):
