@@ -285,7 +285,15 @@ def test_the_only_dynamic_route_to_the_browser_is_the_guarded_one() -> None:
     that the branch reports the missing packages instead of an import traceback.
     """
 
-    _, _, dynamic = _reachable("__init__.py")
+    # Collected over every module Home Assistant can reach, including the
+    # fifteen it only reaches through an import written inside a function.
+    # A module-level crawl from `__init__.py` alone does not see `discovery.py`
+    # or `services.py`, so an `import_module("selenium")` added there used to
+    # leave this test green.
+    dynamic: set[str] = set()
+    for entry in _ha_entry_points():
+        for rel in _modules_reached_including_function_bodies(entry):
+            dynamic |= _dynamic_edges(PACKAGE_ROOT / Path(rel))
     browser_routes = {
         target
         for target in dynamic
@@ -595,10 +603,16 @@ def _resolve_internal(module: str) -> Path | None:
     return None
 
 
-def _closure_including_function_bodies(entry: str) -> dict[str, set[str]]:
-    """Walk from one entry point, following imports wherever they are written."""
+def _modules_reached_including_function_bodies(entry: str) -> set[str]:
+    """Every module reachable from *entry*, following imports wherever written.
 
-    offenders: dict[str, set[str]] = {}
+    Wider than `_reachable`, which stops at module level: fifteen modules --
+    `discovery.py`, `services.py`, `map_view.py` and the `fmdn_finder` family
+    among them -- are reached only through an import inside a function that
+    Home Assistant calls. A check that crawls module level alone never looks
+    at them.
+    """
+
     seen: set[str] = set()
     queue = [Path(entry)]
     while queue:
@@ -606,13 +620,22 @@ def _closure_including_function_bodies(entry: str) -> dict[str, set[str]]:
         if str(rel) in seen:
             continue
         seen.add(str(rel))
-        external, internal = _all_imports(PACKAGE_ROOT / rel)
-        if external & BROWSER_PACKAGES:
-            offenders[str(rel)] = external & BROWSER_PACKAGES
+        _, internal = _all_imports(PACKAGE_ROOT / rel)
         for module in internal:
             resolved = _resolve_internal(module)
             if resolved is not None and str(resolved) not in seen:
                 queue.append(resolved)
+    return seen
+
+
+def _closure_including_function_bodies(entry: str) -> dict[str, set[str]]:
+    """Walk from one entry point, following imports wherever they are written."""
+
+    offenders: dict[str, set[str]] = {}
+    for rel in _modules_reached_including_function_bodies(entry):
+        external, _ = _all_imports(PACKAGE_ROOT / Path(rel))
+        if external & BROWSER_PACKAGES:
+            offenders[rel] = external & BROWSER_PACKAGES
     return offenders
 
 
