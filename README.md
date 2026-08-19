@@ -470,8 +470,11 @@ What that means in practice:
   No module Home Assistant loads reaches `create_driver`. The exception is the
   interactive key-backup fallback: it is loaded dynamically and, in a Home
   Assistant process started in the foreground of a terminal whose bundle carries
-  no shared key, it could reach the same code. That guard is being tightened to
-  require the command-line tool itself.
+  no shared key, it used to be able to reach the same code. That guard now
+  requires the command-line tool itself, which identifies itself through the
+  `GOOGLEFINDMY_CLI_PROCESS` marker rather than through an attached terminal.
+  Exporting that marker into a Home Assistant process puts the old behaviour
+  back — it is an opt-in for wrappers, not a lock.
 
 ### Standalone login refuses to start (attended terminal required)
 The desktop login opens Chrome **on your own screen** and prints a "Press Enter
@@ -682,16 +685,39 @@ clear.
 
 Chrome and Selenium. The browser-based credential extraction is a manual step
 you run yourself, from a terminal, on your own machine. No module Home Assistant
-loads imports Selenium or starts a browser: an import-graph walk from
-`__init__.py`, `config_flow.py` and `eid_resolver.py` reaches no browser package,
-while the same walk from `chrome_driver.py` does — so the check can fire.
+loads imports Selenium or starts a browser: an import-graph walk from every
+module Home Assistant loads on its own reaches no browser package, while the
+same walk from `chrome_driver.py` does — so the check can fire. "Every module"
+means: `__init__.py`, the entry point; the four Home Assistant looks up by
+filename (`config_flow.py`, `diagnostics.py`, `repairs.py`,
+`system_health.py`), which the check lists explicitly because that convention
+is Home Assistant's rather than ours; `eid_resolver.py`, which is an ordinary
+import of `__init__.py` and would be crawled anyway, seeded as its own entry
+because it is where the decryption path starts; and the platform modules, which
+the check reads from `PLATFORMS` because that list does change. From each of them it follows
+imports inside function bodies as well, and `importlib.import_module` calls
+whose target is a literal string, because a module reached only that way is
+reached all the same. A dynamic import whose target is assembled at run time
+is beyond it, which is a limit of reading source without executing it rather
+than an oversight. Three such calls exist here, and all three resolve from
+tables of constants in the package (`__init__.py` → `_PROTO_DECODER_PATHS`, and
+the two module names in `integration_modules.py`): protocol decoders and the
+integration's own API module, no browser among them.
 
-One qualification, because it is real: the interactive key-backup fallback is
-guarded by a terminal check (`KeyBackup/shared_key_retrieval.py` →
-`_retrieve_shared_key_hex`, `is_tty = sys.stdin and sys.stdin.isatty()`), not by
-a check for "am I the CLI". A Home Assistant process running in the foreground
-on a terminal, whose bundle carries no shared key, can therefore reach it. The
-guard is being replaced by a signal the command-line process sets for itself.
+The interactive key-backup fallback used to be the one qualification here: it is
+loaded dynamically through `importlib`, and its guard asked whether a terminal
+was attached — a question a foreground Home Assistant answers with yes. It now
+asks two (`KeyBackup/shared_key_retrieval.py` → `_retrieve_shared_key_hex`):
+whether this process is the command-line tool, which it learns from the
+`GOOGLEFINDMY_CLI_PROCESS` marker that `main.py` sets on itself and Home
+Assistant never sets, and whether somebody is present to answer the browser
+prompt. Either answer missing is refused with a message that names what is
+missing. Read that as the default rather than as a lock: the marker is an
+environment variable and is inherited, so a Home Assistant process started with
+it exported, on a terminal, has answered both questions itself. The refusal
+message says as much, because an unforeseen command-line wrapper has to be able
+to identify itself somehow. What changed is that this now takes a deliberate
+act instead of happening to anyone who starts Home Assistant in a terminal.
 
 ### If your credential bundle leaks
 
