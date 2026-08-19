@@ -230,8 +230,13 @@ async def _retrieve_shared_key_hex() -> str:
             from custom_components.googlefindmy.browser_deps import (  # noqa: PLC0415
                 INSTALL_COMMAND,
                 MISSING_BROWSER_PACKAGES_HINT,
+                BrowserPackagesUnusable,
                 browser_packages_missing,
             )
+
+            # Installed but unusable: the type says so where the text cannot.
+            if isinstance(err, BrowserPackagesUnusable):
+                raise
 
             # "Install these two packages" and "your Chrome installation is
             # broken" are different problems with different remedies. The

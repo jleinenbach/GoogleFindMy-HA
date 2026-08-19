@@ -17,6 +17,7 @@ from typing import Any, cast
 
 from custom_components.googlefindmy.browser_deps import (
     MISSING_BROWSER_PACKAGES_HINT,
+    BrowserPackagesUnusable,
     missing_browser_dependency,
 )
 
@@ -95,7 +96,7 @@ def _load_uc() -> Any:
             # (`version_main`, `browser_executable_path`, ...). A narrower one
             # would raise TypeError before this hint is reached, and the
             # strategy chain would swallow it as a generic driver failure.
-            raise RuntimeError(
+            raise BrowserPackagesUnusable(
                 f"{MISSING_BROWSER_PACKAGES_HINT}\n\n"
                 "undetected_chromedriver could not be imported; if it is "
                 "installed, check its runtime dependencies (including "
@@ -1198,6 +1199,14 @@ def _create_driver_inner(
         resolved_version=resolved_version,
         version_source=version_source,
     )
+    # A package that cannot be loaded is not a driver problem, and the advice
+    # below does not address it. Raised after the strategies and the
+    # webdriver-manager fallback have had their turn, so nothing that could
+    # still have worked is cut short; only the wording of the final failure
+    # changes.
+    if isinstance(last_error, BrowserPackagesUnusable):
+        raise last_error
+
     raise RuntimeError(
         "Failed to start ChromeDriver after all attempts.\n"
         "Possible solutions:\n"

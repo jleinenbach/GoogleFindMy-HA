@@ -485,3 +485,54 @@ def test_an_imported_stub_counts_as_present(monkeypatch: pytest.MonkeyPatch) -> 
     monkeypatch.setitem(sys.modules, "selenium", SimpleNamespace())
 
     assert browser_deps.browser_packages_missing() is False
+
+
+def test_an_installed_but_unimportable_package_survives_the_strategy_chain() -> None:
+    """`find_spec` finds a package whose import fails; only the type tells them apart.
+
+    `undetected_chromedriver` does not import where `distutils` has been
+    removed from the standard library, which is the state of a modern GitHub
+    runner. The package is installed, so a presence probe says "present", and
+    the strategy chain rewrites the stub's message into its own generic one.
+    The type is the only thing that crosses both.
+    """
+
+    from custom_components.googlefindmy import main
+
+    def _broken() -> tuple[str, str | None]:
+        raise browser_deps.BrowserPackagesUnusable(
+            "undetected_chromedriver could not be imported"
+        )
+
+    with pytest.raises(SystemExit) as excinfo:
+        main._run_oauth_flow_or_exit(_broken)
+
+    assert excinfo.value.code == 1
+
+
+def test_the_chain_surfaces_the_typed_failure_instead_of_its_own(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The generic "Failed to start ChromeDriver" advice does not address it.
+
+    Raised only after every strategy and the webdriver-manager fallback have
+    had their turn, so nothing that could still have worked is cut short.
+    """
+
+    from custom_components.googlefindmy import chrome_driver
+
+    typed = browser_deps.BrowserPackagesUnusable("uc is installed but broken")
+
+    monkeypatch.setattr(
+        chrome_driver, "_try_strategy_default", lambda **_: (None, typed)
+    )
+    monkeypatch.setattr(
+        chrome_driver, "_try_strategy_headless", lambda **_: (None, typed)
+    )
+    monkeypatch.setattr(
+        chrome_driver, "_try_strategy_no_version", lambda **_: (None, typed)
+    )
+    monkeypatch.setattr(chrome_driver, "_try_webdriver_manager_fallback", lambda: None)
+
+    with pytest.raises(browser_deps.BrowserPackagesUnusable):
+        chrome_driver._create_driver_inner(headless=True)

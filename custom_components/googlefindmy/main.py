@@ -442,11 +442,17 @@ def _run_oauth_flow_or_exit(
     from custom_components.googlefindmy.browser_deps import (  # noqa: PLC0415
         INSTALL_COMMAND,
         MISSING_BROWSER_PACKAGES_HINT,
+        BrowserPackagesUnusable,
         browser_packages_missing,
     )
 
     try:
         return flow()
+    except BrowserPackagesUnusable as err:
+        # The typed case: the packages are there but unusable, and the type
+        # carried that through the strategy chain unchanged.
+        print(f"\n{err}\n")
+        raise SystemExit(1) from err
     except RuntimeError as err:
         if INSTALL_COMMAND in str(err):
             print(f"\n{err}\n")

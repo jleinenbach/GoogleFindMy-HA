@@ -32,6 +32,24 @@ MISSING_BROWSER_PACKAGES_HINT = (
 )
 
 
+class BrowserPackagesUnusable(RuntimeError):
+    """The browser packages cannot be used, whether absent or broken.
+
+    A type rather than a message, because the message does not survive: the
+    driver strategy chain in `chrome_driver.py` ends in its own generic
+    "Failed to start ChromeDriver" text, and matching a substring through that
+    is what kept failing. A type carries through unchanged.
+
+    "Broken" is not a corner case: `undetected_chromedriver` fails to import
+    where `distutils` has been removed from the standard library, which is the
+    state of a modern GitHub runner. `find_spec` finds that package, so asking
+    whether it is *installed* cannot tell this apart from a working one.
+    """
+
+    def __init__(self, message: str | None = None) -> None:
+        super().__init__(message or MISSING_BROWSER_PACKAGES_HINT)
+
+
 def browser_packages_missing() -> bool:
     """Answer "are the packages there" by looking, not by reading a message.
 
