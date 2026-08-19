@@ -555,6 +555,41 @@ def test_the_chain_surfaces_the_typed_failure_instead_of_its_own(
         chrome_driver._create_driver_inner(headless=True)
 
 
+def _runtime_nodes(tree: ast.Module) -> list[ast.stmt]:
+    """Every node that can run, function bodies included, `TYPE_CHECKING` not.
+
+    `ast.walk` would report `if TYPE_CHECKING: import selenium` as reachable.
+    That import never executes, and annotating against a CLI-only dependency
+    is a legitimate pattern, so a scan that flags it fails a correct module.
+    The guard polarity is read with `_type_checking_polarity`, the same helper
+    `_module_level_imports` uses, rather than a second reading of it: the
+    `else:` branch of such a guard *does* run, and `__init__.py` relies on that.
+    """
+
+    out: list[ast.stmt] = []
+
+    def walk(body: list[ast.stmt]) -> None:
+        for node in body:
+            out.append(node)
+            if isinstance(node, ast.If):
+                guard = _type_checking_polarity(node.test)
+                if guard is True:
+                    walk(node.orelse)
+                elif guard is False:
+                    walk(node.body)
+                else:
+                    walk(node.body)
+                    walk(node.orelse)
+                continue
+            for field in ("body", "orelse", "finalbody"):
+                walk(getattr(node, field, []) or [])
+            for handler in getattr(node, "handlers", []):
+                walk(handler.body)
+
+    walk(tree.body)
+    return out
+
+
 def _all_imports(path: Path, root: Path = PACKAGE_ROOT) -> tuple[set[str], set[str]]:
     """Return (external packages, internal modules) from *every* import in a file.
 
@@ -575,7 +610,7 @@ def _all_imports(path: Path, root: Path = PACKAGE_ROOT) -> tuple[set[str], set[s
     internal: set[str] = set()
     rel = path.relative_to(root)
 
-    for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+    for node in _runtime_nodes(ast.parse(path.read_text(encoding="utf-8"))):
         if isinstance(node, ast.Import):
             for alias in node.names:
                 if alias.name.startswith(prefix):
