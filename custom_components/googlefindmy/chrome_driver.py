@@ -589,10 +589,17 @@ def get_options(*, headless: bool = False) -> ChromeOptions:
     # * Scope. ``get_options`` is reached only through ``create_driver``, and
     #   ``create_driver`` only from the manual command-line entry points
     #   (``Auth/auth_flow.py``, ``KeyBackup/shared_key_flow.py``,
-    #   ``get_oauth_token.py``). No Home Assistant code path imports this module,
-    #   so these flags never apply to a running Home Assistant instance. They
-    #   apply to a browser the user starts themselves, for the minutes it takes
-    #   to sign in to their own Google account.
+    #   ``get_oauth_token.py``). No module Home Assistant loads imports this one:
+    #   an import-graph walk from ``__init__.py``, ``config_flow.py`` and
+    #   ``eid_resolver.py`` reaches no browser package.
+    # * The one exception, stated rather than glossed over.
+    #   ``KeyBackup/shared_key_retrieval.py`` -> ``_interactive_flow_hex`` loads
+    #   the browser flow through ``importlib.import_module``, which no import
+    #   graph sees. Its guard in ``_retrieve_shared_key_hex`` used to ask whether
+    #   a terminal was attached, and a foreground Home Assistant answers yes, so
+    #   these flags *could* be applied inside the Home Assistant process. That
+    #   guard is being replaced by a marker the command-line tool sets on its own
+    #   process; until that lands, "CLI only" is the intent, not a guarantee.
     # * Provenance. They arrived with commit 5219da9f, described as taken from
     #   the upstream tool. That is not accurate: leonboe1/GoogleFindMyTools sets
     #   exactly three arguments in its own ``get_options`` (``--start-maximized``,
