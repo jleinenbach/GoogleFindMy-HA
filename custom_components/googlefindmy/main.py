@@ -686,7 +686,18 @@ async def _ensure_vault_keys(cache: object) -> None:
     # Shared key: essential and browser-bound. Failure is fatal.
     try:
         await _ensure_shared_key(cache)
-    except Exception:  # noqa: BLE001
+    except Exception as err:  # noqa: BLE001
+        from custom_components.googlefindmy.browser_deps import (  # noqa: PLC0415
+            INSTALL_COMMAND,
+        )
+
+        # The browser packages are optional (they are not in manifest.json), so
+        # "they are not installed" is a normal way for this to fail, and the
+        # sign-in advice below is useless against it. Print what the user is
+        # actually missing instead.
+        if INSTALL_COMMAND in str(err):
+            print(f"\n{err}\n", file=sys.stderr)
+            sys.exit(1)
         print(
             "\nError: vault key retrieval failed.\n"
             "Could not obtain the encryption key from Google's vault.\n"

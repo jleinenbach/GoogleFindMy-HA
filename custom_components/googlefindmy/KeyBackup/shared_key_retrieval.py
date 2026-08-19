@@ -227,6 +227,17 @@ async def _retrieve_shared_key_hex() -> str:
             return await _interactive_flow_hex()
         except Exception as err:
             _LOGGER.warning("Interactive shared key flow failed: %s", err)
+            from custom_components.googlefindmy.browser_deps import (  # noqa: PLC0415
+                INSTALL_COMMAND,
+            )
+
+            # "Install these two packages" and "your Chrome installation is
+            # broken" are different problems with different remedies. The
+            # generic message below tells a user whose only fault is a missing
+            # pip install to re-run the tool, which cannot help. Let the hint
+            # through untouched when it is the one that was raised.
+            if INSTALL_COMMAND in str(err):
+                raise
             raise RuntimeError(
                 "Shared key retrieval failed. "
                 "Ensure Chrome/Chromium is installed for the browser-based flow."

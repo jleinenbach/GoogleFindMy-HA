@@ -787,6 +787,38 @@ class TestEnsureVaultKeysExit:
         assert cache.data["aas_token"] == "aas"
 
     @pytest.mark.asyncio
+    async def test_missing_browser_packages_name_themselves(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """The generic advice cannot fix a missing pip install.
+
+        The browser packages are optional (they are not in `manifest.json`), so
+        a bare copy of the directory fails here as a matter of course. Telling
+        that user to re-run the tool and complete the sign-in sends them in a
+        circle; the install command has to reach them.
+        """
+        from custom_components.googlefindmy import main as cli_main
+        from custom_components.googlefindmy.browser_deps import (
+            INSTALL_COMMAND,
+            MISSING_BROWSER_PACKAGES_HINT,
+        )
+
+        cache = _AsyncDictCache({"username": "u@example.com"})
+
+        async def _raise(_cache):  # type: ignore[no-untyped-def]
+            raise RuntimeError(MISSING_BROWSER_PACKAGES_HINT)
+
+        monkeypatch.setattr(cli_main, "_ensure_shared_key", _raise)
+
+        with pytest.raises(SystemExit) as excinfo:
+            await cli_main._ensure_vault_keys(cache)
+
+        assert excinfo.value.code == 1
+        err = capsys.readouterr().err
+        assert INSTALL_COMMAND in err
+        assert "complete the Google sign-in" not in err
+
+    @pytest.mark.asyncio
     async def test_vault_failure_message_on_stderr(
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
