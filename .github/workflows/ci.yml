@@ -528,11 +528,29 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
   test_legacy_python:
-    name: Test (Python 3.13, legacy Home Assistant line)
+    name: Test (Python 3.13, ${{ matrix.label }})
     runs-on: ubuntu-latest
     needs:
       - hassfest
       - hacs
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The declared floor. `requirements-dev.txt` starts with
+          # `-c constraints-test-stubs.txt`, which pins Home Assistant to
+          # 2025.12.1 -- close to the 2025.9.1 floor in hacs.json and the line
+          # where the backwards-compatibility shims (`# Home Assistant <2025.11`,
+          # `# HA < 2025.5`) actually fire.
+          - label: "declared floor"
+            drop_ha_pins: "false"
+          # The last Home Assistant line that supports Python 3.13 (2026.2.3).
+          # Without this axis the three final 3.13-era releases would go
+          # untested, because the stub constraints hold the floor axis at
+          # 2025.12.1. Only the two Home Assistant pins are dropped; the
+          # `pycares<5` constraint in the same file stays.
+          - label: "last 3.13 line"
+            drop_ha_pins: "true"
     steps:
       - name: Check out repository
         uses: actions/checkout@v5
@@ -550,20 +568,43 @@ jobs:
 
       # Deliberately lock-free: poetry.lock resolves the dev/test tree for
       # Python >=3.14.2 only, because Home Assistant Core requires 3.14.2 from
-      # 2026.3.0 onwards. Installing from the plain requirement files lets pip
-      # pick the newest Home Assistant that still supports 3.13 (2026.2.3),
-      # which is what users on Core <=2026.2.x actually run. Without this job
-      # the backwards-compatibility shims in the integration would ship
-      # untested on that axis.
+      # 2026.3.0 onwards. Installing from the plain requirement files keeps the
+      # Python 3.13 axis under test, which is what users on Core 2025.9.1
+      # through 2026.2.x run and where the backwards-compatibility shims fire.
+      - name: Drop the pinned Home Assistant stubs
+        if: matrix.drop_ha_pins == 'true'
+        run: |
+          sed -i -E '/^(homeassistant|pytest-homeassistant-custom-component)==/d' \
+            custom_components/googlefindmy/constraints-test-stubs.txt
+          echo "Remaining constraints:"
+          cat custom_components/googlefindmy/constraints-test-stubs.txt
+
       - name: Install dependencies without the Poetry lock
         run: |
           python -m pip install --upgrade pip
           pip install -r custom_components/googlefindmy/requirements-dev.txt
 
-      # Printed so a reader of the log can tell which Home Assistant line this
-      # job actually exercised, instead of inferring it from the Python version.
-      - name: Report the resolved Home Assistant version
-        run: pip show homeassistant pytest-homeassistant-custom-component | grep -E "^(Name|Version):"
+      # Printed, and asserted, so this job's claim about which Home Assistant
+      # line it exercised is measured rather than inferred from the matrix
+      # label. Without the assertion a future change to the constraints file
+      # could silently collapse both axes onto the same release.
+      - name: Report and verify the resolved Home Assistant version
+        run: |
+          set -euo pipefail
+          resolved="$(python -c 'from importlib.metadata import version; print(version("homeassistant"))')"
+          echo "homeassistant==${resolved}"
+          echo "pytest-homeassistant-custom-component==$(python -c 'from importlib.metadata import version; print(version("pytest-homeassistant-custom-component"))')"
+          if [ "${{ matrix.drop_ha_pins }}" = "true" ]; then
+            if [ "${resolved}" = "2025.12.1" ]; then
+              echo "::error::The unpinned axis resolved to the pinned floor (${resolved}); the two axes are testing the same thing."
+              exit 1
+            fi
+          else
+            if [ "${resolved}" != "2025.12.1" ]; then
+              echo "::error::The floor axis resolved to ${resolved}, not the pinned 2025.12.1 from constraints-test-stubs.txt."
+              exit 1
+            fi
+          fi
 
       # No coverage gate here: coverage is measured once, by the `test` job on
       # the primary axis. This job answers a single question, namely whether
@@ -580,7 +621,7 @@ jobs:
         if: always()
         run: |
           {
-            echo "## Pytest summary (Python 3.13, legacy Home Assistant line)"
+            echo "## Pytest summary (Python 3.13, ${{ matrix.label }})"
             echo
             echo '```'
             tail -n 200 pytest_legacy_output.log
