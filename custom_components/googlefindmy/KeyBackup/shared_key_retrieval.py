@@ -229,6 +229,8 @@ async def _retrieve_shared_key_hex() -> str:
             _LOGGER.warning("Interactive shared key flow failed: %s", err)
             from custom_components.googlefindmy.browser_deps import (  # noqa: PLC0415
                 INSTALL_COMMAND,
+                MISSING_BROWSER_PACKAGES_HINT,
+                browser_packages_missing,
             )
 
             # "Install these two packages" and "your Chrome installation is
@@ -238,6 +240,12 @@ async def _retrieve_shared_key_hex() -> str:
             # through untouched when it is the one that was raised.
             if INSTALL_COMMAND in str(err):
                 raise
+            # It usually is not: `shared_key_flow.request_shared_key_flow`
+            # catches every driver failure and returns `None`, so the hint
+            # raised inside `create_driver` never reaches this line as text.
+            # The packages can still be asked directly.
+            if browser_packages_missing():
+                raise RuntimeError(MISSING_BROWSER_PACKAGES_HINT) from err
             raise RuntimeError(
                 "Shared key retrieval failed. "
                 "Ensure Chrome/Chromium is installed for the browser-based flow."

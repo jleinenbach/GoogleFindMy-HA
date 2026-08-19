@@ -441,15 +441,25 @@ def _run_oauth_flow_or_exit(
 
     from custom_components.googlefindmy.browser_deps import (  # noqa: PLC0415
         INSTALL_COMMAND,
+        MISSING_BROWSER_PACKAGES_HINT,
+        browser_packages_missing,
     )
 
     try:
         return flow()
     except RuntimeError as err:
-        if INSTALL_COMMAND not in str(err):
-            raise
-        print(f"\n{err}\n")
-        raise SystemExit(1) from err
+        if INSTALL_COMMAND in str(err):
+            print(f"\n{err}\n")
+            raise SystemExit(1) from err
+        # The hint does not always survive the trip. `chrome_driver.py` ends its
+        # strategy chain in a generic "Failed to start ChromeDriver" message, so
+        # matching on the text alone would let exactly the case this boundary
+        # exists for slip past. Ask the packages instead.
+        if browser_packages_missing():
+            print(f"\n{MISSING_BROWSER_PACKAGES_HINT}\n")
+            print(f"Details: {err}")
+            raise SystemExit(1) from err
+        raise
 
 
 def _ensure_authenticated() -> None:
@@ -689,14 +699,22 @@ async def _ensure_vault_keys(cache: object) -> None:
     except Exception as err:  # noqa: BLE001
         from custom_components.googlefindmy.browser_deps import (  # noqa: PLC0415
             INSTALL_COMMAND,
+            MISSING_BROWSER_PACKAGES_HINT,
+            browser_packages_missing,
         )
 
         # The browser packages are optional (they are not in manifest.json), so
         # "they are not installed" is a normal way for this to fail, and the
         # sign-in advice below is useless against it. Print what the user is
-        # actually missing instead.
+        # actually missing instead. Two questions, because the hint is lost
+        # wherever the failure is translated on its way here: does the message
+        # say so, and failing that, are the packages actually there?
         if INSTALL_COMMAND in str(err):
             print(f"\n{err}\n", file=sys.stderr)
+            sys.exit(1)
+        if browser_packages_missing():
+            print(f"\n{MISSING_BROWSER_PACKAGES_HINT}\n", file=sys.stderr)
+            print(f"Details: {err}", file=sys.stderr)
             sys.exit(1)
         print(
             "\nError: vault key retrieval failed.\n"

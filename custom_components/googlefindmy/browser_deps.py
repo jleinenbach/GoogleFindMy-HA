@@ -16,6 +16,9 @@ Imports nothing beyond the standard library: it is reached from the CLI process.
 
 from __future__ import annotations
 
+import importlib.util
+import sys
+
 INSTALL_COMMAND = "pip install selenium undetected-chromedriver"
 
 MISSING_BROWSER_PACKAGES_HINT = (
@@ -27,6 +30,36 @@ MISSING_BROWSER_PACKAGES_HINT = (
     "the manual credential extraction you are running right now, ideally from a "
     "copy of the integration directory in a flat folder of its own."
 )
+
+
+def browser_packages_missing() -> bool:
+    """Answer "are the packages there" by looking, not by reading a message.
+
+    Asking whether an error *text* carries the install hint fails wherever the
+    hint is translated on its way out, and it is translated twice: the driver
+    strategy chain in `chrome_driver.py` ends in a generic "Failed to start
+    ChromeDriver" message, and `KeyBackup/shared_key_flow.py` turns any driver
+    failure into `None`. Neither leaves a substring to match. The packages
+    themselves are still right there to be checked.
+
+    `find_spec` locates without importing, so this costs a path lookup and has
+    no side effect on a working installation. It is asked second, though: a
+    module already in `sys.modules` is importable by definition, and asking
+    `find_spec` about one that was put there without a `__spec__` raises
+    `ValueError` — which would report a package that is demonstrably present
+    as missing.
+    """
+
+    for package in ("selenium", "undetected_chromedriver"):
+        if sys.modules.get(package) is not None:
+            continue
+        try:
+            if importlib.util.find_spec(package) is None:
+                return True
+        except (ImportError, ValueError):
+            # A package whose parent is broken cannot be imported either.
+            return True
+    return False
 
 
 def missing_browser_dependency(err: ImportError) -> ImportError:

@@ -17,6 +17,7 @@ import ast
 import json
 import textwrap
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -384,3 +385,78 @@ def test_the_first_run_cli_exits_cleanly_when_the_driver_is_missing() -> None:
     # Anything else must keep its traceback: swallowing it would hide real bugs.
     with pytest.raises(RuntimeError, match="chrome crashed"):
         main._run_oauth_flow_or_exit(_unrelated)
+
+
+def test_the_translated_failure_still_reaches_the_user(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The hint does not survive the strategy chain, so text matching is not enough.
+
+    `chrome_driver.py` ends in a generic "Failed to start ChromeDriver"
+    message, and `shared_key_flow.request_shared_key_flow` turns any driver
+    failure into `None`. Both wipe the install hint from the text, which is
+    exactly the case the boundary exists for. Asking the packages survives
+    both translations.
+    """
+
+    from custom_components.googlefindmy import main
+
+    monkeypatch.setattr(browser_deps, "browser_packages_missing", lambda: True)
+
+    def _translated() -> tuple[str, str | None]:
+        raise RuntimeError(
+            "Failed to start ChromeDriver after all attempts.\n"
+            "Possible solutions:\n"
+            "1. Make sure Google Chrome is installed and up-to-date"
+        )
+
+    with pytest.raises(SystemExit) as excinfo:
+        main._run_oauth_flow_or_exit(_translated)
+
+    assert excinfo.value.code == 1
+
+
+def test_a_real_driver_failure_keeps_its_traceback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Counterpart: with the packages present, nothing is swallowed."""
+
+    from custom_components.googlefindmy import main
+
+    monkeypatch.setattr(browser_deps, "browser_packages_missing", lambda: False)
+
+    def _crashed() -> tuple[str, str | None]:
+        raise RuntimeError("chrome crashed")
+
+    with pytest.raises(RuntimeError, match="chrome crashed"):
+        main._run_oauth_flow_or_exit(_crashed)
+
+
+def test_the_package_probe_reports_what_is_installed() -> None:
+    """Positive control: the probe is capable of answering both ways.
+
+    Selenium and undetected-chromedriver are installed in the test
+    environment, so a probe that always returned True would make the two
+    tests above vacuous.
+    """
+
+    assert browser_deps.browser_packages_missing() is False
+
+
+def test_an_imported_stub_counts_as_present(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A module in `sys.modules` is importable, whatever `find_spec` says.
+
+    `tests/test_chrome_driver.py` puts a `SimpleNamespace` under
+    `undetected_chromedriver` so the driver module can be imported without the
+    real package. That object has no `__spec__`, and `find_spec` raises
+    `ValueError` for it — so a probe that only asked `find_spec` reported a
+    package that is demonstrably in use as missing, and the install hint
+    started appearing on unrelated failures.
+    """
+
+    import sys
+
+    monkeypatch.setitem(sys.modules, "undetected_chromedriver", SimpleNamespace())
+    monkeypatch.setitem(sys.modules, "selenium", SimpleNamespace())
+
+    assert browser_deps.browser_packages_missing() is False
