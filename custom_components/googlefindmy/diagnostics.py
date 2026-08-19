@@ -782,4 +782,3 @@ async def async_get_config_entry_diagnostics(
     # --- Final safety net: redact known secret-like keys anywhere in the payload ---
     # (We already avoided including secrets, but this keeps us safe against future extensions.)
     return async_redact_data(payload, TO_REDACT)
-
