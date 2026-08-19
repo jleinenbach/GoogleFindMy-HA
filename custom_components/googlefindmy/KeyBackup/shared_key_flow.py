@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import sys
 from typing import TYPE_CHECKING
 
 from custom_components.googlefindmy.browser_deps import missing_browser_dependency
@@ -136,8 +137,37 @@ def request_shared_key_flow(
         safe_quit_driver(driver)
 
 
-if __name__ == "__main__":
-    _args = _parse_cli_args()
-    request_shared_key_flow(
-        chrome_path=_args.chrome_path, chrome_version=_args.chrome_version
+def _main() -> int:
+    """Run the flow as a command and report the outcome in the exit status.
+
+    `request_shared_key_flow` returns `None` for every failure, including the
+    one that got more likely when the browser packages left `manifest.json`:
+    they are simply not installed. A caller that ignores that return exits 0
+    on a run that retrieved nothing, and a script around it cannot tell the
+    difference. The packages are named here because at this point they are the
+    likeliest reason, and this is the last place that still knows.
+    """
+
+    args = _parse_cli_args()
+    key = request_shared_key_flow(
+        chrome_path=args.chrome_path, chrome_version=args.chrome_version
     )
+    if key:
+        print(key)
+        return 0
+
+    from custom_components.googlefindmy.browser_deps import (  # noqa: PLC0415
+        MISSING_BROWSER_PACKAGES_HINT,
+        browser_packages_missing,
+    )
+
+    print(
+        "\nThe shared key could not be retrieved. See the log above.", file=sys.stderr
+    )
+    if browser_packages_missing():
+        print(f"\n{MISSING_BROWSER_PACKAGES_HINT}\n", file=sys.stderr)
+    return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(_main())

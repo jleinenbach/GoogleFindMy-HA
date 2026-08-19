@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import sys
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -301,6 +302,54 @@ def test_module_entrypoint_invokes_flow(monkeypatch: pytest.MonkeyPatch) -> None
     monkeypatch.setattr(chrome_driver, "safe_quit_driver", lambda _: None)
     monkeypatch.setattr(sys, "argv", ["shared_key_flow.py"])
 
-    runpy.run_path(shared_key_flow.__file__, run_name="__main__")
+    with pytest.raises(SystemExit) as excinfo:
+        runpy.run_path(shared_key_flow.__file__, run_name="__main__")
 
     assert calls == {"chrome_path": None, "chrome_version": None}
+    # The flow returned no key, and since this commit the command says so in
+    # its exit status instead of reporting success.
+    assert excinfo.value.code == 1
+
+
+def test_the_command_reports_failure_in_its_exit_status(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`request_shared_key_flow` returns `None` for every failure.
+
+    A caller that ignores that return exits 0 on a run that retrieved nothing,
+    and a script around it cannot tell success from failure. Missing browser
+    packages are now an ordinary reason to land here, so the name of the
+    remedy is printed with it.
+    """
+
+    from custom_components.googlefindmy import browser_deps
+    from custom_components.googlefindmy.KeyBackup import shared_key_flow as flow
+
+    monkeypatch.setattr(
+        flow,
+        "_parse_cli_args",
+        lambda: SimpleNamespace(chrome_path=None, chrome_version=None),
+    )
+    monkeypatch.setattr(flow, "request_shared_key_flow", lambda **_: None)
+    monkeypatch.setattr(browser_deps, "browser_packages_missing", lambda: True)
+
+    assert flow._main() == 1
+    assert browser_deps.INSTALL_COMMAND in capsys.readouterr().err
+
+
+def test_the_command_succeeds_when_a_key_comes_back(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Counterpart, so the exit status is not simply always 1."""
+
+    from custom_components.googlefindmy.KeyBackup import shared_key_flow as flow
+
+    monkeypatch.setattr(
+        flow,
+        "_parse_cli_args",
+        lambda: SimpleNamespace(chrome_path=None, chrome_version=None),
+    )
+    monkeypatch.setattr(flow, "request_shared_key_flow", lambda **_: "aa" * 32)
+
+    assert flow._main() == 0
+    assert "aa" * 32 in capsys.readouterr().out
