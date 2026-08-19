@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# script/vendor_leaflet.py
 """Keep the vendored Leaflet copy in step with the pinned npm version.
 
 Why this exists
@@ -132,12 +133,42 @@ def check() -> int:
     return 0
 
 
+def installed_version() -> str | None:
+    """Return the version of the Leaflet package actually present in node_modules."""
+
+    package_json = NODE_DIST.parent / "package.json"
+    if not package_json.is_file():
+        return None
+    installed = json.loads(package_json.read_text(encoding="utf-8")).get("version")
+    return installed if isinstance(installed, str) else None
+
+
 def update() -> int:
     if not NODE_DIST.is_dir():
         print(f"{NODE_DIST} not found; run `npm install` first.", file=sys.stderr)
         return 2
 
     version = pinned_version()
+
+    # Stamping the pinned version onto whatever happens to sit in node_modules
+    # would produce a copy that passes --check while carrying the previous
+    # release, which is precisely the drift this script exists to prevent.
+    present = installed_version()
+    if present != version:
+        print(
+            f"node_modules carries leaflet {present or 'an unknown version'}, "
+            f"but package.json pins {version}; run `npm install` first.",
+            file=sys.stderr,
+        )
+        return 2
+
+    if not NODE_LICENSE.is_file():
+        print(
+            f"{NODE_LICENSE} not found; refusing to keep the previous licence file "
+            "next to new sources (BSD-2-Clause attribution).",
+            file=sys.stderr,
+        )
+        return 2
     digests: dict[str, str] = {}
     for name in ASSETS:
         source = NODE_DIST / name
@@ -147,8 +178,7 @@ def update() -> int:
         shutil.copyfile(source, VENDOR_DIR / name)
         digests[name] = digest(VENDOR_DIR / name)
 
-    if NODE_LICENSE.is_file():
-        shutil.copyfile(NODE_LICENSE, VENDOR_DIR / "LICENSE")
+    shutil.copyfile(NODE_LICENSE, VENDOR_DIR / "LICENSE")
 
     write_version(version, digests)
     print(f"Vendored Leaflet {version} from {NODE_DIST}.")
