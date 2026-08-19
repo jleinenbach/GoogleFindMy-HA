@@ -691,8 +691,14 @@ means: the six Home Assistant looks up by filename (`__init__.py`,
 `eid_resolver.py`), which the check lists explicitly because that convention is
 Home Assistant's rather than ours, plus the platform modules, which it reads
 from `PLATFORMS` because that list does change. From each of them it follows
-imports inside function bodies and dynamic imports as well, because a module
-reached only that way is reached all the same.
+imports inside function bodies as well, and `importlib.import_module` calls
+whose target is a literal string, because a module reached only that way is
+reached all the same. A dynamic import whose target is assembled at run time
+is beyond it, which is a limit of reading source without executing it rather
+than an oversight. Three such calls exist here, and all three resolve from
+tables of constants in the package (`__init__.py` → `_PROTO_DECODER_PATHS`, and
+the two module names in `integration_modules.py`): protocol decoders and the
+integration's own API module, no browser among them.
 
 The interactive key-backup fallback used to be the one qualification here: it is
 loaded dynamically through `importlib`, and its guard asked whether a terminal
