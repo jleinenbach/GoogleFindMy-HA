@@ -560,12 +560,23 @@ configuration.
 | Google account e-mail | The config entry itself (`.storage/core.config_entries`) | Needed to restart without asking you again |
 | The pasted bundle and the OAuth token, **during setup only** | Also the config entry, until the first successful start moves them into the token cache and removes them | If setup fails before that, they stay there; the diagnostics download redacts them |
 | Derived tokens (AAS, ADM, SPOT), FCM push identity, the shared key and the owner key | Same per-entry storage file | Refreshed automatically; the long-lived ones are what make the integration work after a restart |
-| The Map View access token | Not stored as a secret: it is derived on demand from the instance UUID and the entry id, and it appears inside each device's `configuration_url` in `.storage/core.device_registry` | See the `map_view_token_expiration` option above |
+| The Map View access token | Derived on demand from the instance UUID and the entry id, and carried inside each device's `configuration_url` in `.storage/core.device_registry` | Treat that URL as long-lived bearer material: the map view is not behind Home Assistant's login, so whoever holds the link sees the device's location. With the default `map_view_token_expiration` (off) the token never expires |
 
 `secrets.json` is **not** part of the running integration. It is produced by the
-manual command-line login, you paste its contents once, and after that the file
-on your own machine is the only copy. If an old `Auth/secrets.json` is found next
-to the integration it is imported once and then deleted (`Auth/token_cache.py`,
+manual command-line login, and if you paste its contents there is no copy of it
+on the Home Assistant machine at all.
+
+There is a second, optional hand-off that does put the file there, so it belongs
+in this list. The integration watches two paths for a dropped bundle
+(`discovery.py` → `_default_watch_paths`): the bundled `Auth/secrets.json` and
+the login container's `docker-login/data/secrets.json`. A bundle found there
+starts a discovery flow, and the copy is deleted once Home Assistant is observed
+to hold the imported credentials (`config_flow.py` →
+`_async_delete_watched_secrets`, armed by `async_setup_entry`). Until then — and
+indefinitely if you never confirm the flow, or if the import fails — the file
+stays on the Home Assistant machine in clear. If you use that route, remove the
+file yourself when you abandon an import. A legacy `Auth/secrets.json` found by
+the token cache is imported once and then deleted (`Auth/token_cache.py`,
 `os.remove(legacy_path)`).
 
 ### Who can read it
