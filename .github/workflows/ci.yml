@@ -115,7 +115,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
-          python-version: "3.13"
+          python-version: "3.14"
 
       - name: Probe brands endpoint
         id: brands_probe
@@ -214,7 +214,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
-          python-version: "3.13"
+          python-version: "3.14"
 
       - name: Run translations sync check
         id: translations_sync
@@ -269,7 +269,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
-          python-version: "3.13"
+          python-version: "3.14"
 
       # Dependabot reads manifests, never checked-in files. Without this gate a
       # bump of the `leaflet` devDependency would leave the embedded copy behind
@@ -313,7 +313,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
-          python-version: "3.13"
+          python-version: "3.14"
 
       - name: Install Poetry
         uses: snok/install-poetry@v1
@@ -322,13 +322,19 @@ jobs:
           virtualenvs-create: true
           virtualenvs-in-project: true
 
+      # The Python version belongs in both the key and the restore prefix. The
+      # cached artefact is a complete virtualenv, so an interpreter-agnostic
+      # prefix can restore a 3.13 `.venv` built before the lock moved to
+      # `^3.14.2`; Poetry then adopts that interpreter as the project
+      # environment and `poetry install` refuses it, taking all four lint jobs
+      # down before they run. The `test` job already keys this way.
       - name: Cache Poetry dependencies
         uses: actions/cache@v5
         with:
           path: .venv
-          key: ${{ runner.os }}-poetry-${{ hashFiles('poetry.lock') }}
+          key: ${{ runner.os }}-py3.14-poetry-${{ hashFiles('poetry.lock') }}
           restore-keys: |
-            ${{ runner.os }}-poetry-
+            ${{ runner.os }}-py3.14-poetry-
 
       - name: Install dependencies
         run: poetry install --with dev,test
@@ -453,9 +459,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.13"]
-        # Can add more Python versions when available:
-        # python-version: ["3.13", "3.14"]
+        # Home Assistant requires Python >=3.14.2 from Core 2026.3.0 onwards, so
+        # the Poetry lock resolves the dev/test tree only for 3.14+. Python 3.13
+        # is still what users on Core <=2026.2.x run; that axis is covered by the
+        # lock-free `test_legacy_python` job below, not by this matrix.
+        python-version: ["3.14"]
     steps:
       - name: Check out repository
         uses: actions/checkout@v5
@@ -525,11 +533,139 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
+  test_legacy_python:
+    name: Test (Python 3.13, ${{ matrix.label }})
+    runs-on: ubuntu-latest
+    needs:
+      - hassfest
+      - hacs
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The floor hacs.json actually declares. The stub constraints in the
+          # repository pin 2025.12.1, which is a speed-up for local runs and not
+          # a compatibility claim; testing there would leave the pre-2025.11
+          # paths -- such as the `EntityCategory` import fallback in button.py --
+          # unexercised by every axis. 0.13.278 is the plugin release that
+          # carries Home Assistant 2025.9.1.
+          - label: "declared floor"
+            ha_pin: "2025.9.1"
+            plugin_pin: "0.13.278"
+          # The last Home Assistant line that still supports Python 3.13
+          # (2026.2.3). Without this axis the final three 3.13-era releases go
+          # untested. Both pins are dropped so pip resolves the newest release
+          # that satisfies the interpreter; `pycares<5` in the same file stays.
+          - label: "last 3.13 line"
+            ha_pin: ""
+            plugin_pin: ""
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name || github.repository }}
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.ref || github.ref }}
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libc-ares-dev
+
+      # Deliberately lock-free: poetry.lock resolves the dev/test tree for
+      # Python >=3.14.2 only, because Home Assistant Core requires 3.14.2 from
+      # 2026.3.0 onwards. Installing from the plain requirement files keeps the
+      # Python 3.13 axis under test, which is what users on Core 2025.9.1
+      # through 2026.2.x run and where the backwards-compatibility shims fire.
+      # Guards against silent drift: if someone raises the floor in hacs.json,
+      # this axis would keep testing the old one and the label would lie.
+      - name: Verify the pinned floor still matches hacs.json
+        if: matrix.ha_pin != ''
+        run: |
+          set -euo pipefail
+          declared="$(python -c 'import json;print(json.load(open("hacs.json"))["homeassistant"])')"
+          if [ "$declared" != "${{ matrix.ha_pin }}" ]; then
+            echo "::error::hacs.json declares Home Assistant $declared but this axis pins ${{ matrix.ha_pin }}. Update the matrix entry (and the pytest plugin release that carries it)."
+            exit 1
+          fi
+          echo "hacs.json floor: $declared"
+
+      - name: Rewrite the stub constraints for this axis
+        run: |
+          set -euo pipefail
+          constraints=custom_components/googlefindmy/constraints-test-stubs.txt
+          sed -i -E '/^(homeassistant|pytest-homeassistant-custom-component)==/d' "$constraints"
+          if [ -n "${{ matrix.ha_pin }}" ]; then
+            printf 'homeassistant==%s\n' "${{ matrix.ha_pin }}" >> "$constraints"
+            printf 'pytest-homeassistant-custom-component==%s\n' "${{ matrix.plugin_pin }}" >> "$constraints"
+            # The plugin release that carries an older Home Assistant also
+            # carries the pytest stack of its own era: 0.13.278 requires
+            # pytest-asyncio==1.1.0, while requirements-dev.txt pins 1.3.0.
+            # Keeping both makes the resolution impossible. Testing an old
+            # Home Assistant line means testing it with the test tooling that
+            # line shipped with, so the local pin steps aside on this axis.
+            sed -i -E '/^pytest-asyncio==/d' \
+              custom_components/googlefindmy/requirements-dev.txt
+          fi
+          echo "Constraints for this axis:"
+          cat "$constraints"
+
+      - name: Install dependencies without the Poetry lock
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r custom_components/googlefindmy/requirements-dev.txt
+
+      # Printed, and asserted, so this job's claim about which Home Assistant
+      # line it exercised is measured rather than inferred from the matrix
+      # label. Without the assertion a future change to the constraints file
+      # could silently collapse both axes onto the same release.
+      - name: Report and verify the resolved Home Assistant version
+        run: |
+          set -euo pipefail
+          resolved="$(python -c 'from importlib.metadata import version; print(version("homeassistant"))')"
+          echo "homeassistant==${resolved}"
+          echo "pytest-homeassistant-custom-component==$(python -c 'from importlib.metadata import version; print(version("pytest-homeassistant-custom-component"))')"
+          if [ -n "${{ matrix.ha_pin }}" ]; then
+            if [ "${resolved}" != "${{ matrix.ha_pin }}" ]; then
+              echo "::error::The floor axis resolved to ${resolved}, not the pinned ${{ matrix.ha_pin }}."
+              exit 1
+            fi
+          else
+            if [ "${resolved}" = "2025.9.1" ]; then
+              echo "::error::The unpinned axis resolved to the declared floor (${resolved}); both axes are testing the same release."
+              exit 1
+            fi
+          fi
+
+      # No coverage gate here: coverage is measured once, by the `test` job on
+      # the primary axis. This job answers a single question, namely whether
+      # the suite still passes on Python 3.13 against the last Home Assistant
+      # line that supports it.
+      - name: Run pytest
+        env:
+          PYTHONPATH: .
+        run: |
+          set -o pipefail
+          pytest -q --no-cov 2>&1 | tee pytest_legacy_output.log
+
+      - name: Write short summary to GitHub Step Summary
+        if: always()
+        run: |
+          {
+            echo "## Pytest summary (Python 3.13, ${{ matrix.label }})"
+            echo
+            echo '```'
+            tail -n 200 pytest_legacy_output.log
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
   # Summary job to require all tests pass
   ci-success:
     name: CI Success
     runs-on: ubuntu-latest
-    needs: [hassfest, hacs, lint, test, translations, vendored_assets]
+    needs: [hassfest, hacs, lint, test, test_legacy_python, translations, vendored_assets]
     if: always()
     steps:
       - name: Check all jobs passed
@@ -539,6 +675,7 @@ jobs:
              [[ "${{ needs.hacs.result }}" != "success" ]] || \
              [[ "${{ needs.lint.result }}" != "success" ]] || \
              [[ "${{ needs.test.result }}" != "success" ]] || \
+             [[ "${{ needs.test_legacy_python.result }}" != "success" ]] || \
              [[ "${{ needs.translations.result }}" != "success" ]] || \
              [[ "${{ needs.vendored_assets.result }}" != "success" ]]; then
             echo "One or more jobs failed"
@@ -585,6 +722,12 @@ jobs:
               echo "| Tests | ✅ Pass |"
             else
               echo "| Tests | ❌ Fail |"
+            fi
+
+            if [ "${{ needs.test_legacy_python.result }}" = "success" ]; then
+              echo "| Tests (Python 3.13, legacy HA) | ✅ Pass |"
+            else
+              echo "| Tests (Python 3.13, legacy HA) | ❌ Fail |"
             fi
 
             if [ "${{ needs.translations.result }}" = "success" ]; then

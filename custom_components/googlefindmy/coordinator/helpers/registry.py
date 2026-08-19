@@ -695,7 +695,7 @@ def build_canonical_unique_id(
     return ":".join(parts)
 
 
-def match_entity_by_device_id(
+def match_entity_by_device_id(  # noqa: PLR0917
     unique_id: Any,
     config_entry_id: str | None,
     device_id: str,
