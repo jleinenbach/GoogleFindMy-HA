@@ -82,7 +82,13 @@ def _module_level_imports(path: Path) -> list[tuple[str, int]]:
                     walk(handler.body)
                 walk(getattr(node, "orelse", []))
                 walk(getattr(node, "finalbody", []))
-            # function and class bodies are not walked: they do not run on import
+            elif isinstance(node, ast.ClassDef):
+                # A class body *does* run at import time: Python executes it to
+                # build the namespace before the class object exists. An import
+                # placed there is a load-time import like any other, so skipping
+                # it alongside function bodies would be a hole in this check.
+                walk(node.body)
+            # function bodies are not walked: they do not run on import
 
     walk(ast.parse(path.read_text(encoding="utf-8")).body)
     return found
@@ -196,6 +202,34 @@ def test_home_assistant_entry_points_reach_no_browser_package(entry: str) -> Non
         f"{entry} now loads a browser package at import time; "
         "either the import is misplaced or manifest.json has to carry it again"
     )
+
+
+def test_the_crawler_walks_a_class_body(tmp_path: Path) -> None:
+    """A class body runs at import time; a function body does not.
+
+    Both were skipped together, which is right for one of them. An import
+    inside a class body executes while the module loads, so it would break a
+    Home Assistant platform at setup time while this test stayed green.
+    """
+
+    module = tmp_path / "classy.py"
+    module.write_text(
+        textwrap.dedent(
+            """\
+            class Holder:
+                import class_body_package
+
+                def method(self):
+                    import function_body_package
+            """
+        ),
+        encoding="utf-8",
+    )
+
+    names = {name for name, _ in _module_level_imports(module)}
+
+    assert "class_body_package" in names
+    assert "function_body_package" not in names
 
 
 @pytest.mark.parametrize("entry", ["chrome_driver.py", "Auth/auth_flow.py"])
@@ -323,6 +357,7 @@ def test_the_lazy_driver_import_carries_the_install_hint(
             stub.Chrome(**kwargs)
 
         assert browser_deps.INSTALL_COMMAND in str(excinfo.value)
+
 
 def test_the_first_run_cli_exits_cleanly_when_the_driver_is_missing() -> None:
     """The `ImportError` guard cannot see it: the driver loads later, lazily.
