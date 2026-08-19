@@ -145,9 +145,21 @@ async def _interactive_flow_hex() -> str:
     This opens a browser and requires a TTY; **not suitable for Home Assistant**.
     We keep it as a last-resort fallback for developer CLI usage.
     """
-    shared_key_flow = importlib.import_module(
-        "custom_components.googlefindmy.KeyBackup.shared_key_flow"
-    )
+    # Deliberately dynamic: this module must stay importable in the Home
+    # Assistant runtime, where the browser packages are absent (they are not in
+    # manifest.json, because nothing Home Assistant runs on its own needs them).
+    # This branch is reachable in a process that has a terminal attached, so the
+    # failure has to name what is missing rather than show a bare import error.
+    try:
+        shared_key_flow = importlib.import_module(
+            "custom_components.googlefindmy.KeyBackup.shared_key_flow"
+        )
+    except ImportError as err:
+        from custom_components.googlefindmy.browser_deps import (  # noqa: PLC0415
+            MISSING_BROWSER_PACKAGES_HINT,
+        )
+
+        raise RuntimeError(MISSING_BROWSER_PACKAGES_HINT) from err
     request_shared_key_flow = shared_key_flow.request_shared_key_flow
 
     # Run potentially interactive/GUI logic in executor
@@ -273,6 +285,30 @@ async def _retrieve_shared_key_hex() -> str:
             return await _interactive_flow_hex()
         except Exception as err:
             _LOGGER.warning("Interactive shared key flow failed: %s", err)
+            from custom_components.googlefindmy.browser_deps import (  # noqa: PLC0415
+                INSTALL_COMMAND,
+                MISSING_BROWSER_PACKAGES_HINT,
+                BrowserPackagesUnusable,
+                browser_packages_missing,
+            )
+
+            # Installed but unusable: the type says so where the text cannot.
+            if isinstance(err, BrowserPackagesUnusable):
+                raise
+
+            # "Install these two packages" and "your Chrome installation is
+            # broken" are different problems with different remedies. The
+            # generic message below tells a user whose only fault is a missing
+            # pip install to re-run the tool, which cannot help. Let the hint
+            # through untouched when it is the one that was raised.
+            if INSTALL_COMMAND in str(err):
+                raise
+            # It usually is not: `shared_key_flow.request_shared_key_flow`
+            # catches every driver failure and returns `None`, so the hint
+            # raised inside `create_driver` never reaches this line as text.
+            # The packages can still be asked directly.
+            if browser_packages_missing():
+                raise RuntimeError(MISSING_BROWSER_PACKAGES_HINT) from err
             raise RuntimeError(
                 "Shared key retrieval failed. "
                 "Ensure Chrome/Chromium is installed for the browser-based flow."

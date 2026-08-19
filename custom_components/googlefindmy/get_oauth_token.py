@@ -74,10 +74,13 @@ def main(*, chrome_path: str | None = None, chrome_version: int | None = None) -
 
         from custom_components.googlefindmy.chrome_driver import create_driver
     except ImportError as err:
-        print(f"Missing required package: {err}")
+        from custom_components.googlefindmy.browser_deps import (  # noqa: PLC0415
+            MISSING_BROWSER_PACKAGES_HINT,
+        )
+
+        print(MISSING_BROWSER_PACKAGES_HINT)
         print()
-        print("Please install the required packages:")
-        print("pip install selenium undetected-chromedriver")
+        print(f"Details: {err}")
         sys.exit(1)
 
     try:

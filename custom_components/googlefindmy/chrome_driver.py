@@ -15,8 +15,17 @@ from collections.abc import Callable
 from types import ModuleType, SimpleNamespace
 from typing import Any, cast
 
-from selenium.webdriver.chrome.webdriver import WebDriver
-from selenium.webdriver.remote.webdriver import WebDriver as RemoteWebDriver
+from custom_components.googlefindmy.browser_deps import (
+    MISSING_BROWSER_PACKAGES_HINT,
+    BrowserPackagesUnusable,
+    missing_browser_dependency,
+)
+
+try:
+    from selenium.webdriver.chrome.webdriver import WebDriver
+    from selenium.webdriver.remote.webdriver import WebDriver as RemoteWebDriver
+except ImportError as _err:  # pragma: no cover - needs a selenium-less environment
+    raise missing_browser_dependency(_err) from _err
 
 # Platform-specific import for Windows registry access
 _winreg: ModuleType | None = None
@@ -76,10 +85,22 @@ def _load_uc() -> Any:
             def add_argument(self, argument: str) -> None:
                 self.arguments.append(argument)
 
-        def _stub_chrome(*, options: object) -> WebDriver:
-            raise RuntimeError(
-                "undetected_chromedriver could not be imported; install its runtime "
-                "dependencies (including setuptools' distutils module)"
+        def _stub_chrome(*args: object, **kwargs: object) -> WebDriver:
+            # This is where a selenium-only environment actually fails: the
+            # import above is lazy, so nothing earlier notices that
+            # undetected-chromedriver is absent. Carry the install hint here
+            # rather than leaving a generic driver error at the end of the
+            # strategy chain.
+            #
+            # The signature accepts whatever the real strategies pass
+            # (`version_main`, `browser_executable_path`, ...). A narrower one
+            # would raise TypeError before this hint is reached, and the
+            # strategy chain would swallow it as a generic driver failure.
+            raise BrowserPackagesUnusable(
+                f"{MISSING_BROWSER_PACKAGES_HINT}\n\n"
+                "undetected_chromedriver could not be imported; if it is "
+                "installed, check its runtime dependencies (including "
+                "setuptools' distutils module)"
             ) from error
 
         return SimpleNamespace(ChromeOptions=_StubChromeOptions, Chrome=_stub_chrome)
@@ -1211,6 +1232,14 @@ def _create_driver_inner(
         resolved_version=resolved_version,
         version_source=version_source,
     )
+    # A package that cannot be loaded is not a driver problem, and the advice
+    # below does not address it. Raised after the strategies and the
+    # webdriver-manager fallback have had their turn, so nothing that could
+    # still have worked is cut short; only the wording of the final failure
+    # changes.
+    if isinstance(last_error, BrowserPackagesUnusable):
+        raise last_error
+
     raise RuntimeError(
         "Failed to start ChromeDriver after all attempts.\n"
         "Possible solutions:\n"

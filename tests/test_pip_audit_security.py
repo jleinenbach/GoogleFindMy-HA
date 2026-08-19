@@ -1171,7 +1171,7 @@ def test_main_pins_governed_requirement_to_ha_version(
     Wiring-level proof of Fund 2 (not the isolated helper): the requirement list
     the production path hands to pip-audit must carry Home Assistant's ``==``
     pin for the governed package (aiohttp) and the declared floor for an
-    integration-owned package (selenium), never the governed floor. No
+    integration-owned package (gpsoauth), never the governed floor. No
     ``--audit-json``, so main() takes the live branch and invokes the patched
     runner.
 
@@ -1200,7 +1200,7 @@ def test_main_pins_governed_requirement_to_ha_version(
     assert "aiohttp==3.12.15" in reqs
     assert "aiohttp==3.11.8" not in reqs
     # An integration-owned package is still pinned to its declared floor.
-    assert "selenium==4.25.0" in reqs
+    assert "gpsoauth==2.0.0" in reqs
 
 
 def test_main_reaudits_governed_transitive_with_no_deps(
@@ -1315,22 +1315,22 @@ def test_package_owned_at_minimum_but_governed_at_latest_still_blocks(
     not.
     """
     primary = tmp_path / "min.txt"
-    primary.write_text("aiohttp==3.12.15\n", encoding="utf-8")  # does not pin selenium
+    primary.write_text("aiohttp==3.12.15\n", encoding="utf-8")  # does not pin gpsoauth
     latest = tmp_path / "latest.txt"
-    latest.write_text("aiohttp==3.14.1\nselenium==4.30.0\n", encoding="utf-8")
+    latest.write_text("aiohttp==3.14.1\ngpsoauth==2.1.0\n", encoding="utf-8")
 
     def fake_run(reqs: list[str], out_path: Path, *, no_deps: bool = False) -> int:
-        # The floor pass carries selenium==<floor>; surface a fixable CVE there.
-        if "selenium==4.25.0" in reqs:
+        # The floor pass carries gpsoauth==<floor>; surface a fixable CVE there.
+        if "gpsoauth==2.0.0" in reqs:
             out_path.write_text(
                 json.dumps(
                     {
                         "dependencies": [
                             {
-                                "name": "selenium",
-                                "version": "4.25.0",
+                                "name": "gpsoauth",
+                                "version": "2.0.0",
                                 "vulns": [
-                                    {"id": "CVE-SEL-FLOOR", "fix_versions": ["4.26.0"]}
+                                    {"id": "CVE-GPS-FLOOR", "fix_versions": ["2.0.1"]}
                                 ],
                             }
                         ]
@@ -1356,7 +1356,7 @@ def test_package_owned_at_minimum_but_governed_at_latest_still_blocks(
     report = capsys.readouterr().out
 
     assert rc == 1
-    assert "CVE-SEL-FLOOR" in report
+    assert "CVE-GPS-FLOOR" in report
 
 
 class TestAdditionalGovernedReauditPins:
@@ -1551,17 +1551,17 @@ def test_main_owned_as_declared_pass_catches_above_floor_cve(
 
     def fake_run(reqs: list[str], out_path: Path, *, no_deps: bool = False) -> int:
         # The as-declared owned pass carries the bare specifier; the floor pass
-        # carries selenium==<floor>. Only the former surfaces the CVE.
-        if "selenium>=4.25.0" in reqs:
+        # carries gpsoauth==<floor>. Only the former surfaces the CVE.
+        if "gpsoauth>=2.0.0" in reqs:
             out_path.write_text(
                 json.dumps(
                     {
                         "dependencies": [
                             {
-                                "name": "selenium",
-                                "version": "4.40.0",
+                                "name": "gpsoauth",
+                                "version": "2.2.0",
                                 "vulns": [
-                                    {"id": "CVE-SEL-LATEST", "fix_versions": ["4.41.0"]}
+                                    {"id": "CVE-GPS-LATEST", "fix_versions": ["2.2.1"]}
                                 ],
                             }
                         ]
@@ -1580,7 +1580,7 @@ def test_main_owned_as_declared_pass_catches_above_floor_cve(
     report = capsys.readouterr().out
 
     assert rc == 1
-    assert "CVE-SEL-LATEST" in report
+    assert "CVE-GPS-LATEST" in report
 
 
 def test_offline_preview_documents_reduced_coverage_and_stays_offline(

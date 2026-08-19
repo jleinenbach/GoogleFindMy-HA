@@ -9,11 +9,20 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import sys
 from typing import TYPE_CHECKING
 
-from selenium.common.exceptions import TimeoutException
-from selenium.webdriver.support import expected_conditions as ec
-from selenium.webdriver.support.ui import WebDriverWait
+from custom_components.googlefindmy.browser_deps import (
+    BrowserPackagesUnusable,
+    missing_browser_dependency,
+)
+
+try:
+    from selenium.common.exceptions import TimeoutException
+    from selenium.webdriver.support import expected_conditions as ec
+    from selenium.webdriver.support.ui import WebDriverWait
+except ImportError as _err:  # pragma: no cover - needs a selenium-less environment
+    raise missing_browser_dependency(_err) from _err
 
 from custom_components.googlefindmy.chrome_driver import create_driver, safe_quit_driver
 from custom_components.googlefindmy.KeyBackup.response_parser import (
@@ -68,6 +77,12 @@ def request_shared_key_flow(
     driver: WebDriver | None = None
     try:
         driver = create_driver(chrome_path=chrome_path, chrome_version=chrome_version)
+    except BrowserPackagesUnusable:
+        # Not a runtime Selenium failure, and the only one worth telling apart
+        # here: returning `None` for it erases the single piece of information
+        # the user needs, and every caller then has to guess it back from a
+        # message that no longer says it.
+        raise
     except Exception:  # pragma: no cover - relies on runtime Selenium setup
         LOGGER.exception("Failed to initialize ChromeDriver for shared key flow")
         return None
@@ -145,8 +160,41 @@ def request_shared_key_flow(
         safe_quit_driver(driver)
 
 
-if __name__ == "__main__":
-    _args = _parse_cli_args()
-    request_shared_key_flow(
-        chrome_path=_args.chrome_path, chrome_version=_args.chrome_version
+def _main() -> int:
+    """Run the flow as a command and report the outcome in the exit status.
+
+    `request_shared_key_flow` returns `None` for every failure, including the
+    one that got more likely when the browser packages left `manifest.json`:
+    they are simply not installed. A caller that ignores that return exits 0
+    on a run that retrieved nothing, and a script around it cannot tell the
+    difference. The packages are named here because at this point they are the
+    likeliest reason, and this is the last place that still knows.
+    """
+
+    args = _parse_cli_args()
+    try:
+        key = request_shared_key_flow(
+            chrome_path=args.chrome_path, chrome_version=args.chrome_version
+        )
+    except BrowserPackagesUnusable as err:
+        print(f"\n{err}\n", file=sys.stderr)
+        return 1
+    if key:
+        print(key)
+        return 0
+
+    from custom_components.googlefindmy.browser_deps import (  # noqa: PLC0415
+        MISSING_BROWSER_PACKAGES_HINT,
+        browser_packages_missing,
     )
+
+    print(
+        "\nThe shared key could not be retrieved. See the log above.", file=sys.stderr
+    )
+    if browser_packages_missing():
+        print(f"\n{MISSING_BROWSER_PACKAGES_HINT}\n", file=sys.stderr)
+    return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(_main())

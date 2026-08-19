@@ -408,6 +408,60 @@ async def test_async_get_shared_key_isolates_accounts() -> None:
     assert cache_b.set_calls == []
 
 
+async def test_retrieve_lets_the_install_hint_through(
+    tty_stdin: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A missing pip install is not a broken Chrome installation.
+
+    The browser packages are optional (they are not in `manifest.json`), so
+    "they are not installed" is an ordinary way for this to fail. The generic
+    wrapper tells the user to check their Chrome installation and to re-run,
+    neither of which helps; the install command must survive.
+    """
+
+    from custom_components.googlefindmy.browser_deps import (
+        INSTALL_COMMAND,
+        MISSING_BROWSER_PACKAGES_HINT,
+    )
+
+    async def missing_packages() -> str:
+        raise RuntimeError(MISSING_BROWSER_PACKAGES_HINT)
+
+    monkeypatch.setattr(skr, "_interactive_flow_hex", missing_packages)
+
+    with pytest.raises(RuntimeError) as excinfo:
+        await skr._retrieve_shared_key_hex()
+
+    assert INSTALL_COMMAND in str(excinfo.value)
+
+
+async def test_retrieve_asks_the_packages_when_the_hint_is_gone(
+    tty_stdin: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`request_shared_key_flow` turns every driver failure into `None`.
+
+    By the time the failure arrives here it says "returned empty/invalid
+    result", with no trace of the install hint raised inside `create_driver`.
+    Matching on the text therefore cannot work for the case that matters; the
+    packages themselves still answer.
+    """
+
+    from custom_components.googlefindmy import browser_deps
+    from custom_components.googlefindmy.browser_deps import INSTALL_COMMAND
+
+    monkeypatch.setattr(browser_deps, "browser_packages_missing", lambda: True)
+
+    async def swallowed() -> str:
+        raise RuntimeError("Interactive shared key flow returned empty/invalid result")
+
+    monkeypatch.setattr(skr, "_interactive_flow_hex", swallowed)
+
+    with pytest.raises(RuntimeError) as excinfo:
+        await skr._retrieve_shared_key_hex()
+
+    assert INSTALL_COMMAND in str(excinfo.value)
+
+
 # ---------------------------------------------------------------------------
 # The CLI marker: a terminal is not a command line
 # ---------------------------------------------------------------------------

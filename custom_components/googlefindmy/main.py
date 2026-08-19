@@ -38,7 +38,7 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:  # pragma: no cover - import-time typing block
     import argparse
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Callable, Mapping, Sequence
 
 _this_dir = Path(__file__).resolve().parent
 _standalone = not (
@@ -426,6 +426,58 @@ def _register_file_cache(entry_id: str = "") -> object:
     return file_cache
 
 
+def _run_oauth_flow_or_exit(
+    flow: Callable[[], tuple[str, str | None]],
+) -> tuple[str, str | None]:
+    """Run the Chrome login, turning a missing driver into a clean exit.
+
+    The `ImportError` guard around `auth_flow` cannot notice a missing
+    undetected-chromedriver: `chrome_driver._load_uc()` runs later, inside the
+    flow, and falls back to a stub that raises the install hint as a
+    `RuntimeError`. Without this boundary the first-run CLI ends in a traceback
+    from the bottom of the driver strategy chain instead of in the one line the
+    user needs.
+    """
+
+    from custom_components.googlefindmy.browser_deps import (  # noqa: PLC0415
+        INSTALL_COMMAND,
+        MISSING_BROWSER_PACKAGES_HINT,
+        BrowserPackagesUnusable,
+        browser_packages_missing,
+    )
+
+    try:
+        return flow()
+    except BrowserPackagesUnusable as err:
+        # The typed case: the packages are there but unusable, and the type
+        # carried that through the strategy chain unchanged.
+        print(f"\n{err}\n")
+        raise SystemExit(1) from err
+    except RuntimeError as err:
+        if INSTALL_COMMAND in str(err):
+            print(f"\n{err}\n")
+            raise SystemExit(1) from err
+        # The hint does not always survive the trip. `chrome_driver.py` ends its
+        # strategy chain in a generic "Failed to start ChromeDriver" message, so
+        # matching on the text alone would let exactly the case this boundary
+        # exists for slip past. Ask the packages instead.
+        #
+        # The failure is reported first and the packages second, deliberately.
+        # Not every error on this path comes from loading the driver: the flow
+        # refuses an unattended run before it ever gets there. Leading with the
+        # install command would answer a question that user did not ask, and
+        # they would install the packages and fail again for the same reason.
+        if browser_packages_missing():
+            print(f"\n{err}\n")
+            print(
+                "The browser packages are also missing, so this run could not "
+                "have succeeded either way:\n"
+                f"\n{MISSING_BROWSER_PACKAGES_HINT}\n"
+            )
+            raise SystemExit(1) from err
+        raise
+
+
 def _ensure_authenticated() -> None:
     """Run the Chrome-based OAuth login when no credentials exist yet.
 
@@ -462,12 +514,27 @@ def _ensure_authenticated() -> None:
 
     print("No credentials found. Starting authentication flow...\n")
 
-    # 1) Get the OAuth token via Chrome login
-    from custom_components.googlefindmy.Auth.auth_flow import (  # noqa: PLC0415
-        request_oauth_account_token_flow,
-    )
+    # 1) Get the OAuth token via Chrome login.
+    # Selenium and undetected-chromedriver are not part of the Home Assistant
+    # requirements of this integration (nothing Home Assistant runs imports
+    # them), so this is the point where a bare copy of the directory notices
+    # they are missing. Say what to install instead of showing a traceback.
+    try:
+        from custom_components.googlefindmy.Auth.auth_flow import (  # noqa: PLC0415
+            request_oauth_account_token_flow,
+        )
+    except ImportError as err:
+        from custom_components.googlefindmy.browser_deps import (  # noqa: PLC0415
+            MISSING_BROWSER_PACKAGES_HINT,
+        )
 
-    oauth_token, detected_email = request_oauth_account_token_flow()
+        print(f"\n{MISSING_BROWSER_PACKAGES_HINT}\n")
+        print(f"Details: {err}")
+        raise SystemExit(1) from err
+
+    oauth_token, detected_email = _run_oauth_flow_or_exit(
+        request_oauth_account_token_flow
+    )
 
     # 2) Set the Google account e-mail (needed for gpsoauth exchange).
     #    Prefer the email extracted from the Chrome session; fall back to
@@ -645,7 +712,31 @@ async def _ensure_vault_keys(cache: object) -> None:
     # Shared key: essential and browser-bound. Failure is fatal.
     try:
         await _ensure_shared_key(cache)
-    except Exception:  # noqa: BLE001
+    except Exception as err:  # noqa: BLE001
+        from custom_components.googlefindmy.browser_deps import (  # noqa: PLC0415
+            INSTALL_COMMAND,
+            MISSING_BROWSER_PACKAGES_HINT,
+            browser_packages_missing,
+        )
+
+        # The browser packages are optional (they are not in manifest.json), so
+        # "they are not installed" is a normal way for this to fail, and the
+        # sign-in advice below is useless against it. Print what the user is
+        # actually missing instead. Two questions, because the hint is lost
+        # wherever the failure is translated on its way here: does the message
+        # say so, and failing that, are the packages actually there?
+        if INSTALL_COMMAND in str(err):
+            print(f"\n{err}\n", file=sys.stderr)
+            sys.exit(1)
+        if browser_packages_missing():
+            print(f"\n{err}\n", file=sys.stderr)
+            print(
+                "The browser packages are also missing, so this run could not "
+                "have succeeded either way:\n"
+                f"\n{MISSING_BROWSER_PACKAGES_HINT}\n",
+                file=sys.stderr,
+            )
+            sys.exit(1)
         print(
             "\nError: vault key retrieval failed.\n"
             "Could not obtain the encryption key from Google's vault.\n"

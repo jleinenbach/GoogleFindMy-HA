@@ -11,7 +11,12 @@ import os
 import sys
 from typing import TYPE_CHECKING, Any, cast
 
-from selenium.webdriver.support.ui import WebDriverWait
+from custom_components.googlefindmy.browser_deps import missing_browser_dependency
+
+try:
+    from selenium.webdriver.support.ui import WebDriverWait
+except ImportError as _err:  # pragma: no cover - needs a selenium-less environment
+    raise missing_browser_dependency(_err) from _err
 
 from custom_components.googlefindmy.chrome_driver import create_driver, safe_quit_driver
 
