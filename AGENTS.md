@@ -692,6 +692,17 @@ artifacts remain exempt when explicitly flagged by repo configuration).
 
 ## 11) Clean & Secure Coding Standard (Python 3.13 + Home Assistant 2025.10)
 
+> **Two separate axes, do not conflate them.** The *language level* this code is
+> written against is Python 3.13, enforced by `ruff target-version = "py313"` and
+> `mypy python_version = "3.13"`; the integration has to keep running on Home
+> Assistant Core 2025.9.1, which ships 3.13. The *development and test
+> environment* resolves for Python 3.14.2 and above, because Core requires that
+> from 2026.3.0 onwards and pins its dependencies exactly, so a 3.13 resolution
+> would permanently hold nine packages at vulnerable versions. The 3.13 runtime
+> axis is kept under test by the lock-free `test_legacy_python` CI job. Raising
+> the language level is therefore a separate decision from the lock constraint,
+> and neither implies the other.
+
 ### 11.1 Language & style (self-documenting)
 
 #### Logging formatting (ruff G004)

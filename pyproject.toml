@@ -25,7 +25,7 @@ packages = [
 ]
 
 [tool.poetry.dependencies]
-python = "^3.13.2"
+python = "^3.14.2"
 aiohttp = ">=3.11.8"
 beautifulsoup4 = ">=4.12.3"
 cryptography = ">=43.0.3"
@@ -111,6 +111,7 @@ ignore = ["E501"]
 "tests/**" = [
     "PLR0912",
     "PLR0913",
+    "PLR0917",  # sibling of PLR0913; ruff 0.16 stabilised it out of preview
     "PLR0915",
     "PLR2004",
     "PLC0415",
@@ -226,6 +227,7 @@ ignore = ["E501"]
     "PLC0415",
     "PLR0912",
     "PLR0913",
+    "PLR0917",  # sibling of PLR0913; ruff 0.16 stabilised it out of preview
     "PLR0915",
     "PLR2004",
 ]
@@ -280,6 +282,15 @@ ignore = ["E501"]
 quote-style = "double"
 indent-style = "space"
 line-ending = "auto"
+# Ruff 0.16 extended the formatter to Python code blocks inside Markdown. That
+# reach arrived through a tool upgrade, not through a decision here, and it
+# rewrites hand-aligned example code in eight handbooks under docs/ and
+# agents/ (for instance the aligned parameter comments in
+# docs/PLAY_SOUND_ARCHITECTURE.md). Documentation examples are read by humans
+# and are not compiled; keeping the formatter to actual source files keeps the
+# guarantee it exists for -- one uniform style in the tree that ships -- without
+# reflowing prose artefacts nobody reviewed. Linting Markdown is unaffected.
+exclude = ["*.md"]
 
 [tool.pytest.ini_options]
 addopts = ["-q", "--cov", "--cov-report=term"]

@@ -674,7 +674,7 @@ class TTLPolicy:
     # ADM tokens typically last 1-4 hours.
     MIN_TTL_FOR_LEARNING_SEC = 300  # 5 minutes
 
-    def __init__(  # noqa: PLR0913
+    def __init__(  # noqa: PLR0913, PLR0917
         self,
         username: str,
         logger: logging.Logger,
