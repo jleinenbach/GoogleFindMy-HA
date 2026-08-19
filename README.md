@@ -239,16 +239,21 @@ With this option **off** (the default), the Map View link on a device page is
 stable and keeps working indefinitely.
 
 With it **on**, the token rotates weekly. The map accepts the current and the
-previous week, so there is a full week of grace, but the link stored on the
-device page is only rebuilt when the integration starts up. If Home Assistant
-runs for more than two week boundaries without a restart and without a reload of
-the entry, the device page's own Map View link goes stale and returns
-"Unauthorized".
+previous bucket, but the link stored on the device page is only rebuilt when the
+integration starts up. The stored link therefore dies the moment the **second**
+weekly boundary is crossed — if the instance started shortly before a boundary,
+that can be little more than a week later — and the device page's own Map View
+link then returns "Unauthorized".
 
 You do not have to restart to fix that. Call the service
 **`googlefindmy.refresh_device_urls`** (Developer tools → Actions → *Refresh
 Device URLs*); it rewrites the configuration URL of every device with a current
 token, and the link works again immediately.
+
+One prerequisite: Home Assistant must have a reachable base URL. If none is
+configured, the service logs a warning and updates nothing, so the stale link
+stays. If the action appears to do nothing, set an internal or external URL
+under Settings → System → Network and check the log.
 
 ### Google Home filter behavior
 
