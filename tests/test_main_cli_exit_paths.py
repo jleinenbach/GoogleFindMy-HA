@@ -17,6 +17,7 @@ The standalone FCM lead (``_setup_fcm_receiver``) is intentionally excluded
 
 from __future__ import annotations
 
+import builtins
 import json
 from typing import Any
 
@@ -108,6 +109,43 @@ class TestEnsureAuthenticated:
         written = json.loads(secrets.read_text(encoding="utf-8"))
         assert written["oauth_token"] == "fresh-oauth"
         assert written["username"] == "detected@example.com"
+
+    def test_missing_browser_packages_explain_themselves(
+        self, tmp_path, monkeypatch: pytest.MonkeyPatch, capsys
+    ) -> None:  # type: ignore[no-untyped-def]
+        """Selenium is not installed by Home Assistant, so the CLI must say so.
+
+        `manifest.json` deliberately no longer lists the browser packages, which
+        makes a bare copy of the integration directory the normal case rather
+        than the exception. The first-run login is where that shows up, and it
+        has to name the install command instead of showing a traceback.
+        """
+        import sys
+
+        from custom_components.googlefindmy import main as cli_main
+        from custom_components.googlefindmy.browser_deps import INSTALL_COMMAND
+
+        monkeypatch.setattr(cli_main, "_this_dir", tmp_path, raising=True)
+
+        real_import = builtins.__import__
+
+        def _no_auth_flow(name: str, *args: Any, **kwargs: Any) -> Any:
+            if name.endswith("Auth.auth_flow"):
+                raise ImportError("No module named 'selenium'")
+            return real_import(name, *args, **kwargs)
+
+        monkeypatch.delitem(
+            sys.modules, "custom_components.googlefindmy.Auth.auth_flow", raising=False
+        )
+        monkeypatch.setattr(builtins, "__import__", _no_auth_flow)
+
+        with pytest.raises(SystemExit) as excinfo:
+            cli_main._ensure_authenticated()
+
+        assert excinfo.value.code == 1
+        out = capsys.readouterr().out
+        assert INSTALL_COMMAND in out
+        assert "No module named 'selenium'" in out
 
     def test_empty_email_aborts_with_exit_one(
         self, tmp_path, monkeypatch: pytest.MonkeyPatch

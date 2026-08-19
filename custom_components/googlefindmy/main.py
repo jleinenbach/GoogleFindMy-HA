@@ -462,10 +462,23 @@ def _ensure_authenticated() -> None:
 
     print("No credentials found. Starting authentication flow...\n")
 
-    # 1) Get the OAuth token via Chrome login
-    from custom_components.googlefindmy.Auth.auth_flow import (  # noqa: PLC0415
-        request_oauth_account_token_flow,
-    )
+    # 1) Get the OAuth token via Chrome login.
+    # Selenium and undetected-chromedriver are not part of the Home Assistant
+    # requirements of this integration (nothing Home Assistant runs imports
+    # them), so this is the point where a bare copy of the directory notices
+    # they are missing. Say what to install instead of showing a traceback.
+    try:
+        from custom_components.googlefindmy.Auth.auth_flow import (  # noqa: PLC0415
+            request_oauth_account_token_flow,
+        )
+    except ImportError as err:
+        from custom_components.googlefindmy.browser_deps import (  # noqa: PLC0415
+            MISSING_BROWSER_PACKAGES_HINT,
+        )
+
+        print(f"\n{MISSING_BROWSER_PACKAGES_HINT}\n")
+        print(f"Details: {err}")
+        raise SystemExit(1) from err
 
     oauth_token, detected_email = request_oauth_account_token_flow()
 

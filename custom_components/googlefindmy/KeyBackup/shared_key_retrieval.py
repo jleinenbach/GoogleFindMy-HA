@@ -142,9 +142,21 @@ async def _interactive_flow_hex() -> str:
     This opens a browser and requires a TTY; **not suitable for Home Assistant**.
     We keep it as a last-resort fallback for developer CLI usage.
     """
-    shared_key_flow = importlib.import_module(
-        "custom_components.googlefindmy.KeyBackup.shared_key_flow"
-    )
+    # Deliberately dynamic: this module must stay importable in the Home
+    # Assistant runtime, where the browser packages are absent (they are not in
+    # manifest.json, because nothing Home Assistant runs on its own needs them).
+    # This branch is reachable in a process that has a terminal attached, so the
+    # failure has to name what is missing rather than show a bare import error.
+    try:
+        shared_key_flow = importlib.import_module(
+            "custom_components.googlefindmy.KeyBackup.shared_key_flow"
+        )
+    except ImportError as err:
+        from custom_components.googlefindmy.browser_deps import (  # noqa: PLC0415
+            MISSING_BROWSER_PACKAGES_HINT,
+        )
+
+        raise RuntimeError(MISSING_BROWSER_PACKAGES_HINT) from err
     request_shared_key_flow = shared_key_flow.request_shared_key_flow
 
     # Run potentially interactive/GUI logic in executor

@@ -15,8 +15,13 @@ from collections.abc import Callable
 from types import ModuleType, SimpleNamespace
 from typing import Any, cast
 
-from selenium.webdriver.chrome.webdriver import WebDriver
-from selenium.webdriver.remote.webdriver import WebDriver as RemoteWebDriver
+from custom_components.googlefindmy.browser_deps import missing_browser_dependency
+
+try:
+    from selenium.webdriver.chrome.webdriver import WebDriver
+    from selenium.webdriver.remote.webdriver import WebDriver as RemoteWebDriver
+except ImportError as _err:  # pragma: no cover - needs a selenium-less environment
+    raise missing_browser_dependency(_err) from _err
 
 # Platform-specific import for Windows registry access
 _winreg: ModuleType | None = None
