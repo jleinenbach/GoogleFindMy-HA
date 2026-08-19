@@ -693,6 +693,85 @@ a check for "am I the CLI". A Home Assistant process running in the foreground
 on a terminal, whose bundle carries no shared key, can therefore reach it. The
 guard is being replaced by a signal the command-line process sets for itself.
 
+### If your credential bundle leaks
+
+Treat a leaked bundle as a full compromise of what this integration can reach.
+Two things have to be kept apart, because only one of them is hopeless:
+
+- **Reports the holder already received** stay readable. The keys that decrypt
+  them are in the copy, and no documented way exists for you to rotate them.
+- **Reports from now on** are a different question. Removing a tracker from Find
+  Hub is the step that touches its device-side key material, so containment is
+  not futile: step 5 below is what ends future location access, for as long as
+  the tracker stays removed. Re-pairing one to the same account can hand it
+  back; see the note under step 5.
+
+| What is in the bundle | What it opens | Can you revoke it? |
+| --- | --- | --- |
+| `aas_token` (long-lived Android account credential) | Mints fresh API tokens at will, without your password and without 2-Step Verification | Not documented. See the caveat below |
+| `adm_token_*` (short-lived API token) | Lists your devices, requests locations, rings them — but returns **ciphertext** without the keys below | Expires by itself within hours; a holder of the `aas_token` just mints another |
+| `fcm_credentials` (push identity) | Receives the push stream and decrypts its **transport** envelope (`Auth/firebase_messaging/fcmpushclient.py` → `_handle_data_message`), and presents to Google as the same device. The reports inside are still encrypted: turning them into coordinates needs the key chain in the row below (`location_request.py` → `location_callback` calls `async_decrypt_location_response_locations` with the entry cache) | Not documented for a third party's copy |
+| `shared_key` and `owner_key` | Open the **decryption chain**: the shared key unwraps the server-provided owner key, from which the tracker's identity key and finally the report key are derived. This is the step that turns "can list and ring your devices" into "can see where you are" | Not documented |
+| Your Google account e-mail, the device identifier, usage timestamps | Identifies the account and the device the tokens were issued for | Not applicable |
+
+**If you believe the leak is being used right now, do step 5 first, for every
+tracker whose location must be protected.** It is the
+only step in this list that touches the device side of the key material, and
+steps 1 to 4 have documented effects on account access but undocumented effects
+on the copy somebody already holds. In the ordinary case, work through the list
+as numbered.
+
+**What to do.** Every step below is something Google documents; where the
+documentation stops, this says so instead of guessing.
+
+1. **Change your Google password.** Google states you are then "signed out
+   everywhere except … some devices with third-party apps that you've given
+   account access"
+   ([support](https://support.google.com/accounts/answer/41078)). Whether the
+   `aas_token` falls under that exception is *not documented*, so do not treat
+   this step as sufficient.
+2. **Review your devices and sign out anything you do not recognise**
+   ([support](https://support.google.com/accounts/answer/3067630)). The page
+   does not state what signing out does to already issued tokens.
+3. **Review third-party access and remove what you do not want.** "If you remove
+   access, the app can't access your Google Account"
+   ([support](https://support.google.com/accounts/answer/13533235)). Whether a
+   grant made this way appears in that list is not documented.
+4. **Check your account's security activity and turn on 2-Step Verification**
+   ([support](https://support.google.com/accounts/answer/6294825)).
+5. **If the location itself is what you need to protect, remove every affected
+   tracker from Find Hub**: the stolen credentials list *your devices*, not one
+   of them, so removing a single tracker leaves the rest reachable. Removing a
+   tracker deletes its associated data
+   ([support](https://support.google.com/android/answer/14800516)). This is the
+   only step in the list that touches the device-side of the key material.
+
+   **Do not pair a new tracker to that account while the bundle may still
+   work.** This step contains the trackers you removed, and only while they stay
+   removed: it does not rotate the account-level material. The `aas_token` can
+   still mint fresh Spot and ADM tokens (`Auth/spot_token_retrieval.py` →
+   `_async_generate_spot_token`), and registration encrypts a new tracker's
+   identity key with the *account's* owner key
+   (`SpotApi/CreateBleDevice/create_ble_device.py` → `register_esp32`,
+   `encrypt_aes_gcm(owner_key, eik)`) — the same owner key the leaked shared key
+   unwraps. A tracker paired after the leak is therefore readable again by the
+   same copy. Use a different Google account for new trackers until you have
+   confirmation from Google that the old credentials no longer work.
+6. **Locally:** delete your copy of `secrets.json`, remove the config entry, and
+   run the login again. This gives *you* fresh credentials; it does nothing to
+   the thief's copy. If you turned the *delete caches on remove* option off,
+   removing the entry keeps `.storage/googlefindmy_secrets_<entry_id>` on disk
+   (`__init__.py` → `async_remove_entry`): turn the option back on before you
+   remove the entry, or delete that file yourself.
+
+**The uncomfortable part, stated plainly:** steps 1 to 4 all act on account and
+token access. The two items that decrypt your location, `shared_key` and
+`owner_key`, are key material the holder already has locally, and no Google
+documentation we could find describes a way for an account owner to rotate or
+revoke them. Until that changes, a leaked bundle should be assumed to keep
+decrypting whatever it already received. That is the part you cannot undo; the
+part you can is future access, and the remedy for it is step 5.
+
 ### Reporting a security issue
 
 Use GitHub's private vulnerability reporting (the *Security* tab of this
