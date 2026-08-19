@@ -473,6 +473,8 @@ What that means in practice:
   no shared key, it used to be able to reach the same code. That guard now
   requires the command-line tool itself, which identifies itself through the
   `GOOGLEFINDMY_CLI_PROCESS` marker rather than through an attached terminal.
+  Exporting that marker into a Home Assistant process puts the old behaviour
+  back — it is an opt-in for wrappers, not a lock.
 
 ### Standalone login refuses to start (attended terminal required)
 The desktop login opens Chrome **on your own screen** and prints a "Press Enter
@@ -710,7 +712,12 @@ whether this process is the command-line tool, which it learns from the
 `GOOGLEFINDMY_CLI_PROCESS` marker that `main.py` sets on itself and Home
 Assistant never sets, and whether somebody is present to answer the browser
 prompt. Either answer missing is refused with a message that names what is
-missing.
+missing. Read that as the default rather than as a lock: the marker is an
+environment variable and is inherited, so a Home Assistant process started with
+it exported, on a terminal, has answered both questions itself. The refusal
+message says as much, because an unforeseen command-line wrapper has to be able
+to identify itself somehow. What changed is that this now takes a deliberate
+act instead of happening to anyone who starts Home Assistant in a terminal.
 
 ### If your credential bundle leaks
 
