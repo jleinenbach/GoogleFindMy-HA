@@ -282,6 +282,15 @@ ignore = ["E501"]
 quote-style = "double"
 indent-style = "space"
 line-ending = "auto"
+# Ruff 0.16 extended the formatter to Python code blocks inside Markdown. That
+# reach arrived through a tool upgrade, not through a decision here, and it
+# rewrites hand-aligned example code in eight handbooks under docs/ and
+# agents/ (for instance the aligned parameter comments in
+# docs/PLAY_SOUND_ARCHITECTURE.md). Documentation examples are read by humans
+# and are not compiled; keeping the formatter to actual source files keeps the
+# guarantee it exists for -- one uniform style in the tree that ships -- without
+# reflowing prose artefacts nobody reviewed. Linting Markdown is unaffected.
+exclude = ["*.md"]
 
 [tool.pytest.ini_options]
 addopts = ["-q", "--cov", "--cov-report=term"]
