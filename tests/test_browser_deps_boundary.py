@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import ast
 import json
+import textwrap
 from pathlib import Path
 
 import pytest
@@ -23,6 +24,25 @@ from custom_components.googlefindmy import browser_deps
 
 PACKAGE_ROOT = Path(browser_deps.__file__).parent
 BROWSER_PACKAGES = {"selenium", "undetected_chromedriver", "webdriver_manager"}
+
+
+def _type_checking_polarity(test: ast.expr) -> bool | None:
+    """Return what a plain TYPE_CHECKING guard evaluates to at run time.
+
+    ``True``  for ``if TYPE_CHECKING:``      — the body is type-only.
+    ``False`` for ``if not TYPE_CHECKING:``  — the body is the runtime branch.
+    ``None``  for anything else              — walk both branches.
+    """
+
+    if isinstance(test, ast.Name) and test.id == "TYPE_CHECKING":
+        return True
+    if isinstance(test, ast.Attribute) and test.attr == "TYPE_CHECKING":
+        return True
+    if isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not):
+        inner = _type_checking_polarity(test.operand)
+        if inner is not None:
+            return not inner
+    return None
 
 
 def _module_level_imports(path: Path) -> list[tuple[str, int]]:
@@ -45,10 +65,17 @@ def _module_level_imports(path: Path) -> list[tuple[str, int]]:
                             (f"{base}.{alias.name}" if base else alias.name, node.level)
                         )
             elif isinstance(node, ast.If):
-                if "TYPE_CHECKING" in ast.dump(node.test):
-                    continue  # not executed at run time
-                walk(node.body)
-                walk(node.orelse)
+                # `if TYPE_CHECKING:` does not run, but its `else:` does — and
+                # that runtime-alias pattern is used in `__init__.py` itself.
+                # Skipping the whole statement would hide an import there.
+                guard = _type_checking_polarity(node.test)
+                if guard is True:
+                    walk(node.orelse)
+                elif guard is False:
+                    walk(node.body)
+                else:
+                    walk(node.body)
+                    walk(node.orelse)
             elif isinstance(node, (ast.Try, ast.With)):
                 walk(node.body)
                 for handler in getattr(node, "handlers", []):
@@ -142,6 +169,39 @@ def test_positive_control_the_crawler_can_see_browser_packages(entry: str) -> No
     assert external & BROWSER_PACKAGES
 
 
+def test_the_crawler_walks_the_runtime_branch_of_a_type_checking_guard(
+    tmp_path: Path,
+) -> None:
+    """`if TYPE_CHECKING: ... else: ...` is used in `__init__.py` itself.
+
+    Dropping both branches would make an import in the branch that actually
+    executes invisible, and the boundary test would stay green while the
+    manifest no longer installs that dependency.
+    """
+
+    module = tmp_path / "guarded.py"
+    module.write_text(
+        textwrap.dedent(
+            """\
+            from typing import TYPE_CHECKING
+            if TYPE_CHECKING:
+                import type_only_package
+            else:
+                import runtime_package
+            if not TYPE_CHECKING:
+                import other_runtime_package
+            """
+        ),
+        encoding="utf-8",
+    )
+
+    names = {name for name, _ in _module_level_imports(module)}
+
+    assert "runtime_package" in names
+    assert "other_runtime_package" in names
+    assert "type_only_package" not in names
+
+
 def test_the_only_dynamic_route_to_the_browser_is_the_guarded_one() -> None:
     """A static crawl alone would overstate the result.
 
@@ -208,7 +268,20 @@ def test_the_lazy_driver_import_carries_the_install_hint(
 
     stub = chrome_driver._load_uc()
 
-    with pytest.raises(RuntimeError) as excinfo:
-        stub.Chrome(options=object())
+    # Call it the way the production strategies call it. A stub that only
+    # accepts `options` raises TypeError here, the strategy chain swallows it
+    # as a generic driver failure, and the hint never reaches the user.
+    for kwargs in (
+        {"options": object()},
+        {"options": object(), "version_main": 131},
+        {"options": object(), "version_main": None},
+        {
+            "options": object(),
+            "version_main": 131,
+            "browser_executable_path": "/usr/bin/chromium",
+        },
+    ):
+        with pytest.raises(RuntimeError) as excinfo:
+            stub.Chrome(**kwargs)
 
-    assert browser_deps.INSTALL_COMMAND in str(excinfo.value)
+        assert browser_deps.INSTALL_COMMAND in str(excinfo.value)

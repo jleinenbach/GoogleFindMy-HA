@@ -84,12 +84,17 @@ def _load_uc() -> Any:
             def add_argument(self, argument: str) -> None:
                 self.arguments.append(argument)
 
-        def _stub_chrome(*, options: object) -> WebDriver:
+        def _stub_chrome(*args: object, **kwargs: object) -> WebDriver:
             # This is where a selenium-only environment actually fails: the
             # import above is lazy, so nothing earlier notices that
             # undetected-chromedriver is absent. Carry the install hint here
             # rather than leaving a generic driver error at the end of the
             # strategy chain.
+            #
+            # The signature accepts whatever the real strategies pass
+            # (`version_main`, `browser_executable_path`, ...). A narrower one
+            # would raise TypeError before this hint is reached, and the
+            # strategy chain would swallow it as a generic driver failure.
             raise RuntimeError(
                 f"{MISSING_BROWSER_PACKAGES_HINT}\n\n"
                 "undetected_chromedriver could not be imported; if it is "
