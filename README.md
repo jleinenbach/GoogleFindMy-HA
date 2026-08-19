@@ -558,13 +558,17 @@ configuration.
 | --- | --- | --- |
 | The credential bundle you paste during setup | Home Assistant's storage, one file per config entry: `.storage/googlefindmy_secrets_<entry_id>` | Written by the integration's token cache, not by you |
 | Google account e-mail | The config entry itself (`.storage/core.config_entries`) | Needed to restart without asking you again |
+| The location history of every tracker | Home Assistant's recorder database (`home-assistant_v2.db` by default) | Not written by this integration but by Home Assistant, recording the entities it creates, including the recorder-only `last_latitude`/`last_longitude` attributes the Map View reads back (`map_view.py`, `get_significant_states`). It is kept for as long as your `recorder` `purge_keep_days` says and it is in every backup. Exclude the entities under `recorder:` if you do not want that history |
 | The pasted bundle and the OAuth token | Also the config entry (`.storage/core.config_entries`) | On **initial setup** they are moved into the token cache on the first successful start and removed from the entry. Two cases keep them there indefinitely: a setup that fails before that point, and any later credential replacement (reauth or the options flow), because `config_flow.py` → `_persist_secrets_bundle` writes them back and the reload then finds a primed cache and skips the removal (`__init__.py`, the `legacy_cache_primed` branch). The copy lives beside the token cache in the same `.storage` directory, so it widens no trust boundary, and the diagnostics download redacts it |
 | Derived tokens (AAS, ADM, SPOT), FCM push identity, the shared key and the owner key | Same per-entry storage file | Refreshed automatically; the long-lived ones are what make the integration work after a restart |
 | The Map View access token | Derived on demand from the instance UUID and the entry id, and carried inside each device's `configuration_url` in `.storage/core.device_registry` | Treat that URL as long-lived bearer material: the map view is not behind Home Assistant's login, so whoever holds the link sees the device's location. The token authenticates the **config entry**, not one device (`map_view.py` → `_resolve_entry_by_token`), so a recipient who knows another device id of the same account can substitute it in the path. With the default `map_view_token_expiration` (off) the token never expires |
 
 `secrets.json` is **not** part of the running integration. It is produced by the
-manual command-line login, and if you paste its contents there is no copy of it
-on the Home Assistant machine at all.
+manual command-line login, and if you paste its contents, no file by that name
+ever reaches the Home Assistant machine. Its *contents* do: `async_setup_entry`
+hands the normalised bundle to `_async_save_secrets_data`, which stores it in
+the per-entry file listed in the table above. What pasting avoids is a second,
+loose copy on disk, not storage as such.
 
 There is a second, optional hand-off that does put the file there, so it belongs
 in this list. The integration watches two paths for a dropped bundle
@@ -587,7 +591,10 @@ no message will ever appear for it. If you use that route, remove every such
 copy yourself when you abandon an import, including the ones behind
 `secrets_extra_watch_paths`. A legacy `Auth/secrets.json` found by
 the token cache is imported once and then deleted (`Auth/token_cache.py`,
-`os.remove(legacy_path)`).
+`os.remove(legacy_path)`), best-effort in the same way: on a read-only mount
+the file stays, and the log says so
+(`Failed to remove legacy cache file after migration: <path>`). Search for that
+line too, and remove the file yourself if it appears.
 
 ### Who can read it
 
