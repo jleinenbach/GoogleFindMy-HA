@@ -1,14 +1,20 @@
 # tests/test_browser_deps_boundary.py
 """The browser packages are a CLI concern and must stay out of Home Assistant.
 
-Two properties are asserted here, both mechanically:
+Three properties are asserted here, all mechanically:
 
 1. `manifest.json` does not make Home Assistant install Selenium or
    undetected-chromedriver into every setup.
 2. No module Home Assistant loads on its own reaches them, so (1) cannot break
    the integration.
+3. `requirements.txt` *does* declare them, because the login container installs
+   its Chrome chain from that file.
 
 Property (2) is what makes (1) safe, which is why they live in one file.
+Property (3) is here for the same reason from the other side: the boundary runs
+between the two files, not through the package. Reading (1) alone invites the
+tidy-looking next step of removing the packages "everywhere", which breaks the
+one supported way to obtain credentials without a local Chrome.
 """
 
 from __future__ import annotations
@@ -197,8 +203,78 @@ def test_manifest_does_not_ship_browser_packages() -> None:
     manifest = json.loads((PACKAGE_ROOT / "manifest.json").read_text(encoding="utf-8"))
     requirements = " ".join(manifest["requirements"]).lower()
 
-    assert "selenium" not in requirements
-    assert "chromedriver" not in requirements
+    # The counterpart is `test_requirements_txt_keeps_the_cli_browser_packages`:
+    # absent here, present there. Moving one of them without the other is the
+    # mistake this pair exists to catch.
+    hint = (
+        "Home Assistant installs manifest requirements into every setup, and it "
+        "never starts a browser. The CLI chain belongs in requirements.txt "
+        "instead, where the login container installs it from."
+    )
+    assert "selenium" not in requirements, hint
+    assert "chromedriver" not in requirements, hint
+
+
+def test_requirements_txt_keeps_the_cli_browser_packages() -> None:
+    """The other half of the boundary: absent from the manifest, present here.
+
+    `docker-login/Dockerfile` builds the login container with
+    ``COPY requirements.txt`` followed by ``pip3 install -r
+    /app/requirements.txt``, and that container is the supported way to obtain
+    credentials without a local Chrome (README, "Option A"). The same file is
+    what a standalone `pip install -r requirements.txt` reads before running
+    `main.py`. Neither path consults `manifest.json`, so dropping the packages
+    here does not show up as a failure anywhere else: measured 2026-08-19 by
+    removing both lines, the boundary, container-hardening, protobuf and
+    pip-audit suites stayed green across 232 tests.
+    """
+
+    requirements = (PACKAGE_ROOT / "requirements.txt").read_text(encoding="utf-8")
+    # A PEP 508 marker is what makes "the name appears in the file" too weak a
+    # question: `selenium>=4.25.0; python_version < "3.0"` reads as a
+    # declaration and installs nothing. The marker's truth depends on the
+    # environment pip runs in, which is the container's, not this test's — so
+    # rather than evaluating it here, an unconditional declaration is required.
+    # The two packages are needed on every platform the login image builds for.
+    # pip joins a line ending in a backslash with the next one before it reads
+    # the marker, so a requirement split across two physical lines has to be
+    # joined here too — otherwise the marker lands on a line of its own and is
+    # read as a separate, marker-free entry.
+    # https://pip.pypa.io/en/stable/reference/requirements-file-format/
+    joined = requirements.replace("\\\n", " ")
+
+    declared: dict[str, str | None] = {}
+    for line in joined.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        requirement, _, marker = stripped.partition(";")
+        name = (
+            requirement.split("=")[0]
+            .split(">")[0]
+            .split("<")[0]
+            .split("[")[0]
+            .strip()
+            .lower()
+        )
+        declared[name] = marker.strip() or None
+
+    for package in ("selenium", "undetected-chromedriver"):
+        assert package in declared, (
+            f"{package} is missing from custom_components/googlefindmy/"
+            "requirements.txt. The login container (docker-login/Dockerfile) "
+            "installs its Chrome chain from this file, so removing it here "
+            "leaves users without a way to produce secrets.json. It is "
+            "deliberately absent from manifest.json only — see "
+            "test_manifest_does_not_ship_browser_packages."
+        )
+        assert declared[package] is None, (
+            f"{package} is declared in requirements.txt, but only under the "
+            f"environment marker {declared[package]!r}. pip skips a requirement "
+            "whose marker is false, so the login container would build without "
+            "a browser while this file still names one. The two browser "
+            "packages have to be declared unconditionally."
+        )
 
 
 @pytest.mark.parametrize("entry", _ha_entry_points())
