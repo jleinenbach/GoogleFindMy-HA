@@ -569,13 +569,18 @@ on the Home Assistant machine at all.
 There is a second, optional hand-off that does put the file there, so it belongs
 in this list. The integration watches two paths for a dropped bundle
 (`discovery.py` → `_default_watch_paths`): the bundled `Auth/secrets.json` and
-the login container's `docker-login/data/secrets.json`. A bundle found there
-starts a discovery flow, and the copy is deleted once Home Assistant is observed
-to hold the imported credentials (`config_flow.py` →
-`_async_delete_watched_secrets`, armed by `async_setup_entry`). Until then — and
-indefinitely if you never confirm the flow, or if the import fails — the file
-stays on the Home Assistant machine in clear. If you use that route, remove the
-file yourself when you abandon an import. A legacy `Auth/secrets.json` found by
+the login container's `docker-login/data/secrets.json`. The advanced option
+`secrets_extra_watch_paths` adds any further paths you configure
+(`discovery.py` → `_collect_extra_watch_paths`), and those are watched the same
+way. A bundle found on any of them starts a discovery flow, and the copy is
+deleted once Home Assistant is observed to hold the imported credentials
+(`config_flow.py` → `_async_delete_watched_secrets`, armed by
+`async_setup_entry`). Until then — and indefinitely if you never confirm the
+flow, or if the import fails — the file stays on the Home Assistant machine in
+clear. Deletion is also best-effort: a path Home Assistant cannot write to
+keeps its copy, and nothing warns you about it. If you use that route, remove every
+such copy yourself when you abandon an import, including the ones behind
+`secrets_extra_watch_paths`. A legacy `Auth/secrets.json` found by
 the token cache is imported once and then deleted (`Auth/token_cache.py`,
 `os.remove(legacy_path)`).
 
