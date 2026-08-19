@@ -38,7 +38,7 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:  # pragma: no cover - import-time typing block
     import argparse
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Callable, Mapping, Sequence
 
 _this_dir = Path(__file__).resolve().parent
 _standalone = not (
@@ -426,6 +426,32 @@ def _register_file_cache(entry_id: str = "") -> object:
     return file_cache
 
 
+def _run_oauth_flow_or_exit(
+    flow: Callable[[], tuple[str, str | None]],
+) -> tuple[str, str | None]:
+    """Run the Chrome login, turning a missing driver into a clean exit.
+
+    The `ImportError` guard around `auth_flow` cannot notice a missing
+    undetected-chromedriver: `chrome_driver._load_uc()` runs later, inside the
+    flow, and falls back to a stub that raises the install hint as a
+    `RuntimeError`. Without this boundary the first-run CLI ends in a traceback
+    from the bottom of the driver strategy chain instead of in the one line the
+    user needs.
+    """
+
+    from custom_components.googlefindmy.browser_deps import (  # noqa: PLC0415
+        INSTALL_COMMAND,
+    )
+
+    try:
+        return flow()
+    except RuntimeError as err:
+        if INSTALL_COMMAND not in str(err):
+            raise
+        print(f"\n{err}\n")
+        raise SystemExit(1) from err
+
+
 def _ensure_authenticated() -> None:
     """Run the Chrome-based OAuth login when no credentials exist yet.
 
@@ -480,7 +506,9 @@ def _ensure_authenticated() -> None:
         print(f"Details: {err}")
         raise SystemExit(1) from err
 
-    oauth_token, detected_email = request_oauth_account_token_flow()
+    oauth_token, detected_email = _run_oauth_flow_or_exit(
+        request_oauth_account_token_flow
+    )
 
     # 2) Set the Google account e-mail (needed for gpsoauth exchange).
     #    Prefer the email extracted from the Chrome session; fall back to

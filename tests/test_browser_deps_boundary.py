@@ -142,6 +142,44 @@ def _reachable(entry: str) -> tuple[set[str], set[str], set[str]]:
     return seen, external, dynamic
 
 
+def _ha_entry_points() -> list[str]:
+    """Every module Home Assistant loads on its own, not just the obvious two.
+
+    The platform modules are never imported from `__init__.py`: Home Assistant
+    loads them itself from the `PLATFORMS` list via `async_forward_entry_setups`.
+    A browser import in one of them would run at setup time while this test
+    stayed green, which is exactly the failure the manifest change would cause.
+    The list is read from the source instead of being written out here, so a new
+    platform cannot silently fall out of the crawl.
+    """
+
+    tree = ast.parse((PACKAGE_ROOT / "__init__.py").read_text(encoding="utf-8"))
+    platforms: list[str] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.AnnAssign):
+            continue
+        target = node.target
+        if not (isinstance(target, ast.Name) and target.id == "PLATFORMS"):
+            continue
+        for element in getattr(node.value, "elts", []):
+            if isinstance(element, ast.Attribute):
+                platforms.append(element.attr.lower())
+
+    assert platforms, "PLATFORMS could not be read; the crawl would be incomplete"
+
+    # Modules Home Assistant discovers by file name, not by import.
+    by_convention = [
+        "__init__.py",
+        "config_flow.py",
+        "diagnostics.py",
+        "repairs.py",
+        "system_health.py",
+        "eid_resolver.py",
+    ]
+    entries = [f"{name}.py" for name in platforms] + by_convention
+    return [name for name in entries if (PACKAGE_ROOT / name).is_file()]
+
+
 def test_manifest_does_not_ship_browser_packages() -> None:
     manifest = json.loads((PACKAGE_ROOT / "manifest.json").read_text(encoding="utf-8"))
     requirements = " ".join(manifest["requirements"]).lower()
@@ -150,7 +188,7 @@ def test_manifest_does_not_ship_browser_packages() -> None:
     assert "chromedriver" not in requirements
 
 
-@pytest.mark.parametrize("entry", ["__init__.py", "config_flow.py", "eid_resolver.py"])
+@pytest.mark.parametrize("entry", _ha_entry_points())
 def test_home_assistant_entry_points_reach_no_browser_package(entry: str) -> None:
     _, external, _dynamic = _reachable(entry)
 
@@ -285,3 +323,29 @@ def test_the_lazy_driver_import_carries_the_install_hint(
             stub.Chrome(**kwargs)
 
         assert browser_deps.INSTALL_COMMAND in str(excinfo.value)
+
+def test_the_first_run_cli_exits_cleanly_when_the_driver_is_missing() -> None:
+    """The `ImportError` guard cannot see it: the driver loads later, lazily.
+
+    Without a boundary at the call, the stub's hinted `RuntimeError` travels
+    through the driver strategy chain and reaches the user as a traceback.
+    """
+
+    from custom_components.googlefindmy import main
+
+    def _flow() -> tuple[str, str | None]:
+        raise RuntimeError(
+            f"Browser packages are missing.\n\n    {browser_deps.INSTALL_COMMAND}\n"
+        )
+
+    with pytest.raises(SystemExit) as excinfo:
+        main._run_oauth_flow_or_exit(_flow)
+
+    assert excinfo.value.code == 1
+
+    def _unrelated() -> tuple[str, str | None]:
+        raise RuntimeError("chrome crashed")
+
+    # Anything else must keep its traceback: swallowing it would hide real bugs.
+    with pytest.raises(RuntimeError, match="chrome crashed"):
+        main._run_oauth_flow_or_exit(_unrelated)
