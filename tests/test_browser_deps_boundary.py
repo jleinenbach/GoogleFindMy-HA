@@ -230,11 +230,27 @@ def test_requirements_txt_keeps_the_cli_browser_packages() -> None:
     """
 
     requirements = (PACKAGE_ROOT / "requirements.txt").read_text(encoding="utf-8")
-    declared = {
-        line.split("=")[0].split(">")[0].split("<")[0].split("[")[0].strip().lower()
-        for line in requirements.splitlines()
-        if line.strip() and not line.lstrip().startswith("#")
-    }
+    # A PEP 508 marker is what makes "the name appears in the file" too weak a
+    # question: `selenium>=4.25.0; python_version < "3.0"` reads as a
+    # declaration and installs nothing. The marker's truth depends on the
+    # environment pip runs in, which is the container's, not this test's — so
+    # rather than evaluating it here, an unconditional declaration is required.
+    # The two packages are needed on every platform the login image builds for.
+    declared: dict[str, str | None] = {}
+    for line in requirements.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        requirement, _, marker = stripped.partition(";")
+        name = (
+            requirement.split("=")[0]
+            .split(">")[0]
+            .split("<")[0]
+            .split("[")[0]
+            .strip()
+            .lower()
+        )
+        declared[name] = marker.strip() or None
 
     for package in ("selenium", "undetected-chromedriver"):
         assert package in declared, (
@@ -244,6 +260,13 @@ def test_requirements_txt_keeps_the_cli_browser_packages() -> None:
             "leaves users without a way to produce secrets.json. It is "
             "deliberately absent from manifest.json only — see "
             "test_manifest_does_not_ship_browser_packages."
+        )
+        assert declared[package] is None, (
+            f"{package} is declared in requirements.txt, but only under the "
+            f"environment marker {declared[package]!r}. pip skips a requirement "
+            "whose marker is false, so the login container would build without "
+            "a browser while this file still names one. The two browser "
+            "packages have to be declared unconditionally."
         )
 
 
