@@ -12,7 +12,10 @@ import logging
 import sys
 from typing import TYPE_CHECKING
 
-from custom_components.googlefindmy.browser_deps import missing_browser_dependency
+from custom_components.googlefindmy.browser_deps import (
+    BrowserPackagesUnusable,
+    missing_browser_dependency,
+)
 
 try:
     from selenium.common.exceptions import TimeoutException
@@ -67,6 +70,12 @@ def request_shared_key_flow(
     driver: WebDriver | None = None
     try:
         driver = create_driver(chrome_path=chrome_path, chrome_version=chrome_version)
+    except BrowserPackagesUnusable:
+        # Not a runtime Selenium failure, and the only one worth telling apart
+        # here: returning `None` for it erases the single piece of information
+        # the user needs, and every caller then has to guess it back from a
+        # message that no longer says it.
+        raise
     except Exception:  # pragma: no cover - relies on runtime Selenium setup
         LOGGER.exception("Failed to initialize ChromeDriver for shared key flow")
         return None
@@ -149,9 +158,13 @@ def _main() -> int:
     """
 
     args = _parse_cli_args()
-    key = request_shared_key_flow(
-        chrome_path=args.chrome_path, chrome_version=args.chrome_version
-    )
+    try:
+        key = request_shared_key_flow(
+            chrome_path=args.chrome_path, chrome_version=args.chrome_version
+        )
+    except BrowserPackagesUnusable as err:
+        print(f"\n{err}\n", file=sys.stderr)
+        return 1
     if key:
         print(key)
         return 0

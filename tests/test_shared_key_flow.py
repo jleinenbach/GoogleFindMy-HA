@@ -353,3 +353,42 @@ def test_the_command_succeeds_when_a_key_comes_back(
 
     assert flow._main() == 0
     assert "aa" * 32 in capsys.readouterr().out
+
+
+def test_the_unusable_package_type_is_not_turned_into_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every other driver failure becomes `None`; this one must not.
+
+    `undetected_chromedriver` installed but unimportable is invisible to a
+    presence probe and unreadable from the message, so the type is the only
+    carrier left. Erasing it here left the user with generic Chrome advice
+    against a missing package.
+    """
+
+    from custom_components.googlefindmy import browser_deps, chrome_driver
+    from custom_components.googlefindmy.KeyBackup import shared_key_flow as flow
+
+    def _unusable(**_: Any) -> Any:
+        raise browser_deps.BrowserPackagesUnusable("uc installed but broken")
+
+    monkeypatch.setattr(chrome_driver, "create_driver", _unusable)
+    monkeypatch.setattr(flow, "create_driver", _unusable)
+
+    with pytest.raises(browser_deps.BrowserPackagesUnusable):
+        flow.request_shared_key_flow()
+
+
+def test_an_ordinary_driver_failure_still_becomes_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Counterpart, so the pass-through is not simply "raise everything"."""
+
+    from custom_components.googlefindmy.KeyBackup import shared_key_flow as flow
+
+    def _boom(**_: Any) -> Any:
+        raise RuntimeError("chrome crashed")
+
+    monkeypatch.setattr(flow, "create_driver", _boom)
+
+    assert flow.request_shared_key_flow() is None
