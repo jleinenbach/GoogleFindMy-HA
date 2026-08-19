@@ -549,14 +549,21 @@ configuration.
 - Authentication tokens are securely cached
 - All GPS coordinates are processed locally. The integration itself sends no
   location data anywhere except to Google, which is where it comes from.
-- **One exception, and it is yours to trigger:** the Map View page loads its map
-  tiles from OpenStreetMap (`https://{s}.tile.openstreetmap.org/...`). While a
-  Map View page is open, your browser therefore asks that provider for the tiles
-  covering the area you are looking at, which is an area centred on your device.
-  The request contains no device name, no account and no coordinates as such,
-  but the requested tiles do describe the viewport. Nothing is requested while
-  no Map View page is open, and no other page of this integration loads map
-  tiles.
+- **The exceptions, and they are yours to trigger.** Opening a Map View page
+  makes your browser talk to two third parties:
+  - **Map tiles** from OpenStreetMap (`https://{s}.tile.openstreetmap.org/...`).
+    The page fits its view to *all* locations it shows, so with the default
+    history window the requested area is the area your device moved through
+    during that window, not just its current position. The requests carry no
+    device name, no account and no coordinates as such, but the requested tiles
+    do describe that area.
+  - **The Leaflet library** from `unpkg.com`, which the page currently loads to
+    draw the map. That request carries no location data at all, only the fact
+    that the page was opened. It is being removed in favour of a copy shipped
+    with the integration.
+
+  Nothing is requested while no Map View page is open, and no other page of this
+  integration loads either.
 
 ## Contributing
 
