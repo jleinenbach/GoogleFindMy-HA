@@ -443,6 +443,36 @@ export GOOGLEFINDMY_CHROME_PATH=/usr/bin/google-chrome
 
 Run any of the scripts with `--help` to list the available options.
 
+### The standalone login closes your other Chrome windows
+
+**Before it starts its own browser, the standalone login terminates the Chrome
+processes it finds running.** This is deliberate, not a bug: the login has to
+drive a browser session it controls end to end, and an already running Chrome
+would otherwise capture the sign-in and keep the credentials out of reach.
+
+What that means in practice:
+
+- **Close your Chrome windows before you run any of the helper scripts**
+  (`get_oauth_token.py`, `Auth/auth_flow.py`, `KeyBackup/shared_key_flow.py`,
+  or `main.py`). Unsaved tabs are lost as with any forced quit.
+- **Do not start a login while other automation is using Chrome** on the same
+  machine and user account (scraping jobs, kiosk displays, printing services).
+- **The match is on the whole command line, not on the program name.** The
+  cleanup uses `pgrep -f chrome`, so anything whose command line contains
+  `chrome` is terminated too — a monitoring script called
+  `chrome_metrics.py`, for example. If you run such a process, stop it or rename
+  it before a login run.
+- The scripts protect their own process and its parents, so running them from a
+  terminal or a test runner does not terminate that terminal.
+- Inside the provided login container the cleanup is skipped, because there it
+  would tear down the container's own browser stack.
+- **In Home Assistant this does not happen — with one exception worth knowing.**
+  No module Home Assistant loads reaches `create_driver`. The exception is the
+  interactive key-backup fallback: it is loaded dynamically and, in a Home
+  Assistant process started in the foreground of a terminal whose bundle carries
+  no shared key, it could reach the same code. That guard is being tightened to
+  require the command-line tool itself.
+
 ### Standalone login refuses to start (attended terminal required)
 The desktop login opens Chrome **on your own screen** and prints a "Press Enter
 to continue" prompt first, so you decide when a browser window takes over. When
