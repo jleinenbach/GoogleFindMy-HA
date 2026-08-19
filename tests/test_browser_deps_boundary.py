@@ -539,3 +539,68 @@ def test_the_chain_surfaces_the_typed_failure_instead_of_its_own(
 
     with pytest.raises(browser_deps.BrowserPackagesUnusable):
         chrome_driver._create_driver_inner(headless=True)
+
+
+def _function_body_imports(path: Path) -> set[str]:
+    """Return top-level packages imported inside function bodies of one module.
+
+    The load-time crawl above deliberately ignores these, and for its own
+    question that is right: they do not run on import. They do run when Home
+    Assistant calls the function, though, so a browser import placed in
+    `async_setup_entry` or a coordinator helper would break at setup time
+    while the load-time check stayed green.
+
+    Only literal `import` statements are collected. The one deliberate dynamic
+    route, `importlib.import_module` in `shared_key_retrieval`, is not an
+    import statement and is covered separately by `_dynamic_edges`.
+    """
+
+    found: set[str] = set()
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        for sub in ast.walk(node):
+            if isinstance(sub, ast.Import):
+                found.update(alias.name.split(".")[0] for alias in sub.names)
+            elif isinstance(sub, ast.ImportFrom) and sub.module and not sub.level:
+                found.add(sub.module.split(".")[0])
+    return found
+
+
+@pytest.mark.parametrize("entry", _ha_entry_points())
+def test_no_browser_import_hides_in_a_function_home_assistant_calls(
+    entry: str,
+) -> None:
+    """Every module reachable from a Home Assistant entry point, not just its imports."""
+
+    reachable, _external, _dynamic = _reachable(entry)
+
+    offenders = {
+        module
+        for module in reachable
+        if _function_body_imports(PACKAGE_ROOT / module) & BROWSER_PACKAGES
+    }
+
+    assert not offenders, (
+        f"{sorted(offenders)} import a browser package inside a function body, "
+        "and Home Assistant reaches them; manifest.json no longer installs it"
+    )
+
+
+def test_the_function_body_scan_can_see_an_import(tmp_path: Path) -> None:
+    """Positive control: without it the assertion above is a vacuum finding."""
+
+    module = tmp_path / "deferred.py"
+    module.write_text(
+        textwrap.dedent(
+            """\
+            def setup():
+                import selenium
+                return selenium
+            """
+        ),
+        encoding="utf-8",
+    )
+
+    assert _function_body_imports(module) & BROWSER_PACKAGES
