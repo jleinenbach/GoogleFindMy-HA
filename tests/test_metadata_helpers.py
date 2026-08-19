@@ -15,6 +15,7 @@ from custom_components.googlefindmy.const import (
     map_token_secret_seed,
 )
 from custom_components.googlefindmy.entity import GoogleFindMyDeviceEntity
+from tests.helpers.config_entries_stub import make_config_entry
 
 
 @pytest.mark.asyncio
@@ -122,3 +123,148 @@ def test_device_configuration_url_warns_when_external_url_missing(
     ]
     assert len(warnings) == 1
     assert entity._base_url_warning_emitted is True
+
+
+@pytest.mark.asyncio
+async def test_periodic_refresh_follows_the_week_boundary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two week rollovers must leave the device page with a usable link.
+
+    The map accepts the current and the previous weekly bucket, so two rollovers
+    is the first moment at which a link written at setup is certainly stale.
+    """
+
+    base_url = "https://example.test"
+    week = 7 * 24 * 3600
+    now = {"value": 1_209_600}
+
+    entry = make_config_entry(
+        entry_id="entry-1",
+        options={OPT_MAP_VIEW_TOKEN_EXPIRATION: True},
+    )
+    hass = SimpleNamespace()
+    hass.data = {"core.uuid": "ha-uuid"}
+    hass.config_entries = SimpleNamespace(async_entries=lambda domain: [entry])
+
+    monkeypatch.setattr(integration, "get_url", lambda _hass, **kwargs: base_url)
+    monkeypatch.setattr(integration.time, "time", lambda: now["value"])
+
+    registry = dr.async_get(hass)
+    device = registry.async_get_or_create(
+        config_entry_id=entry.entry_id,
+        identifiers={(DOMAIN, f"{entry.entry_id}:device-alpha")},
+        manufacturer="Google",
+        model="Nest",
+        name="Alpha",
+    )
+
+    await integration._async_refresh_device_urls(hass)
+    at_setup = device.configuration_url
+
+    now["value"] += 2 * week
+    await integration._async_refresh_device_urls(hass, periodic=True)
+
+    expected = map_token_hex_digest(
+        map_token_secret_seed("ha-uuid", entry.entry_id, True, now=now["value"])
+    )
+    assert device.configuration_url != at_setup
+    assert device.configuration_url == (
+        f"{base_url}/api/googlefindmy/map/device-alpha?token={expected}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_periodic_refresh_reports_an_unreachable_url_once(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A daily timer must not turn a startup warning into a daily warning."""
+
+    hass = SimpleNamespace()
+    hass.data = {"core.uuid": "ha-uuid"}
+    hass.config_entries = SimpleNamespace(async_entries=lambda domain: [])
+
+    def _no_url(_hass: object, **_kwargs: object) -> str:
+        raise NoURLAvailableError
+
+    monkeypatch.setattr(integration, "get_url", _no_url)
+
+    caplog.set_level(logging.DEBUG)
+    for _ in range(10):
+        await integration._async_refresh_device_urls(hass, periodic=True)
+
+    above_debug = [
+        record
+        for record in caplog.records
+        if record.levelno > logging.DEBUG
+        and "Skipping configuration URL refresh" in record.getMessage()
+    ]
+    assert len(above_debug) == 1
+
+    # A user-triggered refresh still reports every time: somebody is waiting.
+    caplog.clear()
+    await integration._async_refresh_device_urls(hass)
+    assert any(record.levelno == logging.WARNING for record in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_startup_state_is_recorded_so_the_first_tick_stays_quiet(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The startup run records the situation even though it always reports.
+
+    With the recording behind a short-circuiting ``or``, a startup that logged
+    the warning would not have stored it, and the first daily tick would have
+    logged the identical line again -- the very repetition the suppressor exists
+    to prevent.
+    """
+
+    hass = SimpleNamespace()
+    hass.data = {"core.uuid": "ha-uuid"}
+    hass.config_entries = SimpleNamespace(async_entries=lambda domain: [])
+
+    def _no_url(_hass: object, **_kwargs: object) -> str:
+        raise NoURLAvailableError
+
+    monkeypatch.setattr(integration, "get_url", _no_url)
+
+    caplog.set_level(logging.DEBUG)
+    await integration._async_refresh_device_urls(hass)  # startup, reports
+    caplog.clear()
+    await integration._async_refresh_device_urls(hass, periodic=True)  # first tick
+
+    assert not [record for record in caplog.records if record.levelno > logging.DEBUG]
+
+
+@pytest.mark.asyncio
+async def test_periodic_refresh_reports_again_after_the_situation_changes(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Suppression must not swallow a *new* state, only a repeated one."""
+
+    hass = SimpleNamespace()
+    hass.data = {"core.uuid": "ha-uuid"}
+    hass.config_entries = SimpleNamespace(async_entries=lambda domain: [])
+
+    state = {"url": "https://example.test"}
+
+    def _get_url(_hass: object, **kwargs: object) -> str:
+        if state["url"] is None:
+            raise NoURLAvailableError
+        return state["url"]
+
+    monkeypatch.setattr(integration, "get_url", _get_url)
+
+    caplog.set_level(logging.DEBUG)
+    await integration._async_refresh_device_urls(hass, periodic=True)
+    state["url"] = None
+    await integration._async_refresh_device_urls(hass, periodic=True)
+    await integration._async_refresh_device_urls(hass, periodic=True)
+
+    above_debug = [
+        record
+        for record in caplog.records
+        if record.levelno > logging.DEBUG
+        and "Skipping configuration URL refresh" in record.getMessage()
+    ]
+    assert len(above_debug) == 1

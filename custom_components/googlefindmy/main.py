@@ -935,6 +935,16 @@ def _main(argv: Sequence[str] | None = None) -> None:
     """
     import asyncio  # noqa: PLC0415
 
+    # Mark this process as the command-line tool before anything else runs. The
+    # interactive key-backup fallback used to ask "is a terminal attached",
+    # which a foreground Home Assistant also answers with yes; it now asks for
+    # this marker instead. Home Assistant never sets it, the user never has to.
+    from custom_components.googlefindmy.KeyBackup.shared_key_retrieval import (  # noqa: PLC0415
+        _ENV_CLI_PROCESS,
+    )
+
+    os.environ[_ENV_CLI_PROCESS] = "1"
+
     args = _build_cli_parser().parse_args(argv)
     _configure_cli_logging(debug_flag=args.debug, env=os.environ)
 

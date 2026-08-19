@@ -336,6 +336,17 @@ def _leaflet_asset(name: str) -> str:
     return cached
 
 
+# The map URL carries its access token in the query string, so every response of
+# this view is as sensitive as the link itself. `no-store` keeps it out of shared
+# browser and proxy caches, `noindex, nofollow` keeps it out of search engines on
+# instances that are reachable from the internet. Both are pure response headers:
+# no migration, no effect on links already handed out.
+NO_STORE_HEADERS = {
+    "Cache-Control": "no-store",
+    "X-Robots-Tag": "noindex, nofollow",
+}
+
+
 def _html_response(title: str, body: str, status: int = 200) -> web.Response:
     """Return a minimal HTML response (no secrets, no stacktraces)."""
     return web.Response(
@@ -349,6 +360,7 @@ def _html_response(title: str, body: str, status: int = 200) -> web.Response:
 </html>""",
         content_type="text/html",
         status=status,
+        headers=NO_STORE_HEADERS,
     )
 
 
@@ -708,7 +720,12 @@ class GoogleFindMyMapView(HomeAssistantView):
         html = self._generate_map_html(
             device_name, locations, device_id, start_time, end_time, accuracy_filter
         )
-        return web.Response(text=html, content_type="text/html", charset="utf-8")
+        return web.Response(
+            text=html,
+            content_type="text/html",
+            charset="utf-8",
+            headers=NO_STORE_HEADERS,
+        )
 
     def _generate_map_html(
         self,
@@ -1070,4 +1087,4 @@ class GoogleFindMyMapRedirectView(HomeAssistantView):
         redirect_url = f"/api/googlefindmy/map/{device_id}?{urlencode(query_dict)}"
         _LOGGER.debug("Relative redirect prepared for device_id=%s", device_id)
 
-        raise web.HTTPFound(location=redirect_url)
+        raise web.HTTPFound(location=redirect_url, headers=NO_STORE_HEADERS)
