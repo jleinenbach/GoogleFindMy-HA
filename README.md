@@ -617,6 +617,88 @@ configuration.
   Nothing is requested while no Map View page is open, and no other page of this
   integration loads either.
 
+## Security considerations
+
+### What is stored, and where
+
+| What | Where | Notes |
+| --- | --- | --- |
+| The credential bundle you paste during setup | Home Assistant's storage, one file per config entry: `.storage/googlefindmy_secrets_<entry_id>` | Written by the integration's token cache, not by you |
+| Google account e-mail | The config entry itself (`.storage/core.config_entries`) | Needed to restart without asking you again |
+| The location history of every tracker | Home Assistant's recorder database (`home-assistant_v2.db` by default) | Not written by this integration but by Home Assistant, recording the entities it creates, including the recorder-only `last_latitude`/`last_longitude` attributes the Map View reads back (`map_view.py`, `get_significant_states`). It is kept for as long as your `recorder` `purge_keep_days` says, and it travels with any backup that includes the database (Home Assistant's backup manager offers that as a choice; a recorder pointed at an external database is not in the backup at all). Exclude the entities under `recorder:` if you do not want that history |
+| The pasted bundle and the OAuth token | Also the config entry (`.storage/core.config_entries`) | On **initial setup** they are moved into the token cache on the first successful start and removed from the entry. Two cases keep them there indefinitely: a setup that fails before that point, and any later credential replacement (reauth or the options flow), because `config_flow.py` → `_persist_secrets_bundle` writes them back and the reload then finds a primed cache and skips the removal (`__init__.py`, the `legacy_cache_primed` branch). The copy lives beside the token cache in the same `.storage` directory, so it widens no trust boundary, and the diagnostics download redacts it |
+| Derived tokens (AAS, ADM, SPOT), FCM push identity, the shared key and the owner key | Same per-entry storage file | Refreshed automatically; the long-lived ones are what make the integration work after a restart |
+| The Map View access token | Derived on demand from the instance UUID and the entry id, and carried inside each device's `configuration_url` in `.storage/core.device_registry` | Treat that URL as long-lived bearer material: the map view is not behind Home Assistant's login, so whoever holds the link sees the device's location. The token authenticates the **config entry**, not one device (`map_view.py` → `_resolve_entry_by_token`), so a recipient who knows another device id of the same account can substitute it in the path. With the default `map_view_token_expiration` (off) the token never expires |
+
+`secrets.json` is **not** part of the running integration. It is produced by the
+manual command-line login, and if you paste its contents, no file by that name
+ever reaches the Home Assistant machine. Its *contents* do: `async_setup_entry`
+hands the normalised bundle to `_async_save_secrets_data`, which stores it in
+the per-entry file listed in the table above. What pasting avoids is a second,
+loose copy on disk, not storage as such.
+
+There is a second, optional hand-off that does put the file there, so it belongs
+in this list. The integration watches two paths for a dropped bundle
+(`discovery.py` → `_default_watch_paths`): the bundled `Auth/secrets.json` and
+the login container's `docker-login/data/secrets.json`. The advanced option
+`secrets_extra_watch_paths` adds any further paths you configure
+(`discovery.py` → `_collect_extra_watch_paths`), and those are watched the same
+way. A bundle found on any of them starts a discovery flow, and the copy is
+deleted once Home Assistant is observed to hold the imported credentials
+(`config_flow.py` → `_async_delete_watched_secrets`, armed by
+`async_setup_entry`). Until then — and indefinitely if you never confirm the
+flow, or if the import fails — the file stays on the Home Assistant machine in
+clear. Deletion is also best-effort: a path Home Assistant cannot write to
+keeps its copy. That one case does announce itself, in the Home Assistant log:
+`Failed to remove watched secrets file after import: <path>`
+(`config_flow.py` → `_remove_if_digest_matches`); search for it if you used a
+watched path, and remove the named file yourself. The other case is silent by
+construction: a flow you never confirmed never reaches the deletion at all, so
+no message will ever appear for it. If you use that route, remove every such
+copy yourself when you abandon an import, including the ones behind
+`secrets_extra_watch_paths`. A legacy `Auth/secrets.json` found by
+the token cache is imported once and then deleted (`Auth/token_cache.py`,
+`os.remove(legacy_path)`), best-effort in the same way: on a read-only mount
+the file stays, and the log says so
+(`Failed to remove legacy cache file after migration: <path>`). Search for that
+line too, and remove the file yourself if it appears.
+
+### Who can read it
+
+Anyone with **administrator access to Home Assistant** or **read access to its
+configuration directory**. That is not a property of this integration: the
+`.storage` directory holds the credentials of every integration you have
+installed, and the recorder database holds their history. Protect the Home
+Assistant instance and you protect these credentials; do not protect it and no
+choice this integration could make would help.
+
+Diagnostics downloads are redacted before they leave Home Assistant
+(`diagnostics.py`, `TO_REDACT` and `TO_REDACT_PREFIXES`), including the pasted
+bundle and the key names the token cache builds at run time, so an attached
+diagnostics file does not contain your tokens. It does contain the entry id in
+clear.
+
+### What is *not* part of the Home Assistant runtime
+
+Chrome and Selenium. The browser-based credential extraction is a manual step
+you run yourself, from a terminal, on your own machine. No module Home Assistant
+loads imports Selenium or starts a browser: an import-graph walk from
+`__init__.py`, `config_flow.py` and `eid_resolver.py` reaches no browser package,
+while the same walk from `chrome_driver.py` does — so the check can fire.
+
+One qualification, because it is real: the interactive key-backup fallback is
+guarded by a terminal check (`KeyBackup/shared_key_retrieval.py` →
+`_retrieve_shared_key_hex`, `is_tty = sys.stdin and sys.stdin.isatty()`), not by
+a check for "am I the CLI". A Home Assistant process running in the foreground
+on a terminal, whose bundle carries no shared key, can therefore reach it. The
+guard is being replaced by a signal the command-line process sets for itself.
+
+### Reporting a security issue
+
+Use GitHub's private vulnerability reporting (the *Security* tab of this
+repository, *Report a vulnerability*) for anything with an attacker in it, and a
+normal issue — one per item — for hardening suggestions.
+
 ## Contributing
 
 Contributions are welcome and encouraged!
