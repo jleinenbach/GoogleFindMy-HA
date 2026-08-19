@@ -131,6 +131,27 @@ def test_a_slash_in_the_local_part_does_not_survive() -> None:
     assert "aas_token_issued_at_<account-1>" in redacted
 
 
+def test_an_anonymised_name_does_not_evict_a_later_literal_key() -> None:
+    """Which field survives must not depend on the order they were inserted.
+
+    `xuser@example.com` anonymises to `x<account-1>`; a literal key of that
+    name arriving afterwards was not checked for a collision, because the
+    check ran only for keys that had been rewritten. The later one then
+    replaced the earlier one silently.
+    """
+
+    payload = {
+        "username": "user@example.com",
+        "xuser@example.com": "first",
+        "x<account-1>": "second",
+    }
+
+    redacted = _redact(payload)
+
+    assert len(redacted) == 3
+    assert set(redacted.values()) >= {"first", "second"}
+
+
 def test_run_time_key_names_are_redacted_by_prefix() -> None:
     """These names are built from the account e-mail and cannot be listed."""
 
