@@ -1335,7 +1335,7 @@ def apply_owned_as_declared_audit(  # noqa: PLR0913 - findings + owned + classif
     return None
 
 
-def apply_audit_span_passes(  # noqa: PLR0913 - orchestration seam; see docstring
+def apply_audit_span_passes(  # noqa: PLR0913, PLR0917 - orchestration seam; see docstring
     findings: dict[str, list[Record]],
     audit: dict[str, Any],
     constraint_texts: list[str],

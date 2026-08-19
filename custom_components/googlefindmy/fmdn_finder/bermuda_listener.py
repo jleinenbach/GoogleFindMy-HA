@@ -696,7 +696,7 @@ async def _async_get_device_eid(  # noqa: PLR0911, PLR0912, PLR0915
         return None
 
 
-async def _async_upload_semantic_location(  # noqa: PLR0913
+async def _async_upload_semantic_location(  # noqa: PLR0913, PLR0917
     hass: HomeAssistant,
     eid: bytes,
     area: str,
