@@ -609,11 +609,17 @@ assumption is in the last column below.
 | `aas_token` (long-lived Android account credential) | Mints fresh API tokens at will, without your password and without 2-Step Verification | Not documented. See the caveat below |
 | `adm_token_*` (short-lived API token) | Lists your devices, requests locations, rings them — but returns **ciphertext** without the keys below | Expires by itself within hours; a holder of the `aas_token` just mints another |
 | `fcm_credentials` (push identity) | Receives and decrypts the push responses, i.e. reads incoming location reports, and presents to Google as the same device | Not documented for a third party's copy |
-| `shared_key` and `owner_key` | **Decrypt** location reports. This is the step that turns "can list and ring your devices" into "can see where you are" | Not documented |
+| `shared_key` and `owner_key` | Open the **decryption chain**: the shared key unwraps the server-provided owner key, from which the tracker's identity key and finally the report key are derived. This is the step that turns "can list and ring your devices" into "can see where you are" | Not documented |
 | Your Google account e-mail, the device identifier, usage timestamps | Identifies the account and the device the tokens were issued for | Not applicable |
 
-**What to do, in this order.** Every step below is something Google documents;
-where the documentation stops, this says so instead of guessing.
+**If you believe the leak is being used right now, do step 5 first.** It is the
+only step in this list that touches the device side of the key material, and
+steps 1 to 4 have documented effects on account access but undocumented effects
+on the copy somebody already holds. In the ordinary case, work through the list
+as numbered.
+
+**What to do.** Every step below is something Google documents; where the
+documentation stops, this says so instead of guessing.
 
 1. **Change your Google password.** Google states you are then "signed out
    everywhere except … some devices with third-party apps that you've given
