@@ -54,6 +54,21 @@ def async_redact_data[T](data: T, to_redact: Iterable[Any]) -> T:
     return cast(T, redacted)
 
 
+def describe_keys(value: Any) -> str:
+    """Describe a mapping by its key names only, never by its values.
+
+    For a payload whose shape is *unknown* (a malformed or unrecognised
+    response), redacting by key name is not enough: the sensitive field may sit
+    under a name nobody anticipated. Key names are metadata and are what a
+    maintainer needs; the values are what must not be logged.
+    """
+
+    if isinstance(value, Mapping):
+        keys = ", ".join(sorted(str(key) for key in value))
+        return f"keys=[{keys}]"
+    return describe_payload(value)
+
+
 def describe_payload(value: Any) -> str:
     """Describe a payload by type and size, never by content.
 

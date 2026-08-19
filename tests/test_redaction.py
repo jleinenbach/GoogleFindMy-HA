@@ -12,6 +12,7 @@ from custom_components.googlefindmy import redaction
 from custom_components.googlefindmy.redaction import (
     REDACTED,
     async_redact_data,
+    describe_keys,
     describe_payload,
 )
 
@@ -81,3 +82,17 @@ def test_module_stays_free_of_home_assistant_imports() -> None:
 
     assert "homeassistant" not in imported
     assert imported <= {"__future__", "collections", "typing"}
+
+
+def test_describe_keys_reports_names_without_values() -> None:
+    payload = {"method": "x", "vaultKeys": "secret", "surprise": "also-secret"}
+
+    described = describe_keys(payload)
+
+    assert described == "keys=[method, surprise, vaultKeys]"
+    assert "secret" not in described
+
+
+def test_describe_keys_falls_back_to_shape_for_non_mappings() -> None:
+    assert describe_keys(["a", "b"]) == "list len=2"
+    assert describe_keys("abc") == "str len=3"

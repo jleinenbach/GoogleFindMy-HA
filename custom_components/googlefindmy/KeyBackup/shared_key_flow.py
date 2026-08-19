@@ -22,7 +22,7 @@ from custom_components.googlefindmy.KeyBackup.response_parser import (
 from custom_components.googlefindmy.KeyBackup.shared_key_request import (
     get_security_domain_request_url,
 )
-from custom_components.googlefindmy.redaction import async_redact_data, describe_payload
+from custom_components.googlefindmy.redaction import describe_keys, describe_payload
 
 if TYPE_CHECKING:  # pragma: no cover - import-time typing block
     from selenium.webdriver.remote.webdriver import WebDriver
@@ -31,8 +31,10 @@ if TYPE_CHECKING:  # pragma: no cover - import-time typing block
 LOGGER = logging.getLogger(__name__)
 
 # Alert payloads on this channel carry vault key material. Anything that reaches
-# a log record is reduced to type and length; the values themselves never are.
-_ALERT_TO_REDACT = frozenset({"vaultKeys", "str"})
+# a log record is reduced to shape: type, length, key names. Redacting by key
+# name would not be enough here, because these branches exist precisely for
+# payloads whose shape is unknown, where the sensitive field may sit under a name
+# nobody anticipated.
 
 
 def _parse_cli_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -119,9 +121,9 @@ def request_shared_key_flow(
                 vault_keys = data.get("vaultKeys")
                 if not isinstance(vault_keys, str):
                     LOGGER.error(
-                        "Missing or invalid vaultKeys payload (%s): %s",
+                        "Missing or invalid vaultKeys payload (%s); alert %s",
                         describe_payload(vault_keys),
-                        async_redact_data(data, _ALERT_TO_REDACT),
+                        describe_keys(data),
                     )
                     continue
 
@@ -134,9 +136,7 @@ def request_shared_key_flow(
                 LOGGER.info("closeView invoked; terminating browser session")
                 return None
 
-            LOGGER.debug(
-                "Unhandled alert payload: %s", async_redact_data(data, _ALERT_TO_REDACT)
-            )
+            LOGGER.debug("Unhandled alert payload: %s", describe_keys(data))
 
     except Exception:  # pragma: no cover - runtime Selenium failures
         LOGGER.exception("Shared key flow terminated unexpectedly")
