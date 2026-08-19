@@ -236,8 +236,15 @@ def test_requirements_txt_keeps_the_cli_browser_packages() -> None:
     # environment pip runs in, which is the container's, not this test's — so
     # rather than evaluating it here, an unconditional declaration is required.
     # The two packages are needed on every platform the login image builds for.
+    # pip joins a line ending in a backslash with the next one before it reads
+    # the marker, so a requirement split across two physical lines has to be
+    # joined here too — otherwise the marker lands on a line of its own and is
+    # read as a separate, marker-free entry.
+    # https://pip.pypa.io/en/stable/reference/requirements-file-format/
+    joined = requirements.replace("\\\n", " ")
+
     declared: dict[str, str | None] = {}
-    for line in requirements.splitlines():
+    for line in joined.splitlines():
         stripped = line.strip()
         if not stripped or stripped.startswith("#"):
             continue
