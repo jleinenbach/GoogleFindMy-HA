@@ -50,6 +50,31 @@ def test_the_two_keys_that_decrypt_locations_are_redacted() -> None:
     assert all(value == REDACTED for value in redacted.values())
 
 
+def test_the_account_address_does_not_survive_in_the_key_name() -> None:
+    """Redacting the value leaves the address standing in the property name.
+
+    These names are built as `<what>_<e-mail>`, and the diagnostics file is the
+    one people attach to public issues, so the address has to go from the name
+    as well. The numbering is shared across nesting levels, so a reader can
+    still tell which entries belong to the same account.
+    """
+
+    payload = {
+        "adm_token_user@example.com": _SECRET,
+        "aas_token_issued_at_user@example.com": 1,
+        "nested": {"spot_token_other@example.org": _SECRET},
+    }
+
+    redacted = _redact(payload)
+
+    assert "example.com" not in str(redacted)
+    assert "example.org" not in str(redacted)
+    assert "adm_token_<account-1>" in redacted
+    # The same account keeps the same number, and `issued_at` survives.
+    assert "aas_token_issued_at_<account-1>" in redacted
+    assert "spot_token_<account-2>" in redacted["nested"]
+
+
 def test_run_time_key_names_are_redacted_by_prefix() -> None:
     """These names are built from the account e-mail and cannot be listed."""
 
