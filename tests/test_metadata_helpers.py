@@ -208,6 +208,35 @@ async def test_periodic_refresh_reports_an_unreachable_url_once(
 
 
 @pytest.mark.asyncio
+async def test_startup_state_is_recorded_so_the_first_tick_stays_quiet(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The startup run records the situation even though it always reports.
+
+    With the recording behind a short-circuiting ``or``, a startup that logged
+    the warning would not have stored it, and the first daily tick would have
+    logged the identical line again -- the very repetition the suppressor exists
+    to prevent.
+    """
+
+    hass = SimpleNamespace()
+    hass.data = {"core.uuid": "ha-uuid"}
+    hass.config_entries = SimpleNamespace(async_entries=lambda domain: [])
+
+    def _no_url(_hass: object, **_kwargs: object) -> str:
+        raise NoURLAvailableError
+
+    monkeypatch.setattr(integration, "get_url", _no_url)
+
+    caplog.set_level(logging.DEBUG)
+    await integration._async_refresh_device_urls(hass)  # startup, reports
+    caplog.clear()
+    await integration._async_refresh_device_urls(hass, periodic=True)  # first tick
+
+    assert not [record for record in caplog.records if record.levelno > logging.DEBUG]
+
+
+@pytest.mark.asyncio
 async def test_periodic_refresh_reports_again_after_the_situation_changes(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:

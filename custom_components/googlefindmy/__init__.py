@@ -2970,6 +2970,7 @@ class GoogleFindMyDomainData(TypedDict, total=False):
     restart_check_initial_unsub: Callable[[], None] | None
     url_refresh_registered: bool
     url_refresh_unsub: Callable[[], None] | None
+    url_refresh_state: str
     providers_registered: bool
     views_registered: bool
     _subentry_forward_helper_logs: set[str]
@@ -7107,7 +7108,7 @@ def _teardown_url_refresh_timer(
         with suppress(Exception):
             unsub()
     bucket.pop("url_refresh_registered", None)
-    hass.data.pop(_URL_STATE_MARKER, None)
+    bucket.pop("url_refresh_state", None)
 
 
 @callback
@@ -9053,17 +9054,18 @@ async def _async_normalize_device_names(hass: HomeAssistant) -> None:
         _LOGGER.debug("Device name normalization skipped due to: %s", err)
 
 
-# Marker under which the last observed URL situation is remembered, so a periodic
-# refresh can report a *change* instead of repeating the same line every day.
-_URL_STATE_MARKER = f"{DOMAIN}_url_refresh_state"
-
-
 @callback
 def _url_state_changed(hass: HomeAssistant, state: str) -> bool:
-    """Return True when the URL situation differs from the previous refresh."""
+    """Record the URL situation and return whether it differs from the last one.
 
-    previous: object = hass.data.get(_URL_STATE_MARKER)
-    hass.data[_URL_STATE_MARKER] = state
+    The marker lives in the typed domain bucket, next to the timer that reads it
+    and the teardown that clears it, rather than in a second top-level
+    ``hass.data`` key: one owner, one lifecycle.
+    """
+
+    bucket = _domain_data(hass)
+    previous: object = bucket.get("url_refresh_state")
+    bucket["url_refresh_state"] = state
     return bool(previous != state)
 
 
@@ -9081,9 +9083,16 @@ async def _async_refresh_device_urls(
     """
 
     def _report_once(state: str) -> bool:
-        """Return True when this run should log above debug level."""
+        """Record the state and return whether this run should log above debug.
 
-        return not periodic or _url_state_changed(hass, state)
+        The state is recorded on *every* run, the startup one included. Ordering
+        matters here: with the recording behind a short-circuiting ``or``, a
+        startup that logged the warning would not have stored it, and the first
+        daily tick would have logged the identical line again.
+        """
+
+        changed = _url_state_changed(hass, state)
+        return not periodic or changed
 
     try:
         base_url = cast(
