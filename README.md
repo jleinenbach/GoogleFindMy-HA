@@ -613,7 +613,7 @@ Two things have to be kept apart, because only one of them is hopeless:
 | --- | --- | --- |
 | `aas_token` (long-lived Android account credential) | Mints fresh API tokens at will, without your password and without 2-Step Verification | Not documented. See the caveat below |
 | `adm_token_*` (short-lived API token) | Lists your devices, requests locations, rings them — but returns **ciphertext** without the keys below | Expires by itself within hours; a holder of the `aas_token` just mints another |
-| `fcm_credentials` (push identity) | Receives and decrypts the push responses, i.e. reads incoming location reports, and presents to Google as the same device | Not documented for a third party's copy |
+| `fcm_credentials` (push identity) | Receives the push stream and decrypts its **transport** envelope (`Auth/firebase_messaging/fcmpushclient.py` → `_handle_data_message`), and presents to Google as the same device. The reports inside are still encrypted: turning them into coordinates needs the key chain in the row below (`location_request.py` → `location_callback` calls `async_decrypt_location_response_locations` with the entry cache) | Not documented for a third party's copy |
 | `shared_key` and `owner_key` | Open the **decryption chain**: the shared key unwraps the server-provided owner key, from which the tracker's identity key and finally the report key are derived. This is the step that turns "can list and ring your devices" into "can see where you are" | Not documented |
 | Your Google account e-mail, the device identifier, usage timestamps | Identifies the account and the device the tokens were issued for | Not applicable |
 
