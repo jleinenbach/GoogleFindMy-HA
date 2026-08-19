@@ -105,10 +105,17 @@ class _StubHass:
         }
 
 
-def _redact(data, keys):  # pragma: no cover - deterministic helper in tests
+def _redact(data, keys, prefixes=()):  # pragma: no cover - deterministic helper
+    # Mirrors the production signature, including the prefix rule for key names
+    # the token cache builds at run time (adm_token_<e-mail> and friends).
     if isinstance(data, dict):
         return {
-            key: _redact(value, keys) for key, value in data.items() if key not in keys
+            key: _redact(value, keys, prefixes)
+            for key, value in data.items()
+            if key not in keys
+            and not (
+                prefixes and isinstance(key, str) and key.startswith(tuple(prefixes))
+            )
         }
     if isinstance(data, list):
         return [_redact(item, keys) for item in data]

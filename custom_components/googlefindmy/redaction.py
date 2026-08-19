@@ -21,37 +21,142 @@ dropped here rather than dragging ``homeassistant.core`` back in.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable, Mapping, Sized
 from typing import Any, cast
 
 # Consistent placeholder used when redacting fields.
 REDACTED = "**REDACTED**"
 
+# The token cache builds key *names* from the account address
+# (``adm_token_<e-mail>``, ``aas_token_issued_at_<e-mail>``). Redacting the value
+# leaves the address standing in the property name, in a file people attach to
+# public issues. The address is replaced in the name as well; the rest of the
+# name is kept, because ``issued_at`` is what makes the entry readable.
+# Two passes, because guessing where a name ends and an address begins cannot
+# be done safely. First the addresses actually present in the payload are
+# removed from key names verbatim, which keeps the readable part of the name
+# (``aas_token_issued_at_...``) intact even for a local part containing an
+# underscore. Whatever still looks like an address afterwards is removed
+# greedily: correctness of the redaction outranks readability of the key.
+#
+# The two patterns are deliberately not the same. The first anchors on the
+# whole string, so it can accept every character a local part may carry,
+# `/` among them (`first/last@example.com` is a valid address and does occur
+# on hosted domains). The second has to find an address *inside* a longer
+# name and stops at `/` and a backslash on purpose, so a path-shaped key name
+# cannot be swallowed whole.
+_EMAIL_VALUE = re.compile(r"^[^\s@]+@[^\s@/\\]+\.[^\s@/\\]+$")
+_EMAIL_IN_KEY = re.compile(r"[^\s@/\\]+@[^\s@/\\]+\.[^\s@/\\]+")
 
-def async_redact_data[T](data: T, to_redact: Iterable[Any]) -> T:
-    """Redact sensitive keys from mappings or lists without importing HA's HTTP stack."""
+
+def async_redact_data[T](
+    data: T,
+    to_redact: Iterable[Any],
+    to_redact_prefixes: Iterable[str] = (),
+    _accounts: dict[str, str] | None = None,
+) -> T:
+    """Redact sensitive keys from mappings or lists without importing HA's HTTP stack.
+
+    ``to_redact`` matches key names exactly. ``to_redact_prefixes`` exists for the
+    keys whose names are built at runtime and can therefore never appear in a
+    fixed list: the token cache stores entries such as ``adm_token_<e-mail>`` and
+    ``android_id_<e-mail>``. Without a prefix rule those names pass an exact-match
+    filter untouched.
+    """
 
     if not isinstance(data, (Mapping, list)):
         return data
 
+    accounts = {} if _accounts is None else _accounts
+    if _accounts is None:
+        _register_addresses(data, accounts)
+
     if isinstance(data, list):
-        return cast(T, [async_redact_data(item, to_redact) for item in data])
+        return cast(
+            T,
+            [
+                async_redact_data(item, to_redact, to_redact_prefixes, accounts)
+                for item in data
+            ],
+        )
 
-    redacted = dict(data)
+    prefixes = tuple(to_redact_prefixes)
+    redacted: dict[Any, Any] = {}
 
-    for key, value in list(redacted.items()):
-        if value is None:
+    for key, value in dict(data).items():
+        out_key = _anonymise_key(key, accounts)
+        # Not `out_key != key`: an anonymised name can also collide with a
+        # literal key that arrives *later*, and that one would then overwrite
+        # the earlier entry. Which field survives would depend on insertion
+        # order, in a file whose purpose is to show what is there.
+        while out_key in redacted:
+            out_key = f"{out_key}-2"
+        if value is None or (isinstance(value, str) and not value):
+            redacted[out_key] = value
             continue
-        if isinstance(value, str) and not value:
-            continue
-        if key in to_redact:
-            redacted[key] = REDACTED
+        if key in to_redact or (
+            prefixes and isinstance(key, str) and key.startswith(prefixes)
+        ):
+            redacted[out_key] = REDACTED
         elif isinstance(value, Mapping):
-            redacted[key] = async_redact_data(value, to_redact)
+            redacted[out_key] = async_redact_data(value, to_redact, prefixes, accounts)
         elif isinstance(value, list):
-            redacted[key] = [async_redact_data(item, to_redact) for item in value]
+            redacted[out_key] = [
+                async_redact_data(item, to_redact, prefixes, accounts) for item in value
+            ]
+        else:
+            redacted[out_key] = value
 
     return cast(T, redacted)
+
+
+def _register_addresses(data: Any, accounts: dict[str, str]) -> None:
+    """Collect the e-mail addresses that appear as *values*, before redaction.
+
+    The key names are built from the account address, so knowing the address
+    lets the name be cleaned exactly instead of by pattern guessing. Run once,
+    on the whole payload, before any value has been replaced.
+    """
+
+    if isinstance(data, Mapping):
+        for value in data.values():
+            _register_addresses(value, accounts)
+        return
+    if isinstance(data, list):
+        for item in data:
+            _register_addresses(item, accounts)
+        return
+    if isinstance(data, str) and _EMAIL_VALUE.match(data) and data not in accounts:
+        accounts[data] = f"<account-{len(accounts) + 1}>"
+
+
+def _anonymise_key(key: Any, accounts: dict[str, str]) -> Any:
+    """Replace an account address inside a key *name* with a stable placeholder.
+
+    Numbered rather than hashed: a hash of an e-mail address is reversible with
+    a word list, and the only thing a reader needs from the name is whether two
+    entries belong to the same account.
+    """
+
+    if not isinstance(key, str) or "@" not in key:
+        return key
+
+    # Longest first, so a shorter address that is a suffix of a longer one
+    # cannot claim the match.
+    for address in sorted(accounts, key=len, reverse=True):
+        if address in key:
+            key = key.replace(address, accounts[address])
+            if "@" not in key:
+                return key
+
+    def _replace(match: re.Match[str]) -> str:
+        address = match.group(0)
+        if address not in accounts:
+            accounts[address] = f"<account-{len(accounts) + 1}>"
+        return accounts[address]
+
+    return _EMAIL_IN_KEY.sub(_replace, key)
 
 
 def describe_keys(value: Any) -> str:
