@@ -64,6 +64,11 @@ jobs:
             echo "pip-audit failed with exit code $status" >&2
             exit "$status"
           fi
+          audited=$(jq '.dependencies | length' audit.json)
+          if [ "$audited" -eq 0 ]; then
+            echo "::error title=pip-audit measured nothing::The report lists zero packages. The exported requirements carry environment markers (python_full_version >= \"3.14.2\"); running pip-audit under an older interpreter discards every line and reports a clean result that means nothing. Check the python-version of this job against the constraint in pyproject.toml." >&2
+            exit 1
+          fi
           fixable=$(jq '[.dependencies[].vulns[] | select((.fix_versions|length)>0)] | length' audit.json)
           unfixable=$(jq '[.dependencies[].vulns[] | select((.fix_versions|length)==0)] | length' audit.json)
           printf " - Poetry dependencies: fixable=%s, unfixable=%s\n" "$fixable" "$unfixable" >> "$summary_tmp"
@@ -71,8 +76,17 @@ jobs:
             echo "::warning title=pip-audit (no fix available)::${unfixable} vulnerability/vulnerabilities without a fix."
           fi
           if [ "$fixable" -gt 0 ]; then
-            echo "::notice title=pip-audit (fix available)::${fixable} vulnerability/vulnerabilities have fixes. They will be auto-fixed by the scheduled job."
+            # Deliberately not phrased as a promise. The scheduled job runs
+            # `poetry update --lock`, which can only move a package inside the
+            # constraints it is given. Home Assistant pins several of its
+            # dependencies exactly (aiohttp, cryptography, Pillow, PyJWT), and a
+            # finding in one of those cannot be resolved by any update run --
+            # only by a Home Assistant release whose own pin carries the fix.
+            # Claiming otherwise is what made four consecutive autofix pull
+            # requests look actionable when they were not.
+            echo "::notice title=pip-audit (fix available upstream)::${fixable} vulnerability/vulnerabilities report a fix version. The scheduled job will attempt an update; findings in packages Home Assistant pins exactly cannot be moved by it."
           fi
+          echo " - The blocking runtime gate is \`script/audit_manifest.py\` (pytest \`test_no_fixable_integration_owned_vulnerability\`), which audits the \`manifest.json\` requirements users actually install. This job is report-only over the dev/test lock." >> "$summary_tmp"
 
           cat "$summary_tmp" >> "$GITHUB_STEP_SUMMARY"
           rm "$summary_tmp"
@@ -82,9 +96,15 @@ jobs:
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     steps:
+      # Pinned to the default branch on purpose. Without `ref`, a manual
+      # `workflow_dispatch` from a topic branch makes the action open its pull
+      # request against that branch: #1237 landed on
+      # `fix/subentry-deletion-type-axis` instead of the release line, where
+      # nobody was looking for it.
       - name: Check out
         uses: actions/checkout@v5
         with:
+          ref: ${{ github.event.repository.default_branch }}
           persist-credentials: false  # use GITHUB_TOKEN via the PR action
 
       - name: Set up Python
@@ -128,8 +148,15 @@ jobs:
             exit "$status"
           fi
 
+          audited=$(jq '.dependencies | length' audit.json)
+          if [ "$audited" -eq 0 ]; then
+            echo "::error title=pip-audit measured nothing::The report lists zero packages. The exported requirements carry environment markers (python_full_version >= \"3.14.2\"); running pip-audit under an older interpreter discards every line and reports a clean result that means nothing. Check the python-version of this job against the constraint in pyproject.toml." >&2
+            exit 1
+          fi
           fixable=$(jq '[.dependencies[].vulns[] | select((.fix_versions|length)>0)] | length' audit.json)
           unfixable=$(jq '[.dependencies[].vulns[] | select((.fix_versions|length)==0)] | length' audit.json)
+
+          fixable_after="$fixable"
 
           if [ "$fixable" -gt 0 ]; then
             echo "Found ${fixable} fixable vulnerabilities, updating Poetry dependencies..."
@@ -138,23 +165,65 @@ jobs:
             poetry update --lock
 
             if ! git diff --quiet -- pyproject.toml poetry.lock; then
-              changed=1
+              # A changed lock is not the same as a fixed vulnerability. An
+              # update run routinely moves unrelated packages while the finding
+              # that triggered it stays put, because Home Assistant pins it
+              # exactly. Re-audit and keep the change only if the fixable count
+              # actually went down; otherwise the weekly pull request is noise
+              # that has to be reviewed and closed by hand (#1191, #1212,
+              # #1223, #1237 were all of that kind).
+              poetry export -f requirements.txt --without-hashes -o poetry-requirements.txt --with dev,test
+              set +e
+              pip-audit -r poetry-requirements.txt -f json -o audit.json
+              status=$?
+              set -e
+              if [ "$status" -gt 1 ]; then
+                echo "pip-audit failed with exit code $status" >&2
+                exit "$status"
+              fi
+              # Same guard as before the first audit, and for the same reason
+              # one level down: an empty re-audit yields fixable_after=0, which
+              # is less than any real prior count, so the job would open a pull
+              # request announcing a fix it never measured.
+              audited_after=$(jq '.dependencies | length' audit.json)
+              if [ "$audited_after" -eq 0 ]; then
+                echo "::error title=pip-audit measured nothing after the update::The re-audit lists zero packages, so its count cannot be compared with the pre-update count." >&2
+                exit 1
+              fi
+              fixable_after=$(jq '[.dependencies[].vulns[] | select((.fix_versions|length)>0)] | length' audit.json)
+
+              if [ "$fixable_after" -lt "$fixable" ]; then
+                changed=1
+              else
+                echo "::notice title=pip-audit (no effective fix)::The update run changed the lock but did not reduce the fixable count (${fixable} -> ${fixable_after}). No pull request is opened."
+                git checkout -- pyproject.toml poetry.lock poetry-requirements.txt audit.json
+                fixable_after="$fixable"
+              fi
             fi
           fi
 
           {
             echo "- Poetry dependencies: fixable=${fixable}, unfixable=${unfixable}"
+            echo "- After the update run: fixable=${fixable_after}"
+            echo "- A pull request is opened only when the fixable count drops. Findings in packages Home Assistant pins exactly (aiohttp, cryptography, Pillow, PyJWT) cannot be moved here; they need a Home Assistant release whose own pin carries the fix."
           } >> "$GITHUB_STEP_SUMMARY"
           echo "changed=$changed" >> "$GITHUB_OUTPUT"
+          echo "fixable_before=$fixable" >> "$GITHUB_OUTPUT"
+          echo "fixable_after=$fixable_after" >> "$GITHUB_OUTPUT"
 
       - name: Create pull request with fixes
         if: steps.fixrun.outputs.changed == '1'
         uses: peter-evans/create-pull-request@v8.1.1
         with:
+          base: ${{ github.event.repository.default_branch }}
           branch: security/pip-audit-autofix
           delete-branch: true
           commit-message: "pip-audit: apply available security updates"
           title: "pip-audit: automatic security updates"
           body: |
-            This PR was created automatically by `pip-audit`. It upgrades vulnerable dependencies where fixes exist by updating `pyproject.toml` and `poetry.lock`. Vulnerabilities with no available fix remain and are reported in the job summary.
+            This PR was created automatically by `pip-audit`. It updates `pyproject.toml` and `poetry.lock`.
+
+            It is opened **only because the number of fixable findings actually went down**: ${{ steps.fixrun.outputs.fixable_before }} -> ${{ steps.fixrun.outputs.fixable_after }}. An update run that changes the lock without reducing that count is discarded instead of proposed.
+
+            Remaining findings are listed in the job summary. Findings in packages Home Assistant pins exactly cannot be fixed here; they need a Home Assistant release whose own pin carries the fix. The blocking gate for what users actually install is `script/audit_manifest.py`, not this job.
           labels: security, dependencies, automated-pr
