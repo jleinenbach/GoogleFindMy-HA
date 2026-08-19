@@ -1139,3 +1139,78 @@ async def test_popup_coordinates_display_is_shortened_copy_stays_raw(
     ) in html
     # (f) copy path is untouched by rounding: no toFixed inside the copy handler
     assert 'gfmyCopyToClipboard(loc.lat + ", " + loc.lon, coBtn).toFixed' not in html
+
+
+# ---------------------------------------------------------------------------
+# Response hygiene headers: the map URL carries its token in the query string
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_map_response_carries_no_store_and_norobots(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The rendered map must not be cached or indexed.
+
+    The access token travels in the query string, so a cached copy on a shared
+    machine, or an indexed URL on an instance reachable from the internet, is
+    the way such a link actually leaks.
+    """
+
+    device_id = "device123"
+    coordinator = SimpleNamespace(data=[{"id": device_id, "name": "Test Device"}])
+    entry = make_config_entry(entry_id="entry-id", runtime_data=coordinator)
+    hass = _StubHass([entry])
+
+    monkeypatch.setattr(map_view, "_resolve_coordinator_class", lambda: SimpleNamespace)
+
+    registry_entry = _StubRegistryEntry(
+        entity_id="device_tracker.device123",
+        unique_id=f"{entry.entry_id}:{device_id}",
+        config_entry_id=entry.entry_id,
+    )
+    monkeypatch.setattr(
+        map_view.er, "async_get", lambda _hass: _StubEntityRegistry([registry_entry])
+    )
+    _install_history_stub(
+        monkeypatch, registry_entry.entity_id, _StubState(latitude=10.0, longitude=20.0)
+    )
+
+    ha_uuid = hass.data["core.uuid"]
+    token = map_token_hex_digest(map_token_secret_seed(ha_uuid, entry.entry_id, False))
+
+    response = await map_view.GoogleFindMyMapView(hass).get(
+        SimpleNamespace(query={"token": token}), device_id=device_id
+    )
+
+    assert response.status == 200
+    assert response.headers["Cache-Control"] == "no-store"
+    assert response.headers["X-Robots-Tag"] == "noindex, nofollow"
+
+
+@pytest.mark.asyncio
+async def test_error_pages_carry_the_same_headers() -> None:
+    """The 401 page is reached with the token in the URL as well."""
+
+    response = await map_view.GoogleFindMyMapView(_StubHass([])).get(
+        SimpleNamespace(query={}), device_id="device123"
+    )
+
+    assert response.status == 401
+    assert response.headers["Cache-Control"] == "no-store"
+    assert response.headers["X-Robots-Tag"] == "noindex, nofollow"
+
+
+@pytest.mark.asyncio
+async def test_redirect_carries_the_same_headers() -> None:
+    """A cached 302 would hand the token to the next user of the browser."""
+
+    view = map_view.GoogleFindMyMapRedirectView(_StubHass([]))
+
+    with pytest.raises(map_view.web.HTTPFound) as ctx:
+        await view.get(SimpleNamespace(query={"token": "abc"}), device_id="device123")
+
+    assert ctx.value.headers["Cache-Control"] == "no-store"
+    assert ctx.value.headers["X-Robots-Tag"] == "noindex, nofollow"
+    # the relative Location contract is unchanged
+    assert ctx.value.location == "/api/googlefindmy/map/device123?token=abc"
