@@ -54,29 +54,52 @@ class LoginAborted(Exception):
     """
 
 
+# Evidence that the browser *died* rather than being closed. Chromedriver
+# announces a crash through the same channels as a closed window -- an
+# ``InvalidSessionIdException``, or a ``WebDriverException`` whose message
+# mentions a lost DevTools connection -- so these phrases are what tells the two
+# apart, and they outrank every abort signal below. Reporting a crash as "you
+# cancelled" would exit 130 with a reassuring sentence and discard the traceback
+# of a real defect, which is the opposite of what this classifier is for.
+_CRASH_MARKERS = (
+    "session deleted because of page crash",
+    "chrome not reachable",
+    "tab crashed",
+    "cannot connect to chrome at",
+    "devtoolsactiveport file doesn't exist",
+)
+
+# Evidence that the *window* is gone: each phrase either names the window or
+# says the browser itself closed the connection. A bare "disconnected: not
+# connected to DevTools" is deliberately absent -- it is the generic symptom of
+# any lost connection, a crash included, so on its own it proves nothing about
+# who ended the session.
+_WINDOW_GONE_MARKERS = (
+    "no such window",
+    "target window already closed",
+    "web view not found",
+    "session deleted as the browser has closed the connection",
+)
+
+
 def _describe_lost_session(err: WebDriverException) -> str | None:
     """Return an abort reason when *err* means "the browser window is gone".
 
-    Selenium reports the same event under more than one type and, for the
-    generic ``WebDriverException``, only in the message. ``NoSuchWindowException``
-    and ``InvalidSessionIdException`` are typed and therefore matched as types.
-    The text match below is the deliberate remainder: chromedriver reports a
-    window that was closed mid-command as a bare ``WebDriverException`` whose
-    message is the only discriminator, and treating *every* ``WebDriverException``
-    as an abort would swallow real defects (a broken driver, a crashed renderer)
-    behind a friendly "you cancelled" line.
+    Selenium reports that event under more than one type and, for the generic
+    ``WebDriverException``, only in the message -- so the message is read first,
+    and a crash marker ends the classification immediately. Only then do the
+    window-gone phrases and the two typed cases (``NoSuchWindowException``,
+    ``InvalidSessionIdException``) count as a cancellation: both types also fire
+    when Chrome dies on its own, and the crash check above is what keeps such a
+    failure on the traceback path instead of turning it into a friendly
+    "you cancelled" line.
     """
-    if isinstance(err, (NoSuchWindowException, InvalidSessionIdException)):
-        return "the browser window was closed"
     message = (getattr(err, "msg", None) or str(err) or "").lower()
-    lost_markers = (
-        "no such window",
-        "target window already closed",
-        "web view not found",
-        "disconnected: not connected to devtools",
-        "session deleted as the browser has closed the connection",
-    )
-    if any(marker in message for marker in lost_markers):
+    if any(marker in message for marker in _CRASH_MARKERS):
+        return None
+    if any(marker in message for marker in _WINDOW_GONE_MARKERS):
+        return "the browser window was closed"
+    if isinstance(err, (NoSuchWindowException, InvalidSessionIdException)):
         return "the browser window was closed"
     return None
 

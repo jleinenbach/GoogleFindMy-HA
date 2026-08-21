@@ -675,8 +675,10 @@ def _flow_raising(
         auth_flow.NoSuchWindowException("no such window: target window already closed"),
         # The untyped remainder: chromedriver reports a window closed mid-command
         # as a bare WebDriverException, where the message is the only signal.
+        # The phrase has to name the window -- see the DevTools test below for
+        # what deliberately does *not* count.
         auth_flow.WebDriverException(
-            "disconnected: not connected to DevTools (Session info: chrome=150)"
+            "no such window: target window already closed (Session info: chrome=150)"
         ),
     ],
 )
@@ -718,6 +720,50 @@ def test_a_real_driver_failure_keeps_its_own_type(
     driver = _flow_raising(monkeypatch, error)
 
     with pytest.raises(auth_flow.WebDriverException, match="cannot determine loading"):
+        request_oauth_account_token_flow(headless=True)
+
+    assert driver.quit_calls == 1
+
+
+def test_a_bare_devtools_disconnect_is_not_an_abort(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ "disconnected: not connected to DevTools" alone proves nothing.
+
+    It is the generic symptom of *any* lost connection: a closed window says it,
+    and so does a Chrome that segfaulted or was OOM-killed. Treating it as a
+    cancellation exits 130 with "you stopped" and drops the traceback of a real
+    failure, so the phrase is not on the window-gone list. The closed window
+    still reaches the abort path, because chromedriver pairs it with a phrase
+    that names the window (see the parametrised cases above).
+    """
+    error = auth_flow.WebDriverException(
+        "disconnected: not connected to DevTools (Session info: chrome=150)"
+    )
+    driver = _flow_raising(monkeypatch, error)
+
+    with pytest.raises(auth_flow.WebDriverException, match="not connected to DevTools"):
+        request_oauth_account_token_flow(headless=True)
+
+    assert driver.quit_calls == 1
+
+
+def test_a_crashed_browser_keeps_its_own_type_despite_an_abort_type(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A crash marker outranks the typed abort signal.
+
+    ``InvalidSessionIdException`` is raised for every dead session, whoever
+    killed it -- the user, a crash, an OOM kill. When the message names a crash,
+    that evidence wins: the run must end in a traceback the user can report, not
+    in a friendly line claiming they cancelled something they did not.
+    """
+    error = auth_flow.InvalidSessionIdException(
+        "invalid session id: session deleted because of page crash"
+    )
+    driver = _flow_raising(monkeypatch, error)
+
+    with pytest.raises(auth_flow.InvalidSessionIdException, match="page crash"):
         request_oauth_account_token_flow(headless=True)
 
     assert driver.quit_calls == 1
