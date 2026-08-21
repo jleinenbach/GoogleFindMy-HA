@@ -629,7 +629,14 @@ def test_the_chain_surfaces_the_typed_failure_instead_of_its_own(
         "_try_strategy_headless",
     ):
         monkeypatch.setattr(chrome_driver, strategy, lambda **_: (None, typed))
-    monkeypatch.setattr(chrome_driver, "_try_webdriver_manager_fallback", lambda: None)
+    # ``**_`` rather than a bare ``lambda``: the fallback is called with the
+    # window mode the caller asked for, and a stub that only accepts the
+    # signature of the day turns a future keyword into a TypeError raised
+    # from inside the code under test, which this test would then report as
+    # a failure of the chain rather than of its own double.
+    monkeypatch.setattr(
+        chrome_driver, "_try_webdriver_manager_fallback", lambda **_: None
+    )
 
     with pytest.raises(browser_deps.BrowserPackagesUnusable):
         chrome_driver._create_driver_inner(headless=True)
