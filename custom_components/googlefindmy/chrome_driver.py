@@ -13,7 +13,7 @@ import sys
 import time
 from collections.abc import Callable, Mapping
 from types import ModuleType, SimpleNamespace
-from typing import Any, cast
+from typing import Any, Protocol, cast
 
 from custom_components.googlefindmy.browser_deps import (
     MISSING_BROWSER_PACKAGES_HINT,
@@ -618,6 +618,52 @@ def _login_locale(env: Mapping[str, str]) -> str | None:
     return candidate
 
 
+class _AcceptsChromeArguments(Protocol):
+    """The one thing both option builders have in common.
+
+    Documents the requirement; it does not currently enforce it at either call
+    site, and saying otherwise would be a control claim this file cannot cash.
+    Both callers pass an object typed ``Any`` (the uc module is resolved
+    dynamically, ``_selenium_webdriver`` is imported lazily), and mypy checks
+    nothing against a protocol when the argument is ``Any``. It becomes binding
+    the moment either of those grows a real type, which is the cheapest way to
+    have the guarantee waiting rather than to add it later.
+    """
+
+    def add_argument(self, argument: str) -> None: ...  # pragma: no cover
+
+
+def _apply_login_locale(
+    options: _AcceptsChromeArguments, env: Mapping[str, str]
+) -> str | None:
+    """Put the user's language on ``options``, or leave it untouched.
+
+    Every Chrome this module starts goes through one of two option builders, and
+    a user who sets the variable means the login they get, not the one strategy
+    that happened to win. Keeping the two switches here rather than in each
+    builder is the point: a third builder that forgets them is then caught by
+    ``test_every_chrome_options_builder_applies_the_login_locale`` -- within
+    that test's measured extent, which is module-level ``def``/``async def`` in
+    this file that name ``ChromeOptions`` directly. A builder reached through an
+    alias or built at import time is outside it, and outside anything short of
+    running the code.
+
+    Both switches are needed and neither is optional: ``--lang`` localises the
+    browser, ``--accept-lang`` the page Google serves for it. Returns the applied
+    tag, or ``None`` when nothing was requested.
+    """
+    locale = _login_locale(env)
+    if locale is None:
+        return None
+    options.add_argument(f"--lang={locale}")
+    options.add_argument(f"--accept-lang={locale}")
+    # Logged here rather than left to the callers: a rejected value already says
+    # so at warning level, but an accepted one that never reached the browser
+    # used to leave no trace at all, which is the harder half to diagnose.
+    LOGGER.debug("Login browser language set to %s", locale)
+    return locale
+
+
 def get_options(*, headless: bool = False) -> ChromeOptions:
     """Create Chrome options that match the integration's requirements.
 
@@ -684,14 +730,8 @@ def get_options(*, headless: bool = False) -> ChromeOptions:
 
     # Language. Nothing here forces one: without the variable Chrome keeps its
     # own default (English in a bare container), which is the right fallback for
-    # a login page nobody should have to translate. With it, Chrome's UI *and*
-    # the Accept-Language it sends follow the user, so Google shows the sign-in
-    # in the language they actually read. Both switches are needed: --lang alone
-    # localises the browser, not the page it requests.
-    locale = _login_locale(os.environ)
-    if locale is not None:
-        chrome_options.add_argument(f"--lang={locale}")
-        chrome_options.add_argument(f"--accept-lang={locale}")
+    # a login page nobody should have to translate.
+    _apply_login_locale(chrome_options, os.environ)
 
     return chrome_options
 
@@ -742,8 +782,19 @@ def get_driver(
     )
 
 
-def _try_webdriver_manager_fallback() -> WebDriver | None:
+def _try_webdriver_manager_fallback(
+    *, headless: bool = False, resolved_path: str | None = None
+) -> WebDriver | None:
     """Try to use webdriver-manager as a fallback for standard Selenium.
+
+    Parameters
+    ----------
+    headless: bool
+        Whether the browser should run without a window, mirroring the
+        caller's request to :func:`create_driver`.
+    resolved_path: str | None
+        The Chrome binary the four earlier strategies were pointed at, or
+        ``None`` to let Selenium look for one itself.
 
     Returns
     -------
@@ -759,9 +810,41 @@ def _try_webdriver_manager_fallback() -> WebDriver | None:
         LOGGER.info("Attempting webdriver-manager fallback...")
         service = _chrome_service_cls(_chrome_driver_manager_cls().install())
         options = _selenium_webdriver.ChromeOptions()
-        options.add_argument("--start-maximized")
+        # Still not a copy of get_options(): the two origin-isolation flags it
+        # sets are absent here on purpose, and their absence is the evidence
+        # that they are dispensable (see the note there). What does belong on
+        # every path is what the *caller* asked for, and strategy 5 used to be
+        # the one path that forgot it (Codex review, PR #1261).
+        #
+        # What is applied here, and why each is not optional:
+        #   - the window mode: a visible window is useless in an environment
+        #     that has no display, which is exactly the one that asked for
+        #     headless. --disable-gpu rides along because get_options() sets it
+        #     unconditionally and headless without it is the documented failure
+        #     combination on older builds and on Windows.
+        #   - the Chrome binary: the four earlier strategies all honour
+        #     GOOGLEFINDMY_CHROME_PATH, so a fallback that starts whatever
+        #     Chrome happens to be on PATH either fails on a machine that has
+        #     none, or silently runs a different browser than the user chose.
+        #   - the language: the sign-in page has to be readable whichever
+        #     strategy opened it.
+        #
+        # Still *not* honoured here, deliberately: the resolved Chrome major
+        # version. webdriver-manager takes it through its own constructor
+        # argument, whose name and semantics differ across releases, and
+        # guessing at that from an untested fallback path would trade a
+        # cosmetic gap for a driver that fails to install at all. Noted for a
+        # follow-up that can measure the installed webdriver-manager instead.
+        if headless:
+            options.add_argument("--headless")
+            options.add_argument("--disable-gpu")
+        else:
+            options.add_argument("--start-maximized")
+        if resolved_path:
+            options.binary_location = resolved_path
         options.add_argument("--no-sandbox")
         options.add_argument("--disable-dev-shm-usage")
+        _apply_login_locale(options, os.environ)
 
         driver = _selenium_webdriver.Chrome(service=service, options=options)
         LOGGER.warning(
@@ -1262,7 +1345,9 @@ def _create_driver_inner(
                 all_file_lock = False
 
     # Strategy 5: webdriver-manager fallback
-    fallback_driver = _try_webdriver_manager_fallback()
+    fallback_driver = _try_webdriver_manager_fallback(
+        headless=headless, resolved_path=resolved_path
+    )
     if fallback_driver is not None:
         _warn_on_driver_version_mismatch(
             fallback_driver, detected_version=detected_version

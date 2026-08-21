@@ -3,9 +3,11 @@
 
 from __future__ import annotations
 
+import ast
 import importlib
 import logging
 import os
+import pathlib
 import platform
 import shutil
 import signal
@@ -2100,8 +2102,15 @@ def test_create_driver_uses_webdriver_manager_fallback(
     monkeypatch.setattr(chrome_driver, "_kill_existing_chrome_processes", lambda: None)
     monkeypatch.setattr(chrome_driver, "find_chrome", lambda: None)
     monkeypatch.setattr(chrome_driver, "get_chrome_version", lambda _p, **_k: None)
+    # ``**_`` rather than the signature of the day: this test cares that the
+    # fallback is reached, not how it is parameterised. Pinning the keywords
+    # here made a later, unrelated parameter surface as a TypeError raised from
+    # inside the code under test -- a failure of the double reported as a
+    # failure of the chain.
     monkeypatch.setattr(
-        chrome_driver, "_try_webdriver_manager_fallback", lambda: fallback_driver
+        chrome_driver,
+        "_try_webdriver_manager_fallback",
+        lambda **_: fallback_driver,
     )
 
     assert chrome_driver.create_driver(headless=True) is fallback_driver
@@ -2460,6 +2469,209 @@ def test_no_locale_leaves_chrome_untouched(monkeypatch: pytest.MonkeyPatch) -> N
     options = chrome_driver.get_options(headless=True)
 
     assert not [arg for arg in options.arguments if "lang" in arg]
+
+
+def _fallback_options_with_env(
+    monkeypatch: pytest.MonkeyPatch,
+    locale: str | None,
+    *,
+    headless: bool = False,
+    resolved_path: str | None = None,
+) -> FakeChromeOptions:
+    """Run the webdriver-manager fallback and return the options it built.
+
+    Returns the object, not just its argument list, because not every caller
+    preference arrives as an argument: the Chrome binary is an attribute.
+
+    The fallback is strategy 5: it is reached only after the four
+    undetected-chromedriver attempts have failed, which is exactly when nobody
+    is watching closely enough to notice that the sign-in page came back in the
+    wrong language.
+    """
+    built: list[FakeChromeOptions] = []
+
+    def _make_options() -> FakeChromeOptions:
+        options = FakeChromeOptions()
+        built.append(options)
+        return options
+
+    fake_driver = object()
+
+    def _make_chrome(*, service: object, options: object) -> object:
+        # The arguments are read off built[0] further down; pin that this is the
+        # object Chrome actually received, so a builder that constructs two and
+        # passes the wrong one cannot pass by being measured on the right one.
+        assert options is built[0]
+        return fake_driver
+
+    monkeypatch.setattr(chrome_driver, "_WEBDRIVER_MANAGER_AVAILABLE", True)
+    monkeypatch.setattr(
+        chrome_driver,
+        "_selenium_webdriver",
+        SimpleNamespace(ChromeOptions=_make_options, Chrome=_make_chrome),
+    )
+    monkeypatch.setattr(
+        chrome_driver, "_chrome_service_cls", lambda path: SimpleNamespace(path=path)
+    )
+    monkeypatch.setattr(
+        chrome_driver,
+        "_chrome_driver_manager_cls",
+        lambda: SimpleNamespace(install=lambda: "/driver"),
+    )
+    if locale is None:
+        monkeypatch.delenv(chrome_driver.ENV_LOGIN_LOCALE, raising=False)
+    else:
+        monkeypatch.setenv(chrome_driver.ENV_LOGIN_LOCALE, locale)
+
+    assert (
+        chrome_driver._try_webdriver_manager_fallback(
+            headless=headless, resolved_path=resolved_path
+        )
+        is fake_driver
+    )
+    assert len(built) == 1
+    return built[0]
+
+
+def test_webdriver_manager_fallback_honours_the_login_locale(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Strategy 5 builds its own options; the language must survive that.
+
+    Regression for the Codex finding on PR #1261, reviewed at commit 9b20e736
+    and introduced at 9d0a2841: the language was added inside get_options(), so
+    the one path that does not call it silently ignored the variable and served
+    the container default instead.
+    """
+    arguments = _fallback_options_with_env(monkeypatch, "pt-BR").arguments
+
+    assert "--lang=pt-BR" in arguments
+    assert "--accept-lang=pt-BR" in arguments
+
+
+def test_webdriver_manager_fallback_stays_silent_without_a_locale(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Opting out has to mean the same thing on every path, too.
+
+    Not a regression test: this one is green before the fix as well, because a
+    path that ignored the variable ignored it in both directions. It is here to
+    stop the fix from over-applying, i.e. from inventing a default language for
+    someone who never asked for one.
+    """
+    arguments = _fallback_options_with_env(monkeypatch, None).arguments
+
+    assert not [arg for arg in arguments if "lang" in arg]
+
+
+def test_webdriver_manager_fallback_rejects_an_invalid_locale(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The validation has to hold on this path too, not just by composition.
+
+    The value is spliced into a Chrome command line. That it is validated is
+    covered for the helper in isolation; this pins that the fallback really goes
+    through the validating helper and cannot be handed a second switch.
+    """
+    options = _fallback_options_with_env(monkeypatch, "de-DE --no-sandbox")
+    arguments = options.arguments
+
+    assert not [arg for arg in arguments if "lang" in arg]
+    # Not "--no-sandbox is present": that holds under a successful injection
+    # too, because the smuggled switch would ride inside a *different* element.
+    # What rules injection out is that no element carries a second switch.
+    assert not [arg for arg in arguments if " " in arg], arguments
+
+
+@pytest.mark.parametrize("headless", [False, True])
+def test_webdriver_manager_fallback_follows_the_requested_window_mode(
+    monkeypatch: pytest.MonkeyPatch, headless: bool
+) -> None:
+    """Same finding class as the locale, same answer.
+
+    create_driver(headless=True) reaches strategy 5, and a fallback that opens a
+    visible window fails exactly in the environment that asked for headless,
+    i.e. one without a display.
+    """
+    arguments = _fallback_options_with_env(
+        monkeypatch, None, headless=headless
+    ).arguments
+
+    assert ("--headless" in arguments) is headless
+    assert ("--start-maximized" in arguments) is not headless
+    # --disable-gpu belongs to the headless mode, not to the fallback: it is
+    # what get_options() pairs with --headless unconditionally, and headless
+    # without it is the documented failure combination on older builds and on
+    # Windows. Asserted rather than merely executed, so that dropping it turns
+    # a test red instead of only changing a coverage number.
+    assert ("--disable-gpu" in arguments) is headless
+
+
+@pytest.mark.parametrize("resolved_path", [None, "/opt/portable/chrome"])
+def test_webdriver_manager_fallback_uses_the_resolved_chrome_binary(
+    monkeypatch: pytest.MonkeyPatch, resolved_path: str | None
+) -> None:
+    """Same finding class as the locale, third instance.
+
+    The four earlier strategies all point Chrome at GOOGLEFINDMY_CHROME_PATH.
+    A fallback that does not either starts a different browser than the user
+    chose, or fails outright on a machine whose Chrome is not on PATH -- and it
+    runs precisely when the other four have already failed, so there is nothing
+    behind it to correct the mistake.
+    """
+    options = _fallback_options_with_env(monkeypatch, None, resolved_path=resolved_path)
+
+    assert options.binary_location == resolved_path
+
+
+def test_every_chrome_options_builder_applies_the_login_locale() -> None:
+    """The guard against the finding coming back through a third builder.
+
+    The tests above pin the two builders that exist today. This one pins the
+    rule, by reading the module's own syntax tree: every function that
+    constructs ChromeOptions must also call _apply_login_locale. A future
+    builder that inlines the switches again, or forgets them, is caught even
+    though no test executes it -- which a test that merely counts calls into the
+    two known builders could never do.
+    """
+    tree = ast.parse(pathlib.Path(chrome_driver.__file__).read_text(encoding="utf-8"))
+
+    def _calls(node: ast.AST) -> set[str]:
+        names: set[str] = set()
+        for child in ast.walk(node):
+            if not isinstance(child, ast.Call):
+                continue
+            func = child.func
+            if isinstance(func, ast.Attribute):
+                names.add(func.attr)
+            elif isinstance(func, ast.Name):
+                names.add(func.id)
+        return names
+
+    builders = {
+        node.name: _calls(node)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)
+        and "ChromeOptions" in _calls(node)
+    }
+
+    # Griff-Kontrolle, in both directions. Non-emptiness alone would still pass
+    # after a builder is renamed out of view, which is the failure this test
+    # exists to notice: it would then report success having lost exactly the
+    # path it was written for. Naming the two known builders costs an update
+    # when one is renamed on purpose -- and that update is the point.
+    assert {"get_options", "_try_webdriver_manager_fallback"} <= builders.keys(), (
+        f"the guard lost its grip: it sees {sorted(builders)}. If a builder was "
+        f"renamed, rename it here too; if one was removed, say so here."
+    )
+
+    missing = sorted(
+        name for name, calls in builders.items() if "_apply_login_locale" not in calls
+    )
+    assert not missing, (
+        f"these builders construct ChromeOptions without applying the user's "
+        f"language: {missing}. Call _apply_login_locale(options, os.environ)."
+    )
 
 
 @pytest.mark.parametrize(
