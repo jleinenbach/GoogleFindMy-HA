@@ -210,6 +210,58 @@ if [ "${GFMY_NOVNC_TLS:-}" = "1" ]; then
   fi
 fi
 
+# --- Keyboard: make AltGr characters reach Chrome ------------------------------
+# Symptom this fixes: on a German (and every other AltGr) layout the "@" of the
+# account e-mail never appeared in the browser, which makes the login literally
+# impossible to complete.
+#
+# The chain, read from the two ends that are actually source-verifiable:
+#   * noVNC sends the *character*, not the key combination: getKeysym() ends in
+#     `keysyms.lookup(codepoint)`, so AltGr+Q arrives as the keysym `at`
+#     (core/input/util.js). Separately, the AltGr press itself arrives as
+#     `ISO_Level3_Shift` (core/input/domkeytable.js: addStandard("AltGraph",
+#     XK_ISO_Level3_Shift)) -- and it is still *held down* when `at` arrives.
+#   * The base image starts x11vnc with neither -xkb nor -remap (NodeBase/
+#     start-vnc.sh builds X11VNC_OPTS from scratch, so an inherited value cannot
+#     add to it). x11vnc's own default only switches -xkb on when a keysym like
+#     "@" is otherwise unreachable (x11vnc(1), -xkb); on the container's us
+#     layout "@" *is* reachable as Shift+2, so it stays off and the stray
+#     modifier is injected around the character.
+#
+# Two settings, both from the x11vnc man page:
+#   xkb    -- resolve the keysym through XKEYBOARD instead of plain modtweak,
+#             which is the documented remedy "if there are still keymapping
+#             problems when using -modtweak by itself".
+#   remap  -- drop the level-3 modifiers entirely ("To disable a keysym [...]
+#             remap it to NoSymbol"). Nothing is lost: the character keysym
+#             already carries the meaning, and no login needs AltGr shortcuts.
+#
+# Written here, at runtime, rather than baked into the image, so it sits next to
+# every other viewer decision and can be switched off in one place. x11vnc reads
+# $HOME/.x11vncrc as "one command line option per line" (leading dash optional),
+# and it is read by the supervisor child started below -- hence *before* that
+# line, exactly like the VNC password above.
+if [ "${GFMY_KEYBOARD_FIX:-1}" = "1" ]; then
+  # Non-fatal on purpose. This script runs under `set -e`, so an unguarded
+  # redirection into a read-only HOME would abort the whole login over a
+  # convenience setting -- a worse outcome than the keyboard problem it fixes.
+  if ! printf '%s\n' \
+    '# Written by GoogleFindMy-HA docker-login/entrypoint.sh.' \
+    '# Disable with GFMY_KEYBOARD_FIX=0.' \
+    'xkb' \
+    'remap ISO_Level3_Shift-NoSymbol,Mode_switch-NoSymbol' \
+    > "${HOME:-/home/seluser}/.x11vncrc" 2>/dev/null; then
+    echo "[entrypoint] WARNING: could not write ~/.x11vncrc; AltGr characters" >&2
+    echo "[entrypoint] may not reach the browser. Paste them via the noVNC" >&2
+    echo "[entrypoint] clipboard panel instead." >&2
+  fi
+else
+  # An explicit opt-out must also undo a file left by an earlier run, or the
+  # switch would only work on a pristine container.
+  rm -f "${HOME:-/home/seluser}/.x11vncrc" 2>/dev/null || true
+  echo "[entrypoint] Keyboard fix disabled (GFMY_KEYBOARD_FIX=0)."
+fi
+
 "${VENV_PATH}/bin/supervisord" --configuration /etc/supervisord.conf &
 SUPERVISOR_PID=$!
 
@@ -381,6 +433,33 @@ if command -v curl >/dev/null 2>&1; then
     fi
     sleep 1
   done
+fi
+
+# --- Optional X keyboard layout (opt-in) ---------------------------------------
+# The keysym remap above is what makes AltGr characters work regardless of
+# layout, and it needs no configuration. This block is the second, *optional*
+# lever for the rarer cases it cannot reach -- dead keys, a layout whose
+# characters have no keysym of their own -- and it is off unless asked for:
+# nobody's keyboard should be assumed. GFMY_KEYBOARD_LAYOUT takes what
+# setxkbmap takes ("de", "fr", "de -variant nodeadkeys").
+#
+# Placed after the grid wait because setxkbmap needs a live X display, and kept
+# bounded and best-effort for the same reason as that wait: a missing setxkbmap
+# or a slow Xvfb must cost the login nothing. It touches no trap/wait machinery.
+# shellcheck disable=SC2086 -- the layout may legitimately carry option words.
+if [ -n "${GFMY_KEYBOARD_LAYOUT:-}" ]; then
+  if command -v setxkbmap >/dev/null 2>&1; then
+    for _i in $(seq 1 15); do
+      if setxkbmap -display "${DISPLAY}" ${GFMY_KEYBOARD_LAYOUT} 2>/dev/null; then
+        echo "[entrypoint] Keyboard layout set to '${GFMY_KEYBOARD_LAYOUT}'."
+        break
+      fi
+      sleep 1
+    done
+  else
+    echo "[entrypoint] WARNING: GFMY_KEYBOARD_LAYOUT is set but setxkbmap is not" >&2
+    echo "[entrypoint] installed; keeping the default layout." >&2
+  fi
 fi
 
 cd /app/gfmy
