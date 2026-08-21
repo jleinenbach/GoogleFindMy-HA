@@ -86,6 +86,10 @@ def test_get_options_headless_uses_expected_arguments(
 
     uc_module = chrome_driver._get_uc_module()
     monkeypatch.setattr(uc_module, "ChromeOptions", FakeChromeOptions)
+    # The frozen list only holds if the ambient environment does not add to it:
+    # a developer with the locale variable exported would see this fail for a
+    # reason that has nothing to do with the flags it guards.
+    monkeypatch.delenv(chrome_driver.ENV_LOGIN_LOCALE, raising=False)
 
     options = chrome_driver.get_options(headless=True)
 
@@ -2421,3 +2425,86 @@ def test_create_driver_warns_but_returns_on_version_mismatch(
         "does not match the running Chrome major" in record.getMessage()
         for record in caplog.records
     )
+
+
+# --- Login language ------------------------------------------------------------
+#
+# The container login used to show Google's sign-in page in English no matter who
+# was looking at it, because Chrome inherits no language in a bare image. The
+# variable below lets a user hand their own language in. The tests pin the two
+# halves of the promise: opting in localises both the browser and the request,
+# and staying silent changes nothing at all.
+
+
+def test_login_locale_adds_both_language_switches(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    uc_module = chrome_driver._get_uc_module()
+    monkeypatch.setattr(uc_module, "ChromeOptions", FakeChromeOptions)
+    monkeypatch.setenv(chrome_driver.ENV_LOGIN_LOCALE, "de-DE")
+
+    options = chrome_driver.get_options(headless=True)
+
+    # --lang localises Chrome, --accept-lang the page Google serves. One without
+    # the other leaves the user with half a translation.
+    assert "--lang=de-DE" in options.arguments
+    assert "--accept-lang=de-DE" in options.arguments
+
+
+def test_no_locale_leaves_chrome_untouched(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The default must not choose a language for anyone."""
+    uc_module = chrome_driver._get_uc_module()
+    monkeypatch.setattr(uc_module, "ChromeOptions", FakeChromeOptions)
+    monkeypatch.delenv(chrome_driver.ENV_LOGIN_LOCALE, raising=False)
+
+    options = chrome_driver.get_options(headless=True)
+
+    assert not [arg for arg in options.arguments if "lang" in arg]
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("de", "de"),
+        ("pt-BR", "pt-BR"),
+        # What a shell actually hands out. Accepted and translated rather than
+        # rejected, because this is the value users will copy from `echo $LANG`.
+        ("de_DE.UTF-8", "de-DE"),
+        ("pt_BR@euro", "pt-BR"),
+        ("  fr-CA  ", "fr-CA"),
+    ],
+)
+def test_login_locale_accepts_tags_and_posix_locales(
+    monkeypatch: pytest.MonkeyPatch, raw: str, expected: str
+) -> None:
+    monkeypatch.setenv(chrome_driver.ENV_LOGIN_LOCALE, raw)
+    assert chrome_driver._login_locale(os.environ) == expected
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "",
+        "   ",
+        "German",  # a language name, not a tag
+        "de-DE --no-sandbox",  # the reason this is validated at all
+        "../../etc/passwd",
+        "de;rm -rf /",
+    ],
+)
+def test_a_bad_locale_is_ignored_not_fatal(
+    monkeypatch: pytest.MonkeyPatch, raw: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A cosmetic preference must never be able to stop or steer the login.
+
+    The two whitespace-carrying values are the point: the value is spliced into
+    a Chrome command line, so anything that could smuggle a second switch has to
+    be refused rather than passed through.
+    """
+    monkeypatch.setenv(chrome_driver.ENV_LOGIN_LOCALE, raw)
+
+    with caplog.at_level(logging.WARNING):
+        assert chrome_driver._login_locale(os.environ) is None
+
+    if raw.strip():
+        assert chrome_driver.ENV_LOGIN_LOCALE in caplog.text

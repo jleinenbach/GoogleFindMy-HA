@@ -260,6 +260,67 @@ read it as your host user. Docker Desktop (Windows/macOS) maps ownership for you
    (the terminal then logs `Trying headless mode...`). The owner-key step needs
    no browser at all.
 
+## Language and keyboard
+
+Three different pieces of software show up on your screen during a login, and
+each takes its language from a different place. None of them is pinned to a
+language by this container.
+
+| What you see | Where its language comes from | How to change it |
+| --- | --- | --- |
+| The noVNC viewer (toolbar, panels) | Your **own browser's** language, which noVNC reads from it directly | Change your browser's language |
+| Chrome inside the viewer, and the Google sign-in page it loads | `GFMY_LOCALE`, empty by default | `GFMY_LOCALE=fr bash login.sh` |
+| The `[entrypoint]` / `[AuthFlow]` lines in your terminal | English, like the rest of the project | — |
+
+The launchers fill `GFMY_LOCALE` in from your own environment: `login.sh` reads
+your shell locale (`LC_ALL` / `LC_MESSAGES` / `LANG`) and `login.cmd` asks
+Windows for its culture name, so the sign-in page usually arrives in the
+language you read without you setting anything. Both accept a locale in either
+spelling (`de-DE` or `de_DE.UTF-8`).
+
+Set it yourself to override that — `GFMY_LOCALE=en` to stay in English — and
+leave it empty to let Chrome choose, which in this image means English. A value
+that is not a language tag is ignored with a warning rather than passed on: a
+login must not fail over the language of its own error messages.
+
+### Typing "@" and other AltGr characters
+
+A VNC viewer does not forward your keyboard; it forwards *characters* plus the
+modifier keys you are holding. On a German, French or Spanish layout the "@" of
+your e-mail address is made with AltGr, and the base image's VNC server used to
+receive that stray AltGr *around* the character and produce nothing at all —
+which makes the login impossible, since every account name contains an "@".
+
+The container now tells its VNC server to resolve keys through XKEYBOARD and to
+drop the level-3 modifiers (`~/.x11vncrc`, written by `entrypoint.sh`), so the
+character arrives on its own. It is on by default; `GFMY_KEYBOARD_FIX=0`
+restores the base image's behaviour.
+
+Two fallbacks, in the order worth trying:
+
+1. **Paste instead of type.** Open the panel on the left edge of the noVNC
+   window, type or paste the text into the *Clipboard* box, then press `Ctrl+V`
+   in the browser field. This path never touches the keyboard translation and
+   therefore always works.
+2. **Give the container your layout.** `GFMY_KEYBOARD_LAYOUT=de bash login.sh`
+   (the value is passed to `setxkbmap`, so `de -variant nodeadkeys` works too).
+   Only needed for the rarer cases the default cannot reach, such as dead keys.
+
+## Cancelling a login
+
+Closing the Chrome window in the viewer, or simply walking away and letting the
+five-minute wait expire, ends the run with a single line:
+
+```
+[AuthFlow] Login cancelled: the browser window was closed before Google issued
+an account token. Nothing was saved; start the login again to retry.
+```
+
+The exit status is `130` ("cancelled by the user"), which is deliberately
+distinct from the `1`/`2` the launcher uses for its own failures, so a script
+around this can tell "you stopped" from "it broke". Nothing is written on this
+path, so re-running the login is the whole recovery procedure.
+
 ## After the login (the menu, `q`, and the wrap-up)
 
 The tracker list is not the end of the run. The CLI stays in a small loop and
@@ -477,6 +538,19 @@ there is no separate image to rebuild for code changes.
   every HACS update; that is why the commands above use this form.
 - **noVNC page won't load:** give the container a few seconds; check
   `docker compose logs` for `[entrypoint] Display ready.`
+- **A character will not type ("@", "\\", "|", "€"):** those are AltGr
+  characters, which a VNC viewer handles differently from the rest. Paste them
+  instead — the panel on the left edge of the noVNC window has a *Clipboard*
+  box, and `Ctrl+V` puts its contents into the browser field. See
+  [Typing "@" and other AltGr characters](#typing--and-other-altgr-characters)
+  for the setting behind it.
+- **Everything appears in the wrong language:** the viewer follows your own
+  browser, Chrome follows `GFMY_LOCALE` (taken from your shell locale unless you
+  set it). `GFMY_LOCALE=en bash login.sh` keeps the sign-in page in English. See
+  [Language and keyboard](#language-and-keyboard).
+- **The run ended with `Login cancelled` and exit status 130:** that is not an
+  error — the browser window was closed, or the five-minute wait expired.
+  Nothing was written; start the login again.
 - **`port is already allocated` on 7900:** another process on the Docker host
   holds the noVNC port. Stop the conflicting process (a leftover login
   container: `docker compose ps` / `docker compose down`).

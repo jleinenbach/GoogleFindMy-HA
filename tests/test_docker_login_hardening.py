@@ -2551,3 +2551,147 @@ def test_entrypoint_derivation_never_overrides_a_launcher_verdict() -> None:
     )
     assert out["HARDEN"] == "1", "launcher HARDEN verdict must be preserved"
     assert out["TLS"] == "", "launcher --no-tls (TLS empty) must not be overridden to 1"
+
+
+# --- Language and keyboard (the login has to be usable, not only secure) -------
+#
+# Two mandatory-but-invisible parts of a first login: the sign-in page has to be
+# readable, and the "@" of the account name has to be typeable. Both were broken
+# in the container -- English for everyone, and no "@" at all on an AltGr layout,
+# which makes the login impossible rather than merely awkward.
+
+
+def _launcher_env_probe(tmp_path: Path) -> tuple[Path, dict[str, str]]:
+    """A launcher sandbox whose ``docker`` stub reports its ENVIRONMENT.
+
+    The shared sandbox stub echoes the command line, which is the wrong window
+    for these guards: the launcher passes the language through the environment,
+    where compose interpolates it. So this stub prints the variables instead.
+    """
+
+    work, env = _launcher_sandbox(tmp_path)
+    stub = tmp_path / "bin" / "docker"
+    stub.write_text(
+        "#!/usr/bin/env bash\n"
+        'printf "PROBE GFMY_LOCALE=[%s]\\n" "${GFMY_LOCALE-unset}"\n'
+        'printf "PROBE GFMY_KEYBOARD_FIX=[%s]\\n" "${GFMY_KEYBOARD_FIX-unset}"\n'
+        'printf "PROBE GFMY_KEYBOARD_LAYOUT=[%s]\\n" "${GFMY_KEYBOARD_LAYOUT-unset}"\n',
+        "utf-8",
+    )
+    stub.chmod(0o755)
+    return work, env
+
+
+def _probe_launcher(tmp_path: Path, extra_env: dict[str, str]) -> dict[str, str]:
+    bash = shutil.which("bash")
+    if bash is None:  # pragma: no cover - CI images all ship bash
+        pytest.skip("bash is required to run the launcher")
+
+    work, env = _launcher_env_probe(tmp_path)
+    proc = subprocess.run(  # noqa: S603 - fixed argv, test-local stub PATH
+        [bash, str(work / "login.sh")],
+        capture_output=True,
+        timeout=60,
+        check=False,
+        env={**env, **extra_env},
+        stdin=subprocess.DEVNULL,
+    )
+    assert proc.returncode == 0, proc.stderr.decode()
+    found: dict[str, str] = {}
+    for line in proc.stdout.decode().splitlines():
+        if line.startswith("PROBE "):
+            name, _, value = line[len("PROBE ") :].partition("=")
+            found[name] = value.strip()[1:-1]
+    assert found, "the docker stub reported no environment"
+    return found
+
+
+def test_login_sh_hands_the_users_own_language_to_the_container(
+    tmp_path: Path,
+) -> None:
+    """The sign-in page should arrive in the language the user reads.
+
+    Behavioural rather than textual: the value has to survive as an *exported*
+    variable, since that is the only channel compose interpolates. A guard that
+    merely greps for the assignment would pass on a missing ``export``.
+    """
+    probe = _probe_launcher(tmp_path, {"LANG": "fr_FR.UTF-8"})
+
+    assert probe["GFMY_LOCALE"] == "fr_FR.UTF-8"
+
+
+def test_an_explicit_language_wins_over_the_shell_locale(tmp_path: Path) -> None:
+    """Opting out has to be possible, and ``GFMY_LOCALE=en`` is how."""
+    probe = _probe_launcher(tmp_path, {"LANG": "fr_FR.UTF-8", "GFMY_LOCALE": "en"})
+
+    assert probe["GFMY_LOCALE"] == "en"
+
+
+@pytest.mark.parametrize("locale", ["C", "POSIX", "C.UTF-8"])
+def test_a_locale_free_shell_expresses_no_preference(
+    tmp_path: Path, locale: str
+) -> None:
+    """``LANG=C`` is the absence of a language, not a request for one.
+
+    Forwarding it would make Chrome fall back anyway, but it would also make the
+    logs claim a preference the user never expressed.
+    """
+    probe = _probe_launcher(tmp_path, {"LANG": locale})
+
+    assert probe["GFMY_LOCALE"] == ""
+
+
+@pytest.mark.parametrize(
+    ("preset", "expected"),
+    [({}, "1"), ({"GFMY_KEYBOARD_FIX": "0"}, "0")],
+)
+def test_the_keyboard_fix_is_on_unless_switched_off(
+    tmp_path: Path, preset: dict[str, str], expected: str
+) -> None:
+    """A default of "off" would leave the AltGr layouts unable to log in at all."""
+    assert _probe_launcher(tmp_path, preset)["GFMY_KEYBOARD_FIX"] == expected
+
+
+def test_compose_forwards_the_language_and_keyboard_variables() -> None:
+    """The launcher's work is wasted if compose does not carry it inside."""
+    compose = _read("docker-compose.yml")
+
+    assert 'GOOGLEFINDMY_LOGIN_LOCALE: "${GFMY_LOCALE:-}"' in compose, (
+        "the container reads GOOGLEFINDMY_LOGIN_LOCALE (chrome_driver.py); the "
+        "launcher-facing name is GFMY_LOCALE, and compose is what joins them"
+    )
+    assert 'GFMY_KEYBOARD_FIX: "${GFMY_KEYBOARD_FIX:-1}"' in compose
+    assert 'GFMY_KEYBOARD_LAYOUT: "${GFMY_KEYBOARD_LAYOUT:-}"' in compose
+
+
+def test_entrypoint_writes_the_keyboard_rc_before_starting_the_vnc_server() -> None:
+    """Order is the whole property here.
+
+    ``x11vnc`` reads ``$HOME/.x11vncrc`` once, at startup, and it is started by
+    the supervisor this entrypoint launches. Writing the file afterwards would
+    leave no trace in any log and no "@" on any keyboard -- the failure would
+    look exactly like having no fix at all.
+    """
+    entrypoint = _read("entrypoint.sh")
+
+    rc_write = entrypoint.index(".x11vncrc")
+    supervisor = entrypoint.index('"${VENV_PATH}/bin/supervisord"')
+    assert rc_write < supervisor, (
+        "the .x11vncrc must be written before supervisord starts x11vnc"
+    )
+    assert "remap ISO_Level3_Shift-NoSymbol" in entrypoint, (
+        "dropping the level-3 modifier is what makes AltGr characters arrive"
+    )
+
+
+def test_the_keyboard_opt_out_also_removes_a_file_from_an_earlier_run() -> None:
+    """A switch that only works on a pristine container is not a switch.
+
+    ``GFMY_KEYBOARD_FIX=0`` has to undo the file, not just skip writing it: the
+    image layer and a reused container both survive a run.
+    """
+    entrypoint = _read("entrypoint.sh")
+
+    opt_out = entrypoint.index("GFMY_KEYBOARD_FIX:-1")
+    tail = entrypoint[opt_out : opt_out + 1500]
+    assert "rm -f" in tail and ".x11vncrc" in tail

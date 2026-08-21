@@ -11,7 +11,7 @@ import signal
 import subprocess
 import sys
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from types import ModuleType, SimpleNamespace
 from typing import Any, cast
 
@@ -581,6 +581,43 @@ def find_chrome() -> str | None:
     return None
 
 
+# Optional BCP-47 language tag for the login browser (e.g. "de-DE", "pt-BR").
+# Unset means "do not choose for the user": Chrome keeps its own default.
+ENV_LOGIN_LOCALE = "GOOGLEFINDMY_LOGIN_LOCALE"
+
+# A language tag as Chrome accepts it: a two- or three-letter primary language,
+# optionally followed by script and region subtags ("de", "de-DE", "zh-Hant-TW").
+# Validated rather than passed through for two reasons: the value is spliced into
+# a command line, and the primary length limit is what makes a plain mistake
+# ("German", "Deutsch") visible instead of silently ineffective.
+_LOCALE_PATTERN = re.compile(r"^[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8}){0,2}$")
+
+
+def _login_locale(env: Mapping[str, str]) -> str | None:
+    """Return the requested login language tag, or ``None`` to leave it to Chrome.
+
+    A malformed value is ignored rather than fatal: a login must not fail over a
+    cosmetic preference, and the caller cannot fix a typo mid-flow. It is logged
+    at warning level so the user learns why their setting had no effect.
+    """
+    raw = (env.get(ENV_LOGIN_LOCALE) or "").strip()
+    if not raw:
+        return None
+    # Accept the one near-miss worth accepting: POSIX locales ("de_DE.UTF-8",
+    # "pt_BR@euro") are what a shell hands out, and translating them costs one
+    # line, while rejecting them would send users hunting for the difference
+    # between a locale and a language tag.
+    candidate = raw.split(".", 1)[0].split("@", 1)[0].replace("_", "-")
+    if not _LOCALE_PATTERN.match(candidate):
+        LOGGER.warning(
+            "Ignoring %s=%r: expected a language tag such as 'de-DE' or 'fr'",
+            ENV_LOGIN_LOCALE,
+            raw,
+        )
+        return None
+    return candidate
+
+
 def get_options(*, headless: bool = False) -> ChromeOptions:
     """Create Chrome options that match the integration's requirements.
 
@@ -644,6 +681,17 @@ def get_options(*, headless: bool = False) -> ChromeOptions:
     # measurement.
     chrome_options.add_argument("--disable-web-security")
     chrome_options.add_argument("--allow-running-insecure-content")
+
+    # Language. Nothing here forces one: without the variable Chrome keeps its
+    # own default (English in a bare container), which is the right fallback for
+    # a login page nobody should have to translate. With it, Chrome's UI *and*
+    # the Accept-Language it sends follow the user, so Google shows the sign-in
+    # in the language they actually read. Both switches are needed: --lang alone
+    # localises the browser, not the page it requests.
+    locale = _login_locale(os.environ)
+    if locale is not None:
+        chrome_options.add_argument(f"--lang={locale}")
+        chrome_options.add_argument(f"--accept-lang={locale}")
 
     return chrome_options
 

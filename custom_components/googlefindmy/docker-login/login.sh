@@ -547,6 +547,30 @@ fi
 
 mkdir -p data
 
+# Language of the login browser (see docker-compose.yml -> GOOGLEFINDMY_LOGIN_LOCALE).
+# Read from the shell locale so the Google sign-in speaks the language of whoever
+# is running this, instead of always English. Deliberately NOT a hard setting:
+#   * an existing GFMY_LOCALE always wins, so `GFMY_LOCALE=en ./login.sh` opts out;
+#   * an unset or "C"/"POSIX" locale carries no preference, so it stays empty and
+#     Chrome keeps its own default -- English, which is the right fallback.
+# The container validates the value and ignores it if it is not a language tag,
+# so a surprising locale can never break a login. Only the language part is
+# forwarded (LC_ALL > LC_MESSAGES > LANG, the standard precedence).
+if [ -z "${GFMY_LOCALE:-}" ]; then
+  _host_locale="${LC_ALL:-${LC_MESSAGES:-${LANG:-}}}"
+  case "$_host_locale" in
+    ""|C|POSIX|C.*|POSIX.*) GFMY_LOCALE="" ;;
+    *) GFMY_LOCALE="$_host_locale" ;;
+  esac
+fi
+export GFMY_LOCALE
+
+# Keyboard handling for the noVNC viewer (see docker-compose.yml). Both are
+# passed through rather than decided here, so `GFMY_KEYBOARD_LAYOUT=de ./login.sh`
+# works without editing any file.
+export GFMY_KEYBOARD_FIX="${GFMY_KEYBOARD_FIX:-1}"
+export GFMY_KEYBOARD_LAYOUT="${GFMY_KEYBOARD_LAYOUT:-}"
+
 # Hand the finished secrets.json back to the invoking host user as owner (0600).
 # The container chowns ./data to itself for the run, then back to these IDs.
 export GFMY_HOST_UID="$(id -u)"
