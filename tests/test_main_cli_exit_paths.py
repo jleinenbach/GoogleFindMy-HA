@@ -9,7 +9,8 @@ These pin the ``sys.exit(1)`` fail-closed exits and the stale-key purges in
 * ``_ensure_aas_token``    -- cached/absent short circuits and the
   single-use-cookie exit.
 * ``_clear_stale_adm_token``        -- username guard + ADM key clearing.
-* ``_clear_stale_tokens_for_reauth`` -- file/dict/parse guards + key removal.
+* ``_clear_stale_tokens_for_reauth`` -- file/dict/parse guards, key removal,
+  and the restore it hands back for a login that ends without a token.
 
 The standalone FCM lead (``_setup_fcm_receiver``) is intentionally excluded
 (W0/E5 ``# pragma: no cover`` standalone lead).
@@ -440,3 +441,158 @@ class TestClearStaleTokensForReauth:
 
         remaining = json.loads(secrets.read_text(encoding="utf-8"))
         assert remaining == {"username": "u@x"}
+
+
+# ---------------------------------------------------------------------------
+# --reauth restore path
+# ---------------------------------------------------------------------------
+#
+# `--reauth` has to empty the cache *before* the login, because an empty cache
+# is the only thing that makes `_ensure_authenticated` open Chrome at all. That
+# ordering used to mean a cancelled re-authentication signed the user out: the
+# tokens were gone, the new ones never arrived, and the run exited 130 saying
+# "nothing was saved". These tests pin the repair -- the clear now hands back a
+# restore, and every path that ends without a fresh token uses it.
+
+
+class TestReauthRestore:
+    """The cleared tokens come back when the login produces nothing."""
+
+    _SECRETS = {
+        "username": "u@x",
+        "oauth_token": "o",
+        "aas_token": "a",
+        "owner_key": "ok",
+    }
+
+    def _prepare(self, tmp_path, monkeypatch: pytest.MonkeyPatch):  # type: ignore[no-untyped-def]
+        from custom_components.googlefindmy import main as cli_main
+
+        monkeypatch.setattr(cli_main, "_this_dir", tmp_path, raising=True)
+        secrets = tmp_path / "Auth" / "secrets.json"
+        secrets.parent.mkdir(parents=True, exist_ok=True)
+        secrets.write_text(json.dumps(self._SECRETS), encoding="utf-8")
+        return cli_main, secrets
+
+    def test_cancelled_login_restores_every_cleared_key(
+        self, tmp_path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:  # type: ignore[no-untyped-def]
+        cli_main, secrets = self._prepare(tmp_path, monkeypatch)
+
+        restore = cli_main._clear_stale_tokens_for_reauth()
+        assert restore is not None
+        assert json.loads(secrets.read_text(encoding="utf-8")) == {"username": "u@x"}
+
+        restore()
+
+        assert json.loads(secrets.read_text(encoding="utf-8")) == self._SECRETS
+
+    def test_a_fresh_value_survives_the_restore(
+        self, tmp_path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:  # type: ignore[no-untyped-def]
+        """A login that got partway through wins over the snapshot.
+
+        The restore re-reads the file and only fills gaps, so a token written
+        between the clear and the failure is not rolled back to the stale one.
+        """
+        cli_main, secrets = self._prepare(tmp_path, monkeypatch)
+
+        restore = cli_main._clear_stale_tokens_for_reauth()
+        assert restore is not None
+        secrets.write_text(
+            json.dumps({"username": "u@x", "oauth_token": "fresh"}), encoding="utf-8"
+        )
+
+        restore()
+
+        current = json.loads(secrets.read_text(encoding="utf-8"))
+        assert current["oauth_token"] == "fresh"
+        assert current["aas_token"] == "a"
+
+    def test_restore_recreates_a_deleted_file(
+        self, tmp_path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:  # type: ignore[no-untyped-def]
+        cli_main, secrets = self._prepare(tmp_path, monkeypatch)
+
+        restore = cli_main._clear_stale_tokens_for_reauth()
+        assert restore is not None
+        secrets.unlink()
+
+        restore()
+
+        current = json.loads(secrets.read_text(encoding="utf-8"))
+        assert current["oauth_token"] == "o"
+
+    def test_restore_refuses_to_overwrite_an_unreadable_file(
+        self, tmp_path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+    ) -> None:  # type: ignore[no-untyped-def]
+        """Corruption is not a licence to throw the rest of the file away.
+
+        Writing the snapshot over a file that can no longer be parsed would drop
+        every key the clear did not touch (the username, anything a future
+        version stores). Refusing and saying so is the recoverable outcome.
+        """
+        cli_main, secrets = self._prepare(tmp_path, monkeypatch)
+
+        restore = cli_main._clear_stale_tokens_for_reauth()
+        assert restore is not None
+        secrets.write_text("{ broken", encoding="utf-8")
+
+        restore()
+
+        assert secrets.read_text(encoding="utf-8") == "{ broken"
+        assert "Could not read secrets.json" in capsys.readouterr().out
+
+    def test_nothing_to_clear_yields_no_restore(
+        self, tmp_path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:  # type: ignore[no-untyped-def]
+        from custom_components.googlefindmy import main as cli_main
+
+        monkeypatch.setattr(cli_main, "_this_dir", tmp_path, raising=True)
+        secrets = tmp_path / "Auth" / "secrets.json"
+        secrets.parent.mkdir(parents=True, exist_ok=True)
+        secrets.write_text(json.dumps({"username": "u@x"}), encoding="utf-8")
+
+        assert cli_main._clear_stale_tokens_for_reauth() is None
+
+    def test_the_cleared_file_keeps_owner_only_permissions(
+        self, tmp_path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:  # type: ignore[no-untyped-def]
+        """The clear writes a token file, so it goes through the atomic writer.
+
+        The old implementation used a plain ``open(..., "w")``: not atomic, and
+        it left the mode to the umask on a file that still holds the username
+        and, after a restore, the tokens again.
+        """
+        cli_main, secrets = self._prepare(tmp_path, monkeypatch)
+
+        cli_main._clear_stale_tokens_for_reauth()
+
+        assert secrets.stat().st_mode & 0o777 == 0o600
+
+    def test_a_failed_restore_write_says_so_instead_of_raising(
+        self, tmp_path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+    ) -> None:  # type: ignore[no-untyped-def]
+        """The restore runs while an exception is already on its way out.
+
+        It is called from the ``except`` arm in ``_main``, so raising here would
+        replace the reason the login ended (the cancellation, the Ctrl+C) with a
+        disk error and lose the exit status that goes with it. A write that
+        fails therefore reports and returns.
+        """
+        cli_main, secrets = self._prepare(tmp_path, monkeypatch)
+
+        restore = cli_main._clear_stale_tokens_for_reauth()
+        assert restore is not None
+
+        def _fail(path: object, data: object) -> None:
+            raise OSError("read-only file system")
+
+        monkeypatch.setattr(cli_main, "_atomic_write_json", _fail)
+
+        restore()  # must not raise
+
+        assert "Could not restore the previous tokens" in capsys.readouterr().out
+        # The cleared state is what is left on disk; the message is what tells
+        # the user their next move.
+        assert json.loads(secrets.read_text(encoding="utf-8")) == {"username": "u@x"}

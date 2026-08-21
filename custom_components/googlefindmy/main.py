@@ -876,26 +876,38 @@ async def _setup_fcm_receiver(cache: object) -> Any:
     return fcm
 
 
-def _clear_stale_tokens_for_reauth() -> None:
+def _clear_stale_tokens_for_reauth() -> Callable[[], None] | None:
     """Clear cached tokens from secrets.json to force re-authentication.
 
     Called when ``--reauth`` is passed on the CLI. Removes ``oauth_token``,
     ``aas_token``, and all derived ``adm_token_*`` / timestamp keys so that
     ``_ensure_authenticated()`` triggers the Chrome login flow.
+
+    Returns a callable that puts those keys back, or ``None`` when there was
+    nothing to clear. The clearing has to happen *before* the login -- an empty
+    cache is what makes ``_ensure_authenticated`` start the flow at all -- so a
+    login the user then cancels would leave the account signed out as the price
+    of a decision that was meant to change nothing. The caller invokes the
+    returned callable on every path that ends without a fresh token.
+
+    The restore re-reads the file rather than writing the snapshot back: a login
+    that got partway through may have stored newer values, and those win
+    (``setdefault``). Both writes go through ``_atomic_write_json``, so an
+    interrupted write cannot truncate the token file and the 0600 mode holds.
     """
     import json  # noqa: PLC0415
 
     secrets_path = _resolve_secrets_path()
     if not secrets_path.is_file():
-        return
+        return None
 
     try:
         with open(secrets_path, encoding="utf-8") as fh:
             data = json.load(fh)
         if not isinstance(data, dict):
-            return
+            return None
     except Exception:  # noqa: BLE001
-        return
+        return None
 
     keys_to_remove = [
         k
@@ -914,17 +926,51 @@ def _clear_stale_tokens_for_reauth() -> None:
         )
     ]
     if not keys_to_remove:
-        return
+        return None
 
-    for k in keys_to_remove:
-        del data[k]
-
-    with open(secrets_path, "w", encoding="utf-8") as fh:
-        json.dump(data, fh, indent=2)
+    removed = {k: data.pop(k) for k in keys_to_remove}
+    _atomic_write_json(secrets_path, data)
 
     print(
         f"Cleared {len(keys_to_remove)} cached token(s). Re-authentication required.\n"
     )
+
+    def _restore_cleared_tokens() -> None:
+        """Put the cleared tokens back after a login that produced none."""
+        if secrets_path.is_file():
+            try:
+                with open(secrets_path, encoding="utf-8") as fh:
+                    current = json.load(fh)
+            except (OSError, ValueError):
+                current = None
+            if not isinstance(current, dict):
+                # The file is there but unreadable. Overwriting it with the
+                # snapshot alone would drop whatever else it holds, so the
+                # cautious move is to touch nothing and say so.
+                print(
+                    "Could not read secrets.json to restore the previous "
+                    "tokens; sign in again with --reauth.\n"
+                )
+                return
+        else:
+            # No file at all: nothing to preserve, so the snapshot is the whole
+            # truth and writing it back is safe.
+            current = {}
+
+        for key, value in removed.items():
+            current.setdefault(key, value)
+
+        try:
+            _atomic_write_json(secrets_path, current)
+        except OSError:
+            print(
+                "Could not restore the previous tokens; sign in again with --reauth.\n"
+            )
+            return
+
+        print(f"Login did not complete; restored {len(removed)} cached token(s).\n")
+
+    return _restore_cleared_tokens
 
 
 def _resolve_effective_entry_id(cli_entry: str | None, env_entry: str | None) -> str:
@@ -1073,9 +1119,18 @@ def _main(argv: Sequence[str] | None = None) -> None:
     # then a cache-signal check that was always empty for a fresh shell start),
     # both of which could dead-end a repo-layout start in an opaque
     # MissingTokenCacheError instead of bootstrapping.
-    if args.reauth:
-        _clear_stale_tokens_for_reauth()
-    _ensure_authenticated()
+    restore_cleared_tokens = _clear_stale_tokens_for_reauth() if args.reauth else None
+    try:
+        _ensure_authenticated()
+    except BaseException:
+        # A cancelled login, a Ctrl+C, or the sys.exit from a driver failure all
+        # end the run without a new token -- and --reauth has already taken the
+        # old ones away. Put them back, so stopping the login costs the user
+        # nothing. BaseException is deliberate: SystemExit and KeyboardInterrupt
+        # are exactly the two paths that reach here most often.
+        if restore_cleared_tokens is not None:
+            restore_cleared_tokens()
+        raise
     # Resolve the effective entry id once (CLI > env > "") and use the SAME
     # value for both registration and hand-off, so the registry key and the
     # lookup hint can never diverge.  Forwarding the raw args.entry instead

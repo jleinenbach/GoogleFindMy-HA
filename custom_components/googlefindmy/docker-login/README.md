@@ -318,8 +318,24 @@ an account token. Nothing was saved; start the login again to retry.
 
 The exit status is `130` ("cancelled by the user"), which is deliberately
 distinct from the `1`/`2` the launcher uses for its own failures, so a script
-around this can tell "you stopped" from "it broke". Nothing is written on this
-path, so re-running the login is the whole recovery procedure.
+around this can tell "you stopped" from "it broke". No new credentials are
+stored on this path, so re-running the login is the whole recovery procedure.
+
+Cancelling a **re-authentication** costs nothing either. `--reauth` (passed
+through `GFMY_ARGS`, see [Forcing a fresh login](#forcing-a-fresh-login)) clears
+the cached tokens before it starts, because an empty cache is what makes the CLI
+open the login at all. If that login then ends without a token (you closed the
+window, the wait expired, you pressed `Ctrl+C`), the cleared tokens are put back
+and the run says so:
+
+```
+Login did not complete; restored 3 cached token(s).
+```
+
+A cancelled `--reauth` therefore leaves you signed in exactly as you were. The
+single case that cannot be undone is a `secrets.json` that turned unreadable in
+the meantime: the restore then refuses to overwrite the file (it would throw
+away whatever else the file still holds) and tells you to run `--reauth` again.
 
 ## After the login (the menu, `q`, and the wrap-up)
 
