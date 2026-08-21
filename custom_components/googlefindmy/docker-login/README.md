@@ -308,18 +308,32 @@ Two fallbacks, in the order worth trying:
 
 ## Cancelling a login
 
-Closing the Chrome window in the viewer, or simply walking away and letting the
-five-minute wait expire, ends the run with a single line:
+A login can end without a token in two ways that the flow itself names, and the
+line it prints says which one it was. (`Ctrl+C` is a third way out. It saves
+nothing either and ends with the same status, but it is the one cancellation
+that still prints a Python `KeyboardInterrupt` traceback instead of an
+`[AuthFlow]` line.)
+
+Closing the Chrome window in the viewer:
 
 ```
 [AuthFlow] Login cancelled: the browser window was closed before Google issued
 an account token. Nothing was saved; start the login again to retry.
 ```
 
-The exit status is `130` ("cancelled by the user"), which is deliberately
-distinct from the `1`/`2` the launcher uses for its own failures, so a script
-around this can tell "you stopped" from "it broke". No new credentials are
-stored on this path, so re-running the login is the whole recovery procedure.
+Walking away and letting the five-minute wait expire, with the window still
+open:
+
+```
+[AuthFlow] No login completed within 5 minutes, so no account token was
+received. Nothing was saved; start the login again when you are ready.
+```
+
+These are cancellations, not failures. The exit status is `130` ("cancelled by
+the user") on every one of them, which is deliberately distinct from the `1`/`2`
+the launcher uses for its own failures, so a script around this can tell "you
+stopped" from "it broke". No new credentials are stored on any of these paths,
+so re-running the login is the whole recovery procedure.
 
 Cancelling a **re-authentication** costs nothing either. `--reauth` (passed
 through `GFMY_ARGS`, see [Forcing a fresh login](#forcing-a-fresh-login)) clears
@@ -564,9 +578,12 @@ there is no separate image to rebuild for code changes.
   browser, Chrome follows `GFMY_LOCALE` (taken from your shell locale unless you
   set it). `GFMY_LOCALE=en bash login.sh` keeps the sign-in page in English. See
   [Language and keyboard](#language-and-keyboard).
-- **The run ended with `Login cancelled` and exit status 130:** that is not an
-  error — the browser window was closed, or the five-minute wait expired.
-  Nothing was written; start the login again.
+- **The run ended with exit status 130:** that is not an error, it is a
+  cancellation. If you closed the Chrome window or let the wait run out, the
+  line above it names which of the two it was; a `Ctrl+C` gets the same status
+  but ends in a `KeyboardInterrupt` traceback rather than an `[AuthFlow]` line.
+  Nothing was written on any of them; start the login again. The two messages
+  are quoted in full under [Cancelling a login](#cancelling-a-login).
 - **`port is already allocated` on 7900:** another process on the Docker host
   holds the noVNC port. Stop the conflicting process (a leftover login
   container: `docker compose ps` / `docker compose down`).

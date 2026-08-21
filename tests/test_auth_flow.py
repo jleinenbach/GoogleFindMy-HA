@@ -1,6 +1,7 @@
 # tests/test_auth_flow.py
 import sys
 from collections.abc import Callable
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -703,6 +704,134 @@ def test_the_expired_wait_is_reported_as_an_abort(
         request_oauth_account_token_flow(headless=True)
 
     assert driver.quit_calls == 1
+
+
+_DOCKER_LOGIN_README = (
+    Path(auth_flow.__file__).resolve().parent.parent / "docker-login" / "README.md"
+)
+
+# Each cancellation path, with the sentence the guide introduces it by. The
+# lead-in is half the guard: without it the two code blocks could sit under one
+# heading and the guide would be exactly as wrong as before, while a plain
+# "is the message somewhere in the file" check stayed green.
+_CANCELLATION_PATHS = {
+    "closed window": (
+        "Closing the Chrome window in the viewer:",
+        auth_flow.NoSuchWindowException("no such window: target window already closed"),
+    ),
+    "expired wait": (
+        "Walking away and letting the five-minute wait expire, with the window "
+        "still open:",
+        auth_flow.TimeoutException("timed out"),
+    ),
+}
+
+
+def _documented_quotes() -> list[tuple[str, str]]:
+    """Return (lead-in prose, quoted block) pairs from the "Cancelling a login" section.
+
+    Both halves are whitespace-collapsed so the guide may wrap however it likes.
+
+    Pairing the prose with the fenced block that follows it is the whole point,
+    and two earlier shapes of this guard were measurably weaker. Searching the
+    file for the message passes on a guide that files both messages under one
+    lead-in. Searching the remainder after a lead-in passes when the message
+    sits further down the section under something else entirely -- the
+    ``--reauth`` paragraph below quotes program output too. Only the block that
+    directly follows a given sentence answers "is this message documented as
+    *this* path", and reading blocks rather than prose is also what makes the
+    "quote it inside a fenced block" instruction below true rather than merely
+    stated.
+    """
+    text = _DOCKER_LOGIN_README.read_text(encoding="utf-8")
+    marker = "\n## Cancelling a login\n"
+    assert marker in text, (
+        f"{_DOCKER_LOGIN_README} no longer has a '## Cancelling a login' "
+        "section. This guard and the #cancelling-a-login link in the "
+        "troubleshooting list both anchor on that heading."
+    )
+    body = text[text.index(marker) + len(marker) :]
+    end = body.find("\n## ")
+    section = body if end == -1 else body[:end]
+
+    # Odd indices are the fenced blocks, even ones the prose between them --
+    # which only holds while the fences are balanced. An unclosed one would turn
+    # a whole run of prose into a "block" and quietly satisfy the fencing rule
+    # this guard is supposed to enforce.
+    parts = section.split("```")
+    assert len(parts) % 2 == 1, (
+        "unbalanced ``` fences in the 'Cancelling a login' section: "
+        f"{len(parts) - 1} delimiters found"
+    )
+    return [
+        (" ".join(parts[i - 1].split()), " ".join(parts[i].split()))
+        for i in range(1, len(parts), 2)
+    ]
+
+
+def _abort_message(monkeypatch: pytest.MonkeyPatch, error: BaseException) -> str:
+    """Run the flow into *error* and return the sentence the user actually sees."""
+    _flow_raising(monkeypatch, error)
+    with pytest.raises(auth_flow.LoginAborted) as excinfo:
+        request_oauth_account_token_flow(headless=True)
+    return str(excinfo.value)
+
+
+@pytest.mark.parametrize("kind", sorted(_CANCELLATION_PATHS))
+def test_the_docker_login_guide_quotes_each_abort_message(
+    monkeypatch: pytest.MonkeyPatch, kind: str
+) -> None:
+    """Both cancellation paths must be documented with the text they emit.
+
+    The two share an exit status but not a sentence, and the guide used to print
+    the closed-window line for both -- so a user diagnosing a timeout was told to
+    look for words that cannot appear on that path (Codex review, PR #1261).
+    Rendering the message through the real code and then locating it *under its
+    own lead-in* is what keeps the two from drifting apart again: change the
+    wording, the wait constant it interpolates, or the sentence that introduces
+    it, and this fails.
+
+    Measured extent, deliberately narrow: the two ``LoginAborted`` messages this
+    module raises, inside one named section of one file. It says nothing about
+    any other quoted output in that guide.
+    """
+    assert _DOCKER_LOGIN_README.is_file(), f"missing guide: {_DOCKER_LOGIN_README}"
+    lead_in, error = _CANCELLATION_PATHS[kind]
+    message = " ".join(_abort_message(monkeypatch, error).split())
+
+    # Guard against the vacuous pass: "" is a substring of everything, and a
+    # refactor that dropped the text would otherwise satisfy every assertion
+    # below at once.
+    assert message.startswith("[AuthFlow] "), message
+    assert len(message) > 40, message
+
+    quotes = _documented_quotes()
+    introduced = [block for prose, block in quotes if prose.endswith(lead_in)]
+
+    assert introduced, (
+        f"the guide no longer introduces a quoted block with {lead_in!r}; "
+        "each path needs its own lead-in immediately before its own block, or "
+        "both messages end up filed under one and the conflation is back. "
+        f"Lead-ins found: {[prose[-60:] for prose, _ in quotes]}"
+    )
+    assert any(message in block for block in introduced), (
+        f"the {kind} message is not quoted in the block that follows its own "
+        f"lead-in in docker-login/README.md. Quote it verbatim inside a fenced "
+        f"code block directly after {lead_in!r}. Expected: {message!r}. "
+        f"Found there: {introduced!r}"
+    )
+
+    # Presence alone still permits the conflation, only inverted: a block that
+    # carries BOTH sentences documents this path as emitting the other one too.
+    for other, (_, other_error) in _CANCELLATION_PATHS.items():
+        if other == kind:
+            continue
+        stray = " ".join(_abort_message(monkeypatch, other_error).split())
+        assert all(stray not in block for block in introduced), (
+            f"the block introduced by {lead_in!r} also quotes the {other} "
+            f"message. Each path gets its own block, or a reader is told to "
+            f"expect output this one cannot produce: {stray!r}"
+        )
 
 
 def test_a_real_driver_failure_keeps_its_own_type(
