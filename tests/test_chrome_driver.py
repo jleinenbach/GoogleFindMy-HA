@@ -2694,6 +2694,58 @@ def test_login_locale_accepts_tags_and_posix_locales(
 
 
 @pytest.mark.parametrize(
+    ("raw", "expected", "normalised"),
+    [
+        # Dropped-and-accepted: the suffix is never inspected, so this is the
+        # class the README now names instead of promising a warning for it.
+        ("de-DE.anything", "de-DE", True),
+        ("de_DE.UTF-8", "de-DE", True),
+        # Unchanged input must stay silent: a debug line per call would bury the
+        # one case worth reading.
+        ("pt-BR", "pt-BR", False),
+    ],
+)
+def test_a_shortened_locale_leaves_a_trace(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    raw: str,
+    expected: str,
+    normalised: bool,
+) -> None:
+    """Silent shortening is the half a user cannot otherwise diagnose.
+
+    A rejected value announces itself at warning level. A value that was merely
+    cut short still reaches Chrome, and the surviving tag is already logged by
+    ``_apply_login_locale``; what was missing is the pairing with what the user
+    actually set. Kept at debug because it is a trace, not a problem -- the level
+    is asserted, or the mutation to ``warning`` would pass unnoticed.
+    """
+    monkeypatch.setenv(chrome_driver.ENV_LOGIN_LOCALE, raw)
+
+    with caplog.at_level(logging.DEBUG, logger=chrome_driver.LOGGER.name):
+        assert chrome_driver._login_locale(os.environ) == expected
+
+    said_so = [r for r in caplog.records if "Normalised" in r.getMessage()]
+    assert bool(said_so) is normalised, (
+        f"expected normalisation trace={normalised} for {raw!r}: {caplog.text}"
+    )
+    if normalised:
+        assert said_so[0].levelno == logging.DEBUG, (
+            "the trace must stay at debug: a shortened value is not a problem, "
+            "and a warning here would fire on every well-formed POSIX locale."
+        )
+        # The order carries the meaning: raw -> normalised. Asserting only that
+        # both appear lets the two %r arguments be swapped, which turns the
+        # trace into a claim that the user set the short form and got the long
+        # one -- worse than no line at all.
+        rendered = said_so[0].getMessage()
+        assert rendered.index(repr(raw)) < rendered.index(repr(expected)), rendered
+        # The variable name is the half a user greps for; without it the trace
+        # cannot be found by the person the README sends looking for it.
+        assert chrome_driver.ENV_LOGIN_LOCALE in rendered, rendered
+
+
+@pytest.mark.parametrize(
     "raw",
     [
         "",

@@ -599,6 +599,15 @@ def _login_locale(env: Mapping[str, str]) -> str | None:
     A malformed value is ignored rather than fatal: a login must not fail over a
     cosmetic preference, and the caller cannot fix a typo mid-flow. It is logged
     at warning level so the user learns why their setting had no effect.
+
+    Note what is validated and what is not: everything from the first ``.`` or
+    ``@`` onwards is *dropped*, not inspected, and only the remainder -- with
+    ``_`` read as ``-`` -- has to look like a language tag. Together that is what
+    makes ``de_DE.UTF-8`` work, and it also
+    means ``de-DE.anything`` quietly becomes ``de-DE``. Tightening that would
+    have to tell a codeset from a typo -- ``UTF-8``, ``utf8``, ``ISO-8859-1``,
+    ``euro`` -- and a false reject there costs the user their language for no
+    gain, so the normalisation is logged instead of second-guessed.
     """
     raw = (env.get(ENV_LOGIN_LOCALE) or "").strip()
     if not raw:
@@ -615,6 +624,17 @@ def _login_locale(env: Mapping[str, str]) -> str | None:
             raw,
         )
         return None
+    if candidate != raw:
+        # What was missing was the *pairing*: _apply_login_locale already logs
+        # the tag that survived, but not what the user actually set, so a value
+        # that was merely cut short read exactly like one that was accepted
+        # whole. A rejected value announces itself above at warning level.
+        LOGGER.debug(
+            "Normalised %s=%r to the language tag %r",
+            ENV_LOGIN_LOCALE,
+            raw,
+            candidate,
+        )
     return candidate
 
 
@@ -829,12 +849,25 @@ def _try_webdriver_manager_fallback(
         #   - the language: the sign-in page has to be readable whichever
         #     strategy opened it.
         #
-        # Still *not* honoured here, deliberately: the resolved Chrome major
-        # version. webdriver-manager takes it through its own constructor
-        # argument, whose name and semantics differ across releases, and
-        # guessing at that from an untested fallback path would trade a
-        # cosmetic gap for a driver that fails to install at all. Noted for a
-        # follow-up that can measure the installed webdriver-manager instead.
+        # Still *not* honoured here, and for a measured reason rather than a
+        # suspected one: the resolved Chrome major version. webdriver-manager
+        # (measured against 4.1.2) takes it as
+        # ChromeDriverManager(driver_version=...) and passes that string
+        # verbatim to get_url_for_version_and_platform, which selects from the
+        # Chrome-for-Testing list by *substring* and then takes the last match.
+        # Measured against a synthetic known-good list: a pin on the newest
+        # milestone does resolve correctly, but "120" selects 133.0.6943.120,
+        # because that build's patch component contains those digits. So the pin
+        # is honoured or silently redirected to an unrelated newer driver
+        # depending on what else is in the list -- and the silent case is the
+        # likely one here, since users reach for GOOGLEFINDMY_CHROME_VERSION
+        # precisely when their Chrome is *behind* the stable channel. The
+        # library's own major-to-full resolution runs only when driver_version
+        # is left unset, and starts from the browser it detects rather than from
+        # the version we resolved. Honouring the pin properly therefore means a
+        # signature change here plus an HTTP call of our own against the
+        # Chrome-for-Testing metadata -- a bad trade on a last-resort path whose
+        # job is to produce *some* working driver.
         if headless:
             options.add_argument("--headless")
             options.add_argument("--disable-gpu")

@@ -281,7 +281,16 @@ spelling (`de-DE` or `de_DE.UTF-8`).
 Set it yourself to override that — `GFMY_LOCALE=en` to stay in English — and
 leave it empty to let Chrome choose, which in this image means English. A value
 that is not a language tag is ignored with a warning rather than passed on: a
-login must not fail over the language of its own error messages.
+login must not fail over the language of its own error messages. What is read is the
+part before the first `.` or `@`, with `_` read as `-` — together that is what
+turns `de_DE.UTF-8` into `de-DE` — so whatever follows those characters is
+dropped without a warning, and only the remainder has to look like a language
+tag. To see which tag actually reached Chrome, add `--debug` to `GFMY_ARGS`
+(`GFMY_ARGS=--debug bash login.sh`, or `set GFMY_ARGS=--debug` before
+`login.cmd`): the login then logs the language it applied, and, if your value
+was shortened, what it was shortened from. Note that `--debug` makes the whole
+run verbose in the launcher terminal and in `docker logs`, your account address
+included, so it is a diagnostic setting rather than an everyday one.
 
 ### Typing "@" and other AltGr characters
 
