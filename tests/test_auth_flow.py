@@ -627,3 +627,145 @@ def test_module_entrypoint_invokes_flow(monkeypatch: pytest.MonkeyPatch) -> None
 
 # Silence unused-import checks while keeping explicit references for clarity.
 del WebDriverWait, create_driver
+
+
+# --- Cancelling the login is not a defect --------------------------------------
+#
+# Closing the browser window kills the session, and selenium reports that from
+# the bottom of the wait as `InvalidSessionIdException: session deleted as the
+# browser has closed the connection`. Until 1.7.16 that reached the terminal as
+# a traceback through `main.py`, which reads like a crash although the user had
+# simply stopped. These tests pin the translation: abort types become
+# `LoginAborted`, real driver failures keep their own type, and the CLI boundary
+# turns an abort into a message plus a defined exit status.
+
+
+class _FailingWait:
+    """A ``WebDriverWait`` stand-in whose ``until`` raises *error*."""
+
+    def __init__(self, error: BaseException) -> None:
+        self._error = error
+        self.instances: list[_FailingWait] = []
+
+    def __call__(self, driver: Any, timeout: int) -> "_FailingWait":
+        self.instances.append(self)
+        self.timeout = timeout
+        return self
+
+    def until(self, predicate: Callable[[Any], Any]) -> Any:  # noqa: ARG002
+        raise self._error
+
+
+def _flow_raising(
+    monkeypatch: pytest.MonkeyPatch, error: BaseException
+) -> "FakeDriver":
+    driver = FakeDriver(cookie_after_wait={"value": "unreachable"})
+    monkeypatch.setattr(auth_flow, "create_driver", lambda **kwargs: driver)
+    monkeypatch.setattr(auth_flow, "WebDriverWait", _FailingWait(error))
+    return driver
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        auth_flow.InvalidSessionIdException(
+            "invalid session id: session deleted as the browser has closed the "
+            "connection\nfrom disconnected: not connected to DevTools"
+        ),
+        auth_flow.NoSuchWindowException("no such window: target window already closed"),
+        # The untyped remainder: chromedriver reports a window closed mid-command
+        # as a bare WebDriverException, where the message is the only signal.
+        auth_flow.WebDriverException(
+            "disconnected: not connected to DevTools (Session info: chrome=150)"
+        ),
+    ],
+)
+def test_closing_the_browser_is_reported_as_an_abort(
+    monkeypatch: pytest.MonkeyPatch, error: BaseException
+) -> None:
+    driver = _flow_raising(monkeypatch, error)
+
+    with pytest.raises(auth_flow.LoginAborted, match="Login cancelled"):
+        request_oauth_account_token_flow(headless=True)
+
+    # The browser is still cleaned up on the abort path.
+    assert driver.quit_calls == 1
+
+
+def test_the_expired_wait_is_reported_as_an_abort(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    driver = _flow_raising(monkeypatch, auth_flow.TimeoutException("timed out"))
+
+    with pytest.raises(auth_flow.LoginAborted, match="No login completed within"):
+        request_oauth_account_token_flow(headless=True)
+
+    assert driver.quit_calls == 1
+
+
+def test_a_real_driver_failure_keeps_its_own_type(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A WebDriverException that is not a lost window must not be softened.
+
+    This is the guard against the lazy fix: catching every ``WebDriverException``
+    would hide a broken driver or a crashed renderer behind a friendly "you
+    cancelled" line, and the user would retry forever.
+    """
+    error = auth_flow.WebDriverException(
+        "unknown error: cannot determine loading status"
+    )
+    driver = _flow_raising(monkeypatch, error)
+
+    with pytest.raises(auth_flow.WebDriverException, match="cannot determine loading"):
+        request_oauth_account_token_flow(headless=True)
+
+    assert driver.quit_calls == 1
+
+
+def test_login_aborted_is_not_a_runtime_error() -> None:
+    """``main.py`` inspects ``RuntimeError`` for the missing-driver hint.
+
+    If ``LoginAborted`` were a ``RuntimeError``, an abort would be routed
+    through the browser-package diagnosis and the user would be told to install
+    packages they already have.
+    """
+    assert not issubclass(auth_flow.LoginAborted, RuntimeError)
+
+
+def test_cli_boundary_turns_an_abort_into_a_message_and_exit_code(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from custom_components.googlefindmy import main as cli
+
+    def _abort() -> tuple[str, str | None]:
+        raise auth_flow.LoginAborted(
+            "[AuthFlow] Login cancelled: the browser window was closed"
+        )
+
+    with pytest.raises(SystemExit) as excinfo:
+        cli._run_oauth_flow_or_exit(_abort)
+
+    assert excinfo.value.code == cli._EXIT_LOGIN_ABORTED
+    out = capsys.readouterr().out
+    assert "Login cancelled" in out
+    assert "Traceback" not in out
+
+
+def test_the_typed_abort_does_not_depend_on_the_message(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A typed abort must be recognised even with an empty message.
+
+    Found by mutating ``_describe_lost_session``: with the ``isinstance`` branch
+    disabled the suite stayed green, because every sample exception also carried
+    a matching *text*. The two branches exist for different reasons -- one is a
+    contract, the other a fallback for the untyped remainder -- so each needs a
+    case that only it can satisfy. Chromedriver has changed these strings before.
+    """
+    driver = _flow_raising(monkeypatch, auth_flow.NoSuchWindowException(""))
+
+    with pytest.raises(auth_flow.LoginAborted, match="Login cancelled"):
+        request_oauth_account_token_flow(headless=True)
+
+    assert driver.quit_calls == 1

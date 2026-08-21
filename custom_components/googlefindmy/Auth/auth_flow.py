@@ -14,6 +14,12 @@ from typing import TYPE_CHECKING, Any, cast
 from custom_components.googlefindmy.browser_deps import missing_browser_dependency
 
 try:
+    from selenium.common.exceptions import (
+        InvalidSessionIdException,
+        NoSuchWindowException,
+        TimeoutException,
+        WebDriverException,
+    )
     from selenium.webdriver.support.ui import WebDriverWait
 except ImportError as _err:  # pragma: no cover - needs a selenium-less environment
     raise missing_browser_dependency(_err) from _err
@@ -25,6 +31,54 @@ if TYPE_CHECKING:  # pragma: no cover - import-time typing block
 
 # Opt-in for consoles that carry a user but report no tty (IDE run windows).
 _ENV_ASSUME_INTERACTIVE = "GOOGLEFINDMY_ASSUME_INTERACTIVE"
+
+# How long the flow waits for the login to produce the ``oauth_token`` cookie.
+# Named so the timeout message can quote it without the two drifting apart.
+_LOGIN_WAIT_SECONDS = 300
+
+
+class LoginAborted(Exception):
+    """The login ended without a token, and nothing went wrong.
+
+    Closing the browser window and letting the wait run out are *decisions*, not
+    failures: the user either changed their mind or could not complete the form.
+    Both used to surface as a selenium traceback from the bottom of the wait
+    (``InvalidSessionIdException: session deleted as the browser has closed the
+    connection``), which reads like a defect in the tool and buries the one line
+    that matters. This type carries that "no token, no defect" verdict up to the
+    CLI boundary, which turns it into a message and an exit code.
+
+    It is deliberately *not* a ``RuntimeError``: ``main.py`` inspects
+    ``RuntimeError`` to decide whether a missing browser package is to blame,
+    and an abort has nothing to do with the driver install.
+    """
+
+
+def _describe_lost_session(err: WebDriverException) -> str | None:
+    """Return an abort reason when *err* means "the browser window is gone".
+
+    Selenium reports the same event under more than one type and, for the
+    generic ``WebDriverException``, only in the message. ``NoSuchWindowException``
+    and ``InvalidSessionIdException`` are typed and therefore matched as types.
+    The text match below is the deliberate remainder: chromedriver reports a
+    window that was closed mid-command as a bare ``WebDriverException`` whose
+    message is the only discriminator, and treating *every* ``WebDriverException``
+    as an abort would swallow real defects (a broken driver, a crashed renderer)
+    behind a friendly "you cancelled" line.
+    """
+    if isinstance(err, (NoSuchWindowException, InvalidSessionIdException)):
+        return "the browser window was closed"
+    message = (getattr(err, "msg", None) or str(err) or "").lower()
+    lost_markers = (
+        "no such window",
+        "target window already closed",
+        "web view not found",
+        "disconnected: not connected to devtools",
+        "session deleted as the browser has closed the connection",
+    )
+    if any(marker in message for marker in lost_markers):
+        return "the browser window was closed"
+    return None
 
 
 def _parse_cli_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -75,17 +129,13 @@ def _stdin_is_attended() -> bool:
         return False
 
 
-def request_oauth_account_token_flow(
-    headless: bool = False,
-    *,
-    chrome_path: str | None = None,
-    chrome_version: int | None = None,
-) -> tuple[str, str | None]:
-    """Open Chrome for Google login and return ``(oauth_token, email)``.
+def _announce_and_gate(*, headless: bool) -> None:
+    """Tell the user what is about to happen, and let them stop it.
 
-    The *email* is extracted from the Chrome session after login if possible.
-    It may be ``None`` when the DOM selectors fail (e.g. Google changes their
-    page layout) — callers should fall back to prompting the user.
+    Split out of ``request_oauth_account_token_flow`` so that function is left
+    with the browser work alone: everything here happens *before* a driver
+    exists, and none of it can fail in a way the caller has to clean up. It
+    raises ``RuntimeError`` when there is nobody to drive the desktop login.
     """
     # ``headless`` is the interactivity signal: an automated caller passes True,
     # an attended terminal session passes False. The historical test
@@ -123,6 +173,14 @@ def request_oauth_account_token_flow(
                 "few seconds.\n"
                 "[AuthFlow]   3. Sign in to Google there, then come back to "
                 "this terminal.\n"
+                "[AuthFlow] --------------------------------------------------\n"
+                "[AuthFlow] If a character will not type (the '@' of your "
+                "address is\n"
+                "[AuthFlow] the usual one), paste it instead: open the panel on "
+                "the left\n"
+                "[AuthFlow] edge of the viewer, put the text in the Clipboard "
+                "box, then\n"
+                "[AuthFlow] press Ctrl+V in the browser field.\n"
                 "[AuthFlow] =================================================="
             )
             # No stdin gate in the container: Chrome runs *inside* the container
@@ -170,6 +228,23 @@ def request_oauth_account_token_flow(
                 )
                 raise RuntimeError(msg) from err
 
+
+def request_oauth_account_token_flow(
+    headless: bool = False,
+    *,
+    chrome_path: str | None = None,
+    chrome_version: int | None = None,
+) -> tuple[str, str | None]:
+    """Open Chrome for Google login and return ``(oauth_token, email)``.
+
+    The *email* is extracted from the Chrome session after login if possible.
+    It may be ``None`` when the DOM selectors fail (e.g. Google changes their
+    page layout) — callers should fall back to prompting the user.
+    """
+    # Everything the user sees before the browser exists -- the instruction
+    # block, and the gate that lets them decline -- lives in one place.
+    _announce_and_gate(headless=headless)
+
     # Automatically install and set up the Chrome driver
     if not headless:
         print("[AuthFlow] Installing ChromeDriver...")
@@ -182,13 +257,27 @@ def request_oauth_account_token_flow(
         # Open the browser and navigate to the URL
         driver.get("https://accounts.google.com/EmbeddedSetup")
 
-        # Wait until the "oauth_token" cookie is set
+        # Wait until the "oauth_token" cookie is set.
+        #
+        # Everything that can end this wait *without* a token is a decision, not
+        # a defect: the user closes the window, or they never finish the form.
+        # Both are translated into LoginAborted here, at the only place that
+        # knows what the wait was for, so the CLI can say one sentence instead
+        # of printing a selenium stack that points at a lambda.
         if not headless:
             print("[AuthFlow] Waiting for 'oauth_token' cookie to be set...")
-        WebDriverWait(driver, 300).until(
-            lambda d: d.get_cookie("oauth_token") is not None
-        )
-
+        try:
+            WebDriverWait(driver, _LOGIN_WAIT_SECONDS).until(
+                lambda d: d.get_cookie("oauth_token") is not None
+            )
+        except TimeoutException as err:
+            msg = (
+                "[AuthFlow] No login completed within "
+                f"{_LOGIN_WAIT_SECONDS // 60} minutes, so no account token was "
+                "received. Nothing was saved; start the login again when you "
+                "are ready."
+            )
+            raise LoginAborted(msg) from err
         # Get the value of the "oauth_token" cookie
         cookie = driver.get_cookie("oauth_token")
         if cookie is None:
@@ -211,6 +300,23 @@ def request_oauth_account_token_flow(
                 print(f"[AuthFlow] Detected account: {email}")
 
         return oauth_token_value, email
+
+    except WebDriverException as err:
+        # Closing the window kills the session, and every command issued after
+        # that point reports it -- the navigation, the wait, the cookie read,
+        # the e-mail extraction. Catching it around the whole interaction rather
+        # than around the wait alone means the user gets the same one-line
+        # verdict wherever they happened to close it.
+        reason = _describe_lost_session(err)
+        if reason is None:
+            # Not an abort. Let the real failure keep its own type and message
+            # rather than dressing a driver defect up as a cancellation.
+            raise
+        msg = (
+            f"[AuthFlow] Login cancelled: {reason} before Google issued an "
+            "account token. Nothing was saved; start the login again to retry."
+        )
+        raise LoginAborted(msg) from err
 
     finally:
         # Close the browser (safe_quit handles WinError 6 on Windows)

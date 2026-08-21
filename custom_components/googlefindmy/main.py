@@ -426,6 +426,11 @@ def _register_file_cache(entry_id: str = "") -> object:
     return file_cache
 
 
+# Exit status for a login the user ended themselves (closed window, expired
+# wait). Kept apart from 1/2, which login.sh spends on its own failures.
+_EXIT_LOGIN_ABORTED = 130
+
+
 def _run_oauth_flow_or_exit(
     flow: Callable[[], tuple[str, str | None]],
 ) -> tuple[str, str | None]:
@@ -446,8 +451,30 @@ def _run_oauth_flow_or_exit(
         browser_packages_missing,
     )
 
+    # Safe to import here even though this boundary exists for a *missing*
+    # browser install: `_ensure_authenticated` already imported this module
+    # (behind its own ImportError guard) to obtain the flow it passes in, so by
+    # the time anything reaches this line, selenium is present.
+    from custom_components.googlefindmy.Auth.auth_flow import (  # noqa: PLC0415
+        LoginAborted,
+    )
+
     try:
         return flow()
+    except LoginAborted as err:
+        # A cancelled login is a finished run, not a crash: the user closed the
+        # window or let the wait expire. Print the flow's own sentence and stop
+        # with a non-zero status -- non-zero because no token was produced and
+        # the caller (login.sh, docker compose) must not report success, but
+        # without a traceback, because there is no defect to report.
+        #
+        # 130 is the shell's "cancelled by the user" code, and it is chosen over
+        # a generic 1 for two reasons: it separates "you stopped" from "it
+        # broke" for anything scripting this run, and login.sh already spends 1
+        # and 2 on its own failures, so reusing those would make the two
+        # indistinguishable.
+        print(f"\n{err}\n")
+        raise SystemExit(_EXIT_LOGIN_ABORTED) from err
     except BrowserPackagesUnusable as err:
         # The typed case: the packages are there but unusable, and the type
         # carried that through the strategy chain unchanged.
