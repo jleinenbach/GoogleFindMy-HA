@@ -92,8 +92,19 @@ def _describe_lost_session(err: WebDriverException) -> str | None:
     ``InvalidSessionIdException``) count as a cancellation: both types also fire
     when Chrome dies on its own, and the crash check above is what keeps such a
     failure on the traceback path instead of turning it into a friendly
-    "you cancelled" line.
+    "you cancelled" line. A ``TimeoutException`` is excluded before any of that
+    -- see the first branch.
     """
+    if isinstance(err, TimeoutException):
+        # A timeout says a command got no answer in time. It never says the
+        # window is gone: chromedriver reports that with its own error codes
+        # ("no such window", "invalid session id"), which arrive as their own
+        # types. Reading a stray window phrase out of a *timeout* message would
+        # turn a stalled driver into a "you cancelled" line and exit 130 --
+        # at the navigation, at the poll and at the cookie read alike, not just
+        # at the wait. (The e-mail extraction is not on that list: it swallows
+        # its own failures and returns None.)
+        return None
     message = (getattr(err, "msg", None) or str(err) or "").lower()
     if any(marker in message for marker in _CRASH_MARKERS):
         return None
@@ -263,6 +274,20 @@ def request_oauth_account_token_flow(
     The *email* is extracted from the Chrome session after login if possible.
     It may be ``None`` when the DOM selectors fail (e.g. Google changes their
     page layout) — callers should fall back to prompting the user.
+
+    Raises:
+        LoginAborted: The user ended the login without a token, by closing the
+            window or by letting the wait expire. A finished run, not a defect.
+        WebDriverException: The driver failed — it crashed, stalled, or timed
+            out on a command. Raised with its own type and traceback, because
+            the CLI turns only ``LoginAborted`` into a cancellation status.
+        BrowserPackagesUnusable: Selenium or Chrome is absent or broken. The CLI
+            branches on this type to print an install hint.
+        RuntimeError: The terminal is unattended, stdin closed while the gate
+            waited, the driver could not be started, or the wait completed with
+            a missing or malformed cookie.
+        OSError: The driver could not be replaced on disk — ``PermissionError``
+            from a locked ChromeDriver binary reaches the caller unchanged.
     """
     # Everything the user sees before the browser exists -- the instruction
     # block, and the gate that lets them decline -- lives in one place.
@@ -282,18 +307,40 @@ def request_oauth_account_token_flow(
 
         # Wait until the "oauth_token" cookie is set.
         #
-        # Everything that can end this wait *without* a token is a decision, not
-        # a defect: the user closes the window, or they never finish the form.
-        # Both are translated into LoginAborted here, at the only place that
-        # knows what the wait was for, so the CLI can say one sentence instead
-        # of printing a selenium stack that points at a lambda.
+        # Two of the ways this wait can end without a token are decisions, not
+        # defects: the user closes the window, or they never finish the form.
+        # Those two are translated into LoginAborted here, at the only place
+        # that knows what the wait was for, so the CLI can say one sentence
+        # instead of printing a selenium stack that points at a lambda. A third
+        # way is a defect and stays one: the driver failing a poll command.
         if not headless:
             print("[AuthFlow] Waiting for 'oauth_token' cookie to be set...")
+        # The expiring deadline and a driver that times out on a poll command
+        # raise the *same* selenium type, so the handler below cannot separate
+        # them by type. ``until`` lets a predicate's exception propagate
+        # unchanged (unless it is one of its ``ignored_exceptions``, which by
+        # default is only ``NoSuchElementException``) and constructs a *new*
+        # exception of its own when the deadline expires -- which makes
+        # identity an exact test rather than a heuristic.
+        poll_failure: TimeoutException | None = None
+
+        def _oauth_token_is_set(d: WebDriver) -> bool:
+            nonlocal poll_failure
+            try:
+                return d.get_cookie("oauth_token") is not None
+            except TimeoutException as exc:
+                poll_failure = exc
+                raise
+
         try:
-            WebDriverWait(driver, _LOGIN_WAIT_SECONDS).until(
-                lambda d: d.get_cookie("oauth_token") is not None
-            )
+            WebDriverWait(driver, _LOGIN_WAIT_SECONDS).until(_oauth_token_is_set)
         except TimeoutException as err:
+            if err is poll_failure:
+                # The driver timed out on a command, and the user's deadline
+                # has not necessarily passed. Keep the type, the message and
+                # the traceback rather than reporting a cancellation that did
+                # not happen.
+                raise
             msg = (
                 "[AuthFlow] No login completed within "
                 f"{_LOGIN_WAIT_SECONDS // 60} minutes, so no account token was "
@@ -326,8 +373,9 @@ def request_oauth_account_token_flow(
 
     except WebDriverException as err:
         # Closing the window kills the session, and every command issued after
-        # that point reports it -- the navigation, the wait, the cookie read,
-        # the e-mail extraction. Catching it around the whole interaction rather
+        # that point reports it -- the navigation, the wait, the cookie read.
+        # (Not the e-mail extraction: that one swallows its own failures.)
+        # Catching it around the whole interaction rather
         # than around the wait alone means the user gets the same one-line
         # verdict wherever they happened to close it.
         reason = _describe_lost_session(err)

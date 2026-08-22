@@ -610,6 +610,12 @@ there is no separate image to rebuild for code changes.
   but ends in a `KeyboardInterrupt` traceback rather than an `[AuthFlow]` line.
   Nothing was written on any of them; start the login again. The two messages
   are quoted in full under [Cancelling a login](#cancelling-a-login).
+- **A `TimeoutException` traceback instead of an `[AuthFlow]` line:** that is
+  the opposite case, and the exit status is *not* `130`. Chrome or ChromeDriver
+  stopped answering while the login was still being waited for, so the run
+  reports a driver failure rather than claiming you cancelled anything. The
+  wait may not even have started to run out. Retry the login; if it keeps
+  happening, the traceback is what to attach to a bug report.
 - **`port is already allocated` on 7900:** another process on the Docker host
   holds the noVNC port. Stop the conflicting process (a leftover login
   container: `docker compose ps` / `docker compose down`).
