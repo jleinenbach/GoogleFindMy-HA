@@ -1,6 +1,8 @@
 # tests/test_auth_flow.py
+import re
 import sys
 from collections.abc import Callable
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -627,3 +629,698 @@ def test_module_entrypoint_invokes_flow(monkeypatch: pytest.MonkeyPatch) -> None
 
 # Silence unused-import checks while keeping explicit references for clarity.
 del WebDriverWait, create_driver
+
+
+# --- Cancelling the login is not a defect --------------------------------------
+#
+# Closing the browser window kills the session, and selenium reports that from
+# the bottom of the wait as `InvalidSessionIdException: session deleted as the
+# browser has closed the connection`. Until 1.7.16 that reached the terminal as
+# a traceback through `main.py`, which reads like a crash although the user had
+# simply stopped. These tests pin the translation: abort types become
+# `LoginAborted`, real driver failures keep their own type, and the CLI boundary
+# turns an abort into a message plus a defined exit status.
+
+
+class _FailingWait:
+    """A ``WebDriverWait`` stand-in whose ``until`` raises *error*."""
+
+    def __init__(self, error: BaseException) -> None:
+        self._error = error
+        self.instances: list[_FailingWait] = []
+
+    def __call__(self, driver: Any, timeout: int) -> "_FailingWait":
+        self.instances.append(self)
+        self.timeout = timeout
+        return self
+
+    def until(self, predicate: Callable[[Any], Any]) -> Any:  # noqa: ARG002
+        raise self._error
+
+
+def _flow_raising(
+    monkeypatch: pytest.MonkeyPatch, error: BaseException
+) -> "FakeDriver":
+    driver = FakeDriver(cookie_after_wait={"value": "unreachable"})
+    monkeypatch.setattr(auth_flow, "create_driver", lambda **kwargs: driver)
+    monkeypatch.setattr(auth_flow, "WebDriverWait", _FailingWait(error))
+    return driver
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        auth_flow.InvalidSessionIdException(
+            "invalid session id: session deleted as the browser has closed the "
+            "connection\nfrom disconnected: not connected to DevTools"
+        ),
+        auth_flow.NoSuchWindowException("no such window: target window already closed"),
+        # The untyped remainder: chromedriver reports a window closed mid-command
+        # as a bare WebDriverException, where the message is the only signal.
+        # The phrase has to name the window -- see the DevTools test below for
+        # what deliberately does *not* count.
+        auth_flow.WebDriverException(
+            "no such window: target window already closed (Session info: chrome=150)"
+        ),
+    ],
+)
+def test_closing_the_browser_is_reported_as_an_abort(
+    monkeypatch: pytest.MonkeyPatch, error: BaseException
+) -> None:
+    driver = _flow_raising(monkeypatch, error)
+
+    with pytest.raises(auth_flow.LoginAborted, match="Login cancelled"):
+        request_oauth_account_token_flow(headless=True)
+
+    # The browser is still cleaned up on the abort path.
+    assert driver.quit_calls == 1
+
+
+def test_the_expired_wait_is_reported_as_an_abort(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    driver = _flow_raising(monkeypatch, auth_flow.TimeoutException("timed out"))
+
+    with pytest.raises(auth_flow.LoginAborted, match="No login completed within"):
+        request_oauth_account_token_flow(headless=True)
+
+    assert driver.quit_calls == 1
+
+
+class _PollingWait:
+    """A ``WebDriverWait`` stand-in that keeps the two timeout sources apart.
+
+    The real ``until`` lets whatever the predicate raises propagate unchanged,
+    and constructs a *brand new* ``TimeoutException`` of its own once the
+    deadline passes. A double that blurred those two traits would let the tests
+    below pass for the wrong reason, so both are reproduced here. What is *not*
+    reproduced is the polling: the predicate is called exactly once, so nothing
+    here pins behaviour across iterations.
+    """
+
+    def __init__(self, driver: Any, timeout: int) -> None:
+        self.driver = driver
+        self.timeout = timeout
+
+    def until(self, predicate: Callable[[Any], Any]) -> Any:
+        result = predicate(self.driver)
+        if result:
+            return result
+        raise auth_flow.TimeoutException(
+            f"Message: timeout: the deadline of {self.timeout}s passed"
+        )
+
+
+class _CookieRaisingDriver(FakeDriver):
+    """A driver whose cookie read fails the way a stalled ChromeDriver does."""
+
+    def __init__(self, error: BaseException) -> None:
+        super().__init__(cookie_after_wait=None)
+        self._error = error
+
+    def get_cookie(self, name: str) -> Any:
+        assert name == "oauth_token"
+        self.cookie_calls += 1
+        raise self._error
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "timed out receiving message from renderer: 10.000",
+        # The second case is the one two handlers have to agree on. This message
+        # carries a phrase from the window-gone list, so the *outer* handler
+        # would classify it as "the user closed the window" -- exit 130 again,
+        # one level further down -- if the poll's own verdict did not outrank
+        # phrase matching there as well.
+        "timeout: no such window: target window already closed",
+    ],
+    ids=["plain renderer timeout", "timeout quoting a window phrase"],
+)
+def test_a_driver_timeout_during_polling_is_not_a_cancellation(
+    monkeypatch: pytest.MonkeyPatch, message: str
+) -> None:
+    """A command timeout raised *by the poll* must keep its own identity.
+
+    Chrome or ChromeDriver can time out while answering ``get_cookie``. Selenium
+    reports that with the same type the expiring deadline uses, so a handler
+    that only looks at the type tells the user their five minutes ran out --
+    exiting 130 as a cancellation, minutes before the deadline, and throwing
+    away the traceback of the driver failure that actually happened.
+    """
+    error = auth_flow.TimeoutException(message)
+    driver = _CookieRaisingDriver(error)
+    monkeypatch.setattr(auth_flow, "create_driver", lambda **kwargs: driver)
+    monkeypatch.setattr(auth_flow, "WebDriverWait", _PollingWait)
+
+    with pytest.raises(auth_flow.TimeoutException) as excinfo:
+        request_oauth_account_token_flow(headless=True)
+
+    # The very same object: type, message and traceback all survive untouched,
+    # which is what "keeps its own type" has to mean to be worth anything.
+    assert excinfo.value is error
+    assert driver.quit_calls == 1
+
+
+def test_the_deadline_is_still_a_cancellation_under_the_same_double(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The grip control for the test above: same double, opposite verdict.
+
+    Without this case, a fix that simply stopped translating *any* timeout
+    would look correct here while quietly restoring the selenium stack the
+    abort path exists to replace.
+    """
+    driver = FakeDriver(cookie_after_wait=None)
+    monkeypatch.setattr(auth_flow, "create_driver", lambda **kwargs: driver)
+    monkeypatch.setattr(auth_flow, "WebDriverWait", _PollingWait)
+
+    with pytest.raises(auth_flow.LoginAborted, match="No login completed within"):
+        request_oauth_account_token_flow(headless=True)
+
+    assert driver.quit_calls == 1
+
+
+class _SwallowingWait:
+    """A wait that ignores the predicate's exception and then hits its deadline.
+
+    Selenium does exactly this for anything listed in ``ignored_exceptions``.
+    Under today's arguments that list cannot contain ``TimeoutException``, so
+    this double models the configuration one edit away rather than the current
+    one. Its reach is exactly one check -- the ``err is poll_failure`` inside
+    the wait's own handler, where it separates identity from the weaker
+    "a failure was recorded at some point". It never reaches any later handler.
+    """
+
+    def __init__(self, driver: Any, timeout: int) -> None:
+        self.driver = driver
+        self.timeout = timeout
+
+    def until(self, predicate: Callable[[Any], Any]) -> Any:
+        try:
+            predicate(self.driver)
+        except auth_flow.TimeoutException:
+            pass
+        raise auth_flow.TimeoutException(
+            f"Message: timeout: the deadline of {self.timeout}s passed"
+        )
+
+
+def test_a_swallowed_poll_failure_does_not_disown_the_real_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The recorded failure is not the one that ended the wait, so it does not count.
+
+    Mutation testing showed that ``poll_failure is not None`` passes every other
+    case in this file: as long as ``until`` propagates the predicate's exception
+    at once, "a failure was recorded" and "this failure ended the wait" are the
+    same statement. They come apart the moment the wait swallows one and then
+    times out on its own, and only the identity check gets that right.
+    """
+    error = auth_flow.TimeoutException("timed out receiving message from renderer")
+    driver = _CookieRaisingDriver(error)
+    monkeypatch.setattr(auth_flow, "create_driver", lambda **kwargs: driver)
+    monkeypatch.setattr(auth_flow, "WebDriverWait", _SwallowingWait)
+
+    with pytest.raises(auth_flow.LoginAborted, match="No login completed within"):
+        request_oauth_account_token_flow(headless=True)
+
+    assert driver.quit_calls == 1
+
+
+class _StallAfterPollDriver(FakeDriver):
+    """Answers the poll, then stalls on the *second* read of the same cookie."""
+
+    def __init__(self, error: BaseException) -> None:
+        # ``get_cookie`` is overridden outright, so the inherited canned value
+        # is never read; None keeps that visible.
+        super().__init__(cookie_after_wait=None)
+        self._error = error
+
+    def get_cookie(self, name: str) -> Any:
+        assert name == "oauth_token"
+        self.cookie_calls += 1
+        if self.cookie_calls == 1:
+            return {"value": "token-from-the-poll"}
+        raise self._error
+
+
+def test_a_stall_after_the_poll_is_not_a_cancellation_either(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The wait is not the only command that can time out inside this flow.
+
+    Recording the *poll's* exception fixes the poll and nothing else: the cookie
+    read that follows it and even the initial navigation reach the same
+    classifier, and a timeout whose text happens to name the window would still
+    be sold to the user as a cancellation. The rule that a
+    timeout is never a closed window is what covers all of them at once, so the
+    case furthest from the wait is the one worth pinning.
+    """
+    error = auth_flow.TimeoutException(
+        "timeout: no such window: target window already closed"
+    )
+    driver = _StallAfterPollDriver(error)
+    monkeypatch.setattr(auth_flow, "create_driver", lambda **kwargs: driver)
+    monkeypatch.setattr(auth_flow, "WebDriverWait", _PollingWait)
+
+    with pytest.raises(auth_flow.TimeoutException) as excinfo:
+        request_oauth_account_token_flow(headless=True)
+
+    assert excinfo.value is error
+    assert driver.quit_calls == 1
+
+
+def test_a_window_closing_inside_the_poll_is_still_a_cancellation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The predicate must re-raise what it records, not consume it.
+
+    Measured, so the claim is the right one: merely *widening* the clause to
+    ``WebDriverException`` changes nothing -- it still re-raises, and the
+    timeout-only handler below still ignores a window error. What this case
+    pins is the ``raise``. Drop it, or widen and swallow, and the most common
+    real cancellation of all -- the user closing the window while the wait runs
+    -- turns into an expired-deadline message or a selenium stack. Every other
+    window-closed case in this file raises from ``until`` rather than from the
+    predicate, so without this one the swallow goes unnoticed.
+    """
+    driver = _CookieRaisingDriver(
+        auth_flow.NoSuchWindowException("no such window: target window already closed")
+    )
+    monkeypatch.setattr(auth_flow, "create_driver", lambda **kwargs: driver)
+    monkeypatch.setattr(auth_flow, "WebDriverWait", _PollingWait)
+
+    with pytest.raises(auth_flow.LoginAborted, match="Login cancelled"):
+        request_oauth_account_token_flow(headless=True)
+
+    assert driver.quit_calls == 1
+
+
+@pytest.mark.parametrize(
+    "phrase",
+    [
+        "no such window: target window already closed",
+        "session deleted as the browser has closed the connection",
+    ],
+)
+def test_a_timeout_is_never_read_as_a_closed_window(phrase: str) -> None:
+    """The rule itself, stated once and checked directly.
+
+    The flow tests above exercise it through two long paths; this one names the
+    rule, so a later reader can see that the type outranks the text rather than
+    inferring it from two end-to-end cases.
+    """
+    assert auth_flow._describe_lost_session(auth_flow.TimeoutException(phrase)) is None
+    # The same phrase in a type that *does* mean a closed window still counts.
+    # Asserted as "there is a reason" rather than by its wording, so rephrasing
+    # the user-facing line does not break this test for no behaviour change.
+    assert auth_flow._describe_lost_session(auth_flow.WebDriverException(phrase))
+
+
+class _StallOnNavigationDriver(FakeDriver):
+    """Fails at ``driver.get`` -- the first command, before any wait exists."""
+
+    def __init__(self, error: BaseException) -> None:
+        super().__init__(cookie_after_wait=None)
+        self._error = error
+
+    def get(self, url: str) -> None:
+        self.visited_urls.append(url)
+        raise self._error
+
+
+def test_a_stall_at_the_navigation_is_not_a_cancellation_either(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The earliest command of all, and the reason the rule sits in the classifier.
+
+    Nothing has been polled yet here, so no bookkeeping inside the wait could
+    ever help: only a classifier that refuses to read a window phrase out of a
+    timeout keeps this on the traceback path.
+    """
+    error = auth_flow.TimeoutException(
+        "timeout: no such window: target window already closed"
+    )
+    driver = _StallOnNavigationDriver(error)
+    monkeypatch.setattr(auth_flow, "create_driver", lambda **kwargs: driver)
+    monkeypatch.setattr(auth_flow, "WebDriverWait", _PollingWait)
+
+    with pytest.raises(auth_flow.TimeoutException) as excinfo:
+        request_oauth_account_token_flow(headless=True)
+
+    assert excinfo.value is error
+    assert driver.quit_calls == 1
+
+
+def _troubleshooting_bullets() -> list[str]:
+    """Return the top-level bullets of the guide's "Troubleshooting" section.
+
+    Cut to the section first, the way ``_documented_quotes`` below does: without
+    that, a promise moved wholesale into another section keeps the guard green,
+    which was measured. A bullet is its ``- `` line plus the indented lines that
+    are *not* themselves bullets, so indenting one under its neighbour splits
+    the two rather than merging them -- otherwise the neighbour's text answers
+    for this one and deleting the claim here goes unnoticed.
+    """
+    text = _DOCKER_LOGIN_README.read_text(encoding="utf-8")
+    marker = "\n## Troubleshooting\n"
+    assert marker in text, (
+        f"{_DOCKER_LOGIN_README} no longer has a Troubleshooting section"
+    )
+    section = text.split(marker, 1)[1].split("\n## ", 1)[0]
+
+    bullets: list[list[str]] = []
+    for line in section.splitlines():
+        if line.lstrip().startswith("- "):
+            bullets.append([line.strip()])
+        elif bullets and line.startswith("  ") and line.strip():
+            bullets[-1].append(line.strip())
+    return [" ".join(" ".join(b).split()) for b in bullets]
+
+
+def _guide_bullet_naming(phrase: str) -> str:
+    """Return the single troubleshooting bullet whose text contains *phrase*."""
+    bullets = _troubleshooting_bullets()
+    matches = [b for b in bullets if phrase in b]
+    assert len(matches) == 1, (
+        f"expected exactly one troubleshooting bullet naming {phrase!r}, "
+        f"found {len(matches)} among {len(bullets)} in {_DOCKER_LOGIN_README}"
+    )
+    return matches[0]
+
+
+def test_the_guide_describes_the_driver_timeout_path_it_can_actually_produce(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Both claims of the new troubleshooting bullet, rendered through the code.
+
+    ``AGENTS.md`` treats output quoted in that guide as a claim like any other,
+    to be guarded by rendering it through the real path rather than by matching
+    a string someone typed. The bullet makes two: the reader sees a
+    ``TimeoutException``, and the status is not the cancellation code. Both are
+    produced here instead of being asserted from memory.
+
+    Its reach stops at ``_run_oauth_flow_or_exit``: a future blanket handler
+    further out in ``main._main`` could still swallow the traceback without
+    turning this red.
+    """
+    from custom_components.googlefindmy import main as cli
+
+    driver = _CookieRaisingDriver(
+        auth_flow.TimeoutException("timed out receiving message from renderer")
+    )
+    monkeypatch.setattr(auth_flow, "create_driver", lambda **kwargs: driver)
+    monkeypatch.setattr(auth_flow, "WebDriverWait", _PollingWait)
+
+    # BaseException, not Exception: ``SystemExit`` does not derive from the
+    # latter, so catching ``Exception`` would let the very outcome under test
+    # escape and make the assertion below unfalsifiable.
+    with pytest.raises(BaseException) as excinfo:  # noqa: PT011 - type is the subject
+        cli._run_oauth_flow_or_exit(
+            lambda: request_oauth_account_token_flow(headless=True)
+        )
+
+    # Claim 2 first: whatever came out, it was not the cancellation exit.
+    assert not isinstance(excinfo.value, SystemExit)
+
+    produced = type(excinfo.value).__name__
+    bullet = _guide_bullet_naming("traceback instead of an `[AuthFlow]` line")
+    # The helper has to isolate, or the two assertions below are satisfied by
+    # any other paragraph of the guide.
+    assert len(bullet) < len(_DOCKER_LOGIN_README.read_text(encoding="utf-8")) / 4
+
+    # Claim 1: the guide names the type the run actually raises.
+    assert f"`{produced}`" in bullet, (
+        f"the guide promises a different type than the flow raises: {produced!r} "
+        f"is absent from {bullet!r}"
+    )
+    # Claim 2, with its polarity: the guide must DENY the cancellation status,
+    # and the number comes from the constant rather than from this line. Merely
+    # finding "130" in the bullet was measured to accept the guide asserting the
+    # opposite, which is the single most likely wrong edit here.
+    assert re.search(rf"not\W{{0,3}}`{cli._EXIT_LOGIN_ABORTED}`", bullet), (
+        f"the bullet no longer denies the cancellation status: {bullet!r}"
+    )
+
+
+def test_the_cli_boundary_does_not_turn_a_driver_timeout_into_exit_130() -> None:
+    """The guard for the promise the guide makes to the reader.
+
+    ``docker-login/README.md`` tells users that this traceback is *not* a
+    cancellation and does not carry status 130. That promise spans two modules,
+    so it holds only as long as the boundary keeps its handlers typed: one
+    ``except WebDriverException`` added there would make the guide wrong without
+    any other test noticing.
+    """
+    from custom_components.googlefindmy import main as cli
+
+    error = auth_flow.TimeoutException("timed out receiving message from renderer")
+
+    def _stalled() -> tuple[str, str | None]:
+        raise error
+
+    with pytest.raises(auth_flow.TimeoutException) as excinfo:
+        cli._run_oauth_flow_or_exit(_stalled)
+
+    assert excinfo.value is error
+
+
+_DOCKER_LOGIN_README = (
+    Path(auth_flow.__file__).resolve().parent.parent / "docker-login" / "README.md"
+)
+
+# Each cancellation path, with the sentence the guide introduces it by. The
+# lead-in is half the guard: without it the two code blocks could sit under one
+# heading and the guide would be exactly as wrong as before, while a plain
+# "is the message somewhere in the file" check stayed green.
+_CANCELLATION_PATHS = {
+    "closed window": (
+        "Closing the Chrome window in the viewer:",
+        auth_flow.NoSuchWindowException("no such window: target window already closed"),
+    ),
+    "expired wait": (
+        "Walking away and letting the five-minute wait expire, with the window "
+        "still open:",
+        auth_flow.TimeoutException("timed out"),
+    ),
+}
+
+
+def _documented_quotes() -> list[tuple[str, str]]:
+    """Return (lead-in prose, quoted block) pairs from the "Cancelling a login" section.
+
+    Both halves are whitespace-collapsed so the guide may wrap however it likes.
+
+    Pairing the prose with the fenced block that follows it is the whole point,
+    and two earlier shapes of this guard were measurably weaker. Searching the
+    file for the message passes on a guide that files both messages under one
+    lead-in. Searching the remainder after a lead-in passes when the message
+    sits further down the section under something else entirely -- the
+    ``--reauth`` paragraph below quotes program output too. Only the block that
+    directly follows a given sentence answers "is this message documented as
+    *this* path", and reading blocks rather than prose is also what makes the
+    "quote it inside a fenced block" instruction below true rather than merely
+    stated.
+    """
+    text = _DOCKER_LOGIN_README.read_text(encoding="utf-8")
+    marker = "\n## Cancelling a login\n"
+    assert marker in text, (
+        f"{_DOCKER_LOGIN_README} no longer has a '## Cancelling a login' "
+        "section. This guard and the #cancelling-a-login link in the "
+        "troubleshooting list both anchor on that heading."
+    )
+    body = text[text.index(marker) + len(marker) :]
+    end = body.find("\n## ")
+    section = body if end == -1 else body[:end]
+
+    # Odd indices are the fenced blocks, even ones the prose between them --
+    # which only holds while the fences are balanced. An unclosed one would turn
+    # a whole run of prose into a "block" and quietly satisfy the fencing rule
+    # this guard is supposed to enforce.
+    parts = section.split("```")
+    assert len(parts) % 2 == 1, (
+        "unbalanced ``` fences in the 'Cancelling a login' section: "
+        f"{len(parts) - 1} delimiters found"
+    )
+    return [
+        (" ".join(parts[i - 1].split()), " ".join(parts[i].split()))
+        for i in range(1, len(parts), 2)
+    ]
+
+
+def _abort_message(monkeypatch: pytest.MonkeyPatch, error: BaseException) -> str:
+    """Run the flow into *error* and return the sentence the user actually sees."""
+    _flow_raising(monkeypatch, error)
+    with pytest.raises(auth_flow.LoginAborted) as excinfo:
+        request_oauth_account_token_flow(headless=True)
+    return str(excinfo.value)
+
+
+@pytest.mark.parametrize("kind", sorted(_CANCELLATION_PATHS))
+def test_the_docker_login_guide_quotes_each_abort_message(
+    monkeypatch: pytest.MonkeyPatch, kind: str
+) -> None:
+    """Both cancellation paths must be documented with the text they emit.
+
+    The two share an exit status but not a sentence, and the guide used to print
+    the closed-window line for both -- so a user diagnosing a timeout was told to
+    look for words that cannot appear on that path (Codex review, PR #1261).
+    Rendering the message through the real code and then locating it *under its
+    own lead-in* is what keeps the two from drifting apart again: change the
+    wording, the wait constant it interpolates, or the sentence that introduces
+    it, and this fails.
+
+    Measured extent, deliberately narrow: the two ``LoginAborted`` messages this
+    module raises, inside one named section of one file. It says nothing about
+    any other quoted output in that guide.
+    """
+    assert _DOCKER_LOGIN_README.is_file(), f"missing guide: {_DOCKER_LOGIN_README}"
+    lead_in, error = _CANCELLATION_PATHS[kind]
+    message = " ".join(_abort_message(monkeypatch, error).split())
+
+    # Guard against the vacuous pass: "" is a substring of everything, and a
+    # refactor that dropped the text would otherwise satisfy every assertion
+    # below at once.
+    assert message.startswith("[AuthFlow] "), message
+    assert len(message) > 40, message
+
+    quotes = _documented_quotes()
+    introduced = [block for prose, block in quotes if prose.endswith(lead_in)]
+
+    assert introduced, (
+        f"the guide no longer introduces a quoted block with {lead_in!r}; "
+        "each path needs its own lead-in immediately before its own block, or "
+        "both messages end up filed under one and the conflation is back. "
+        f"Lead-ins found: {[prose[-60:] for prose, _ in quotes]}"
+    )
+    assert any(message in block for block in introduced), (
+        f"the {kind} message is not quoted in the block that follows its own "
+        f"lead-in in docker-login/README.md. Quote it verbatim inside a fenced "
+        f"code block directly after {lead_in!r}. Expected: {message!r}. "
+        f"Found there: {introduced!r}"
+    )
+
+    # Presence alone still permits the conflation, only inverted: a block that
+    # carries BOTH sentences documents this path as emitting the other one too.
+    for other, (_, other_error) in _CANCELLATION_PATHS.items():
+        if other == kind:
+            continue
+        stray = " ".join(_abort_message(monkeypatch, other_error).split())
+        assert all(stray not in block for block in introduced), (
+            f"the block introduced by {lead_in!r} also quotes the {other} "
+            f"message. Each path gets its own block, or a reader is told to "
+            f"expect output this one cannot produce: {stray!r}"
+        )
+
+
+def test_a_real_driver_failure_keeps_its_own_type(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A WebDriverException that is not a lost window must not be softened.
+
+    This is the guard against the lazy fix: catching every ``WebDriverException``
+    would hide a broken driver or a crashed renderer behind a friendly "you
+    cancelled" line, and the user would retry forever.
+    """
+    error = auth_flow.WebDriverException(
+        "unknown error: cannot determine loading status"
+    )
+    driver = _flow_raising(monkeypatch, error)
+
+    with pytest.raises(auth_flow.WebDriverException, match="cannot determine loading"):
+        request_oauth_account_token_flow(headless=True)
+
+    assert driver.quit_calls == 1
+
+
+def test_a_bare_devtools_disconnect_is_not_an_abort(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ "disconnected: not connected to DevTools" alone proves nothing.
+
+    It is the generic symptom of *any* lost connection: a closed window says it,
+    and so does a Chrome that segfaulted or was OOM-killed. Treating it as a
+    cancellation exits 130 with "you stopped" and drops the traceback of a real
+    failure, so the phrase is not on the window-gone list. The closed window
+    still reaches the abort path, because chromedriver pairs it with a phrase
+    that names the window (see the parametrised cases above).
+    """
+    error = auth_flow.WebDriverException(
+        "disconnected: not connected to DevTools (Session info: chrome=150)"
+    )
+    driver = _flow_raising(monkeypatch, error)
+
+    with pytest.raises(auth_flow.WebDriverException, match="not connected to DevTools"):
+        request_oauth_account_token_flow(headless=True)
+
+    assert driver.quit_calls == 1
+
+
+def test_a_crashed_browser_keeps_its_own_type_despite_an_abort_type(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A crash marker outranks the typed abort signal.
+
+    ``InvalidSessionIdException`` is raised for every dead session, whoever
+    killed it -- the user, a crash, an OOM kill. When the message names a crash,
+    that evidence wins: the run must end in a traceback the user can report, not
+    in a friendly line claiming they cancelled something they did not.
+    """
+    error = auth_flow.InvalidSessionIdException(
+        "invalid session id: session deleted because of page crash"
+    )
+    driver = _flow_raising(monkeypatch, error)
+
+    with pytest.raises(auth_flow.InvalidSessionIdException, match="page crash"):
+        request_oauth_account_token_flow(headless=True)
+
+    assert driver.quit_calls == 1
+
+
+def test_login_aborted_is_not_a_runtime_error() -> None:
+    """``main.py`` inspects ``RuntimeError`` for the missing-driver hint.
+
+    If ``LoginAborted`` were a ``RuntimeError``, an abort would be routed
+    through the browser-package diagnosis and the user would be told to install
+    packages they already have.
+    """
+    assert not issubclass(auth_flow.LoginAborted, RuntimeError)
+
+
+def test_cli_boundary_turns_an_abort_into_a_message_and_exit_code(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from custom_components.googlefindmy import main as cli
+
+    def _abort() -> tuple[str, str | None]:
+        raise auth_flow.LoginAborted(
+            "[AuthFlow] Login cancelled: the browser window was closed"
+        )
+
+    with pytest.raises(SystemExit) as excinfo:
+        cli._run_oauth_flow_or_exit(_abort)
+
+    assert excinfo.value.code == cli._EXIT_LOGIN_ABORTED
+    out = capsys.readouterr().out
+    assert "Login cancelled" in out
+    assert "Traceback" not in out
+
+
+def test_the_typed_abort_does_not_depend_on_the_message(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A typed abort must be recognised even with an empty message.
+
+    Found by mutating ``_describe_lost_session``: with the ``isinstance`` branch
+    disabled the suite stayed green, because every sample exception also carried
+    a matching *text*. The two branches exist for different reasons -- one is a
+    contract, the other a fallback for the untyped remainder -- so each needs a
+    case that only it can satisfy. Chromedriver has changed these strings before.
+    """
+    driver = _flow_raising(monkeypatch, auth_flow.NoSuchWindowException(""))
+
+    with pytest.raises(auth_flow.LoginAborted, match="Login cancelled"):
+        request_oauth_account_token_flow(headless=True)
+
+    assert driver.quit_calls == 1

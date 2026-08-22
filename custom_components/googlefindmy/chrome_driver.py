@@ -11,9 +11,9 @@ import signal
 import subprocess
 import sys
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from types import ModuleType, SimpleNamespace
-from typing import Any, cast
+from typing import Any, Protocol, cast
 
 from custom_components.googlefindmy.browser_deps import (
     MISSING_BROWSER_PACKAGES_HINT,
@@ -581,6 +581,127 @@ def find_chrome() -> str | None:
     return None
 
 
+# Optional BCP-47 language tag for the login browser (e.g. "de-DE", "pt-BR").
+# Unset means "do not choose for the user": Chrome keeps its own default.
+ENV_LOGIN_LOCALE = "GOOGLEFINDMY_LOGIN_LOCALE"
+
+# A language tag as Chrome accepts it: a two- or three-letter primary language,
+# optionally followed by script and region subtags ("de", "de-DE", "zh-Hant-TW").
+# Validated rather than passed through for two reasons: the value is spliced into
+# a command line, and the primary length limit is what makes a plain mistake
+# ("German", "Deutsch") visible instead of silently ineffective.
+_LOCALE_PATTERN = re.compile(r"^[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8}){0,2}$")
+
+# The POSIX "no localisation" locale, in the spellings a shell hands out. It is
+# not a malformed language tag, it is a stated absence of one, so it must not be
+# warned about. That distinction is what gives the setting an opt-out cmd.exe can
+# type at all: `login.sh` can express "no preference" as an empty value, but
+# cmd.exe DELETES a variable that is set to nothing, so on Windows the empty case
+# does not exist and the launcher goes on to ask the OS for its culture. (A bare
+# `docker compose run` needs no opt-out: docker-compose.yml reads GFMY_LOCALE and
+# nothing else, so it never picks up a host locale to begin with.) The suffix arm
+# takes both POSIX separators, `.` for the codeset and `@` for the modifier, the
+# same two the normalisation below strips -- otherwise `C@euro` would miss this
+# rule and earn the "expected a language tag" warning it is the opposite of.
+_NO_LOCALE_PATTERN = re.compile(r"^(C|POSIX)([.@].*)?$")
+
+
+def _login_locale(env: Mapping[str, str]) -> str | None:
+    """Return the requested login language tag, or ``None`` to leave it to Chrome.
+
+    A malformed value is ignored rather than fatal: a login must not fail over a
+    cosmetic preference, and the caller cannot fix a typo mid-flow. It is logged
+    at warning level so the user learns why their setting had no effect.
+
+    An empty value and the POSIX ``C``/``POSIX`` locale are not malformed, they
+    say "no preference", so both return ``None`` in silence. ``C`` is the form
+    every caller can express: ``login.sh`` also accepts an empty value, but
+    ``login.cmd`` cannot, because cmd.exe deletes a variable set to nothing.
+
+    Note what is validated and what is not: everything from the first ``.`` or
+    ``@`` onwards is *dropped*, not inspected, and only the remainder -- with
+    ``_`` read as ``-`` -- has to look like a language tag. Together that is what
+    makes ``de_DE.UTF-8`` work, and it also
+    means ``de-DE.anything`` quietly becomes ``de-DE``. Tightening that would
+    have to tell a codeset from a typo -- ``UTF-8``, ``utf8``, ``ISO-8859-1``,
+    ``euro`` -- and a false reject there costs the user their language for no
+    gain, so the normalisation is logged instead of second-guessed.
+    """
+    raw = (env.get(ENV_LOGIN_LOCALE) or "").strip()
+    if not raw or _NO_LOCALE_PATTERN.match(raw):
+        return None
+    # Accept the one near-miss worth accepting: POSIX locales ("de_DE.UTF-8",
+    # "pt_BR@euro") are what a shell hands out, and translating them costs one
+    # line, while rejecting them would send users hunting for the difference
+    # between a locale and a language tag.
+    candidate = raw.split(".", 1)[0].split("@", 1)[0].replace("_", "-")
+    if not _LOCALE_PATTERN.match(candidate):
+        LOGGER.warning(
+            "Ignoring %s=%r: expected a language tag such as 'de-DE' or 'fr'",
+            ENV_LOGIN_LOCALE,
+            raw,
+        )
+        return None
+    if candidate != raw:
+        # What was missing was the *pairing*: _apply_login_locale already logs
+        # the tag that survived, but not what the user actually set, so a value
+        # that was merely cut short read exactly like one that was accepted
+        # whole. A rejected value announces itself above at warning level.
+        LOGGER.debug(
+            "Normalised %s=%r to the language tag %r",
+            ENV_LOGIN_LOCALE,
+            raw,
+            candidate,
+        )
+    return candidate
+
+
+class _AcceptsChromeArguments(Protocol):
+    """The one thing both option builders have in common.
+
+    Documents the requirement; it does not currently enforce it at either call
+    site, and saying otherwise would be a control claim this file cannot cash.
+    Both callers pass an object typed ``Any`` (the uc module is resolved
+    dynamically, ``_selenium_webdriver`` is imported lazily), and mypy checks
+    nothing against a protocol when the argument is ``Any``. It becomes binding
+    the moment either of those grows a real type, which is the cheapest way to
+    have the guarantee waiting rather than to add it later.
+    """
+
+    def add_argument(self, argument: str) -> None: ...  # pragma: no cover
+
+
+def _apply_login_locale(
+    options: _AcceptsChromeArguments, env: Mapping[str, str]
+) -> str | None:
+    """Put the user's language on ``options``, or leave it untouched.
+
+    Every Chrome this module starts goes through one of two option builders, and
+    a user who sets the variable means the login they get, not the one strategy
+    that happened to win. Keeping the two switches here rather than in each
+    builder is the point: a third builder that forgets them is then caught by
+    ``test_every_chrome_options_builder_applies_the_login_locale`` -- within
+    that test's measured extent, which is module-level ``def``/``async def`` in
+    this file that name ``ChromeOptions`` directly. A builder reached through an
+    alias or built at import time is outside it, and outside anything short of
+    running the code.
+
+    Both switches are needed and neither is optional: ``--lang`` localises the
+    browser, ``--accept-lang`` the page Google serves for it. Returns the applied
+    tag, or ``None`` when nothing was requested.
+    """
+    locale = _login_locale(env)
+    if locale is None:
+        return None
+    options.add_argument(f"--lang={locale}")
+    options.add_argument(f"--accept-lang={locale}")
+    # Logged here rather than left to the callers: a rejected value already says
+    # so at warning level, but an accepted one that never reached the browser
+    # used to leave no trace at all, which is the harder half to diagnose.
+    LOGGER.debug("Login browser language set to %s", locale)
+    return locale
+
+
 def get_options(*, headless: bool = False) -> ChromeOptions:
     """Create Chrome options that match the integration's requirements.
 
@@ -645,6 +766,11 @@ def get_options(*, headless: bool = False) -> ChromeOptions:
     chrome_options.add_argument("--disable-web-security")
     chrome_options.add_argument("--allow-running-insecure-content")
 
+    # Language. Nothing here forces one: without the variable Chrome keeps its
+    # own default (English in a bare container), which is the right fallback for
+    # a login page nobody should have to translate.
+    _apply_login_locale(chrome_options, os.environ)
+
     return chrome_options
 
 
@@ -694,8 +820,19 @@ def get_driver(
     )
 
 
-def _try_webdriver_manager_fallback() -> WebDriver | None:
+def _try_webdriver_manager_fallback(
+    *, headless: bool = False, resolved_path: str | None = None
+) -> WebDriver | None:
     """Try to use webdriver-manager as a fallback for standard Selenium.
+
+    Parameters
+    ----------
+    headless: bool
+        Whether the browser should run without a window, mirroring the
+        caller's request to :func:`create_driver`.
+    resolved_path: str | None
+        The Chrome binary the four earlier strategies were pointed at, or
+        ``None`` to let Selenium look for one itself.
 
     Returns
     -------
@@ -711,9 +848,54 @@ def _try_webdriver_manager_fallback() -> WebDriver | None:
         LOGGER.info("Attempting webdriver-manager fallback...")
         service = _chrome_service_cls(_chrome_driver_manager_cls().install())
         options = _selenium_webdriver.ChromeOptions()
-        options.add_argument("--start-maximized")
+        # Still not a copy of get_options(): the two origin-isolation flags it
+        # sets are absent here on purpose, and their absence is the evidence
+        # that they are dispensable (see the note there). What does belong on
+        # every path is what the *caller* asked for, and strategy 5 used to be
+        # the one path that forgot it (Codex review, PR #1261).
+        #
+        # What is applied here, and why each is not optional:
+        #   - the window mode: a visible window is useless in an environment
+        #     that has no display, which is exactly the one that asked for
+        #     headless. --disable-gpu rides along because get_options() sets it
+        #     unconditionally and headless without it is the documented failure
+        #     combination on older builds and on Windows.
+        #   - the Chrome binary: the four earlier strategies all honour
+        #     GOOGLEFINDMY_CHROME_PATH, so a fallback that starts whatever
+        #     Chrome happens to be on PATH either fails on a machine that has
+        #     none, or silently runs a different browser than the user chose.
+        #   - the language: the sign-in page has to be readable whichever
+        #     strategy opened it.
+        #
+        # Still *not* honoured here, and for a measured reason rather than a
+        # suspected one: the resolved Chrome major version. webdriver-manager
+        # (measured against 4.1.2) takes it as
+        # ChromeDriverManager(driver_version=...) and passes that string
+        # verbatim to get_url_for_version_and_platform, which selects from the
+        # Chrome-for-Testing list by *substring* and then takes the last match.
+        # Measured against a synthetic known-good list: a pin on the newest
+        # milestone does resolve correctly, but "120" selects 133.0.6943.120,
+        # because that build's patch component contains those digits. So the pin
+        # is honoured or silently redirected to an unrelated newer driver
+        # depending on what else is in the list -- and the silent case is the
+        # likely one here, since users reach for GOOGLEFINDMY_CHROME_VERSION
+        # precisely when their Chrome is *behind* the stable channel. The
+        # library's own major-to-full resolution runs only when driver_version
+        # is left unset, and starts from the browser it detects rather than from
+        # the version we resolved. Honouring the pin properly therefore means a
+        # signature change here plus an HTTP call of our own against the
+        # Chrome-for-Testing metadata -- a bad trade on a last-resort path whose
+        # job is to produce *some* working driver.
+        if headless:
+            options.add_argument("--headless")
+            options.add_argument("--disable-gpu")
+        else:
+            options.add_argument("--start-maximized")
+        if resolved_path:
+            options.binary_location = resolved_path
         options.add_argument("--no-sandbox")
         options.add_argument("--disable-dev-shm-usage")
+        _apply_login_locale(options, os.environ)
 
         driver = _selenium_webdriver.Chrome(service=service, options=options)
         LOGGER.warning(
@@ -1214,7 +1396,9 @@ def _create_driver_inner(
                 all_file_lock = False
 
     # Strategy 5: webdriver-manager fallback
-    fallback_driver = _try_webdriver_manager_fallback()
+    fallback_driver = _try_webdriver_manager_fallback(
+        headless=headless, resolved_path=resolved_path
+    )
     if fallback_driver is not None:
         _warn_on_driver_version_mismatch(
             fallback_driver, detected_version=detected_version

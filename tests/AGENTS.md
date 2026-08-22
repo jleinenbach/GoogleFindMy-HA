@@ -947,6 +947,26 @@ integration modules without importing Home Assistant. Import the helper with
 module path, class name, and method name to retrieve a standalone function that
 can be bound using :class:`types.MethodType`.
 
+## Shell fragment extraction
+
+A test that pulls a block out of `docker-login/entrypoint.sh` does not merely
+read it, it EXECUTES it, so a mis-grab is a side effect rather than a wrong
+answer. Ending such an extraction on "the next line that is exactly `fi`" is not
+an anchor: deleting the guard, or appending a comment to its `fi`, lets the
+search run on. Measured twice in one change -- 63 lines including
+`sudo chown -R ... /data`, and 74 including the backgrounded login CLI. The
+second happened while fixing the first, which is why this belongs here and not
+only in a comment. Extract through `_extract_shell_block` in
+`tests/test_docker_login_hardening.py`, which ends on `if`/`fi` balance and
+additionally refuses to return a block that fails `must_contain` or exceeds
+`max_lines`; a mis-grab must raise, never run. Extent today, stated so it is not
+mistaken for coverage: two callers go through it, `_extract_display_wait` and
+`_extract_layout_call`. `_extract_layout_feature` is only half braked -- its
+function half comes from the older `_extract_shell_function`, which anchors on
+the first column-0 `}` and has neither `must_contain` nor `max_lines`. Most
+fragments these tests execute therefore still contain an unbraked part; the
+brakes cover the guard blocks, not everything that runs.
+
 ## Device registry expectations
 
 The coordinator device-registry tests retain Home Assistant's 2025.10

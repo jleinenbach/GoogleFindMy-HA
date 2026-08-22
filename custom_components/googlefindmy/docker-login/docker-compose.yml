@@ -92,6 +92,25 @@ services:
       # Optional: pin Chrome's major version if auto-detection ever mismatches
       # the bundled Chrome (undetected-chromedriver SessionNotCreatedException).
       # GOOGLEFINDMY_CHROME_VERSION: "141"
+      # Language of the login browser and of the Google sign-in page it loads.
+      # No language is forced anywhere in this container: unset (the default)
+      # means Chrome keeps its own, which is English. login.sh fills it in from
+      # your shell locale so the sign-in speaks your language without you asking;
+      # set it yourself to override that, e.g. GFMY_LOCALE=en to stay in English,
+      # or GFMY_LOCALE=C to hand the choice back to Chrome from any caller (that
+      # is the POSIX "no localisation" locale, and the container reads it as a
+      # stated absence of a preference rather than as a broken value).
+      # The noVNC viewer around it is a separate thing and needs no setting: it
+      # follows your *browser's* language on its own.
+      GOOGLEFINDMY_LOGIN_LOCALE: "${GFMY_LOCALE:-}"
+      # Keyboard. The default (1) makes AltGr characters -- "@" on a German
+      # layout, the backslash and "|" elsewhere -- reach the browser, which they
+      # do not in the base image. Set GFMY_KEYBOARD_FIX=0 for the base behaviour.
+      GFMY_KEYBOARD_FIX: "${GFMY_KEYBOARD_FIX:-1}"
+      # Optional, and off by default: an X keyboard layout for the container,
+      # in setxkbmap's own spelling ("de", "fr", "de -variant nodeadkeys").
+      # Only needed for the rarer cases the fix above cannot reach (dead keys).
+      GFMY_KEYBOARD_LAYOUT: "${GFMY_KEYBOARD_LAYOUT:-}"
     ports:
       # noVNC web viewer. On the LOOPBACK default (below) it keeps the base
       # image's fixed password "secret" over plain HTTP, safe only because

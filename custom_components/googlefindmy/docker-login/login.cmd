@@ -38,6 +38,14 @@ rem   set GFMY_CLEARTEXT=1
 rem   login.cmd
 rem Either of those skips the question. No extra port is published in either
 rem case, so both tracks start without one.
+rem
+rem Optional language:
+rem   set GFMY_LOCALE=C
+rem hands the language of the sign-in page back to Chrome (English here)
+rem instead of taking it from your Windows culture. Capital C, the POSIX
+rem "no localisation" locale -- and on this shell the ONLY spelling that
+rem works, because `set GFMY_LOCALE=` deletes the name instead of emptying
+rem it. The reasoning sits at the GFMY_LOCALE block further down.
 setlocal
 pushd "%~dp0"
 
@@ -52,7 +60,7 @@ rem list below is not "what this script reads", it is "what a user can set and
 rem what survives into Compose or the container": the ${GFMY_*} names of
 rem docker-compose.yml plus GFMY_NOVNC_URL_HOST, which only this script uses.
 rem Without the trim the wrong mode starts silently, with exit code 0.
-for %%V in (GFMY_CLEARTEXT GFMY_ARGS GFMY_HOST_UID GFMY_HOST_GID GFMY_NOVNC_BIND GFMY_NOVNC_URL_HOST GFMY_NOVNC_HARDEN GFMY_NOVNC_TLS) do call :trim_trailing_blanks %%V
+for %%V in (GFMY_CLEARTEXT GFMY_ARGS GFMY_HOST_UID GFMY_HOST_GID GFMY_NOVNC_BIND GFMY_NOVNC_URL_HOST GFMY_NOVNC_HARDEN GFMY_NOVNC_TLS GFMY_LOCALE GFMY_KEYBOARD_FIX GFMY_KEYBOARD_LAYOUT) do call :trim_trailing_blanks %%V
 
 rem Remember what the caller pinned BEFORE anything defaults it, so the track
 rem menu below can tell "said nothing" from "said off" (AP-5). cmd.exe has no
@@ -193,6 +201,29 @@ if not defined IS_LOOPBACK set "GFMY_NOVNC_HARDEN=1"
 if not defined IS_LOOPBACK set "GFMY_NOVNC_TLS=1"
 if not defined IS_LOOPBACK set "NOVNC_SCHEME=https"
 
+rem Language of the login browser (docker-compose.yml -> GOOGLEFINDMY_LOGIN_LOCALE).
+rem Windows has no LANG, so ask the OS for the culture name, which is already a
+rem language tag ("de-DE"). An existing GFMY_LOCALE always wins, so
+rem `set GFMY_LOCALE=en` before running this stays in English, and a failed or
+rem missing PowerShell simply leaves it empty -- Chrome then keeps its own
+rem default. The container validates the value and ignores anything that is not
+rem a language tag, so this can never break a login.
+rem
+rem What cmd.exe canNOT express is bash's empty-but-present value: `set VAR=`
+rem DELETES the name (same reason the AP-5 comment above uses `if defined` as
+rem the counterpart of `${VAR+set}`), so `set GFMY_LOCALE=` here does not mean
+rem "no preference", it means "ask Windows". The spelling that DOES opt out on
+rem this launcher is `set GFMY_LOCALE=C`: it is defined, so it wins here, and
+rem the container reads the POSIX no-localisation locale as no preference and
+rem drops it without a warning. Documented under "Language and keyboard".
+if not defined GFMY_LOCALE (
+  for /f "usebackq delims=" %%c in (`powershell -NoProfile -Command "(Get-Culture).Name" 2^>nul`) do set "GFMY_LOCALE=%%c"
+)
+
+rem Keyboard handling for the noVNC viewer (docker-compose.yml). Passed through,
+rem not decided here, so `set GFMY_KEYBOARD_LAYOUT=de` works without editing files.
+if not defined GFMY_KEYBOARD_FIX set "GFMY_KEYBOARD_FIX=1"
+
 if not exist data mkdir data
 
 echo [login] Starting the GoogleFindMy-HA login container...
@@ -308,6 +339,9 @@ echo Environment (see the comment block at the top of this file):
 echo   GFMY_NOVNC_BIND       host bind for noVNC 7900          (default 127.0.0.1)
 echo   GFMY_NOVNC_URL_HOST   address printed for your browser  (default: the bind)
 echo   GFMY_CLEARTEXT=1      print the bundle in this terminal at the end
+echo   GFMY_LOCALE           language for the sign-in page     (default: your culture,
+echo                         or Chrome's own if PowerShell did not answer)
+echo                         set GFMY_LOCALE=C to hand the choice back to Chrome
 goto :eof
 
 :set_track

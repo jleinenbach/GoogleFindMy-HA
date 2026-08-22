@@ -260,6 +260,147 @@ read it as your host user. Docker Desktop (Windows/macOS) maps ownership for you
    (the terminal then logs `Trying headless mode...`). The owner-key step needs
    no browser at all.
 
+## Language and keyboard
+
+Three different pieces of software show up on your screen during a login, and
+each takes its language from a different place. None of them is pinned to a
+language by this container.
+
+| What you see | Where its language comes from | How to change it |
+| --- | --- | --- |
+| The noVNC viewer (toolbar, panels) | Your **own browser's** language, which noVNC reads from it directly | Change your browser's language |
+| Chrome inside the viewer, and the Google sign-in page it loads | `GFMY_LOCALE`, which the launchers fill in from your own locale; empty on a bare `docker compose run`, which reads no locale of its own | `GFMY_LOCALE=fr bash login.sh` |
+| The `[entrypoint]` / `[AuthFlow]` lines in your terminal | English, like the rest of the project | — |
+
+The launchers fill `GFMY_LOCALE` in from your own environment: `login.sh` reads
+your shell locale (`LC_ALL` / `LC_MESSAGES` / `LANG`) and `login.cmd` asks
+Windows for its culture name, so the sign-in page usually arrives in the
+language you read without you setting anything. Both accept a locale in either
+spelling (`de-DE` or `de_DE.UTF-8`).
+
+Set it yourself to override that — `GFMY_LOCALE=en` to stay in English — or
+hand the choice back to Chrome, which in this image means English. There are two
+spellings for handing it back, and which one you have depends on your shell:
+
+| Shell | Opt out with | Why |
+| --- | --- | --- |
+| `bash` (`login.sh`) | `GFMY_LOCALE= bash login.sh` **or** `GFMY_LOCALE=C bash login.sh` | An empty value is still a value here, so the launcher leaves it alone; `C` it passes on, and the container reads that as no preference |
+| `cmd.exe` (`login.cmd`) | `set GFMY_LOCALE=C` | `set GFMY_LOCALE=` *deletes* the variable on Windows, and the launcher then asks Windows for your culture instead |
+| `docker compose` directly | `GFMY_LOCALE=C` or nothing at all | This path reads no locale of its own, so it is already empty unless you fill it in |
+
+`GFMY_LOCALE=C` is the one that works everywhere, `docker compose` included:
+`C` is the POSIX locale for "no localisation", and the container reads it as a
+stated absence of a preference rather than as a broken value — so it is dropped
+in silence, without the warning a typo earns.
+
+Any OTHER value that is not a language tag is ignored with a warning rather than
+passed on: a login must not fail over the language of its own error messages. Two
+kinds of value are dropped in silence instead, and deliberately so, because both are an
+answer rather than a mistake: an empty one, and the POSIX locale above. Spell the
+latter with a capital `C` — `c` and `posix` end up at the same English page, but
+by way of the warning, which reads as if your setting had been wrong. What is read is the
+part before the first `.` or `@`, with `_` read as `-` — together that is what
+turns `de_DE.UTF-8` into `de-DE` — so whatever follows those characters is
+dropped without a warning, and only the remainder has to look like a language
+tag. To see which tag actually reached Chrome, add `--debug` to `GFMY_ARGS`
+(`GFMY_ARGS=--debug bash login.sh`, or `set GFMY_ARGS=--debug` before
+`login.cmd`): the login then logs the language it applied, and, if your value
+was shortened, what it was shortened from. Note that `--debug` makes the whole
+run verbose in the launcher terminal and in `docker logs`, your account address
+included, so it is a diagnostic setting rather than an everyday one.
+
+### Typing "@" and other AltGr characters
+
+A VNC viewer does not forward your keyboard; it forwards *characters* plus the
+modifier keys you are holding. On a German, French or Spanish layout the "@" of
+your e-mail address is made with AltGr, and the base image's VNC server used to
+receive that stray AltGr *around* the character and produce nothing at all —
+which makes the login impossible, since every account name contains an "@".
+
+The container now tells its VNC server to resolve keys through XKEYBOARD and to
+drop the level-3 modifiers (`~/.x11vncrc`, written by `entrypoint.sh`), so the
+character arrives on its own. It is on by default; `GFMY_KEYBOARD_FIX=0`
+restores the base image's behaviour.
+
+Two fallbacks, in the order worth trying:
+
+1. **Paste instead of type.** Open the panel on the left edge of the noVNC
+   window, type or paste the text into the *Clipboard* box, then press `Ctrl+V`
+   in the browser field. This path never touches the keyboard translation and
+   therefore always works.
+2. **Give the container your layout.** `GFMY_KEYBOARD_LAYOUT=de bash login.sh`
+   (the value is passed to `setxkbmap`, so `de -variant nodeadkeys` works too).
+   Only needed for the rarer cases the default cannot reach, such as dead keys.
+   If the layout cannot be applied, the container says so on startup, and where
+   `setxkbmap` gave a reason it repeats that reason, so a rejected name is
+   distinguishable from a display that was not up yet. Either way the login
+   continues on the default layout rather than aborting.
+
+## Cancelling a login
+
+A login can end without a token in two ways that the flow itself names, and the
+line it prints says which one it was. (`Ctrl+C` is a third way out. It saves
+nothing either and ends with the same status, but it is the one cancellation
+that still prints a Python `KeyboardInterrupt` traceback instead of an
+`[AuthFlow]` line.)
+
+Closing the Chrome window in the viewer:
+
+```
+[AuthFlow] Login cancelled: the browser window was closed before Google issued
+an account token. Nothing was saved; start the login again to retry.
+```
+
+Walking away and letting the five-minute wait expire, with the window still
+open:
+
+```
+[AuthFlow] No login completed within 5 minutes, so no account token was
+received. Nothing was saved; start the login again when you are ready.
+```
+
+These are cancellations, not failures. The exit status is `130` ("cancelled by
+the user") on every one of them, which is deliberately distinct from the `1`/`2`
+the launcher uses for its own failures, so a script around this can tell "you
+stopped" from "it broke". No new credentials are stored on any of these paths,
+so re-running the login is the whole recovery procedure.
+
+Cancelling a **re-authentication** costs nothing either. `--reauth` (passed
+through `GFMY_ARGS`, see [Forcing a fresh login](#forcing-a-fresh-login)) clears
+the cached tokens before it starts, because an empty cache is what makes the CLI
+open the login at all. If that login then ends without a token (you closed the
+window, the wait expired, you pressed `Ctrl+C`), the cleared tokens are put back
+and the run says so:
+
+```
+Login did not complete; restored 3 cached token(s).
+```
+
+(The number is whatever was cached; a used cache holds more than three keys.)
+
+A cancelled `--reauth` therefore leaves you signed in exactly as you were. Three
+cases cannot be undone, and each says so instead of pretending otherwise:
+
+* **The login already stored a new token** and was then cut short in the moment
+  between saving it and returning — a `Ctrl+C` or a broken pipe in that
+  narrow window. The cleared tokens are then *not* put back, because they belong to the
+  sign-in the new one replaces and a mix of the two would send the next run back
+  to the old account:
+
+  ```
+  A new oauth_token was stored before the run ended, so the previous tokens were
+  not put back (they belong to the old sign-in). Run the login again (without
+  --reauth) to finish signing in with the new one.
+  ```
+
+* **`secrets.json` turned unreadable** in the meantime. The restore refuses to
+  overwrite the file (it would throw away whatever else the file still holds)
+  and tells you to run `--reauth` again.
+
+* **Writing the restored file failed** (a full or read-only disk). The run says
+  so and leaves the cleared state on disk rather than replacing the reason it
+  ended with a disk error; `--reauth` again is the recovery here too.
+
 ## After the login (the menu, `q`, and the wrap-up)
 
 The tracker list is not the end of the run. The CLI stays in a small loop and
@@ -477,6 +618,28 @@ there is no separate image to rebuild for code changes.
   every HACS update; that is why the commands above use this form.
 - **noVNC page won't load:** give the container a few seconds; check
   `docker compose logs` for `[entrypoint] Display ready.`
+- **A character will not type ("@", "\\", "|", "€"):** those are AltGr
+  characters, which a VNC viewer handles differently from the rest. Paste them
+  instead — the panel on the left edge of the noVNC window has a *Clipboard*
+  box, and `Ctrl+V` puts its contents into the browser field. See
+  [Typing "@" and other AltGr characters](#typing--and-other-altgr-characters)
+  for the setting behind it.
+- **Everything appears in the wrong language:** the viewer follows your own
+  browser, Chrome follows `GFMY_LOCALE` (taken from your shell locale unless you
+  set it). `GFMY_LOCALE=en bash login.sh` keeps the sign-in page in English. See
+  [Language and keyboard](#language-and-keyboard).
+- **The run ended with exit status 130:** that is not an error, it is a
+  cancellation. If you closed the Chrome window or let the wait run out, the
+  line above it names which of the two it was; a `Ctrl+C` gets the same status
+  but ends in a `KeyboardInterrupt` traceback rather than an `[AuthFlow]` line.
+  Nothing was written on any of them; start the login again. The two messages
+  are quoted in full under [Cancelling a login](#cancelling-a-login).
+- **A `TimeoutException` traceback instead of an `[AuthFlow]` line:** that is
+  the opposite case, and the exit status is *not* `130`. Chrome or ChromeDriver
+  stopped answering while the login was still being waited for, so the run
+  reports a driver failure rather than claiming you cancelled anything. The
+  wait may not even have started to run out. Retry the login; if it keeps
+  happening, the traceback is what to attach to a bug report.
 - **`port is already allocated` on 7900:** another process on the Docker host
   holds the noVNC port. Stop the conflicting process (a leftover login
   container: `docker compose ps` / `docker compose down`).

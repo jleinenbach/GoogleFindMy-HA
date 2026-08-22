@@ -210,6 +210,58 @@ if [ "${GFMY_NOVNC_TLS:-}" = "1" ]; then
   fi
 fi
 
+# --- Keyboard: make AltGr characters reach Chrome ------------------------------
+# Symptom this fixes: on a German (and every other AltGr) layout the "@" of the
+# account e-mail never appeared in the browser, which makes the login literally
+# impossible to complete.
+#
+# The chain, read from the two ends that are actually source-verifiable:
+#   * noVNC sends the *character*, not the key combination: getKeysym() ends in
+#     `keysyms.lookup(codepoint)`, so AltGr+Q arrives as the keysym `at`
+#     (core/input/util.js). Separately, the AltGr press itself arrives as
+#     `ISO_Level3_Shift` (core/input/domkeytable.js: addStandard("AltGraph",
+#     XK_ISO_Level3_Shift)) -- and it is still *held down* when `at` arrives.
+#   * The base image starts x11vnc with neither -xkb nor -remap (NodeBase/
+#     start-vnc.sh builds X11VNC_OPTS from scratch, so an inherited value cannot
+#     add to it). x11vnc's own default only switches -xkb on when a keysym like
+#     "@" is otherwise unreachable (x11vnc(1), -xkb); on the container's us
+#     layout "@" *is* reachable as Shift+2, so it stays off and the stray
+#     modifier is injected around the character.
+#
+# Two settings, both from the x11vnc man page:
+#   xkb    -- resolve the keysym through XKEYBOARD instead of plain modtweak,
+#             which is the documented remedy "if there are still keymapping
+#             problems when using -modtweak by itself".
+#   remap  -- drop the level-3 modifiers entirely ("To disable a keysym [...]
+#             remap it to NoSymbol"). Nothing is lost: the character keysym
+#             already carries the meaning, and no login needs AltGr shortcuts.
+#
+# Written here, at runtime, rather than baked into the image, so it sits next to
+# every other viewer decision and can be switched off in one place. x11vnc reads
+# $HOME/.x11vncrc as "one command line option per line" (leading dash optional),
+# and it is read by the supervisor child started below -- hence *before* that
+# line, exactly like the VNC password above.
+if [ "${GFMY_KEYBOARD_FIX:-1}" = "1" ]; then
+  # Non-fatal on purpose. This script runs under `set -e`, so an unguarded
+  # redirection into a read-only HOME would abort the whole login over a
+  # convenience setting -- a worse outcome than the keyboard problem it fixes.
+  if ! printf '%s\n' \
+    '# Written by GoogleFindMy-HA docker-login/entrypoint.sh.' \
+    '# Disable with GFMY_KEYBOARD_FIX=0.' \
+    'xkb' \
+    'remap ISO_Level3_Shift-NoSymbol,Mode_switch-NoSymbol' \
+    > "${HOME:-/home/seluser}/.x11vncrc" 2>/dev/null; then
+    echo "[entrypoint] WARNING: could not write ~/.x11vncrc; AltGr characters" >&2
+    echo "[entrypoint] may not reach the browser. Paste them via the noVNC" >&2
+    echo "[entrypoint] clipboard panel instead." >&2
+  fi
+else
+  # An explicit opt-out must also undo a file left by an earlier run, or the
+  # switch would only work on a pristine container.
+  rm -f "${HOME:-/home/seluser}/.x11vncrc" 2>/dev/null || true
+  echo "[entrypoint] Keyboard fix disabled (GFMY_KEYBOARD_FIX=0)."
+fi
+
 "${VENV_PATH}/bin/supervisord" --configuration /etc/supervisord.conf &
 SUPERVISOR_PID=$!
 
@@ -326,13 +378,30 @@ trap 'on_signal TERM 143' TERM
 trap 'on_signal INT 130' INT
 
 echo "[entrypoint] Waiting for X display ${DISPLAY} to come up..."
-for i in $(seq 1 30); do
+# One source for the bound: the warning below names it, and a warning that
+# quotes a number the loop no longer uses is worse than no number at all.
+_display_wait_secs=30
+_display_ready=""
+for i in $(seq 1 "${_display_wait_secs}"); do
   if xdpyinfo -display "${DISPLAY}" >/dev/null 2>&1; then
     echo "[entrypoint] Display ready."
+    _display_ready=1
     break
   fi
   sleep 1
 done
+# Not fatal -- Chrome may still come up moments later, and aborting here would
+# turn a slow start into a failed login. But it must not be silent either: a
+# keyboard layout that will not apply and a browser that never appears are both
+# symptoms of this, and nothing else in the run names it. (Not the only possible
+# cause of a missing browser: the grid wait below can expire too, and still does
+# so silently -- deliberately, because the login drives chromedriver directly and
+# never touches the grid.)
+if [ -z "${_display_ready}" ]; then
+  echo "[entrypoint] WARNING: display ${DISPLAY} did not come up within ${_display_wait_secs}s;" >&2
+  echo "[entrypoint] continuing anyway. If the browser never appears in the" >&2
+  echo "[entrypoint] viewer, this is the reason." >&2
+fi
 
 # Neutral status line only: it must NOT read as the call to action. The single
 # actionable instruction block (open the URL, sign in to the Chrome window that
@@ -381,6 +450,77 @@ if command -v curl >/dev/null 2>&1; then
     fi
     sleep 1
   done
+fi
+
+# --- Optional X keyboard layout (opt-in) ---------------------------------------
+# The keysym remap above is what makes AltGr characters work regardless of
+# layout, and it needs no configuration. This block is the second, *optional*
+# lever for the rarer cases it cannot reach -- dead keys, a layout whose
+# characters have no keysym of their own -- and it is off unless asked for:
+# nobody's keyboard should be assumed. GFMY_KEYBOARD_LAYOUT takes what
+# setxkbmap takes ("de", "fr", "de -variant nodeadkeys").
+#
+# Placed after the grid wait because setxkbmap needs a live X display, and kept
+# bounded and best-effort for the same reason as that wait: a missing setxkbmap
+# or a slow Xvfb must cost the login nothing. It touches no trap/wait machinery.
+#
+# The other viewer switches say so when they cannot honour the request (the
+# ~/.x11vncrc write above, the noVNC TLS block); the ownership handoff does not,
+# and that is a separate gap, not a precedent. A silent fall-through is worst
+# exactly here: the README sends people to this setting precisely when characters
+# do not reach the browser, so a request that quietly did nothing is
+# indistinguishable from a request that did not help.
+#
+# A function, not an inline block, so the behavioural test can run THIS code
+# against a stub setxkbmap rather than a hand-written imitation of it.
+function apply_keyboard_layout {
+  local _err=""
+  local _i=""
+  # Same reason as the display wait above: the warning names this bound.
+  local _tries=15
+
+  if ! command -v setxkbmap >/dev/null 2>&1; then
+    echo "[entrypoint] WARNING: GFMY_KEYBOARD_LAYOUT is set but setxkbmap is not" >&2
+    echo "[entrypoint] installed; keeping the default layout." >&2
+    return 0
+  fi
+
+  # stderr is captured instead of discarded so the final warning can name the
+  # cause. The two are not interchangeable for the user: "Cannot open display"
+  # means the X wait above lost its race and a retry may help, while "Error
+  # loading new keyboard description" means the value itself is wrong and
+  # retrying never will. The substitution also swallows stdout, which the old
+  # 2>/dev/null let through; that is a real difference, but a silent one here:
+  # setxkbmap prints nothing on a successful layout switch.
+  # shellcheck disable=SC2086 -- the layout may legitimately carry option words.
+  for _i in $(seq 1 "${_tries}"); do
+    if _err="$(setxkbmap -display "${DISPLAY}" ${GFMY_KEYBOARD_LAYOUT} 2>&1)"; then
+      echo "[entrypoint] Keyboard layout set to '${GFMY_KEYBOARD_LAYOUT}'."
+      return 0
+    fi
+    sleep 1
+  done
+
+  echo "[entrypoint] WARNING: could not apply the requested keyboard layout" >&2
+  echo "[entrypoint] '${GFMY_KEYBOARD_LAYOUT}' after ${_tries} attempts; keeping the" >&2
+  echo "[entrypoint] default layout." >&2
+  if [ -n "${_err}" ]; then
+    # `|| true`, not decoration: this is a pipeline in statement position, so
+    # under `set -e` a failing or absent `sed` would kill the login HERE --
+    # after the headline, before the way out below. That is the opposite of
+    # what this whole block promises, and the guide promises it too.
+    printf '%s\n' "${_err}" | sed 's/^/[entrypoint] setxkbmap: /' >&2 || true
+  fi
+  echo "[entrypoint] Check the value against the layout and variant names" >&2
+  echo "[entrypoint] setxkbmap accepts, or paste the characters via the noVNC" >&2
+  echo "[entrypoint] clipboard panel instead." >&2
+  # Best-effort by contract: the login must not die over a convenience setting,
+  # and this script runs under `set -e`.
+  return 0
+}
+
+if [ -n "${GFMY_KEYBOARD_LAYOUT:-}" ]; then
+  apply_keyboard_layout
 fi
 
 cd /app/gfmy

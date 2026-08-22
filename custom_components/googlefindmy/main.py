@@ -34,7 +34,7 @@ import os
 import sys
 import types
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Final
 
 if TYPE_CHECKING:  # pragma: no cover - import-time typing block
     import argparse
@@ -426,6 +426,11 @@ def _register_file_cache(entry_id: str = "") -> object:
     return file_cache
 
 
+# Exit status for a login the user ended themselves (closed window, expired
+# wait). Kept apart from 1/2, which login.sh spends on its own failures.
+_EXIT_LOGIN_ABORTED = 130
+
+
 def _run_oauth_flow_or_exit(
     flow: Callable[[], tuple[str, str | None]],
 ) -> tuple[str, str | None]:
@@ -446,8 +451,30 @@ def _run_oauth_flow_or_exit(
         browser_packages_missing,
     )
 
+    # Safe to import here even though this boundary exists for a *missing*
+    # browser install: `_ensure_authenticated` already imported this module
+    # (behind its own ImportError guard) to obtain the flow it passes in, so by
+    # the time anything reaches this line, selenium is present.
+    from custom_components.googlefindmy.Auth.auth_flow import (  # noqa: PLC0415
+        LoginAborted,
+    )
+
     try:
         return flow()
+    except LoginAborted as err:
+        # A cancelled login is a finished run, not a crash: the user closed the
+        # window or let the wait expire. Print the flow's own sentence and stop
+        # with a non-zero status -- non-zero because no token was produced and
+        # the caller (login.sh, docker compose) must not report success, but
+        # without a traceback, because there is no defect to report.
+        #
+        # 130 is the shell's "cancelled by the user" code, and it is chosen over
+        # a generic 1 for two reasons: it separates "you stopped" from "it
+        # broke" for anything scripting this run, and login.sh already spends 1
+        # and 2 on its own failures, so reusing those would make the two
+        # indistinguishable.
+        print(f"\n{err}\n")
+        raise SystemExit(_EXIT_LOGIN_ABORTED) from err
     except BrowserPackagesUnusable as err:
         # The typed case: the packages are there but unusable, and the type
         # carried that through the strategy chain unchanged.
@@ -849,26 +876,63 @@ async def _setup_fcm_receiver(cache: object) -> Any:
     return fcm
 
 
-def _clear_stale_tokens_for_reauth() -> None:
+#: Keys whose presence means a *new* credential chain has begun. Everything else
+#: ``_clear_stale_tokens_for_reauth`` removes hangs off one of these two:
+#: ``_ensure_aas_token`` exchanges ``oauth_token`` for ``aas_token``, and the
+#: vault keys follow from that exchange. They are the anchors precisely because
+#: they are what a later run *reads* to decide the chain is already in place.
+_REAUTH_CHAIN_ANCHORS: Final[tuple[str, ...]] = ("oauth_token", "aas_token")
+
+
+def _credential_is_present(value: object) -> bool:
+    """Report whether *value* is a stored credential rather than a placeholder.
+
+    Deliberately as narrow as the checks it stands in for: ``_ensure_aas_token``
+    and ``_ensure_authenticated`` both require ``isinstance(value, str)`` and a
+    non-blank value before they treat a key as a credential. Anything looser
+    here would deny a restore over a value those two would ignore -- a ``0`` or
+    a ``{}`` left by a half-written file -- and the user would lose the bundle
+    without a new chain having started. ``key in data`` is not enough for the
+    same reason.
+    """
+    return isinstance(value, str) and bool(value.strip())
+
+
+def _clear_stale_tokens_for_reauth() -> Callable[[], None] | None:
     """Clear cached tokens from secrets.json to force re-authentication.
 
     Called when ``--reauth`` is passed on the CLI. Removes ``oauth_token``,
     ``aas_token``, and all derived ``adm_token_*`` / timestamp keys so that
     ``_ensure_authenticated()`` triggers the Chrome login flow.
+
+    Returns a callable that puts those keys back, or ``None`` when there was
+    nothing to clear. The clearing has to happen *before* the login -- an empty
+    cache is what makes ``_ensure_authenticated`` start the flow at all -- so a
+    login the user then cancels would leave the account signed out as the price
+    of a decision that was meant to change nothing. The caller invokes the
+    returned callable on every path that ends without a fresh token.
+
+    The restore re-reads the file rather than writing the snapshot back, and it
+    treats the cleared keys as one bundle. If the login stored a fresh chain
+    anchor (``_REAUTH_CHAIN_ANCHORS``) before it was cut short, nothing goes
+    back: the cleared values all belong to the chain that anchor replaces, and
+    mixing the two is worse than losing the old one. Otherwise the snapshot is
+    put back over the gaps. Both writes go through ``_atomic_write_json``, so an
+    interrupted write cannot truncate the token file and the 0600 mode holds.
     """
     import json  # noqa: PLC0415
 
     secrets_path = _resolve_secrets_path()
     if not secrets_path.is_file():
-        return
+        return None
 
     try:
         with open(secrets_path, encoding="utf-8") as fh:
             data = json.load(fh)
         if not isinstance(data, dict):
-            return
+            return None
     except Exception:  # noqa: BLE001
-        return
+        return None
 
     keys_to_remove = [
         k
@@ -887,17 +951,86 @@ def _clear_stale_tokens_for_reauth() -> None:
         )
     ]
     if not keys_to_remove:
-        return
+        return None
 
-    for k in keys_to_remove:
-        del data[k]
-
-    with open(secrets_path, "w", encoding="utf-8") as fh:
-        json.dump(data, fh, indent=2)
+    removed = {k: data.pop(k) for k in keys_to_remove}
+    _atomic_write_json(secrets_path, data)
 
     print(
         f"Cleared {len(keys_to_remove)} cached token(s). Re-authentication required.\n"
     )
+
+    def _restore_cleared_tokens() -> None:
+        """Put the cleared tokens back after a login that produced none."""
+        if secrets_path.is_file():
+            try:
+                with open(secrets_path, encoding="utf-8") as fh:
+                    current = json.load(fh)
+            except (OSError, ValueError):
+                current = None
+            if not isinstance(current, dict):
+                # The file is there but unreadable. Overwriting it with the
+                # snapshot alone would drop whatever else it holds, so the
+                # cautious move is to touch nothing and say so.
+                print(
+                    "Could not read secrets.json to restore the previous "
+                    "tokens; sign in again with --reauth.\n"
+                )
+                return
+        else:
+            # No file at all: nothing to preserve, so the snapshot is the whole
+            # truth and writing it back is safe.
+            current = {}
+
+        fresh_anchor = next(
+            (
+                k
+                for k in _REAUTH_CHAIN_ANCHORS
+                if _credential_is_present(current.get(k))
+            ),
+            None,
+        )
+        if fresh_anchor is not None:
+            # The login got far enough to store a new anchor before it was cut
+            # short. Everything this function holds belongs to the chain that
+            # anchor replaces, so putting it back would leave the old
+            # ``aas_token`` and vault keys beside the new ``oauth_token``.
+            # ``_ensure_aas_token`` returns early on any cached ``aas_token``,
+            # so the next run would never exchange the fresh one and would keep
+            # using the very chain ``--reauth`` was asked to end -- with the old
+            # account's vault keys, if the user was switching accounts. Little
+            # is lost by declining: ``_ensure_authenticated`` drops the derived
+            # tokens itself when it writes the new anchor, so those were gone
+            # either way. The vault keys it does *not* touch are gone too, but a
+            # completed ``--reauth`` would have replaced them just the same.
+            #
+            # The advice is deliberately not "--reauth again": that flag would
+            # clear the fresh anchor and force a second Chrome login, while a
+            # plain re-run finds ``username`` plus the new ``oauth_token``,
+            # returns early from ``_ensure_authenticated`` and lets
+            # ``_ensure_aas_token`` finish the exchange.
+            print(
+                f"A new {fresh_anchor} was stored before the run ended, so the "
+                "previous tokens were not put back (they belong to the old "
+                "sign-in). Run the login again (without --reauth) to finish "
+                "signing in with the new one.\n"
+            )
+            return
+
+        for key, value in removed.items():
+            current.setdefault(key, value)
+
+        try:
+            _atomic_write_json(secrets_path, current)
+        except OSError:
+            print(
+                "Could not restore the previous tokens; sign in again with --reauth.\n"
+            )
+            return
+
+        print(f"Login did not complete; restored {len(removed)} cached token(s).\n")
+
+    return _restore_cleared_tokens
 
 
 def _resolve_effective_entry_id(cli_entry: str | None, env_entry: str | None) -> str:
@@ -1046,9 +1179,18 @@ def _main(argv: Sequence[str] | None = None) -> None:
     # then a cache-signal check that was always empty for a fresh shell start),
     # both of which could dead-end a repo-layout start in an opaque
     # MissingTokenCacheError instead of bootstrapping.
-    if args.reauth:
-        _clear_stale_tokens_for_reauth()
-    _ensure_authenticated()
+    restore_cleared_tokens = _clear_stale_tokens_for_reauth() if args.reauth else None
+    try:
+        _ensure_authenticated()
+    except BaseException:
+        # A cancelled login, a Ctrl+C, or the sys.exit from a driver failure all
+        # end the run without a new token -- and --reauth has already taken the
+        # old ones away. Put them back, so stopping the login costs the user
+        # nothing. BaseException is deliberate: SystemExit and KeyboardInterrupt
+        # are exactly the two paths that reach here most often.
+        if restore_cleared_tokens is not None:
+            restore_cleared_tokens()
+        raise
     # Resolve the effective entry id once (CLI > env > "") and use the SAME
     # value for both registration and hand-off, so the registry key and the
     # lookup hint can never diverge.  Forwarding the raw args.entry instead

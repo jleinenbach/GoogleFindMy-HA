@@ -61,6 +61,7 @@ Codex review finding on PR #1208:
 
 from __future__ import annotations
 
+import logging
 import os
 import pty
 import re
@@ -2551,3 +2552,880 @@ def test_entrypoint_derivation_never_overrides_a_launcher_verdict() -> None:
     )
     assert out["HARDEN"] == "1", "launcher HARDEN verdict must be preserved"
     assert out["TLS"] == "", "launcher --no-tls (TLS empty) must not be overridden to 1"
+
+
+# --- Language and keyboard (the login has to be usable, not only secure) -------
+#
+# Two mandatory-but-invisible parts of a first login: the sign-in page has to be
+# readable, and the "@" of the account name has to be typeable. Both were broken
+# in the container -- English for everyone, and no "@" at all on an AltGr layout,
+# which makes the login impossible rather than merely awkward.
+
+
+def _launcher_env_probe(tmp_path: Path) -> tuple[Path, dict[str, str]]:
+    """A launcher sandbox whose ``docker`` stub reports its ENVIRONMENT.
+
+    The shared sandbox stub echoes the command line, which is the wrong window
+    for these guards: the launcher passes the language through the environment,
+    where compose interpolates it. So this stub prints the variables instead.
+    """
+
+    work, env = _launcher_sandbox(tmp_path)
+    stub = tmp_path / "bin" / "docker"
+    stub.write_text(
+        "#!/usr/bin/env bash\n"
+        'printf "PROBE GFMY_LOCALE=[%s]\\n" "${GFMY_LOCALE-unset}"\n'
+        'printf "PROBE GFMY_KEYBOARD_FIX=[%s]\\n" "${GFMY_KEYBOARD_FIX-unset}"\n'
+        'printf "PROBE GFMY_KEYBOARD_LAYOUT=[%s]\\n" "${GFMY_KEYBOARD_LAYOUT-unset}"\n',
+        "utf-8",
+    )
+    stub.chmod(0o755)
+    return work, env
+
+
+def _probe_launcher(tmp_path: Path, extra_env: dict[str, str]) -> dict[str, str]:
+    bash = shutil.which("bash")
+    if bash is None:  # pragma: no cover - CI images all ship bash
+        pytest.skip("bash is required to run the launcher")
+
+    work, env = _launcher_env_probe(tmp_path)
+    proc = subprocess.run(  # noqa: S603 - fixed argv, test-local stub PATH
+        [bash, str(work / "login.sh")],
+        capture_output=True,
+        timeout=60,
+        check=False,
+        env={**env, **extra_env},
+        stdin=subprocess.DEVNULL,
+    )
+    assert proc.returncode == 0, proc.stderr.decode()
+    found: dict[str, str] = {}
+    for line in proc.stdout.decode().splitlines():
+        if line.startswith("PROBE "):
+            name, _, value = line[len("PROBE ") :].partition("=")
+            found[name] = value.strip()[1:-1]
+    assert found, "the docker stub reported no environment"
+    return found
+
+
+def test_login_sh_hands_the_users_own_language_to_the_container(
+    tmp_path: Path,
+) -> None:
+    """The sign-in page should arrive in the language the user reads.
+
+    Behavioural rather than textual: the value has to survive as an *exported*
+    variable, since that is the only channel compose interpolates. A guard that
+    merely greps for the assignment would pass on a missing ``export``.
+    """
+    probe = _probe_launcher(tmp_path, {"LANG": "fr_FR.UTF-8"})
+
+    assert probe["GFMY_LOCALE"] == "fr_FR.UTF-8"
+
+
+def test_an_explicit_language_wins_over_the_shell_locale(tmp_path: Path) -> None:
+    """Opting out has to be possible, and ``GFMY_LOCALE=en`` is how."""
+    probe = _probe_launcher(tmp_path, {"LANG": "fr_FR.UTF-8", "GFMY_LOCALE": "en"})
+
+    assert probe["GFMY_LOCALE"] == "en"
+
+
+def test_an_explicitly_empty_language_is_not_overwritten(tmp_path: Path) -> None:
+    """An empty GFMY_LOCALE is an answer, and it must survive the host locale.
+
+    The guide tells the reader to hand the choice back to Chrome by leaving the
+    variable empty. A ``-z`` test cannot tell that apart from "never set", so on
+    a host with a real ``LANG`` the deliberate opt-out silently turned into the
+    host locale -- exactly the value the reader was opting out of. ``LANG`` is
+    set here on purpose: without it the assertion passes on the broken code too.
+    """
+    probe = _probe_launcher(tmp_path, {"LANG": "fr_FR.UTF-8", "GFMY_LOCALE": ""})
+
+    assert probe["GFMY_LOCALE"] == "", (
+        "GFMY_LOCALE= is a stated absence of a preference; replacing it with the "
+        "host locale takes the choice back off the user"
+    )
+
+
+def test_the_posix_locale_reaches_the_container_untouched(tmp_path: Path) -> None:
+    """Half one of the cross-platform opt-out, as a characterisation test.
+
+    ``GFMY_LOCALE=C`` is the spelling the guide gives Windows users, because
+    cmd.exe deletes a variable that is set to nothing and therefore cannot
+    express the empty case at all. For that to work the launcher must pass the
+    value ON rather than substitute the host locale, and the container must then
+    read it as no preference (half two, ``test_chrome_driver.py``).
+
+    Stated so it is not mistaken for a regression guard: this half is green on
+    the old launcher too, because a non-empty value never entered the branch the
+    fix changed. It is here to pin the END of the chain the guide promises, not
+    to catch the bug the sibling test catches.
+    """
+    probe = _probe_launcher(tmp_path, {"LANG": "fr_FR.UTF-8", "GFMY_LOCALE": "C"})
+
+    assert probe["GFMY_LOCALE"] == "C"
+
+
+def test_both_halves_agree_on_what_counts_as_no_preference(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The launcher and the container must mean the SAME thing by "no locale".
+
+    ``login.sh`` claims it drops a locale-free shell locale "by the same rule as"
+    the container's, and the guide sells ``C`` as an opt-out that works on either
+    side. Nothing pinned that: the two live in different languages (a ``case``
+    arm and a Python regex), so extending one and forgetting the other would be
+    silent -- a value the launcher forwards but the container warns about, or the
+    reverse. This runs both over the same inputs and asserts they agree.
+
+    What the container half asserts is the SILENCE, not the ``None``. ``None``
+    alone is tautological here: ``C`` and ``POSIX`` are no language tags either
+    way, so every one of these values already ended at ``None`` before the rule
+    existed -- through the warning branch. Deleting the rule would put the
+    "expected a language tag" warning back on the very spelling the guide sells
+    as the opt-out, and a ``is None`` check would not notice.
+
+    Extent today, stated so it is not mistaken for equivalence: twelve values,
+    the six POSIX spellings below and six real locales. Drift OUTSIDE that set
+    stays invisible -- widening the ``case`` arm to lower case without widening
+    the regex, say, would keep this green. Widen both lists when you widen
+    either rule. The real-locale half is a boundary probe rather than a
+    regression guard: those values were forwarded before the rule too.
+    """
+    from custom_components.googlefindmy.chrome_driver import _login_locale
+
+    neutral = ["C", "POSIX", "C.UTF-8", "POSIX.UTF-8", "C@euro", "POSIX@x"]
+    real = ["de_DE.UTF-8", "fr", "ca", "cs", "cy", "pt_BR@euro"]
+
+    def _case(label: str, index: int) -> Path:
+        # A sandbox is built with mkdir(), so it is single-use; every value gets
+        # its own root rather than loosening the shared helper for this one test.
+        root = tmp_path / f"{label}{index}"
+        root.mkdir()
+        return root
+
+    # Grip check for the silence assertions below: without it, every
+    # `assert not caplog.text` would also pass when NO message reaches caplog at
+    # all (propagation switched off, a logging setup in a future conftest). A
+    # known-bad value therefore has to warn visibly first.
+    caplog.clear()
+    with caplog.at_level(logging.WARNING):
+        assert _login_locale({"GOOGLEFINDMY_LOGIN_LOCALE": "German"}) is None
+    assert caplog.text, (
+        "no warning reached caplog for a value that must warn; the silence "
+        "assertions below would be vacuous"
+    )
+
+    for index, value in enumerate(neutral):
+        probe = _probe_launcher(_case("neutral", index), {"LANG": value})
+        assert probe["GFMY_LOCALE"] == "", (
+            f"the launcher forwards {value!r} as a preference while the container "
+            "reads it as none; the two rules have drifted apart"
+        )
+        caplog.clear()
+        with caplog.at_level(logging.WARNING):
+            assert _login_locale({"GOOGLEFINDMY_LOGIN_LOCALE": value}) is None
+        assert not caplog.text, (
+            f"the launcher drops {value!r} without a word while the container "
+            f"calls it a broken setting; got {caplog.text!r}"
+        )
+
+    for index, value in enumerate(real):
+        probe = _probe_launcher(_case("real", index), {"LANG": value})
+        assert probe["GFMY_LOCALE"] == value, (
+            f"the launcher swallowed {value!r}, which is a real locale"
+        )
+        assert _login_locale({"GOOGLEFINDMY_LOGIN_LOCALE": value}) is not None
+
+
+def test_the_guide_gives_windows_an_opt_out_it_can_actually_type() -> None:
+    """cmd.exe has no empty-but-defined state, so the guide must not imply one.
+
+    ``set GFMY_LOCALE=`` REMOVES the name on Windows, after which login.cmd asks
+    the OS for the culture -- the opposite of opting out. The guide therefore has
+    to name ``C`` for that shell, and login.cmd has to say why at the code.
+    """
+    readme = _read("README.md")
+    windows_row = next(
+        (line for line in readme.splitlines() if "`cmd.exe` (`login.cmd`)" in line),
+        None,
+    )
+    assert windows_row is not None, (
+        "the language section must tell Windows users how to opt out at all"
+    )
+    assert "`set GFMY_LOCALE=C`" in windows_row, (
+        f"cmd.exe cannot express the empty case; got {windows_row!r}"
+    )
+
+    # Anchored at the branch it explains, not "somewhere in the file": the
+    # whole-file form certifies its own opposite. Replacing the culture lookup
+    # with a hard `set GFMY_LOCALE=C` would put every Windows user back on
+    # English, silently, while leaving that literal in place. Same reasoning as
+    # the verbatim-output rule in AGENTS.md.
+    lines = _read("login.cmd").splitlines()
+
+    def _is_comment(line: str) -> bool:
+        # Blank lines count, so a paragraph break between the note and the
+        # branch does not fail a launcher that is in fact correct. `REM` in
+        # capitals is valid cmd.exe and must not fail it either.
+        stripped = line.strip()
+        return (
+            not stripped
+            or stripped.lower().startswith(("rem", "@rem"))
+            or stripped.startswith("::")
+        )
+
+    branch = next(
+        (
+            i
+            for i, line in enumerate(lines)
+            if line.lstrip().lower().startswith("if not defined gfmy_locale")
+        ),
+        None,
+    )
+    assert branch is not None, (
+        "login.cmd must still ask Windows for the culture when the user said "
+        "nothing -- without that branch there is no default left to opt out of"
+    )
+    body_end = next(
+        (i for i in range(branch + 1, len(lines)) if lines[i].strip() == ")"),
+        None,
+    )
+    assert body_end is not None, "the culture branch must be a closed block"
+    body = "\n".join(lines[branch + 1 : body_end])
+    # The `if` line alone proves nothing: a body of `set "GFMY_LOCALE=en"` keeps
+    # it, and puts every Windows user on a fixed language. What has to hold is
+    # that the branch ASKS the OS and assigns what came back.
+    assert "Get-Culture" in body, (
+        f"the branch has to ask Windows for the culture; got body {body!r}"
+    )
+    # `%%[a-zA-Z]` rather than the current letter: renaming the FOR variable is
+    # a stylistic change and must not fail a launcher that still does the right
+    # thing. What matters is that the assignment comes FROM the loop.
+    assert re.search(r'set\s+"?GFMY_LOCALE=%%[a-zA-Z]"?', body), (
+        f"the branch must assign what Windows reported, not a fixed value; "
+        f"got body {body!r}"
+    )
+    start = branch
+    while start > 0 and _is_comment(lines[start - 1]):
+        start -= 1
+    lead_in = "\n".join(lines[start:branch])
+    # Both quoting forms: login.cmd writes `set "VAR=..."` almost everywhere, so
+    # matching only the bare spelling would fail on a stylistic tidy-up.
+    assert re.search(r'set\s+"?GFMY_LOCALE=C"?', lead_in), (
+        "the workaround has to be recorded in the comment block directly above "
+        "the branch it works around, where the next reader of that branch is"
+    )
+    # Anchored at the START of the statement: a help line that merely mentions
+    # `set GFMY_LOCALE=C` is documentation, not a default, and must not trip a
+    # guard whose whole point is to protect that documentation.
+    assigned = [
+        line
+        for line in lines
+        if not _is_comment(line) and re.match(r'\s*@?set\s+"?GFMY_LOCALE=C"?\s*$', line)
+    ]
+    assert not assigned, (
+        f"C is the user's opt-out, not the launcher's default; got {assigned!r}"
+    )
+
+    # The answer also has to be FINDABLE from the launcher itself, not only in
+    # the guide -- `--help` is where someone whose sign-in came up in the wrong
+    # language looks first, and on Windows it is the only spelling they have.
+    for name in ("login.cmd", "login.sh"):
+        text = _read(name).splitlines()
+        start = next(
+            (
+                i
+                for i, line in enumerate(text)
+                if "Environment (see the comment" in line
+            ),
+            None,
+        )
+        assert start is not None, f"{name} --help must keep its Environment list"
+        # Bounded at the list, not the file: `GFMY_LOCALE` appears in the code of
+        # login.sh many times over, so a whole-file search would pass on a help
+        # text that never mentions it.
+        block = text[start : start + 12]
+        listed = "\n".join(block)
+        assert "GFMY_LOCALE" in listed, (
+            f"{name} --help lists the environment but not GFMY_LOCALE. got {block!r}"
+        )
+        # The NAME alone is not the answer the reader came for. What has to
+        # survive is the spelling that opts out, because on cmd.exe it is the
+        # only one that exists.
+        assert "GFMY_LOCALE=C" in listed, (
+            f"{name} --help names the variable but not the C spelling that "
+            f"hands the choice back. got {block!r}"
+        )
+
+
+@pytest.mark.parametrize("locale", ["C", "POSIX", "C.UTF-8", "C@euro", "POSIX@x"])
+def test_a_locale_free_shell_expresses_no_preference(
+    tmp_path: Path, locale: str
+) -> None:
+    """``LANG=C`` is the absence of a language, not a request for one.
+
+    Forwarding it would make Chrome fall back anyway, but it would also make the
+    logs claim a preference the user never expressed.
+    """
+    probe = _probe_launcher(tmp_path, {"LANG": locale})
+
+    assert probe["GFMY_LOCALE"] == ""
+
+
+@pytest.mark.parametrize(
+    ("preset", "expected"),
+    [({}, "1"), ({"GFMY_KEYBOARD_FIX": "0"}, "0")],
+)
+def test_the_keyboard_fix_is_on_unless_switched_off(
+    tmp_path: Path, preset: dict[str, str], expected: str
+) -> None:
+    """A default of "off" would leave the AltGr layouts unable to log in at all."""
+    assert _probe_launcher(tmp_path, preset)["GFMY_KEYBOARD_FIX"] == expected
+
+
+def test_compose_forwards_the_language_and_keyboard_variables() -> None:
+    """The launcher's work is wasted if compose does not carry it inside."""
+    compose = _read("docker-compose.yml")
+
+    assert 'GOOGLEFINDMY_LOGIN_LOCALE: "${GFMY_LOCALE:-}"' in compose, (
+        "the container reads GOOGLEFINDMY_LOGIN_LOCALE (chrome_driver.py); the "
+        "launcher-facing name is GFMY_LOCALE, and compose is what joins them"
+    )
+    assert 'GFMY_KEYBOARD_FIX: "${GFMY_KEYBOARD_FIX:-1}"' in compose
+    assert 'GFMY_KEYBOARD_LAYOUT: "${GFMY_KEYBOARD_LAYOUT:-}"' in compose
+
+
+def test_entrypoint_writes_the_keyboard_rc_before_starting_the_vnc_server() -> None:
+    """Order is the whole property here.
+
+    ``x11vnc`` reads ``$HOME/.x11vncrc`` once, at startup, and it is started by
+    the supervisor this entrypoint launches. Writing the file afterwards would
+    leave no trace in any log and no "@" on any keyboard -- the failure would
+    look exactly like having no fix at all.
+    """
+    entrypoint = _read("entrypoint.sh")
+
+    rc_write = entrypoint.index(".x11vncrc")
+    supervisor = entrypoint.index('"${VENV_PATH}/bin/supervisord"')
+    assert rc_write < supervisor, (
+        "the .x11vncrc must be written before supervisord starts x11vnc"
+    )
+    assert "remap ISO_Level3_Shift-NoSymbol" in entrypoint, (
+        "dropping the level-3 modifier is what makes AltGr characters arrive"
+    )
+
+
+def test_the_keyboard_opt_out_also_removes_a_file_from_an_earlier_run() -> None:
+    """A switch that only works on a pristine container is not a switch.
+
+    ``GFMY_KEYBOARD_FIX=0`` has to undo the file, not just skip writing it: the
+    image layer and a reused container both survive a run.
+    """
+    entrypoint = _read("entrypoint.sh")
+
+    opt_out = entrypoint.index("GFMY_KEYBOARD_FIX:-1")
+    tail = entrypoint[opt_out : opt_out + 1500]
+    assert "rm -f" in tail and ".x11vncrc" in tail
+
+
+# --- Requested settings must not fail silently ---------------------------------
+# Every switch this entrypoint offers says so when it cannot honour the request.
+# The keyboard layout was the one exception: fifteen failed setxkbmap attempts
+# fell through without a word, and the README points users at that very setting
+# when characters do not reach the browser. These tests run the REAL shell code
+# (extracted from entrypoint.sh) against stub binaries, because a text assertion
+# on the warning cannot tell the fixed path from the broken one -- the string is
+# present in the file either way.
+
+
+_FI = re.compile(r"^fi\b")
+_IF = re.compile(r"^if\b")
+
+
+def _extract_shell_block(
+    entrypoint: str,
+    *,
+    banner: str,
+    opener: str,
+    must_contain: tuple[str, ...],
+    max_lines: int,
+    label: str,
+) -> str:
+    """Return a verbatim block from ``entrypoint.sh``, or raise.
+
+    Two extractors in this file learned the same lesson the expensive way, the
+    second one *while fixing the first*: ending on "the next line that is exactly
+    ``fi``" is not an anchor. Delete the guard, or merely append a comment to its
+    ``fi``, and the search runs on -- once handing a test 63 lines including
+    ``sudo chown -R ... /data``, once 74 including the backgrounded login CLI.
+    A test fragment is EXECUTED, so a mis-grab is not a wrong answer, it is a
+    side effect.
+
+    Hence one helper for all of them, with three independent brakes: the end is
+    found by ``if``/``fi`` balance (a trailing comment no longer hides it),
+    ``must_contain`` proves the block is the one meant, and ``max_lines`` caps
+    the blast radius if both are somehow satisfied by a larger stretch.
+    """
+
+    lines = entrypoint.splitlines()
+    start = next((i for i, line in enumerate(lines) if line.startswith(banner)), None)
+    if start is None:
+        raise AssertionError(f"{label}: could not locate its opening line ({banner!r})")
+    guard = next(
+        (i for i in range(start, len(lines)) if lines[i].startswith(opener)), None
+    )
+    if guard is None:
+        raise AssertionError(
+            f"{label}: the guard {opener!r} is gone -- whatever it protected is "
+            "unconditional now, which is exactly what these tests watch for"
+        )
+    depth = 0
+    end = None
+    for i in range(guard, len(lines)):
+        stripped = lines[i].strip()
+        if _IF.match(stripped):
+            depth += 1
+        elif _FI.match(stripped):
+            depth -= 1
+            if depth == 0:
+                end = i
+                break
+    if end is None:
+        raise AssertionError(
+            f"{label}: its guard is never closed by a `fi` on its own line. This "
+            "balance does not model a single-line `if ...; then ...; fi`; if one "
+            "was introduced here, teach the balance about it rather than widening "
+            "the search"
+        )
+    block = lines[start : end + 1]
+    if len(block) > max_lines:
+        raise AssertionError(
+            f"{label}: grabbed {len(block)} lines (cap {max_lines}); refusing to "
+            "run an unknown stretch of the entrypoint as a test fragment"
+        )
+    # Against _code_lines, not the raw block: a body replaced by
+    # `# apply_keyboard_layout (disabled)` plus `:` satisfies a raw substring
+    # search while the feature is gone, which is the opposite of proof.
+    code = _code_lines("\n".join(block))
+    missing = [
+        needle for needle in must_contain if not any(needle in line for line in code)
+    ]
+    if missing:
+        raise AssertionError(f"{label}: extracted block no longer contains {missing!r}")
+    return "\n".join(block)
+
+
+def _extract_display_wait(entrypoint: str) -> str:
+    """Return the X-display wait, from its banner through its warning."""
+
+    return _extract_shell_block(
+        entrypoint,
+        banner='echo "[entrypoint] Waiting for X display',
+        opener='if [ -z "${_display_ready}"',
+        must_contain=("xdpyinfo", "_display_ready", "did not come up within"),
+        max_lines=30,
+        label="the X-display wait",
+    )
+
+
+def _extract_layout_call(entrypoint: str) -> str:
+    """Return the ``if [ -n ... ]; then apply_keyboard_layout; fi`` guard.
+
+    Extracting the FUNCTION alone left the guard untested in both directions:
+    deleting the condition made every login report a switch to ``''``, and
+    emptying the body made the whole feature a no-op. Both stayed green.
+    """
+
+    return _extract_shell_block(
+        entrypoint,
+        banner='if [ -n "${GFMY_KEYBOARD_LAYOUT:-}" ]',
+        opener='if [ -n "${GFMY_KEYBOARD_LAYOUT:-}" ]',
+        must_contain=("apply_keyboard_layout",),
+        max_lines=6,
+        label="the GFMY_KEYBOARD_LAYOUT guard",
+    )
+
+
+def _extract_layout_feature(entrypoint: str) -> str:
+    """Return definition AND guard, in the order the file defines them.
+
+    Assembling the two in an order the test picks would pin neither: with the
+    definition moved below its caller, bash reaches `apply_keyboard_layout:
+    command not found`, exits 127, and `set -e` ends the login -- while a test
+    that concatenates them itself stays green.
+    """
+
+    definition = _extract_shell_function(entrypoint, "apply_keyboard_layout")
+    call = _extract_layout_call(entrypoint)
+    if entrypoint.index(definition) > entrypoint.index(call):
+        raise AssertionError(
+            "apply_keyboard_layout is defined AFTER its caller; under `set -e` "
+            "that aborts the login with 127 instead of setting a layout"
+        )
+    return f"{definition}\n{call}"
+
+
+def _stub_bin(tmp_path: Path, name: str, body: str) -> Path:
+    """Drop an executable stub into ``tmp_path/bin`` and return that directory."""
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir(exist_ok=True)
+    stub = bin_dir / name
+    stub.write_text(f"#!/usr/bin/env bash\n{body}", encoding="utf-8")
+    stub.chmod(0o755)
+    return bin_dir
+
+
+def _run_shell_fragment(
+    fragment: str, call: str, bin_dir: Path, env: dict[str, str]
+) -> subprocess.CompletedProcess[str]:
+    """Run an extracted fragment under ``set -e`` with ``bin_dir`` first on PATH."""
+
+    script = f"#!/usr/bin/env bash\nset -e\n{fragment}\n{call}\necho REACHED_END\n"
+    return subprocess.run(  # noqa: S603 - fixed argv, test-local stub PATH
+        ["bash", "-c", script],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        env={"PATH": f"{bin_dir}:/usr/bin:/bin", **env},
+        check=False,
+    )
+
+
+def _layout_run(
+    tmp_path: Path, setxkbmap_body: str | None, layout: str = "de"
+) -> subprocess.CompletedProcess[str]:
+    bin_dir = _stub_bin(tmp_path, "sleep", "exit 0\n")  # no-op: 15 tries cost 0s
+    if setxkbmap_body is not None:
+        _stub_bin(tmp_path, "setxkbmap", setxkbmap_body)
+    fragment = _extract_shell_function(_read("entrypoint.sh"), "apply_keyboard_layout")
+    return _run_shell_fragment(
+        fragment,
+        "apply_keyboard_layout",
+        bin_dir,
+        {"HOME": str(tmp_path), "DISPLAY": ":99", "GFMY_KEYBOARD_LAYOUT": layout},
+    )
+
+
+def test_an_exhausted_keyboard_layout_retry_warns_instead_of_falling_through(
+    tmp_path: Path,
+) -> None:
+    """Fifteen failed attempts must end in a warning, not in silence.
+
+    This is the defect: setxkbmap installed, every invocation failing (unknown
+    layout, or the bounded X wait expired), and the login continuing on the
+    default layout with nothing on screen to say the requested fallback was
+    dropped. The warning must also survive ``set -e`` -- aborting the login over
+    a convenience setting would be worse than the keyboard problem it fixes.
+    """
+
+    proc = _layout_run(
+        tmp_path,
+        'echo "Error loading new keyboard description" >&2\nexit 1\n',
+        layout="de -variant nope",
+    )
+
+    assert "REACHED_END" in proc.stdout, (
+        "the layout helper must not abort the script under `set -e`; it is "
+        f"best-effort by contract (stdout={proc.stdout!r} stderr={proc.stderr!r})"
+    )
+    assert "could not apply the requested keyboard layout" in proc.stderr, (
+        "an exhausted retry loop must warn; falling through silently is the "
+        f"reported defect (stderr={proc.stderr!r})"
+    )
+    assert "de -variant nope" in proc.stderr, (
+        "the warning must name the value that was refused, or the user cannot "
+        "tell which of several settings was dropped"
+    )
+    assert "clipboard panel" in proc.stderr, (
+        "the warning must name the way out, like the sibling ~/.x11vncrc warning "
+        "does; a warning without a next step only tells the user they are stuck"
+    )
+
+
+def test_the_layout_warning_reports_what_setxkbmap_actually_said(
+    tmp_path: Path,
+) -> None:
+    """The captured cause is the whole point of capturing stderr.
+
+    ``Cannot open display`` (the X wait lost its race, retrying may help) and
+    ``Error loading new keyboard description`` (the value is wrong, retrying
+    never will) call for opposite reactions. Discarding stderr -- the previous
+    ``2>/dev/null`` -- leaves the user guessing between them.
+    """
+
+    proc = _layout_run(tmp_path, 'echo "Cannot open display :99" >&2\nexit 1\n')
+
+    assert "setxkbmap: Cannot open display :99" in proc.stderr, (
+        "the final failure's own message must reach the user, prefixed so it is "
+        f"attributable (stderr={proc.stderr!r})"
+    )
+
+
+def test_a_layout_that_applies_late_reports_success_and_stays_quiet(
+    tmp_path: Path,
+) -> None:
+    """A retry that eventually wins must NOT also warn.
+
+    This is the counter-direction: an assertion that only checks "warning is
+    printed on failure" is satisfied by code that warns unconditionally, which
+    would make every successful login look broken. A slow X display is the
+    normal reason the first attempts fail, so this path is the common one.
+    """
+
+    counter = tmp_path / "tries"
+    proc = _layout_run(
+        tmp_path,
+        f'n=$(cat "{counter}" 2>/dev/null || echo 0)\n'
+        f'n=$((n + 1)); echo "$n" > "{counter}"\n'
+        'if [ "$n" -ge 3 ]; then exit 0; fi\n'
+        'echo "Cannot open display :99" >&2\nexit 1\n',
+    )
+
+    assert "Keyboard layout set to 'de'." in proc.stdout, (
+        f"a late success must be reported (stdout={proc.stdout!r})"
+    )
+    assert "could not apply" not in proc.stderr, (
+        f"a successful apply must not also warn (stderr={proc.stderr!r})"
+    )
+    assert counter.read_text(encoding="utf-8").strip() == "3", (
+        "the loop must actually retry rather than give up after one attempt"
+    )
+
+
+def test_a_missing_setxkbmap_keeps_its_own_distinct_warning(tmp_path: Path) -> None:
+    """The two failure modes need different words: absent tool vs refused value.
+
+    "install it" and "check your value" are not interchangeable advice. Without
+    this the exhaustion warning could simply be moved up to cover both cases and
+    every assertion above would still pass.
+    """
+
+    # The same PATH the fragment runs under (see _run_shell_fragment), not the
+    # pytest process's: a setxkbmap in /usr/local/bin would skip a branch the
+    # subprocess could never have reached.
+    real = shutil.which("setxkbmap", path="/usr/bin:/bin")
+    if real is not None:  # pragma: no cover - environment dependent
+        pytest.skip("a real setxkbmap on PATH would shadow the absent-tool branch")
+
+    proc = _layout_run(tmp_path, None)
+
+    assert "setxkbmap is not" in proc.stderr and "installed" in proc.stderr, (
+        f"the absent-tool branch must keep its own message (stderr={proc.stderr!r})"
+    )
+    assert "could not apply the requested keyboard layout" not in proc.stderr, (
+        "the exhaustion warning must not fire when no attempt was ever made; it "
+        "would send the user to check a value that was never the problem"
+    )
+
+
+def test_a_display_that_never_comes_up_says_so(tmp_path: Path) -> None:
+    """The X wait is the root cause of every later symptom, so it must speak.
+
+    A silent expiry here surfaces later as a keyboard layout that will not apply
+    and a browser that never appears -- two symptoms, no cause. Not fatal on
+    purpose: Chrome may still come up a moment later, and aborting would turn a
+    slow start into a failed login.
+    """
+
+    bin_dir = _stub_bin(tmp_path, "sleep", "exit 0\n")
+    _stub_bin(tmp_path, "xdpyinfo", "exit 1\n")
+    fragment = _extract_display_wait(_read("entrypoint.sh"))
+
+    proc = _run_shell_fragment(fragment, ":", bin_dir, {"DISPLAY": ":99"})
+
+    assert "REACHED_END" in proc.stdout, (
+        f"the wait must not abort the script (stderr={proc.stderr!r})"
+    )
+    assert "did not come up within" in proc.stderr, (
+        f"an expired display wait must name itself (stderr={proc.stderr!r})"
+    )
+    assert "Display ready." not in proc.stdout, (
+        "a display that never answered must not be reported as ready"
+    )
+
+
+def test_a_display_that_comes_up_stays_quiet(tmp_path: Path) -> None:
+    """The counter-direction: a healthy start must produce no warning at all."""
+
+    bin_dir = _stub_bin(tmp_path, "sleep", "exit 0\n")
+    _stub_bin(tmp_path, "xdpyinfo", "exit 0\n")
+    fragment = _extract_display_wait(_read("entrypoint.sh"))
+
+    proc = _run_shell_fragment(fragment, ":", bin_dir, {"DISPLAY": ":99"})
+
+    assert proc.stdout.count("Display ready.") == 1, (
+        "the loop must stop at the first answer; without the `break` it reports "
+        f"readiness once per second for the whole bound (stdout={proc.stdout!r})"
+    )
+    assert "did not come up" not in proc.stderr, (
+        f"a ready display must not warn (stderr={proc.stderr!r})"
+    )
+
+
+def test_no_requested_layout_means_the_helper_is_never_entered(
+    tmp_path: Path,
+) -> None:
+    """A user who set nothing must see nothing -- neither report nor warning."""
+
+    bin_dir = _stub_bin(tmp_path, "sleep", "exit 0\n")
+    _stub_bin(tmp_path, "setxkbmap", "exit 1\n")
+    fragment = _extract_layout_feature(_read("entrypoint.sh"))
+
+    proc = _run_shell_fragment(fragment, ":", bin_dir, {"DISPLAY": ":99"})
+
+    assert "REACHED_END" in proc.stdout, (
+        f"an unset layout must not abort the script (stderr={proc.stderr!r})"
+    )
+    assert proc.stderr.strip() == "", (
+        "nothing was requested, so nothing may be warned about "
+        f"(stderr={proc.stderr!r})"
+    )
+    assert "Keyboard layout set" not in proc.stdout, (
+        f"no layout was requested, so none may be reported (stdout={proc.stdout!r})"
+    )
+
+
+def test_the_layout_warning_survives_a_failing_sed(tmp_path: Path) -> None:
+    """The warning's own plumbing must not be able to kill the login.
+
+    ``printf | sed`` sits in statement position, so under ``set -e`` a failing or
+    absent ``sed`` aborts the function between the headline and the way out --
+    losing exactly the advice the warning exists to give, on exactly the path
+    where it is needed. Both the block's own comment and the guide promise that
+    the login continues instead.
+    """
+
+    bin_dir = _stub_bin(tmp_path, "sleep", "exit 0\n")
+    _stub_bin(tmp_path, "setxkbmap", 'echo "boom" >&2\nexit 1\n')
+    _stub_bin(tmp_path, "sed", "exit 1\n")
+    fragment = _extract_shell_function(_read("entrypoint.sh"), "apply_keyboard_layout")
+
+    proc = _run_shell_fragment(
+        fragment,
+        "apply_keyboard_layout",
+        bin_dir,
+        {"HOME": str(tmp_path), "DISPLAY": ":99", "GFMY_KEYBOARD_LAYOUT": "de"},
+    )
+
+    assert "REACHED_END" in proc.stdout, (
+        "a broken `sed` must not abort the login; the block is best-effort by "
+        f"contract (stderr={proc.stderr!r})"
+    )
+    assert "clipboard panel" in proc.stderr, (
+        "the way out must still be printed after the cause line failed to render "
+        f"(stderr={proc.stderr!r})"
+    )
+
+
+def test_the_warnings_report_the_bound_their_loop_actually_used(
+    tmp_path: Path,
+) -> None:
+    """Rewire each loop's bound and watch the warning follow it.
+
+    Both bounds used to appear twice, once in ``seq`` and once as free text in
+    the message, so shortening a loop left its warning asserting a wait that no
+    longer happened. Rewriting the assignment in the extracted fragment proves
+    the two are now one value -- measured on BOTH ends, the message AND the number
+    of attempts the stub actually saw, because pinning only the message leaves the
+    loop free to run a literal while the warning reports the variable.
+
+    What this does NOT pin, stated so it is not mistaken for coverage: the
+    values 15 and 30 themselves. They are operating choices, and after this
+    coupling a changed value yields a truthful message rather than a false one.
+    """
+
+    layout_tries = tmp_path / "layout_tries"
+    display_tries = tmp_path / "display_tries"
+    bin_dir = _stub_bin(tmp_path, "sleep", "exit 0\n")
+    _stub_bin(
+        tmp_path,
+        "setxkbmap",
+        f'echo x >> "{layout_tries}"\necho "nope" >&2\nexit 1\n',
+    )
+    _stub_bin(tmp_path, "xdpyinfo", f'echo x >> "{display_tries}"\nexit 1\n')
+    entrypoint = _read("entrypoint.sh")
+
+    layout = _extract_shell_function(entrypoint, "apply_keyboard_layout")
+    layout, subs = re.subn(r"local _tries=\d+", "local _tries=2", layout)
+    assert subs == 1, "apply_keyboard_layout must take its bound from `_tries`"
+    proc = _run_shell_fragment(
+        layout,
+        "apply_keyboard_layout",
+        bin_dir,
+        {"HOME": str(tmp_path), "DISPLAY": ":99", "GFMY_KEYBOARD_LAYOUT": "de"},
+    )
+    assert "after 2 attempts" in proc.stderr, (
+        "the layout warning must quote the bound the loop ran, not a literal "
+        f"(stderr={proc.stderr!r})"
+    )
+    assert re.search(r"\b1[0-9]\b", proc.stderr) is None, (
+        f"a stale literal survived in the layout warning (stderr={proc.stderr!r})"
+    )
+    assert layout_tries.read_text(encoding="utf-8").count("x") == 2, (
+        "the LOOP must take its bound from `_tries` too. Reading only the message "
+        "leaves the other half free: a `seq 1 15` under a rewritten assignment "
+        "reports two attempts and runs fifteen"
+    )
+
+    display = _extract_display_wait(entrypoint)
+    display, subs = re.subn(r"_display_wait_secs=\d+", "_display_wait_secs=2", display)
+    assert subs == 1, "the X-display wait must take its bound from `_display_wait_secs`"
+    proc = _run_shell_fragment(display, ":", bin_dir, {"DISPLAY": ":99"})
+    assert "did not come up within 2s" in proc.stderr, (
+        "the display warning must quote the bound the loop ran, not a literal "
+        f"(stderr={proc.stderr!r})"
+    )
+    assert re.search(r"\b[2-9][0-9]s\b", proc.stderr) is None, (
+        f"a stale literal survived in the display warning (stderr={proc.stderr!r})"
+    )
+    assert display_tries.read_text(encoding="utf-8").count("x") == 2, (
+        "the display loop must take its bound from `_display_wait_secs` as well"
+    )
+
+
+def test_a_requested_layout_actually_reaches_setxkbmap(tmp_path: Path) -> None:
+    """The whole feature, end to end: variable set, helper entered, tool called.
+
+    Every other test here either calls ``apply_keyboard_layout`` directly, thus
+    bypassing the guard, or asserts that nothing happens. Emptying the guard's
+    body -- feature present, guard present, call gone -- left all of them green
+    while the setting silently did nothing, which is the very shape of defect
+    this pull request exists to remove.
+
+    It also pins what the guard hands over: the value is deliberately unquoted so
+    ``de -variant nodeadkeys`` arrives as three arguments, and the README
+    promises exactly that. A stub that ignores its argv cannot tell the two
+    apart, so this one records them.
+    """
+
+    argv = tmp_path / "argv"
+    bin_dir = _stub_bin(tmp_path, "sleep", "exit 0\n")
+    _stub_bin(
+        tmp_path,
+        "setxkbmap",
+        f'printf "%s\\n" "$#" > "{argv}"\nprintf "%s\\n" "$@" >> "{argv}"\nexit 0\n',
+    )
+    fragment = _extract_layout_feature(_read("entrypoint.sh"))
+
+    proc = _run_shell_fragment(
+        fragment,
+        ":",
+        bin_dir,
+        {
+            "HOME": str(tmp_path),
+            "DISPLAY": ":99",
+            "GFMY_KEYBOARD_LAYOUT": "de -variant nodeadkeys",
+        },
+    )
+
+    assert "Keyboard layout set to 'de -variant nodeadkeys'." in proc.stdout, (
+        f"a requested layout must actually be applied (stdout={proc.stdout!r})"
+    )
+    recorded = argv.read_text(encoding="utf-8").splitlines()
+    assert recorded[0] == "5", (
+        "setxkbmap must receive `-display :99` plus the three words of the "
+        f"layout; word splitting is deliberate here (got {recorded!r})"
+    )
+    assert recorded[1:] == ["-display", ":99", "de", "-variant", "nodeadkeys"], (
+        f"the layout must arrive verbatim and unquoted (got {recorded!r})"
+    )

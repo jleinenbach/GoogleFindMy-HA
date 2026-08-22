@@ -1246,3 +1246,94 @@ class TestCliMainCallOrder:
 
         cli_main._main([])
         assert "Exiting." in capsys.readouterr().out
+
+
+class TestReauthRestoreWiring:
+    """`_main` uses the restore on every path that yields no fresh token.
+
+    The unit tests for the restore itself live in
+    ``test_main_cli_exit_paths.py``; what is pinned here is the wiring, because
+    the ordering is what makes the bug possible: the clear runs first by
+    necessity, so only the caller can undo it.
+    """
+
+    def _run(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        *,
+        auth_error: BaseException | None,
+        reauth: bool = True,
+    ) -> tuple[mock.Mock, BaseException | None]:
+        import asyncio
+
+        from custom_components.googlefindmy import main as cli_main
+
+        restore = mock.Mock(name="restore")
+        namespace = argparse.Namespace(debug=False, reauth=reauth, entry=None)
+        fake_parser = mock.Mock()
+        fake_parser.parse_args.return_value = namespace
+
+        def _auth() -> None:
+            if auth_error is not None:
+                raise auth_error
+
+        monkeypatch.setattr(cli_main, "_build_cli_parser", lambda: fake_parser)
+        monkeypatch.setattr(cli_main, "_configure_cli_logging", lambda **kw: None)
+        monkeypatch.setattr(cli_main, "_clear_stale_tokens_for_reauth", lambda: restore)
+        monkeypatch.setattr(cli_main, "_ensure_authenticated", _auth)
+        monkeypatch.setattr(
+            cli_main, "_resolve_effective_entry_id", lambda *a: "entry-x"
+        )
+        monkeypatch.setattr(cli_main, "_register_file_cache", lambda entry: object())
+        monkeypatch.setattr(cli_main, "_run_cli_bootstrap", mock.Mock())
+        monkeypatch.setattr(asyncio, "run", mock.Mock())
+
+        raised: BaseException | None = None
+        try:
+            cli_main._main([])
+        except BaseException as err:  # noqa: BLE001 - the test asserts on it
+            raised = err
+        return restore, raised
+
+    @pytest.mark.parametrize(
+        "auth_error",
+        [
+            SystemExit(130),  # the cancelled login, via _run_oauth_flow_or_exit
+            KeyboardInterrupt(),  # Ctrl+C in the terminal
+            RuntimeError("chrome is missing"),  # a genuine failure
+        ],
+        ids=["cancelled", "interrupted", "failed"],
+    )
+    def test_a_login_without_a_token_gets_the_tokens_back(
+        self, monkeypatch: pytest.MonkeyPatch, auth_error: BaseException
+    ) -> None:
+        restore, raised = self._run(monkeypatch, auth_error=auth_error)
+
+        restore.assert_called_once_with()
+        # The exception keeps travelling: the exit status and the traceback are
+        # decided elsewhere, and the restore must not swallow either.
+        assert raised is auth_error
+
+    def test_a_successful_login_keeps_the_cache_cleared(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The whole point of ``--reauth`` is that the stale tokens stay gone."""
+        restore, raised = self._run(monkeypatch, auth_error=None)
+
+        restore.assert_not_called()
+        assert raised is None
+
+    def test_a_failure_without_reauth_has_nothing_to_restore(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Without ``--reauth`` no tokens were cleared, so none come back.
+
+        The guard exists because the clear is conditional while the ``except``
+        arm is not: a plain login that fails must not call into a restore that
+        was never set up.
+        """
+        error = RuntimeError("chrome is missing")
+        restore, raised = self._run(monkeypatch, auth_error=error, reauth=False)
+
+        restore.assert_not_called()
+        assert raised is error
