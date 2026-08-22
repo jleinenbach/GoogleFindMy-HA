@@ -372,10 +372,30 @@ and the run says so:
 Login did not complete; restored 3 cached token(s).
 ```
 
-A cancelled `--reauth` therefore leaves you signed in exactly as you were. The
-single case that cannot be undone is a `secrets.json` that turned unreadable in
-the meantime: the restore then refuses to overwrite the file (it would throw
-away whatever else the file still holds) and tells you to run `--reauth` again.
+(The number is whatever was cached; a used cache holds more than three keys.)
+
+A cancelled `--reauth` therefore leaves you signed in exactly as you were. Three
+cases cannot be undone, and each says so instead of pretending otherwise:
+
+* **The login already stored a new token** and was then cut short in the moment
+  between saving it and returning — a `Ctrl+C` or a broken pipe in that
+  narrow window. The cleared tokens are then *not* put back, because they belong to the
+  sign-in the new one replaces and a mix of the two would send the next run back
+  to the old account:
+
+  ```
+  A new oauth_token was stored before the run ended, so the previous tokens were
+  not put back (they belong to the old sign-in). Run the login again (without
+  --reauth) to finish signing in with the new one.
+  ```
+
+* **`secrets.json` turned unreadable** in the meantime. The restore refuses to
+  overwrite the file (it would throw away whatever else the file still holds)
+  and tells you to run `--reauth` again.
+
+* **Writing the restored file failed** (a full or read-only disk). The run says
+  so and leaves the cleared state on disk rather than replacing the reason it
+  ended with a disk error; `--reauth` again is the recovery here too.
 
 ## After the login (the menu, `q`, and the wrap-up)
 

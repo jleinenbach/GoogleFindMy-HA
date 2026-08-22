@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import builtins
 import json
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -487,27 +488,121 @@ class TestReauthRestore:
 
         assert json.loads(secrets.read_text(encoding="utf-8")) == self._SECRETS
 
-    def test_a_fresh_value_survives_the_restore(
-        self, tmp_path, monkeypatch: pytest.MonkeyPatch
+    @pytest.mark.parametrize("anchor", ["oauth_token", "aas_token"])
+    def test_a_fresh_anchor_stops_the_whole_restore(
+        self,
+        anchor: str,
+        tmp_path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture,
     ) -> None:  # type: ignore[no-untyped-def]
-        """A login that got partway through wins over the snapshot.
+        """A started chain is never mixed with the one it replaces.
 
-        The restore re-reads the file and only fills gaps, so a token written
-        between the clear and the failure is not rolled back to the stale one.
+        The predecessor of this test asserted the opposite -- that the stale
+        ``aas_token`` came back beside a fresh ``oauth_token`` -- and so froze
+        the defect Codex reported. It is the derived values that make the
+        difference: ``_ensure_aas_token`` returns early on any cached
+        ``aas_token``, so a restored one means the next run never exchanges the
+        fresh anchor and silently keeps the credentials ``--reauth`` was asked
+        to replace, vault keys included.
+        """
+        cli_main, secrets = self._prepare(tmp_path, monkeypatch)
+        # The parameters are literals on purpose -- reading them from the
+        # constant would make the test agree with whatever the code says. This
+        # asserts the set instead, so a third anchor cannot slip in unexercised.
+        assert set(cli_main._REAUTH_CHAIN_ANCHORS) == {"oauth_token", "aas_token"}
+
+        restore = cli_main._clear_stale_tokens_for_reauth()
+        assert restore is not None
+        secrets.write_text(
+            json.dumps({"username": "u@x", anchor: "fresh"}), encoding="utf-8"
+        )
+
+        restore()
+
+        current = json.loads(secrets.read_text(encoding="utf-8"))
+        assert current[anchor] == "fresh"
+        # Absent, not merely different: a restored value would be read as a
+        # usable credential, an absent one forces the exchange.
+        assert "owner_key" not in current
+        for other in ("oauth_token", "aas_token"):
+            if other != anchor:
+                assert other not in current
+        assert "was stored before the run ended" in capsys.readouterr().out
+
+    @pytest.mark.parametrize("blank", ["", "   "])
+    def test_a_blank_anchor_is_not_a_fresh_sign_in(
+        self, blank: str, tmp_path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:  # type: ignore[no-untyped-def]
+        """An empty value must not cost the user their tokens.
+
+        ``key in current`` would count a blank leftover as a completed sign-in
+        and suppress a restore the cancelling user is entitled to.
         """
         cli_main, secrets = self._prepare(tmp_path, monkeypatch)
 
         restore = cli_main._clear_stale_tokens_for_reauth()
         assert restore is not None
         secrets.write_text(
-            json.dumps({"username": "u@x", "oauth_token": "fresh"}), encoding="utf-8"
+            json.dumps({"username": "u@x", "oauth_token": blank}), encoding="utf-8"
         )
 
         restore()
 
         current = json.loads(secrets.read_text(encoding="utf-8"))
-        assert current["oauth_token"] == "fresh"
         assert current["aas_token"] == "a"
+        assert current["owner_key"] == "ok"
+        # The blank stays: the restore fills gaps, it does not overwrite.
+        assert current["oauth_token"] == blank
+
+    def test_a_derived_key_alone_does_not_stop_the_restore(
+        self, tmp_path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:  # type: ignore[no-untyped-def]
+        """Only an anchor starts a chain; a derived value on its own does not.
+
+        Blocking on any reappearing key would be the cheaper rule and the wrong
+        one: it would cost a cancelling user their whole bundle over a value
+        that cannot stand in for a sign-in.
+        """
+        cli_main, secrets = self._prepare(tmp_path, monkeypatch)
+
+        restore = cli_main._clear_stale_tokens_for_reauth()
+        assert restore is not None
+        secrets.write_text(
+            json.dumps({"username": "u@x", "owner_key": "new"}), encoding="utf-8"
+        )
+
+        restore()
+
+        current = json.loads(secrets.read_text(encoding="utf-8"))
+        assert current["oauth_token"] == "o"
+        assert current["aas_token"] == "a"
+        assert current["owner_key"] == "new"
+
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [
+            ("token", True),
+            ("", False),
+            ("   ", False),
+            (None, False),
+            (0, False),
+            (False, False),
+            ({}, False),
+        ],
+    )
+    def test_credential_presence_predicate(self, value: object, expected: bool) -> None:
+        """The predicate answers "would a consumer read this as a credential".
+
+        Not "is this truthy" and not "is this set": ``_ensure_aas_token`` and
+        ``_ensure_authenticated`` both gate on ``isinstance(value, str)``, so a
+        non-string left by a half-written file is a value those two ignore.
+        Counting it as a fresh sign-in would cost a cancelling user the whole
+        bundle over something that never started a chain.
+        """
+        from custom_components.googlefindmy import main as cli_main
+
+        assert cli_main._credential_is_present(value) is expected
 
     def test_restore_recreates_a_deleted_file(
         self, tmp_path, monkeypatch: pytest.MonkeyPatch
@@ -596,3 +691,201 @@ class TestReauthRestore:
         # The cleared state is what is left on disk; the message is what tells
         # the user their next move.
         assert json.loads(secrets.read_text(encoding="utf-8")) == {"username": "u@x"}
+
+
+# ---------------------------------------------------------------------------
+# docker-login/README.md: the two restore messages, rendered not retyped
+# ---------------------------------------------------------------------------
+#
+# The root AGENTS.md rule on quoted program output ends with "Extend the guard
+# when you quote a new message there". The `--reauth` paragraph of the guide
+# quotes two of the four messages `main._restore_cleared_tokens` can print (the
+# successful and the declined restore), so those two are guarded here; the other
+# two -- unreadable file, failed write -- the guide paraphrases. The rule's
+# stated extent is what makes this necessary: the two guards in
+# `tests/test_auth_flow.py` cover the `LoginAborted` sentences and explicitly
+# say nothing about the `--reauth` paragraph that sits in the same section.
+#
+# Deliberately a near-copy of `_documented_quotes` in `tests/test_auth_flow.py`
+# rather than a shared helper: the two read the same section of the same file
+# but answer different questions, and the semantics have already diverged (this
+# one pairs a trigger phrase with the lead-in). Merging them across two test
+# modules is its own change, with its own risk of making both weaker.
+
+
+def _reauth_documented_quotes() -> list[tuple[str, str]]:
+    """Return (lead-in prose, fenced block) pairs from "Cancelling a login".
+
+    Both halves are whitespace-collapsed so the guide may wrap however it likes;
+    the messages themselves are single lines that the guide has to break.
+
+    Pairing prose with the block that *directly follows it* is the guard. The
+    section holds four fenced blocks, two of them this module's; "the message
+    appears somewhere in the section" would pass on a guide that files the
+    declined-restore text under the successful-restore lead-in, which is the
+    conflation the rule exists to catch.
+    """
+    from custom_components.googlefindmy import main as cli_main
+
+    readme = Path(cli_main.__file__).resolve().parent / "docker-login" / "README.md"
+    assert readme.is_file(), f"missing guide: {readme}"
+    text = readme.read_text(encoding="utf-8")
+    marker = "\n## Cancelling a login\n"
+    assert marker in text, (
+        f"{readme} no longer has a '## Cancelling a login' section; this guard "
+        "and the one in tests/test_auth_flow.py both anchor on that heading."
+    )
+    body = text[text.index(marker) + len(marker) :]
+    end = body.find("\n## ")
+    section = body if end == -1 else body[:end]
+
+    parts = section.split("```")
+    assert len(parts) % 2 == 1, (
+        "unbalanced ``` fences in the 'Cancelling a login' section: "
+        f"{len(parts) - 1} delimiters found"
+    )
+    return [
+        (" ".join(parts[i - 1].split()), _fenced_body(parts[i]))
+        for i in range(1, len(parts), 2)
+    ]
+
+
+def _fenced_body(raw: str) -> str:
+    """Collapse a fenced block, dropping an optional info string.
+
+    ``\u0060\u0060\u0060text`` and ``\u0060\u0060\u0060console`` are ordinary Markdown and say nothing
+    about the output; folding the tag into the body would make an exact match
+    fail on a guide that is right. The opening fence of an untagged block leaves
+    an empty first line, so nothing is dropped there.
+    """
+    lines = raw.split("\n")
+    head = lines[0].strip() if lines else ""
+    if head and " " not in head:
+        lines = lines[1:]
+    return " ".join(" ".join(lines).split())
+
+
+def _rendered_restore_message(
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+    *,
+    fresh_anchor: bool,
+) -> str:
+    """Drive the real restore and return the line the user actually sees."""
+    from custom_components.googlefindmy import main as cli_main
+
+    monkeypatch.setattr(cli_main, "_this_dir", tmp_path, raising=True)
+    secrets = tmp_path / "Auth" / "secrets.json"
+    secrets.parent.mkdir(parents=True, exist_ok=True)
+    secrets.write_text(
+        json.dumps(
+            {
+                "username": "u@x",
+                "oauth_token": "o",
+                "aas_token": "a",
+                "owner_key": "ok",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    restore = cli_main._clear_stale_tokens_for_reauth()
+    assert restore is not None
+    if fresh_anchor:
+        secrets.write_text(
+            json.dumps({"username": "u@x", "oauth_token": "fresh"}), encoding="utf-8"
+        )
+    capsys.readouterr()  # drop the "Cleared N cached token(s)" line
+    restore()
+    return " ".join(capsys.readouterr().out.split())
+
+
+# Per outcome: the sentence the block must directly follow, and the phrase that
+# names *when* this outcome happens. The lead-in alone is not enough -- swap the
+# trigger sentence for another path's and the guide sends a user looking for
+# words that path cannot emit, while a lead-in-only guard stays green (measured).
+_RESTORE_OUTCOMES = {
+    "restored": (
+        "the cleared tokens are put back and the run says so:",
+        "If that login then ends without a token",
+        False,
+    ),
+    "declined": (
+        "a mix of the two would send the next run back to the old account:",
+        "The login already stored a new token",
+        True,
+    ),
+}
+
+
+@pytest.mark.parametrize("kind", sorted(_RESTORE_OUTCOMES))
+def test_the_guide_quotes_each_reauth_restore_message(
+    kind: str,
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """Each restore outcome is documented with the text it can actually emit.
+
+    The counts and the anchor name are interpolated, so retyping the sentence in
+    the guide is how it drifts. Rendering it through the real function and then
+    locating it under its own lead-in is what fails when the wording, the key
+    names, or the introducing sentence change.
+
+    Measured extent, stated so it is not mistaken for coverage: two of the four
+    messages ``_restore_cleared_tokens`` can print, inside one named section of
+    one file. The unreadable-file and failed-write messages stay unguarded --
+    the guide paraphrases them rather than quoting them. The token count in the
+    restored message is the one this fixture produces (three keys); a real cache
+    holds more, so the guide's number documents the shape of the line, not a
+    figure a user should expect to match.
+    """
+    lead_in, trigger, fresh_anchor = _RESTORE_OUTCOMES[kind]
+    message = _rendered_restore_message(
+        tmp_path, monkeypatch, capsys, fresh_anchor=fresh_anchor
+    )
+    assert message, "the restore printed nothing to render"
+
+    quotes = _reauth_documented_quotes()
+    introduced = [(prose, block) for prose, block in quotes if prose.endswith(lead_in)]
+    assert introduced, (
+        f"no fenced block follows the {kind} lead-in in the guide. Without the "
+        "lead-in both messages could sit under one sentence and the guide would "
+        f"be as wrong as before. Lead-ins found: {[p[-70:] for p, _ in quotes]}"
+    )
+    for prose, _ in introduced:
+        assert trigger in prose, (
+            f"the block for the {kind} outcome no longer says when it happens. "
+            f"Expected the prose before it to contain {trigger!r}. A guard that "
+            "only matched the closing clause let the trigger be swapped for "
+            f"another path's. Prose found: {prose[-200:]!r}"
+        )
+        for other, (_, other_trigger, _) in _RESTORE_OUTCOMES.items():
+            if other != kind:
+                assert other_trigger not in prose, (
+                    f"the prose introducing the {kind} block also announces the "
+                    f"{other} outcome ({other_trigger!r}), so a reader cannot "
+                    "tell which output belongs to which situation."
+                )
+    # Exactly one block, and it is the message. Two weaker shapes were measured
+    # and rejected: ``in`` passes on a block that also promises a backup file the
+    # program never writes, and ``any(... == ...)`` passes when a second block
+    # under a duplicated lead-in carries that promise instead.
+    assert [block for _, block in introduced] == [message], (
+        f"the {kind} outcome is not documented by exactly one fenced block "
+        f"holding its message and nothing else. Quote it verbatim, alone, in a "
+        f"fenced block directly after {lead_in!r}. Expected: [{message!r}]. "
+        f"Found: {[b for _, b in introduced]!r}"
+    )
+
+    # Presence alone permits the conflation inverted: a block carrying BOTH
+    # sentences documents this outcome as producing the other one too.
+    stray = _rendered_restore_message(
+        tmp_path / "other", monkeypatch, capsys, fresh_anchor=not fresh_anchor
+    )
+    assert all(stray not in block for _, block in introduced), (
+        f"the block introduced by {lead_in!r} also quotes the other outcome's "
+        f"message. Each outcome gets its own block, or a reader is told to "
+        f"expect output this one cannot produce: {stray!r}"
+    )

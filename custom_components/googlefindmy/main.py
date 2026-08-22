@@ -34,7 +34,7 @@ import os
 import sys
 import types
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Final
 
 if TYPE_CHECKING:  # pragma: no cover - import-time typing block
     import argparse
@@ -876,6 +876,28 @@ async def _setup_fcm_receiver(cache: object) -> Any:
     return fcm
 
 
+#: Keys whose presence means a *new* credential chain has begun. Everything else
+#: ``_clear_stale_tokens_for_reauth`` removes hangs off one of these two:
+#: ``_ensure_aas_token`` exchanges ``oauth_token`` for ``aas_token``, and the
+#: vault keys follow from that exchange. They are the anchors precisely because
+#: they are what a later run *reads* to decide the chain is already in place.
+_REAUTH_CHAIN_ANCHORS: Final[tuple[str, ...]] = ("oauth_token", "aas_token")
+
+
+def _credential_is_present(value: object) -> bool:
+    """Report whether *value* is a stored credential rather than a placeholder.
+
+    Deliberately as narrow as the checks it stands in for: ``_ensure_aas_token``
+    and ``_ensure_authenticated`` both require ``isinstance(value, str)`` and a
+    non-blank value before they treat a key as a credential. Anything looser
+    here would deny a restore over a value those two would ignore -- a ``0`` or
+    a ``{}`` left by a half-written file -- and the user would lose the bundle
+    without a new chain having started. ``key in data`` is not enough for the
+    same reason.
+    """
+    return isinstance(value, str) and bool(value.strip())
+
+
 def _clear_stale_tokens_for_reauth() -> Callable[[], None] | None:
     """Clear cached tokens from secrets.json to force re-authentication.
 
@@ -890,9 +912,12 @@ def _clear_stale_tokens_for_reauth() -> Callable[[], None] | None:
     of a decision that was meant to change nothing. The caller invokes the
     returned callable on every path that ends without a fresh token.
 
-    The restore re-reads the file rather than writing the snapshot back: a login
-    that got partway through may have stored newer values, and those win
-    (``setdefault``). Both writes go through ``_atomic_write_json``, so an
+    The restore re-reads the file rather than writing the snapshot back, and it
+    treats the cleared keys as one bundle. If the login stored a fresh chain
+    anchor (``_REAUTH_CHAIN_ANCHORS``) before it was cut short, nothing goes
+    back: the cleared values all belong to the chain that anchor replaces, and
+    mixing the two is worse than losing the old one. Otherwise the snapshot is
+    put back over the gaps. Both writes go through ``_atomic_write_json``, so an
     interrupted write cannot truncate the token file and the 0600 mode holds.
     """
     import json  # noqa: PLC0415
@@ -956,6 +981,41 @@ def _clear_stale_tokens_for_reauth() -> Callable[[], None] | None:
             # No file at all: nothing to preserve, so the snapshot is the whole
             # truth and writing it back is safe.
             current = {}
+
+        fresh_anchor = next(
+            (
+                k
+                for k in _REAUTH_CHAIN_ANCHORS
+                if _credential_is_present(current.get(k))
+            ),
+            None,
+        )
+        if fresh_anchor is not None:
+            # The login got far enough to store a new anchor before it was cut
+            # short. Everything this function holds belongs to the chain that
+            # anchor replaces, so putting it back would leave the old
+            # ``aas_token`` and vault keys beside the new ``oauth_token``.
+            # ``_ensure_aas_token`` returns early on any cached ``aas_token``,
+            # so the next run would never exchange the fresh one and would keep
+            # using the very chain ``--reauth`` was asked to end -- with the old
+            # account's vault keys, if the user was switching accounts. Little
+            # is lost by declining: ``_ensure_authenticated`` drops the derived
+            # tokens itself when it writes the new anchor, so those were gone
+            # either way. The vault keys it does *not* touch are gone too, but a
+            # completed ``--reauth`` would have replaced them just the same.
+            #
+            # The advice is deliberately not "--reauth again": that flag would
+            # clear the fresh anchor and force a second Chrome login, while a
+            # plain re-run finds ``username`` plus the new ``oauth_token``,
+            # returns early from ``_ensure_authenticated`` and lets
+            # ``_ensure_aas_token`` finish the exchange.
+            print(
+                f"A new {fresh_anchor} was stored before the run ended, so the "
+                "previous tokens were not put back (they belong to the old "
+                "sign-in). Run the login again (without --reauth) to finish "
+                "signing in with the new one.\n"
+            )
+            return
 
         for key, value in removed.items():
             current.setdefault(key, value)
