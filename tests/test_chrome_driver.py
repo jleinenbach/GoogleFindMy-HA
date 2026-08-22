@@ -2772,3 +2772,44 @@ def test_a_bad_locale_is_ignored_not_fatal(
 
     if raw.strip():
         assert chrome_driver.ENV_LOGIN_LOCALE in caplog.text
+
+
+@pytest.mark.parametrize(
+    "raw", ["C", "POSIX", "C.UTF-8", "POSIX.UTF-8", "C@euro", "POSIX@x"]
+)
+def test_the_posix_locale_is_no_preference_not_a_broken_one(
+    monkeypatch: pytest.MonkeyPatch, raw: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Half two of the cross-platform opt-out (half one: the launcher test).
+
+    ``C`` is the POSIX locale for "no localisation", so it is a stated absence
+    of a preference, not a typo. Both readings end at ``None``, which is why the
+    SILENCE is the property under test: a warning would tell a user who opted
+    out on purpose that their setting was broken, and this is the only opt-out
+    cmd.exe can express at all -- ``set VAR=`` deletes the name there, so the
+    empty spelling does not exist on that launcher.
+    """
+    monkeypatch.setenv(chrome_driver.ENV_LOGIN_LOCALE, raw)
+
+    with caplog.at_level(logging.WARNING):
+        assert chrome_driver._login_locale(os.environ) is None
+
+    assert not caplog.text, (
+        f"{raw!r} says 'no preference'; warning about it reads as 'your setting "
+        f"was wrong'. got {caplog.text!r}"
+    )
+
+
+@pytest.mark.parametrize("raw", ["ca", "co", "cs", "cy", "Cy-az-AZ"])
+def test_a_real_language_starting_with_c_still_gets_through(
+    monkeypatch: pytest.MonkeyPatch, raw: str
+) -> None:
+    """The no-preference rule must not swallow a language that merely looks alike.
+
+    ``ca`` (Catalan), ``co``, ``cs``, ``cy`` are real tags. A rule written as a
+    prefix rather than a whole-token match would drop every one of them, and the
+    user would see English with no warning to explain it.
+    """
+    monkeypatch.setenv(chrome_driver.ENV_LOGIN_LOCALE, raw)
+
+    assert chrome_driver._login_locale(os.environ) == raw

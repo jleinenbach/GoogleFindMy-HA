@@ -96,7 +96,10 @@ services:
       # No language is forced anywhere in this container: unset (the default)
       # means Chrome keeps its own, which is English. login.sh fills it in from
       # your shell locale so the sign-in speaks your language without you asking;
-      # set it yourself to override that, e.g. GFMY_LOCALE=en to stay in English.
+      # set it yourself to override that, e.g. GFMY_LOCALE=en to stay in English,
+      # or GFMY_LOCALE=C to hand the choice back to Chrome from any caller (that
+      # is the POSIX "no localisation" locale, and the container reads it as a
+      # stated absence of a preference rather than as a broken value).
       # The noVNC viewer around it is a separate thing and needs no setting: it
       # follows your *browser's* language on its own.
       GOOGLEFINDMY_LOGIN_LOCALE: "${GFMY_LOCALE:-}"

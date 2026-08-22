@@ -38,6 +38,14 @@ rem   set GFMY_CLEARTEXT=1
 rem   login.cmd
 rem Either of those skips the question. No extra port is published in either
 rem case, so both tracks start without one.
+rem
+rem Optional language:
+rem   set GFMY_LOCALE=C
+rem hands the language of the sign-in page back to Chrome (English here)
+rem instead of taking it from your Windows culture. Capital C, the POSIX
+rem "no localisation" locale -- and on this shell the ONLY spelling that
+rem works, because `set GFMY_LOCALE=` deletes the name instead of emptying
+rem it. The reasoning sits at the GFMY_LOCALE block further down.
 setlocal
 pushd "%~dp0"
 
@@ -200,6 +208,14 @@ rem `set GFMY_LOCALE=en` before running this stays in English, and a failed or
 rem missing PowerShell simply leaves it empty -- Chrome then keeps its own
 rem default. The container validates the value and ignores anything that is not
 rem a language tag, so this can never break a login.
+rem
+rem What cmd.exe canNOT express is bash's empty-but-present value: `set VAR=`
+rem DELETES the name (same reason the AP-5 comment above uses `if defined` as
+rem the counterpart of `${VAR+set}`), so `set GFMY_LOCALE=` here does not mean
+rem "no preference", it means "ask Windows". The spelling that DOES opt out on
+rem this launcher is `set GFMY_LOCALE=C`: it is defined, so it wins here, and
+rem the container reads the POSIX no-localisation locale as no preference and
+rem drops it without a warning. Documented under "Language and keyboard".
 if not defined GFMY_LOCALE (
   for /f "usebackq delims=" %%c in (`powershell -NoProfile -Command "(Get-Culture).Name" 2^>nul`) do set "GFMY_LOCALE=%%c"
 )
@@ -323,6 +339,9 @@ echo Environment (see the comment block at the top of this file):
 echo   GFMY_NOVNC_BIND       host bind for noVNC 7900          (default 127.0.0.1)
 echo   GFMY_NOVNC_URL_HOST   address printed for your browser  (default: the bind)
 echo   GFMY_CLEARTEXT=1      print the bundle in this terminal at the end
+echo   GFMY_LOCALE           language for the sign-in page     (default: your culture,
+echo                         or Chrome's own if PowerShell did not answer)
+echo                         set GFMY_LOCALE=C to hand the choice back to Chrome
 goto :eof
 
 :set_track

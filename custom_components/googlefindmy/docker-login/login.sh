@@ -45,6 +45,14 @@
 #   GFMY_CLEARTEXT=1 bash login.sh       (or answer B to the menu, or --track b)
 # prints the finished bundle in this terminal at the end, for manual copy/paste
 # into Home Assistant, and removes the file afterwards. No extra port is opened.
+#
+# Optional language:
+#   GFMY_LOCALE=C bash login.sh
+# hands the language of the sign-in page back to Chrome (English here) instead
+# of taking it from your shell locale. Spelled with a capital C, the POSIX
+# "no localisation" locale; the reasoning sits at the GFMY_LOCALE block further
+# down, and the guide lists the per-shell spellings under "Language and
+# keyboard".
 set -euo pipefail
 
 cd "$(dirname "$0")"
@@ -80,6 +88,9 @@ Environment (see the comment block at the top of this file):
   GFMY_NOVNC_BIND       host bind for noVNC 7900         (default 127.0.0.1)
   GFMY_NOVNC_URL_HOST   address printed for your browser (default: the bind)
   GFMY_CLEARTEXT=1      print the bundle in this terminal at the end
+  GFMY_LOCALE           language for the sign-in page     (default: your locale,
+                        or Chrome's own if you have none, or it is C/POSIX;
+                        GFMY_LOCALE=C hands the choice back to Chrome)
 EOF
 }
 
@@ -551,15 +562,33 @@ mkdir -p data
 # Read from the shell locale so the Google sign-in speaks the language of whoever
 # is running this, instead of always English. Deliberately NOT a hard setting:
 #   * an existing GFMY_LOCALE always wins, so `GFMY_LOCALE=en ./login.sh` opts out;
+#   * so does `GFMY_LOCALE= ./login.sh`, an empty but PRESENT value, which is how
+#     the guide tells the reader to hand the choice back to Chrome. That is why
+#     the test below expands with `+set` and not `:-`: `:-` cannot tell "said
+#     nothing" from "said no preference", so on a host with a real LANG the
+#     deliberate opt-out silently became the host locale. Same `+set` form as
+#     the three captures above (two for the noVNC menu, AP-1, one for the
+#     handoff switch, AP-5), for the same reason;
 #   * an unset or "C"/"POSIX" locale carries no preference, so it stays empty and
 #     Chrome keeps its own default -- English, which is the right fallback.
+# Windows cannot express the empty-but-present state at all (`set VAR=` deletes
+# the name), so the opt-out that works on BOTH launchers is `GFMY_LOCALE=C`: the
+# container reads the POSIX "no localisation" locale as no preference and drops
+# it in silence. The rule therefore exists TWICE on purpose, once per side, and
+# the two are not interchangeable: the case arm below only ever sees the HOST
+# locale this launcher read, while the container sees whatever the user set --
+# which is the only copy login.cmd and a plain `docker compose` call reach at
+# all. Keep them in step; test_both_halves_agree_on_what_counts_as_no_preference
+# pins the pair over twelve values, and on the container side it is the SILENCE
+# that carries the assertion -- these values are no language tags either way, so
+# the `None` it also checks would pass on a container that warns about them.
 # The container validates the value and ignores it if it is not a language tag,
 # so a surprising locale can never break a login. Only the language part is
 # forwarded (LC_ALL > LC_MESSAGES > LANG, the standard precedence).
-if [ -z "${GFMY_LOCALE:-}" ]; then
+if [ -z "${GFMY_LOCALE+set}" ]; then
   _host_locale="${LC_ALL:-${LC_MESSAGES:-${LANG:-}}}"
   case "$_host_locale" in
-    ""|C|POSIX|C.*|POSIX.*) GFMY_LOCALE="" ;;
+    ""|C|POSIX|C.*|POSIX.*|C@*|POSIX@*) GFMY_LOCALE="" ;;
     *) GFMY_LOCALE="$_host_locale" ;;
   esac
 fi

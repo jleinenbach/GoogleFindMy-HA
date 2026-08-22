@@ -61,6 +61,7 @@ Codex review finding on PR #1208:
 
 from __future__ import annotations
 
+import logging
 import os
 import pty
 import re
@@ -2627,7 +2628,236 @@ def test_an_explicit_language_wins_over_the_shell_locale(tmp_path: Path) -> None
     assert probe["GFMY_LOCALE"] == "en"
 
 
-@pytest.mark.parametrize("locale", ["C", "POSIX", "C.UTF-8"])
+def test_an_explicitly_empty_language_is_not_overwritten(tmp_path: Path) -> None:
+    """An empty GFMY_LOCALE is an answer, and it must survive the host locale.
+
+    The guide tells the reader to hand the choice back to Chrome by leaving the
+    variable empty. A ``-z`` test cannot tell that apart from "never set", so on
+    a host with a real ``LANG`` the deliberate opt-out silently turned into the
+    host locale -- exactly the value the reader was opting out of. ``LANG`` is
+    set here on purpose: without it the assertion passes on the broken code too.
+    """
+    probe = _probe_launcher(tmp_path, {"LANG": "fr_FR.UTF-8", "GFMY_LOCALE": ""})
+
+    assert probe["GFMY_LOCALE"] == "", (
+        "GFMY_LOCALE= is a stated absence of a preference; replacing it with the "
+        "host locale takes the choice back off the user"
+    )
+
+
+def test_the_posix_locale_reaches_the_container_untouched(tmp_path: Path) -> None:
+    """Half one of the cross-platform opt-out, as a characterisation test.
+
+    ``GFMY_LOCALE=C`` is the spelling the guide gives Windows users, because
+    cmd.exe deletes a variable that is set to nothing and therefore cannot
+    express the empty case at all. For that to work the launcher must pass the
+    value ON rather than substitute the host locale, and the container must then
+    read it as no preference (half two, ``test_chrome_driver.py``).
+
+    Stated so it is not mistaken for a regression guard: this half is green on
+    the old launcher too, because a non-empty value never entered the branch the
+    fix changed. It is here to pin the END of the chain the guide promises, not
+    to catch the bug the sibling test catches.
+    """
+    probe = _probe_launcher(tmp_path, {"LANG": "fr_FR.UTF-8", "GFMY_LOCALE": "C"})
+
+    assert probe["GFMY_LOCALE"] == "C"
+
+
+def test_both_halves_agree_on_what_counts_as_no_preference(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The launcher and the container must mean the SAME thing by "no locale".
+
+    ``login.sh`` claims it drops a locale-free shell locale "by the same rule as"
+    the container's, and the guide sells ``C`` as an opt-out that works on either
+    side. Nothing pinned that: the two live in different languages (a ``case``
+    arm and a Python regex), so extending one and forgetting the other would be
+    silent -- a value the launcher forwards but the container warns about, or the
+    reverse. This runs both over the same inputs and asserts they agree.
+
+    What the container half asserts is the SILENCE, not the ``None``. ``None``
+    alone is tautological here: ``C`` and ``POSIX`` are no language tags either
+    way, so every one of these values already ended at ``None`` before the rule
+    existed -- through the warning branch. Deleting the rule would put the
+    "expected a language tag" warning back on the very spelling the guide sells
+    as the opt-out, and a ``is None`` check would not notice.
+
+    Extent today, stated so it is not mistaken for equivalence: twelve values,
+    the six POSIX spellings below and six real locales. Drift OUTSIDE that set
+    stays invisible -- widening the ``case`` arm to lower case without widening
+    the regex, say, would keep this green. Widen both lists when you widen
+    either rule. The real-locale half is a boundary probe rather than a
+    regression guard: those values were forwarded before the rule too.
+    """
+    from custom_components.googlefindmy.chrome_driver import _login_locale
+
+    neutral = ["C", "POSIX", "C.UTF-8", "POSIX.UTF-8", "C@euro", "POSIX@x"]
+    real = ["de_DE.UTF-8", "fr", "ca", "cs", "cy", "pt_BR@euro"]
+
+    def _case(label: str, index: int) -> Path:
+        # A sandbox is built with mkdir(), so it is single-use; every value gets
+        # its own root rather than loosening the shared helper for this one test.
+        root = tmp_path / f"{label}{index}"
+        root.mkdir()
+        return root
+
+    # Grip check for the silence assertions below: without it, every
+    # `assert not caplog.text` would also pass when NO message reaches caplog at
+    # all (propagation switched off, a logging setup in a future conftest). A
+    # known-bad value therefore has to warn visibly first.
+    caplog.clear()
+    with caplog.at_level(logging.WARNING):
+        assert _login_locale({"GOOGLEFINDMY_LOGIN_LOCALE": "German"}) is None
+    assert caplog.text, (
+        "no warning reached caplog for a value that must warn; the silence "
+        "assertions below would be vacuous"
+    )
+
+    for index, value in enumerate(neutral):
+        probe = _probe_launcher(_case("neutral", index), {"LANG": value})
+        assert probe["GFMY_LOCALE"] == "", (
+            f"the launcher forwards {value!r} as a preference while the container "
+            "reads it as none; the two rules have drifted apart"
+        )
+        caplog.clear()
+        with caplog.at_level(logging.WARNING):
+            assert _login_locale({"GOOGLEFINDMY_LOGIN_LOCALE": value}) is None
+        assert not caplog.text, (
+            f"the launcher drops {value!r} without a word while the container "
+            f"calls it a broken setting; got {caplog.text!r}"
+        )
+
+    for index, value in enumerate(real):
+        probe = _probe_launcher(_case("real", index), {"LANG": value})
+        assert probe["GFMY_LOCALE"] == value, (
+            f"the launcher swallowed {value!r}, which is a real locale"
+        )
+        assert _login_locale({"GOOGLEFINDMY_LOGIN_LOCALE": value}) is not None
+
+
+def test_the_guide_gives_windows_an_opt_out_it_can_actually_type() -> None:
+    """cmd.exe has no empty-but-defined state, so the guide must not imply one.
+
+    ``set GFMY_LOCALE=`` REMOVES the name on Windows, after which login.cmd asks
+    the OS for the culture -- the opposite of opting out. The guide therefore has
+    to name ``C`` for that shell, and login.cmd has to say why at the code.
+    """
+    readme = _read("README.md")
+    windows_row = next(
+        (line for line in readme.splitlines() if "`cmd.exe` (`login.cmd`)" in line),
+        None,
+    )
+    assert windows_row is not None, (
+        "the language section must tell Windows users how to opt out at all"
+    )
+    assert "`set GFMY_LOCALE=C`" in windows_row, (
+        f"cmd.exe cannot express the empty case; got {windows_row!r}"
+    )
+
+    # Anchored at the branch it explains, not "somewhere in the file": the
+    # whole-file form certifies its own opposite. Replacing the culture lookup
+    # with a hard `set GFMY_LOCALE=C` would put every Windows user back on
+    # English, silently, while leaving that literal in place. Same reasoning as
+    # the verbatim-output rule in AGENTS.md.
+    lines = _read("login.cmd").splitlines()
+
+    def _is_comment(line: str) -> bool:
+        # Blank lines count, so a paragraph break between the note and the
+        # branch does not fail a launcher that is in fact correct. `REM` in
+        # capitals is valid cmd.exe and must not fail it either.
+        stripped = line.strip()
+        return (
+            not stripped
+            or stripped.lower().startswith(("rem", "@rem"))
+            or stripped.startswith("::")
+        )
+
+    branch = next(
+        (
+            i
+            for i, line in enumerate(lines)
+            if line.lstrip().lower().startswith("if not defined gfmy_locale")
+        ),
+        None,
+    )
+    assert branch is not None, (
+        "login.cmd must still ask Windows for the culture when the user said "
+        "nothing -- without that branch there is no default left to opt out of"
+    )
+    body_end = next(
+        (i for i in range(branch + 1, len(lines)) if lines[i].strip() == ")"),
+        None,
+    )
+    assert body_end is not None, "the culture branch must be a closed block"
+    body = "\n".join(lines[branch + 1 : body_end])
+    # The `if` line alone proves nothing: a body of `set "GFMY_LOCALE=en"` keeps
+    # it, and puts every Windows user on a fixed language. What has to hold is
+    # that the branch ASKS the OS and assigns what came back.
+    assert "Get-Culture" in body, (
+        f"the branch has to ask Windows for the culture; got body {body!r}"
+    )
+    # `%%[a-zA-Z]` rather than the current letter: renaming the FOR variable is
+    # a stylistic change and must not fail a launcher that still does the right
+    # thing. What matters is that the assignment comes FROM the loop.
+    assert re.search(r'set\s+"?GFMY_LOCALE=%%[a-zA-Z]"?', body), (
+        f"the branch must assign what Windows reported, not a fixed value; "
+        f"got body {body!r}"
+    )
+    start = branch
+    while start > 0 and _is_comment(lines[start - 1]):
+        start -= 1
+    lead_in = "\n".join(lines[start:branch])
+    # Both quoting forms: login.cmd writes `set "VAR=..."` almost everywhere, so
+    # matching only the bare spelling would fail on a stylistic tidy-up.
+    assert re.search(r'set\s+"?GFMY_LOCALE=C"?', lead_in), (
+        "the workaround has to be recorded in the comment block directly above "
+        "the branch it works around, where the next reader of that branch is"
+    )
+    # Anchored at the START of the statement: a help line that merely mentions
+    # `set GFMY_LOCALE=C` is documentation, not a default, and must not trip a
+    # guard whose whole point is to protect that documentation.
+    assigned = [
+        line
+        for line in lines
+        if not _is_comment(line) and re.match(r'\s*@?set\s+"?GFMY_LOCALE=C"?\s*$', line)
+    ]
+    assert not assigned, (
+        f"C is the user's opt-out, not the launcher's default; got {assigned!r}"
+    )
+
+    # The answer also has to be FINDABLE from the launcher itself, not only in
+    # the guide -- `--help` is where someone whose sign-in came up in the wrong
+    # language looks first, and on Windows it is the only spelling they have.
+    for name in ("login.cmd", "login.sh"):
+        text = _read(name).splitlines()
+        start = next(
+            (
+                i
+                for i, line in enumerate(text)
+                if "Environment (see the comment" in line
+            ),
+            None,
+        )
+        assert start is not None, f"{name} --help must keep its Environment list"
+        # Bounded at the list, not the file: `GFMY_LOCALE` appears in the code of
+        # login.sh many times over, so a whole-file search would pass on a help
+        # text that never mentions it.
+        block = text[start : start + 12]
+        listed = "\n".join(block)
+        assert "GFMY_LOCALE" in listed, (
+            f"{name} --help lists the environment but not GFMY_LOCALE. got {block!r}"
+        )
+        # The NAME alone is not the answer the reader came for. What has to
+        # survive is the spelling that opts out, because on cmd.exe it is the
+        # only one that exists.
+        assert "GFMY_LOCALE=C" in listed, (
+            f"{name} --help names the variable but not the C spelling that "
+            f"hands the choice back. got {block!r}"
+        )
+
+
+@pytest.mark.parametrize("locale", ["C", "POSIX", "C.UTF-8", "C@euro", "POSIX@x"])
 def test_a_locale_free_shell_expresses_no_preference(
     tmp_path: Path, locale: str
 ) -> None:

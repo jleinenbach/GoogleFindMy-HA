@@ -269,7 +269,7 @@ language by this container.
 | What you see | Where its language comes from | How to change it |
 | --- | --- | --- |
 | The noVNC viewer (toolbar, panels) | Your **own browser's** language, which noVNC reads from it directly | Change your browser's language |
-| Chrome inside the viewer, and the Google sign-in page it loads | `GFMY_LOCALE`, empty by default | `GFMY_LOCALE=fr bash login.sh` |
+| Chrome inside the viewer, and the Google sign-in page it loads | `GFMY_LOCALE`, which the launchers fill in from your own locale; empty on a bare `docker compose run`, which reads no locale of its own | `GFMY_LOCALE=fr bash login.sh` |
 | The `[entrypoint]` / `[AuthFlow]` lines in your terminal | English, like the rest of the project | — |
 
 The launchers fill `GFMY_LOCALE` in from your own environment: `login.sh` reads
@@ -278,10 +278,27 @@ Windows for its culture name, so the sign-in page usually arrives in the
 language you read without you setting anything. Both accept a locale in either
 spelling (`de-DE` or `de_DE.UTF-8`).
 
-Set it yourself to override that — `GFMY_LOCALE=en` to stay in English — and
-leave it empty to let Chrome choose, which in this image means English. A value
-that is not a language tag is ignored with a warning rather than passed on: a
-login must not fail over the language of its own error messages. What is read is the
+Set it yourself to override that — `GFMY_LOCALE=en` to stay in English — or
+hand the choice back to Chrome, which in this image means English. There are two
+spellings for handing it back, and which one you have depends on your shell:
+
+| Shell | Opt out with | Why |
+| --- | --- | --- |
+| `bash` (`login.sh`) | `GFMY_LOCALE= bash login.sh` **or** `GFMY_LOCALE=C bash login.sh` | An empty value is still a value here, so the launcher leaves it alone; `C` it passes on, and the container reads that as no preference |
+| `cmd.exe` (`login.cmd`) | `set GFMY_LOCALE=C` | `set GFMY_LOCALE=` *deletes* the variable on Windows, and the launcher then asks Windows for your culture instead |
+| `docker compose` directly | `GFMY_LOCALE=C` or nothing at all | This path reads no locale of its own, so it is already empty unless you fill it in |
+
+`GFMY_LOCALE=C` is the one that works everywhere, `docker compose` included:
+`C` is the POSIX locale for "no localisation", and the container reads it as a
+stated absence of a preference rather than as a broken value — so it is dropped
+in silence, without the warning a typo earns.
+
+Any OTHER value that is not a language tag is ignored with a warning rather than
+passed on: a login must not fail over the language of its own error messages. Two
+kinds of value are dropped in silence instead, and deliberately so, because both are an
+answer rather than a mistake: an empty one, and the POSIX locale above. Spell the
+latter with a capital `C` — `c` and `posix` end up at the same English page, but
+by way of the warning, which reads as if your setting had been wrong. What is read is the
 part before the first `.` or `@`, with `_` read as `-` — together that is what
 turns `de_DE.UTF-8` into `de-DE` — so whatever follows those characters is
 dropped without a warning, and only the remainder has to look like a language

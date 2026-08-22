@@ -592,6 +592,19 @@ ENV_LOGIN_LOCALE = "GOOGLEFINDMY_LOGIN_LOCALE"
 # ("German", "Deutsch") visible instead of silently ineffective.
 _LOCALE_PATTERN = re.compile(r"^[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8}){0,2}$")
 
+# The POSIX "no localisation" locale, in the spellings a shell hands out. It is
+# not a malformed language tag, it is a stated absence of one, so it must not be
+# warned about. That distinction is what gives the setting an opt-out cmd.exe can
+# type at all: `login.sh` can express "no preference" as an empty value, but
+# cmd.exe DELETES a variable that is set to nothing, so on Windows the empty case
+# does not exist and the launcher goes on to ask the OS for its culture. (A bare
+# `docker compose run` needs no opt-out: docker-compose.yml reads GFMY_LOCALE and
+# nothing else, so it never picks up a host locale to begin with.) The suffix arm
+# takes both POSIX separators, `.` for the codeset and `@` for the modifier, the
+# same two the normalisation below strips -- otherwise `C@euro` would miss this
+# rule and earn the "expected a language tag" warning it is the opposite of.
+_NO_LOCALE_PATTERN = re.compile(r"^(C|POSIX)([.@].*)?$")
+
 
 def _login_locale(env: Mapping[str, str]) -> str | None:
     """Return the requested login language tag, or ``None`` to leave it to Chrome.
@@ -599,6 +612,11 @@ def _login_locale(env: Mapping[str, str]) -> str | None:
     A malformed value is ignored rather than fatal: a login must not fail over a
     cosmetic preference, and the caller cannot fix a typo mid-flow. It is logged
     at warning level so the user learns why their setting had no effect.
+
+    An empty value and the POSIX ``C``/``POSIX`` locale are not malformed, they
+    say "no preference", so both return ``None`` in silence. ``C`` is the form
+    every caller can express: ``login.sh`` also accepts an empty value, but
+    ``login.cmd`` cannot, because cmd.exe deletes a variable set to nothing.
 
     Note what is validated and what is not: everything from the first ``.`` or
     ``@`` onwards is *dropped*, not inspected, and only the remainder -- with
@@ -610,7 +628,7 @@ def _login_locale(env: Mapping[str, str]) -> str | None:
     gain, so the normalisation is logged instead of second-guessed.
     """
     raw = (env.get(ENV_LOGIN_LOCALE) or "").strip()
-    if not raw:
+    if not raw or _NO_LOCALE_PATTERN.match(raw):
         return None
     # Accept the one near-miss worth accepting: POSIX locales ("de_DE.UTF-8",
     # "pt_BR@euro") are what a shell hands out, and translating them costs one
