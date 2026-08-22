@@ -331,6 +331,10 @@ Two fallbacks, in the order worth trying:
 2. **Give the container your layout.** `GFMY_KEYBOARD_LAYOUT=de bash login.sh`
    (the value is passed to `setxkbmap`, so `de -variant nodeadkeys` works too).
    Only needed for the rarer cases the default cannot reach, such as dead keys.
+   If the layout cannot be applied, the container says so on startup, and where
+   `setxkbmap` gave a reason it repeats that reason, so a rejected name is
+   distinguishable from a display that was not up yet. Either way the login
+   continues on the default layout rather than aborting.
 
 ## Cancelling a login
 

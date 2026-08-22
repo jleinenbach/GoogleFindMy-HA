@@ -2925,3 +2925,507 @@ def test_the_keyboard_opt_out_also_removes_a_file_from_an_earlier_run() -> None:
     opt_out = entrypoint.index("GFMY_KEYBOARD_FIX:-1")
     tail = entrypoint[opt_out : opt_out + 1500]
     assert "rm -f" in tail and ".x11vncrc" in tail
+
+
+# --- Requested settings must not fail silently ---------------------------------
+# Every switch this entrypoint offers says so when it cannot honour the request.
+# The keyboard layout was the one exception: fifteen failed setxkbmap attempts
+# fell through without a word, and the README points users at that very setting
+# when characters do not reach the browser. These tests run the REAL shell code
+# (extracted from entrypoint.sh) against stub binaries, because a text assertion
+# on the warning cannot tell the fixed path from the broken one -- the string is
+# present in the file either way.
+
+
+_FI = re.compile(r"^fi\b")
+_IF = re.compile(r"^if\b")
+
+
+def _extract_shell_block(
+    entrypoint: str,
+    *,
+    banner: str,
+    opener: str,
+    must_contain: tuple[str, ...],
+    max_lines: int,
+    label: str,
+) -> str:
+    """Return a verbatim block from ``entrypoint.sh``, or raise.
+
+    Two extractors in this file learned the same lesson the expensive way, the
+    second one *while fixing the first*: ending on "the next line that is exactly
+    ``fi``" is not an anchor. Delete the guard, or merely append a comment to its
+    ``fi``, and the search runs on -- once handing a test 63 lines including
+    ``sudo chown -R ... /data``, once 74 including the backgrounded login CLI.
+    A test fragment is EXECUTED, so a mis-grab is not a wrong answer, it is a
+    side effect.
+
+    Hence one helper for all of them, with three independent brakes: the end is
+    found by ``if``/``fi`` balance (a trailing comment no longer hides it),
+    ``must_contain`` proves the block is the one meant, and ``max_lines`` caps
+    the blast radius if both are somehow satisfied by a larger stretch.
+    """
+
+    lines = entrypoint.splitlines()
+    start = next((i for i, line in enumerate(lines) if line.startswith(banner)), None)
+    if start is None:
+        raise AssertionError(f"{label}: could not locate its opening line ({banner!r})")
+    guard = next(
+        (i for i in range(start, len(lines)) if lines[i].startswith(opener)), None
+    )
+    if guard is None:
+        raise AssertionError(
+            f"{label}: the guard {opener!r} is gone -- whatever it protected is "
+            "unconditional now, which is exactly what these tests watch for"
+        )
+    depth = 0
+    end = None
+    for i in range(guard, len(lines)):
+        stripped = lines[i].strip()
+        if _IF.match(stripped):
+            depth += 1
+        elif _FI.match(stripped):
+            depth -= 1
+            if depth == 0:
+                end = i
+                break
+    if end is None:
+        raise AssertionError(
+            f"{label}: its guard is never closed by a `fi` on its own line. This "
+            "balance does not model a single-line `if ...; then ...; fi`; if one "
+            "was introduced here, teach the balance about it rather than widening "
+            "the search"
+        )
+    block = lines[start : end + 1]
+    if len(block) > max_lines:
+        raise AssertionError(
+            f"{label}: grabbed {len(block)} lines (cap {max_lines}); refusing to "
+            "run an unknown stretch of the entrypoint as a test fragment"
+        )
+    # Against _code_lines, not the raw block: a body replaced by
+    # `# apply_keyboard_layout (disabled)` plus `:` satisfies a raw substring
+    # search while the feature is gone, which is the opposite of proof.
+    code = _code_lines("\n".join(block))
+    missing = [
+        needle for needle in must_contain if not any(needle in line for line in code)
+    ]
+    if missing:
+        raise AssertionError(f"{label}: extracted block no longer contains {missing!r}")
+    return "\n".join(block)
+
+
+def _extract_display_wait(entrypoint: str) -> str:
+    """Return the X-display wait, from its banner through its warning."""
+
+    return _extract_shell_block(
+        entrypoint,
+        banner='echo "[entrypoint] Waiting for X display',
+        opener='if [ -z "${_display_ready}"',
+        must_contain=("xdpyinfo", "_display_ready", "did not come up within"),
+        max_lines=30,
+        label="the X-display wait",
+    )
+
+
+def _extract_layout_call(entrypoint: str) -> str:
+    """Return the ``if [ -n ... ]; then apply_keyboard_layout; fi`` guard.
+
+    Extracting the FUNCTION alone left the guard untested in both directions:
+    deleting the condition made every login report a switch to ``''``, and
+    emptying the body made the whole feature a no-op. Both stayed green.
+    """
+
+    return _extract_shell_block(
+        entrypoint,
+        banner='if [ -n "${GFMY_KEYBOARD_LAYOUT:-}" ]',
+        opener='if [ -n "${GFMY_KEYBOARD_LAYOUT:-}" ]',
+        must_contain=("apply_keyboard_layout",),
+        max_lines=6,
+        label="the GFMY_KEYBOARD_LAYOUT guard",
+    )
+
+
+def _extract_layout_feature(entrypoint: str) -> str:
+    """Return definition AND guard, in the order the file defines them.
+
+    Assembling the two in an order the test picks would pin neither: with the
+    definition moved below its caller, bash reaches `apply_keyboard_layout:
+    command not found`, exits 127, and `set -e` ends the login -- while a test
+    that concatenates them itself stays green.
+    """
+
+    definition = _extract_shell_function(entrypoint, "apply_keyboard_layout")
+    call = _extract_layout_call(entrypoint)
+    if entrypoint.index(definition) > entrypoint.index(call):
+        raise AssertionError(
+            "apply_keyboard_layout is defined AFTER its caller; under `set -e` "
+            "that aborts the login with 127 instead of setting a layout"
+        )
+    return f"{definition}\n{call}"
+
+
+def _stub_bin(tmp_path: Path, name: str, body: str) -> Path:
+    """Drop an executable stub into ``tmp_path/bin`` and return that directory."""
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir(exist_ok=True)
+    stub = bin_dir / name
+    stub.write_text(f"#!/usr/bin/env bash\n{body}", encoding="utf-8")
+    stub.chmod(0o755)
+    return bin_dir
+
+
+def _run_shell_fragment(
+    fragment: str, call: str, bin_dir: Path, env: dict[str, str]
+) -> subprocess.CompletedProcess[str]:
+    """Run an extracted fragment under ``set -e`` with ``bin_dir`` first on PATH."""
+
+    script = f"#!/usr/bin/env bash\nset -e\n{fragment}\n{call}\necho REACHED_END\n"
+    return subprocess.run(  # noqa: S603 - fixed argv, test-local stub PATH
+        ["bash", "-c", script],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        env={"PATH": f"{bin_dir}:/usr/bin:/bin", **env},
+        check=False,
+    )
+
+
+def _layout_run(
+    tmp_path: Path, setxkbmap_body: str | None, layout: str = "de"
+) -> subprocess.CompletedProcess[str]:
+    bin_dir = _stub_bin(tmp_path, "sleep", "exit 0\n")  # no-op: 15 tries cost 0s
+    if setxkbmap_body is not None:
+        _stub_bin(tmp_path, "setxkbmap", setxkbmap_body)
+    fragment = _extract_shell_function(_read("entrypoint.sh"), "apply_keyboard_layout")
+    return _run_shell_fragment(
+        fragment,
+        "apply_keyboard_layout",
+        bin_dir,
+        {"HOME": str(tmp_path), "DISPLAY": ":99", "GFMY_KEYBOARD_LAYOUT": layout},
+    )
+
+
+def test_an_exhausted_keyboard_layout_retry_warns_instead_of_falling_through(
+    tmp_path: Path,
+) -> None:
+    """Fifteen failed attempts must end in a warning, not in silence.
+
+    This is the defect: setxkbmap installed, every invocation failing (unknown
+    layout, or the bounded X wait expired), and the login continuing on the
+    default layout with nothing on screen to say the requested fallback was
+    dropped. The warning must also survive ``set -e`` -- aborting the login over
+    a convenience setting would be worse than the keyboard problem it fixes.
+    """
+
+    proc = _layout_run(
+        tmp_path,
+        'echo "Error loading new keyboard description" >&2\nexit 1\n',
+        layout="de -variant nope",
+    )
+
+    assert "REACHED_END" in proc.stdout, (
+        "the layout helper must not abort the script under `set -e`; it is "
+        f"best-effort by contract (stdout={proc.stdout!r} stderr={proc.stderr!r})"
+    )
+    assert "could not apply the requested keyboard layout" in proc.stderr, (
+        "an exhausted retry loop must warn; falling through silently is the "
+        f"reported defect (stderr={proc.stderr!r})"
+    )
+    assert "de -variant nope" in proc.stderr, (
+        "the warning must name the value that was refused, or the user cannot "
+        "tell which of several settings was dropped"
+    )
+    assert "clipboard panel" in proc.stderr, (
+        "the warning must name the way out, like the sibling ~/.x11vncrc warning "
+        "does; a warning without a next step only tells the user they are stuck"
+    )
+
+
+def test_the_layout_warning_reports_what_setxkbmap_actually_said(
+    tmp_path: Path,
+) -> None:
+    """The captured cause is the whole point of capturing stderr.
+
+    ``Cannot open display`` (the X wait lost its race, retrying may help) and
+    ``Error loading new keyboard description`` (the value is wrong, retrying
+    never will) call for opposite reactions. Discarding stderr -- the previous
+    ``2>/dev/null`` -- leaves the user guessing between them.
+    """
+
+    proc = _layout_run(tmp_path, 'echo "Cannot open display :99" >&2\nexit 1\n')
+
+    assert "setxkbmap: Cannot open display :99" in proc.stderr, (
+        "the final failure's own message must reach the user, prefixed so it is "
+        f"attributable (stderr={proc.stderr!r})"
+    )
+
+
+def test_a_layout_that_applies_late_reports_success_and_stays_quiet(
+    tmp_path: Path,
+) -> None:
+    """A retry that eventually wins must NOT also warn.
+
+    This is the counter-direction: an assertion that only checks "warning is
+    printed on failure" is satisfied by code that warns unconditionally, which
+    would make every successful login look broken. A slow X display is the
+    normal reason the first attempts fail, so this path is the common one.
+    """
+
+    counter = tmp_path / "tries"
+    proc = _layout_run(
+        tmp_path,
+        f'n=$(cat "{counter}" 2>/dev/null || echo 0)\n'
+        f'n=$((n + 1)); echo "$n" > "{counter}"\n'
+        'if [ "$n" -ge 3 ]; then exit 0; fi\n'
+        'echo "Cannot open display :99" >&2\nexit 1\n',
+    )
+
+    assert "Keyboard layout set to 'de'." in proc.stdout, (
+        f"a late success must be reported (stdout={proc.stdout!r})"
+    )
+    assert "could not apply" not in proc.stderr, (
+        f"a successful apply must not also warn (stderr={proc.stderr!r})"
+    )
+    assert counter.read_text(encoding="utf-8").strip() == "3", (
+        "the loop must actually retry rather than give up after one attempt"
+    )
+
+
+def test_a_missing_setxkbmap_keeps_its_own_distinct_warning(tmp_path: Path) -> None:
+    """The two failure modes need different words: absent tool vs refused value.
+
+    "install it" and "check your value" are not interchangeable advice. Without
+    this the exhaustion warning could simply be moved up to cover both cases and
+    every assertion above would still pass.
+    """
+
+    # The same PATH the fragment runs under (see _run_shell_fragment), not the
+    # pytest process's: a setxkbmap in /usr/local/bin would skip a branch the
+    # subprocess could never have reached.
+    real = shutil.which("setxkbmap", path="/usr/bin:/bin")
+    if real is not None:  # pragma: no cover - environment dependent
+        pytest.skip("a real setxkbmap on PATH would shadow the absent-tool branch")
+
+    proc = _layout_run(tmp_path, None)
+
+    assert "setxkbmap is not" in proc.stderr and "installed" in proc.stderr, (
+        f"the absent-tool branch must keep its own message (stderr={proc.stderr!r})"
+    )
+    assert "could not apply the requested keyboard layout" not in proc.stderr, (
+        "the exhaustion warning must not fire when no attempt was ever made; it "
+        "would send the user to check a value that was never the problem"
+    )
+
+
+def test_a_display_that_never_comes_up_says_so(tmp_path: Path) -> None:
+    """The X wait is the root cause of every later symptom, so it must speak.
+
+    A silent expiry here surfaces later as a keyboard layout that will not apply
+    and a browser that never appears -- two symptoms, no cause. Not fatal on
+    purpose: Chrome may still come up a moment later, and aborting would turn a
+    slow start into a failed login.
+    """
+
+    bin_dir = _stub_bin(tmp_path, "sleep", "exit 0\n")
+    _stub_bin(tmp_path, "xdpyinfo", "exit 1\n")
+    fragment = _extract_display_wait(_read("entrypoint.sh"))
+
+    proc = _run_shell_fragment(fragment, ":", bin_dir, {"DISPLAY": ":99"})
+
+    assert "REACHED_END" in proc.stdout, (
+        f"the wait must not abort the script (stderr={proc.stderr!r})"
+    )
+    assert "did not come up within" in proc.stderr, (
+        f"an expired display wait must name itself (stderr={proc.stderr!r})"
+    )
+    assert "Display ready." not in proc.stdout, (
+        "a display that never answered must not be reported as ready"
+    )
+
+
+def test_a_display_that_comes_up_stays_quiet(tmp_path: Path) -> None:
+    """The counter-direction: a healthy start must produce no warning at all."""
+
+    bin_dir = _stub_bin(tmp_path, "sleep", "exit 0\n")
+    _stub_bin(tmp_path, "xdpyinfo", "exit 0\n")
+    fragment = _extract_display_wait(_read("entrypoint.sh"))
+
+    proc = _run_shell_fragment(fragment, ":", bin_dir, {"DISPLAY": ":99"})
+
+    assert proc.stdout.count("Display ready.") == 1, (
+        "the loop must stop at the first answer; without the `break` it reports "
+        f"readiness once per second for the whole bound (stdout={proc.stdout!r})"
+    )
+    assert "did not come up" not in proc.stderr, (
+        f"a ready display must not warn (stderr={proc.stderr!r})"
+    )
+
+
+def test_no_requested_layout_means_the_helper_is_never_entered(
+    tmp_path: Path,
+) -> None:
+    """A user who set nothing must see nothing -- neither report nor warning."""
+
+    bin_dir = _stub_bin(tmp_path, "sleep", "exit 0\n")
+    _stub_bin(tmp_path, "setxkbmap", "exit 1\n")
+    fragment = _extract_layout_feature(_read("entrypoint.sh"))
+
+    proc = _run_shell_fragment(fragment, ":", bin_dir, {"DISPLAY": ":99"})
+
+    assert "REACHED_END" in proc.stdout, (
+        f"an unset layout must not abort the script (stderr={proc.stderr!r})"
+    )
+    assert proc.stderr.strip() == "", (
+        "nothing was requested, so nothing may be warned about "
+        f"(stderr={proc.stderr!r})"
+    )
+    assert "Keyboard layout set" not in proc.stdout, (
+        f"no layout was requested, so none may be reported (stdout={proc.stdout!r})"
+    )
+
+
+def test_the_layout_warning_survives_a_failing_sed(tmp_path: Path) -> None:
+    """The warning's own plumbing must not be able to kill the login.
+
+    ``printf | sed`` sits in statement position, so under ``set -e`` a failing or
+    absent ``sed`` aborts the function between the headline and the way out --
+    losing exactly the advice the warning exists to give, on exactly the path
+    where it is needed. Both the block's own comment and the guide promise that
+    the login continues instead.
+    """
+
+    bin_dir = _stub_bin(tmp_path, "sleep", "exit 0\n")
+    _stub_bin(tmp_path, "setxkbmap", 'echo "boom" >&2\nexit 1\n')
+    _stub_bin(tmp_path, "sed", "exit 1\n")
+    fragment = _extract_shell_function(_read("entrypoint.sh"), "apply_keyboard_layout")
+
+    proc = _run_shell_fragment(
+        fragment,
+        "apply_keyboard_layout",
+        bin_dir,
+        {"HOME": str(tmp_path), "DISPLAY": ":99", "GFMY_KEYBOARD_LAYOUT": "de"},
+    )
+
+    assert "REACHED_END" in proc.stdout, (
+        "a broken `sed` must not abort the login; the block is best-effort by "
+        f"contract (stderr={proc.stderr!r})"
+    )
+    assert "clipboard panel" in proc.stderr, (
+        "the way out must still be printed after the cause line failed to render "
+        f"(stderr={proc.stderr!r})"
+    )
+
+
+def test_the_warnings_report_the_bound_their_loop_actually_used(
+    tmp_path: Path,
+) -> None:
+    """Rewire each loop's bound and watch the warning follow it.
+
+    Both bounds used to appear twice, once in ``seq`` and once as free text in
+    the message, so shortening a loop left its warning asserting a wait that no
+    longer happened. Rewriting the assignment in the extracted fragment proves
+    the two are now one value -- measured on BOTH ends, the message AND the number
+    of attempts the stub actually saw, because pinning only the message leaves the
+    loop free to run a literal while the warning reports the variable.
+
+    What this does NOT pin, stated so it is not mistaken for coverage: the
+    values 15 and 30 themselves. They are operating choices, and after this
+    coupling a changed value yields a truthful message rather than a false one.
+    """
+
+    layout_tries = tmp_path / "layout_tries"
+    display_tries = tmp_path / "display_tries"
+    bin_dir = _stub_bin(tmp_path, "sleep", "exit 0\n")
+    _stub_bin(
+        tmp_path,
+        "setxkbmap",
+        f'echo x >> "{layout_tries}"\necho "nope" >&2\nexit 1\n',
+    )
+    _stub_bin(tmp_path, "xdpyinfo", f'echo x >> "{display_tries}"\nexit 1\n')
+    entrypoint = _read("entrypoint.sh")
+
+    layout = _extract_shell_function(entrypoint, "apply_keyboard_layout")
+    layout, subs = re.subn(r"local _tries=\d+", "local _tries=2", layout)
+    assert subs == 1, "apply_keyboard_layout must take its bound from `_tries`"
+    proc = _run_shell_fragment(
+        layout,
+        "apply_keyboard_layout",
+        bin_dir,
+        {"HOME": str(tmp_path), "DISPLAY": ":99", "GFMY_KEYBOARD_LAYOUT": "de"},
+    )
+    assert "after 2 attempts" in proc.stderr, (
+        "the layout warning must quote the bound the loop ran, not a literal "
+        f"(stderr={proc.stderr!r})"
+    )
+    assert re.search(r"\b1[0-9]\b", proc.stderr) is None, (
+        f"a stale literal survived in the layout warning (stderr={proc.stderr!r})"
+    )
+    assert layout_tries.read_text(encoding="utf-8").count("x") == 2, (
+        "the LOOP must take its bound from `_tries` too. Reading only the message "
+        "leaves the other half free: a `seq 1 15` under a rewritten assignment "
+        "reports two attempts and runs fifteen"
+    )
+
+    display = _extract_display_wait(entrypoint)
+    display, subs = re.subn(r"_display_wait_secs=\d+", "_display_wait_secs=2", display)
+    assert subs == 1, "the X-display wait must take its bound from `_display_wait_secs`"
+    proc = _run_shell_fragment(display, ":", bin_dir, {"DISPLAY": ":99"})
+    assert "did not come up within 2s" in proc.stderr, (
+        "the display warning must quote the bound the loop ran, not a literal "
+        f"(stderr={proc.stderr!r})"
+    )
+    assert re.search(r"\b[2-9][0-9]s\b", proc.stderr) is None, (
+        f"a stale literal survived in the display warning (stderr={proc.stderr!r})"
+    )
+    assert display_tries.read_text(encoding="utf-8").count("x") == 2, (
+        "the display loop must take its bound from `_display_wait_secs` as well"
+    )
+
+
+def test_a_requested_layout_actually_reaches_setxkbmap(tmp_path: Path) -> None:
+    """The whole feature, end to end: variable set, helper entered, tool called.
+
+    Every other test here either calls ``apply_keyboard_layout`` directly, thus
+    bypassing the guard, or asserts that nothing happens. Emptying the guard's
+    body -- feature present, guard present, call gone -- left all of them green
+    while the setting silently did nothing, which is the very shape of defect
+    this pull request exists to remove.
+
+    It also pins what the guard hands over: the value is deliberately unquoted so
+    ``de -variant nodeadkeys`` arrives as three arguments, and the README
+    promises exactly that. A stub that ignores its argv cannot tell the two
+    apart, so this one records them.
+    """
+
+    argv = tmp_path / "argv"
+    bin_dir = _stub_bin(tmp_path, "sleep", "exit 0\n")
+    _stub_bin(
+        tmp_path,
+        "setxkbmap",
+        f'printf "%s\\n" "$#" > "{argv}"\nprintf "%s\\n" "$@" >> "{argv}"\nexit 0\n',
+    )
+    fragment = _extract_layout_feature(_read("entrypoint.sh"))
+
+    proc = _run_shell_fragment(
+        fragment,
+        ":",
+        bin_dir,
+        {
+            "HOME": str(tmp_path),
+            "DISPLAY": ":99",
+            "GFMY_KEYBOARD_LAYOUT": "de -variant nodeadkeys",
+        },
+    )
+
+    assert "Keyboard layout set to 'de -variant nodeadkeys'." in proc.stdout, (
+        f"a requested layout must actually be applied (stdout={proc.stdout!r})"
+    )
+    recorded = argv.read_text(encoding="utf-8").splitlines()
+    assert recorded[0] == "5", (
+        "setxkbmap must receive `-display :99` plus the three words of the "
+        f"layout; word splitting is deliberate here (got {recorded!r})"
+    )
+    assert recorded[1:] == ["-display", ":99", "de", "-variant", "nodeadkeys"], (
+        f"the layout must arrive verbatim and unquoted (got {recorded!r})"
+    )
