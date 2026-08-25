@@ -21,6 +21,8 @@ from homeassistant.exceptions import HomeAssistantError
 
 from custom_components.googlefindmy.const import (
     DEFAULT_MIN_POLL_INTERVAL,
+    PlaySoundResult,
+    SoundDispatchOutcome,
     StopSoundOutcome,
 )
 from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker.decrypt_locations import (
@@ -378,7 +380,9 @@ class TestAsyncPlaySoundGating:
 
     async def test_failure_notes_problem(self, coord: LocateStub) -> None:
         coord._device_caps["dev-1"] = {"can_ring": True}
-        coord.api.async_play_sound.return_value = (False, None)
+        coord.api.async_play_sound.return_value = PlaySoundResult(
+            SoundDispatchOutcome.TRANSPORT_FAILED
+        )
         ok = await coord.async_play_sound("dev-1")
         assert ok is False
         coord._note_push_transport_problem.assert_called_once()
@@ -403,7 +407,9 @@ class TestAsyncPlaySoundGating:
         """
 
         coord._device_caps["dev-1"] = {"can_ring": True}
-        coord.api.async_play_sound.return_value = (False, None)
+        coord.api.async_play_sound.return_value = PlaySoundResult(
+            SoundDispatchOutcome.TRANSPORT_FAILED
+        )
 
         assert await coord.async_play_sound("dev-1") is False
 
@@ -445,7 +451,7 @@ class TestAsyncStopSoundGating:
         user with an expired sign-in to wait a moment.
         """
 
-        coord.api.async_stop_sound.return_value = False
+        coord.api.async_stop_sound.return_value = SoundDispatchOutcome.TRANSPORT_FAILED
         outcome = await coord.async_stop_sound("dev-1")
         assert outcome is StopSoundOutcome.FAILED
         coord.api.async_stop_sound.assert_awaited_once()
@@ -498,7 +504,7 @@ class TestAsyncStopSoundGating:
         coord.api.async_stop_sound.assert_awaited_once_with("dev-1", None)
 
     async def test_failure_notes_problem(self, coord: LocateStub) -> None:
-        coord.api.async_stop_sound.return_value = False
+        coord.api.async_stop_sound.return_value = SoundDispatchOutcome.TRANSPORT_FAILED
         outcome = await coord.async_stop_sound("dev-1", request_uuid="x")
         assert outcome is StopSoundOutcome.FAILED
         coord._note_push_transport_problem.assert_called_once()
@@ -509,7 +515,7 @@ class TestAsyncStopSoundGating:
         """IRR-CA-CANCEL-KEY-ON-SUCCESS-ONLY: a rejected stop spends nothing."""
 
         coord._sound_request_uuids["dev-1"] = "cached-uuid"
-        coord.api.async_stop_sound.return_value = False
+        coord.api.async_stop_sound.return_value = SoundDispatchOutcome.TRANSPORT_FAILED
         outcome = await coord.async_stop_sound("dev-1")
         assert outcome is StopSoundOutcome.FAILED
         assert coord._sound_request_uuids["dev-1"] == "cached-uuid"

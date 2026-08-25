@@ -155,6 +155,33 @@ Two consequences follow, and both are already implemented:
 - Even `CANCELLED` claims only "submitted with a correlated cancel key", never
   "the device stopped".
 
+**IRR-CA-SOUND-FAILURE-CLASS (who refused, and who may be blamed).** A sound
+command can fail in ways that have nothing to do with each other, and the layer
+that knows which one happened is `api.py`. `SoundDispatchOutcome` carries that
+knowledge across the boundary instead of collapsing it into a bool:
+
+| Outcome | The server answered | May a caller arm a push cooldown |
+|---|---|---|
+| `ACCEPTED` | yes, HTTP 200 | no |
+| `REJECTED_AUTH` | yes, on credentials | no |
+| `REJECTED_RATE_LIMIT` | yes, HTTP 429 | no |
+| `REJECTED_SERVER` | yes, for any other reason | no |
+| `TRANSPORT_FAILED` | no usable answer was obtained | **yes** |
+| `NOT_SENT` | no transport was used at all | no |
+| `INTERNAL_ERROR` | our own defect or a broken contract | no |
+
+Only `TRANSPORT_FAILED` describes a broken push transport. Reporting anything
+else as one is what let an expired sign-in, a rate limit and a bug of our own
+each produce the same 90-second cooldown and the same `FcmStatus.DEGRADED`, and
+`can_play_sound()` reported the button as unavailable for the duration. This is
+the same failure class as `StopSoundOutcome` one layer up: a bool cannot carry
+the state space.
+
+`PlaySoundResult` pairs that outcome with the cancel key, and the two are
+deliberately independent. The key answers one question only, "may the device be
+ringing" (see IRR-CA-CANCEL-KEY-ON-SUCCESS-ONLY); the cause is read from the
+outcome and never inferred from the presence or absence of a key.
+
 #### Follow-up (not in this change)
 
 Closing the boundary on the cloud path means wiring **Path B**: registering an

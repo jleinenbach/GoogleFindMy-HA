@@ -25,7 +25,11 @@ from aiohttp import ClientConnectionError, ClientError
 from homeassistant.exceptions import ConfigEntryAuthFailed, HomeAssistantError
 
 from .._reauth_reason import ReauthReasonCode
-from ..const import DEFAULT_MIN_POLL_INTERVAL, StopSoundOutcome
+from ..const import (
+    DEFAULT_MIN_POLL_INTERVAL,
+    SoundDispatchOutcome,
+    StopSoundOutcome,
+)
 from ..NovaApi.ExecuteAction.LocateTracker.decrypt_locations import (
     DecryptionError,
     OwnerKeyLookupTransientError,
@@ -742,7 +746,15 @@ class LocateOperations(_MixinBase):
             )
             return False
         try:
-            ok, request_uuid = await self.api.async_play_sound(device_id)
+            play = await self.api.async_play_sound(device_id)
+            # api.async_play_sound now names WHO refused (play.outcome, see
+            # IRR-CA-SOUND-FAILURE-CLASS). Acting on that classification -- above
+            # all, arming the push cooldown only for TRANSPORT_FAILED instead of
+            # for every non-acceptance -- is the next step and deliberately not
+            # part of this one. Until then the two facts are unpacked to exactly
+            # the values the old tuple carried, so this changes the type at the
+            # boundary and nothing else.
+            ok, request_uuid = play.accepted, play.cancel_key
             # Decide whether to (over)write the cached Stop cancel key.
             # api.async_play_sound returns a non-None UUID in exactly the two
             # cases where a ring may be active and Stop needs the key: (1) the
@@ -955,7 +967,13 @@ class LocateOperations(_MixinBase):
                 )
 
         try:
-            submitted = await self.api.async_stop_sound(device_id, request_uuid_to_use)
+            stop_outcome = await self.api.async_stop_sound(
+                device_id, request_uuid_to_use
+            )
+            # Same deliberate narrowing as on the play path above: the boundary
+            # now carries the classification, acting on it is the next step.
+            # Acceptance is the single bit this one keeps looking at.
+            submitted = stop_outcome is SoundDispatchOutcome.ACCEPTED
             if not submitted:
                 self._note_push_transport_problem()
                 # No credential proof on this path: api.async_stop_sound
