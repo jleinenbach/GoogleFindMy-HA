@@ -11,6 +11,7 @@ import hashlib
 import math
 import time
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from enum import StrEnum
 from types import MappingProxyType
 from typing import Final, Literal
@@ -34,6 +35,90 @@ CONFIG_ENTRY_VERSION: int = 2
 # regex only matches `NAME = "x"`, not `NAME: str = "x"`. Re-adding the annotation
 # would silently skip this file on the automated version bump.
 INTEGRATION_VERSION = "1.7.15.10"
+
+# --------------------------------------------------------------------------------------
+# Sound dispatch outcome (API -> coordinator boundary)
+# --------------------------------------------------------------------------------------
+
+
+class SoundDispatchOutcome(StrEnum):
+    """Why a sound command did or did not reach Google, as classified by ``api.py``.
+
+    ``api.py`` already reaches nine distinct exits (missing action token, empty
+    submitter reply, HTTP 200, NovaAuthError, HTTP 401/403, other HTTP status,
+    rate limit, network error, unexpected exception). Until this type existed,
+    all of them collapsed into a single ``False``, and the coordinator had no
+    choice but to read that ``False`` as "the push transport is broken". A server
+    saying no and a network that never answered then produced the same 90-second
+    cooldown and the same ``FcmStatus.DEGRADED``. This is the same failure class
+    ``StopSoundOutcome`` documents one layer up: a bool cannot carry the state
+    space.
+
+    Only ``TRANSPORT_FAILED`` justifies a push cooldown. Only ``ACCEPTED`` proves
+    that the credentials worked.
+    """
+
+    ACCEPTED = "accepted"
+    """Nova answered HTTP 200. Acceptance of the submission, not proof of a ring.
+
+    See IRR-CA-NO-RING-CONFIRMATION in ``docs/PLAY_SOUND_ARCHITECTURE.md``.
+    """
+
+    REJECTED_AUTH = "rejected_auth"
+    """The server answered and refused on credentials (NovaAuthError, 401, 403).
+
+    The transport worked. A cooldown would mislabel an expired sign-in as a
+    network outage and hide it behind a self-clearing timer.
+    """
+
+    REJECTED_RATE_LIMIT = "rejected_rate_limit"
+    """The server answered HTTP 429. The transport worked; only the pace was wrong."""
+
+    REJECTED_SERVER = "rejected_server"
+    """The server answered and refused for any other reason (5xx, logic error)."""
+
+    TRANSPORT_FAILED = "transport_failed"
+    """No usable answer was obtained: DNS, connect refused/timeout, disconnect,
+    read timeout, or a NovaError leaving the transport after its retries.
+
+    This is the ONLY outcome that justifies arming the push cooldown.
+    """
+
+    NOT_SENT = "not_sent"
+    """A local precondition failed before any transport was used (no action token).
+
+    Neither the server nor the network said anything, so neither may be blamed.
+    """
+
+    INTERNAL_ERROR = "internal_error"
+    """This integration failed on its own: an unexpected exception, or a contract
+    violation such as an empty reply from the submitter.
+
+    Classifying such a bug as a network outage is what this type was written to
+    stop; it is logged with a traceback and never arms the cooldown.
+    """
+
+
+@dataclass(frozen=True, slots=True)
+class PlaySoundResult:
+    """Result of ``api.async_play_sound``: a classification plus the cancel key.
+
+    ``cancel_key`` is non-None in exactly the cases where the device may be
+    ringing and a later Stop needs the handle: an accepted command, or a failure
+    that latched dispatch (``NovaError.dispatched``). Read ``cancel_key`` ONLY for
+    the question "may the device be ringing"; read ``outcome`` for every question
+    about the cause. Deriving the cause from the key is the out-of-band channel
+    this type replaces.
+    """
+
+    outcome: SoundDispatchOutcome
+    cancel_key: str | None = None
+
+    @property
+    def accepted(self) -> bool:
+        """Return True when Nova accepted the submission (HTTP 200)."""
+        return self.outcome is SoundDispatchOutcome.ACCEPTED
+
 
 # --------------------------------------------------------------------------------------
 # Stop Sound outcome
