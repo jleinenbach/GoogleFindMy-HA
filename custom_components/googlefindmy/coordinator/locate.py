@@ -747,13 +747,12 @@ class LocateOperations(_MixinBase):
             return False
         try:
             play = await self.api.async_play_sound(device_id)
-            # api.async_play_sound now names WHO refused (play.outcome, see
-            # IRR-CA-SOUND-FAILURE-CLASS). Acting on that classification -- above
-            # all, arming the push cooldown only for TRANSPORT_FAILED instead of
-            # for every non-acceptance -- is the next step and deliberately not
-            # part of this one. Until then the two facts are unpacked to exactly
-            # the values the old tuple carried, so this changes the type at the
-            # boundary and nothing else.
+            # api.async_play_sound carries two independent facts. ``accepted``
+            # answers "did Nova take the command", ``cancel_key`` answers "may
+            # the device be ringing", and ``outcome`` names WHO refused. The
+            # cause is read from ``outcome`` below and never reconstructed from
+            # the presence of a key -- that out-of-band inference is what
+            # IRR-CA-SOUND-FAILURE-CLASS removed.
             ok, request_uuid = play.accepted, play.cancel_key
             # Decide whether to (over)write the cached Stop cancel key.
             # api.async_play_sound returns a non-None UUID in exactly the two
@@ -796,17 +795,26 @@ class LocateOperations(_MixinBase):
                     "Stored Play Sound UUID for %s: %s", device_id, request_uuid
                 )
                 await self._async_save_sound_uuids()
-            if not ok:
+            # Only a transport that gave us no usable answer is a push problem.
+            # A server rejection (401/403/5xx), a rate limit, a missing local
+            # action token and a bug of our own all reached this point as the
+            # same False before SoundDispatchOutcome existed, so every one of
+            # them armed the 90-second cooldown, flipped the integration to
+            # FcmStatus.DEGRADED and made can_play_sound report the button as
+            # unavailable -- an outage this integration inflicted on itself over
+            # a network that was working, and one that then also suppressed the
+            # user's follow-up Stop. See IRR-CA-SOUND-FAILURE-CLASS.
+            if play.outcome is SoundDispatchOutcome.TRANSPORT_FAILED:
                 self._note_push_transport_problem()
-            else:
+            elif ok:
                 # Only an ACCEPTED submission proves the credentials worked.
-                # api.async_play_sound collapses NovaAuthError and HTTP 401/403
-                # into the same False as a read timeout, so clearing the
-                # auth-failure state on a failed play erased the very signal an
-                # expired sign-in produces. async_stop_sound has always applied
-                # this rule and states the reason; the two paths now agree.
+                # An auth rejection arrives as REJECTED_AUTH, indistinguishable
+                # from a read timeout before this contract existed, so clearing
+                # the auth-failure state on a failed play erased the very signal
+                # an expired sign-in produces. async_stop_sound has always
+                # applied this rule and states the reason; the two paths agree.
                 self._set_auth_state(failed=False)
-            return bool(ok)
+            return ok
         except ConfigEntryAuthFailed as auth_exc:
             self._set_auth_state(
                 failed=True, reason=f"Auth failed during play_sound: {auth_exc}"
@@ -833,7 +841,12 @@ class LocateOperations(_MixinBase):
                 exc_info=True,
             )
             self.note_error(err, where="async_play_sound", device=device_id)
-            self._note_push_transport_problem()
+            # No cooldown here. api.async_play_sound classifies every Exception
+            # in band and returns INTERNAL_ERROR instead of raising, so nothing
+            # that reaches this handler came from the push transport: what is
+            # left is this method's own body around the call, or an api
+            # implementation that breaks the Protocol. Blaming the transport for
+            # either is the misclassification IRR-CA-SOUND-FAILURE-CLASS stops.
             return False
 
     async def async_stop_sound(
@@ -970,16 +983,19 @@ class LocateOperations(_MixinBase):
             stop_outcome = await self.api.async_stop_sound(
                 device_id, request_uuid_to_use
             )
-            # Same deliberate narrowing as on the play path above: the boundary
-            # now carries the classification, acting on it is the next step.
-            # Acceptance is the single bit this one keeps looking at.
-            submitted = stop_outcome is SoundDispatchOutcome.ACCEPTED
-            if not submitted:
-                self._note_push_transport_problem()
-                # No credential proof on this path: api.async_stop_sound
-                # swallows NovaAuthError and HTTP 401/403 into the same False
-                # as a timeout, so clearing the auth-failure state here would
-                # erase the very signal an expired sign-in produces.
+            # Same rule as on the play path above. The outer test stays in its
+            # negative form on purpose and is the single exception to the
+            # positive-list discipline: the safe default of THIS branch is
+            # FAILED, so an outcome nobody anticipated must fall through to it
+            # rather than be waved past. The cooldown inside it keeps the
+            # positive form, because there the safe default is to do nothing.
+            if stop_outcome is not SoundDispatchOutcome.ACCEPTED:
+                if stop_outcome is SoundDispatchOutcome.TRANSPORT_FAILED:
+                    self._note_push_transport_problem()
+                # No credential proof on any non-accepted path: an auth
+                # rejection arrives as REJECTED_AUTH, and clearing the
+                # auth-failure state here would erase the very signal an expired
+                # sign-in produces.
                 return StopSoundOutcome.FAILED
             # An accepted submission, and only that, proves credentials worked.
             self._set_auth_state(failed=False)
@@ -1041,5 +1057,8 @@ class LocateOperations(_MixinBase):
                 exc_info=True,
             )
             self.note_error(err, where="async_stop_sound", device=device_id)
-            self._note_push_transport_problem()
+            # No cooldown, for the reason spelled out on the play path:
+            # api.async_stop_sound returns INTERNAL_ERROR for every unexpected
+            # Exception instead of raising, so this handler only ever sees a
+            # failure of our own bookkeeping around the call.
             return StopSoundOutcome.FAILED

@@ -362,6 +362,20 @@ class TestAsyncLocateDeviceDecryptFailure:
         coord.config_entry.async_start_reauth.assert_called_once()
 
 
+# One row per ``SoundDispatchOutcome`` member: (outcome, accepted, may arm the
+# push cooldown). Kept at module level so the exhaustiveness guard below reads
+# the same table the parametrisation runs on.
+PLAY_OUTCOME_CASES: list[tuple[SoundDispatchOutcome, bool, bool]] = [
+    (SoundDispatchOutcome.ACCEPTED, True, False),
+    (SoundDispatchOutcome.REJECTED_AUTH, False, False),
+    (SoundDispatchOutcome.REJECTED_RATE_LIMIT, False, False),
+    (SoundDispatchOutcome.REJECTED_SERVER, False, False),
+    (SoundDispatchOutcome.NOT_SENT, False, False),
+    (SoundDispatchOutcome.INTERNAL_ERROR, False, False),
+    (SoundDispatchOutcome.TRANSPORT_FAILED, False, True),
+]
+
+
 class TestAsyncPlaySoundGating:
     """Exercise gating branches of ``async_play_sound``."""
 
@@ -387,13 +401,26 @@ class TestAsyncPlaySoundGating:
         assert ok is False
         coord._note_push_transport_problem.assert_called_once()
 
-    async def test_unexpected_exception_returns_false(self, coord: LocateStub) -> None:
+    async def test_unexpected_exception_is_not_a_transport_problem(
+        self, coord: LocateStub
+    ) -> None:
+        """A bug of our own must not be reported as a broken push transport.
+
+        ``api.async_play_sound`` classifies every ``Exception`` in band and
+        returns ``INTERNAL_ERROR`` instead of raising, so nothing that reaches
+        this handler came from the push transport: what is left is the
+        coordinator's own body around the call, or an ``api`` implementation
+        that breaks the Protocol. Arming the push cooldown for either is the
+        self-inflicted outage this contract was written to stop. The error is
+        still recorded.
+        """
+
         coord._device_caps["dev-1"] = {"can_ring": True}
         coord.api.async_play_sound.side_effect = RuntimeError("boom")
         ok = await coord.async_play_sound("dev-1")
         assert ok is False
         coord.note_error.assert_called_once()
-        coord._note_push_transport_problem.assert_called_once()
+        coord._note_push_transport_problem.assert_not_called()
 
     async def test_failed_play_does_not_clear_auth_state(
         self, coord: LocateStub
@@ -426,9 +453,115 @@ class TestAsyncPlaySoundGating:
 
         coord._set_auth_state.assert_called_once_with(failed=False)
 
+    @pytest.mark.parametrize(
+        ("outcome", "expect_accepted", "expect_cooldown"), PLAY_OUTCOME_CASES
+    )
+    async def test_only_a_transport_failure_arms_the_push_cooldown(
+        self,
+        coord: LocateStub,
+        outcome: SoundDispatchOutcome,
+        expect_accepted: bool,
+        expect_cooldown: bool,
+    ) -> None:
+        """A server saying no is not a network outage.
+
+        Every non-acceptance used to arrive as a plain ``False``, so all of them
+        armed the 90-second push cooldown, flipped the integration to
+        ``FcmStatus.DEGRADED`` and made ``can_play_sound`` report the button as
+        unavailable. ``SoundDispatchOutcome`` names the cause; only a transport
+        that never gave us a usable answer may arm that cooldown. The list is
+        exhaustive over the enum on purpose: a new member added without a
+        decision here shows up as a missing parametrisation, not as a silent
+        default.
+        """
+
+        coord._device_caps["dev-1"] = {"can_ring": True}
+        coord.api.async_play_sound.return_value = PlaySoundResult(outcome)
+
+        assert await coord.async_play_sound("dev-1") is expect_accepted
+
+        assert coord._note_push_transport_problem.called is expect_cooldown
+
+    def test_the_play_parametrisation_covers_every_outcome(self) -> None:
+        """Guard the exhaustiveness the case table claims for itself.
+
+        The decision "which outcome may arm the cooldown" has to be taken for
+        every member of the enum. A member added later without a row here would
+        otherwise silently inherit whatever the ``if`` cascade happens to do.
+        """
+
+        assert {case[0] for case in PLAY_OUTCOME_CASES} == set(SoundDispatchOutcome)
+
+
+# One row per ``SoundDispatchOutcome`` member on the stop side: (dispatch,
+# resulting StopSoundOutcome, may arm the push cooldown, may vouch for the
+# credentials). ACCEPTED lands on UNCORRELATED here because the key is passed
+# in by the caller and is none of ours -- that split is pinned by its own tests.
+STOP_OUTCOME_CASES: list[tuple[SoundDispatchOutcome, StopSoundOutcome, bool, bool]] = [
+    (SoundDispatchOutcome.ACCEPTED, StopSoundOutcome.UNCORRELATED, False, True),
+    (SoundDispatchOutcome.REJECTED_AUTH, StopSoundOutcome.FAILED, False, False),
+    (SoundDispatchOutcome.REJECTED_RATE_LIMIT, StopSoundOutcome.FAILED, False, False),
+    (SoundDispatchOutcome.REJECTED_SERVER, StopSoundOutcome.FAILED, False, False),
+    (SoundDispatchOutcome.NOT_SENT, StopSoundOutcome.FAILED, False, False),
+    (SoundDispatchOutcome.INTERNAL_ERROR, StopSoundOutcome.FAILED, False, False),
+    (SoundDispatchOutcome.TRANSPORT_FAILED, StopSoundOutcome.FAILED, True, False),
+]
+
 
 class TestAsyncStopSoundGating:
     """Exercise gating branches of ``async_stop_sound``."""
+
+    @pytest.mark.parametrize(
+        ("dispatch", "expect_outcome", "expect_cooldown", "expect_auth_cleared"),
+        STOP_OUTCOME_CASES,
+    )
+    async def test_only_a_transport_failure_arms_the_push_cooldown(
+        self,
+        coord: LocateStub,
+        dispatch: SoundDispatchOutcome,
+        expect_outcome: StopSoundOutcome,
+        expect_cooldown: bool,
+        expect_auth_cleared: bool,
+    ) -> None:
+        """The same rule as on the play path, on the stop path.
+
+        A stop the server refused on credentials, refused outright or rate
+        limited reached this method as a plain ``False`` before the contract
+        existed, so each of them armed the 90-second cooldown -- which then
+        suppressed the user's next attempt for a minute and a half over a
+        problem the network never had.
+        """
+
+        coord.api.async_stop_sound.return_value = dispatch
+
+        outcome = await coord.async_stop_sound("dev-1", request_uuid="foreign-key")
+
+        assert outcome is expect_outcome
+        assert coord._note_push_transport_problem.called is expect_cooldown
+        assert coord._set_auth_state.called is expect_auth_cleared
+
+    def test_the_stop_parametrisation_covers_every_outcome(self) -> None:
+        """Guard the exhaustiveness the case table claims for itself."""
+
+        assert {case[0] for case in STOP_OUTCOME_CASES} == set(SoundDispatchOutcome)
+
+    async def test_unexpected_exception_is_not_a_transport_problem(
+        self, coord: LocateStub
+    ) -> None:
+        """Mirror of the play-path rule: our own bug is not an outage.
+
+        ``api.async_stop_sound`` returns ``INTERNAL_ERROR`` for every unexpected
+        ``Exception`` instead of raising, so this handler only sees failures of
+        the coordinator's own bookkeeping around the call.
+        """
+
+        coord.api.async_stop_sound.side_effect = RuntimeError("boom")
+
+        outcome = await coord.async_stop_sound("dev-1", request_uuid="x")
+
+        assert outcome is StopSoundOutcome.FAILED
+        coord.note_error.assert_called_once()
+        coord._note_push_transport_problem.assert_not_called()
 
     async def test_blocks_when_push_not_ready(self, coord: LocateStub) -> None:
         coord._api_push_ready.return_value = False

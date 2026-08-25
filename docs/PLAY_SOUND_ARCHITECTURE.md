@@ -182,6 +182,22 @@ deliberately independent. The key answers one question only, "may the device be
 ringing" (see IRR-CA-CANCEL-KEY-ON-SUCCESS-ONLY); the cause is read from the
 outcome and never inferred from the presence or absence of a key.
 
+The rule has exactly one consumer, and stating it in a type is not the same as
+enforcing it. `coordinator/locate.py` holds every call to
+`_note_push_transport_problem()` on the sound paths, and `async_play_sound` and
+`async_stop_sound` each arm it on `TRANSPORT_FAILED` alone. Their blanket
+`except Exception` handlers do not arm it at all: `api.py` classifies every
+unexpected exception in band and returns `INTERNAL_ERROR` rather than raising
+(`api.py`, the final handler of both sound methods), so what still reaches those
+coordinator handlers is a failure of the coordinator's own bookkeeping around
+the call, and none of that is the push transport. The two typed handlers for
+`TimeoutError`/`ClientConnectionError`/`ClientError` do keep the cooldown: `api`
+is a Protocol, and an aiohttp error surfacing from an implementation that does
+not wrap it really is a transport failure. The `pytest.mark.parametrize` tables
+in `tests/test_coordinator_locate_basics.py` carry one row per enum member and
+are guarded against a member being added without a decision, so the "may a
+caller arm a push cooldown" column above is a measured claim, not a wish.
+
 #### Follow-up (not in this change)
 
 Closing the boundary on the cloud path means wiring **Path B**: registering an
