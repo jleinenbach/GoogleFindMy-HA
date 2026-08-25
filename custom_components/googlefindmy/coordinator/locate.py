@@ -786,8 +786,14 @@ class LocateOperations(_MixinBase):
                 await self._async_save_sound_uuids()
             if not ok:
                 self._note_push_transport_problem()
-            # Success implies credentials worked
-            self._set_auth_state(failed=False)
+            else:
+                # Only an ACCEPTED submission proves the credentials worked.
+                # api.async_play_sound collapses NovaAuthError and HTTP 401/403
+                # into the same False as a read timeout, so clearing the
+                # auth-failure state on a failed play erased the very signal an
+                # expired sign-in produces. async_stop_sound has always applied
+                # this rule and states the reason; the two paths now agree.
+                self._set_auth_state(failed=False)
             return bool(ok)
         except ConfigEntryAuthFailed as auth_exc:
             self._set_auth_state(

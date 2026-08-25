@@ -391,6 +391,35 @@ class TestAsyncPlaySoundGating:
         coord.note_error.assert_called_once()
         coord._note_push_transport_problem.assert_called_once()
 
+    async def test_failed_play_does_not_clear_auth_state(
+        self, coord: LocateStub
+    ) -> None:
+        """A play that was not accepted must not vouch for the credentials.
+
+        ``api.async_play_sound`` collapses a 401/403 rejection into the same
+        ``(False, None)`` as a timeout, so clearing the auth-failure state here
+        deleted the signal an expired sign-in produces. The stop path never did
+        this (see ``async_stop_sound``); the two paths now agree.
+        """
+
+        coord._device_caps["dev-1"] = {"can_ring": True}
+        coord.api.async_play_sound.return_value = (False, None)
+
+        assert await coord.async_play_sound("dev-1") is False
+
+        coord._set_auth_state.assert_not_called()
+
+    async def test_accepted_play_still_clears_auth_state(
+        self, coord: LocateStub
+    ) -> None:
+        """The positive half of the rule must not be lost with the fix."""
+
+        coord._device_caps["dev-1"] = {"can_ring": True}
+
+        assert await coord.async_play_sound("dev-1") is True
+
+        coord._set_auth_state.assert_called_once_with(failed=False)
+
 
 class TestAsyncStopSoundGating:
     """Exercise gating branches of ``async_stop_sound``."""
