@@ -193,8 +193,9 @@ def test_api_docstrings_declare_no_ring_confirmation() -> None:
 
     Drift guard in the style of the FMDN constant checks in
     tests/test_ble_battery_sensor.py: a boundary that lives only in a design
-    document gets re-discovered as a bug. Both public sound entry points return
-    a plain bool, which is exactly the shape that invites "True means it
+    document gets re-discovered as a bug. Both public sound entry points now
+    return a classification instead of a bool, but ACCEPTED still only means
+    "Nova took the submission", which is exactly the shape that invites "so it
     stopped", so each one carries the disclaimer in its own Returns block.
     """
 

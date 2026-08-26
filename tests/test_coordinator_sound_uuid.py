@@ -7,7 +7,11 @@ from types import SimpleNamespace
 
 import pytest
 
-from custom_components.googlefindmy.const import StopSoundOutcome
+from custom_components.googlefindmy.const import (
+    PlaySoundResult,
+    SoundDispatchOutcome,
+    StopSoundOutcome,
+)
 from custom_components.googlefindmy.coordinator import GoogleFindMyCoordinator
 from custom_components.googlefindmy.coordinator.helpers.cache import (
     SOUND_UUID_MAX_AGE_S,
@@ -27,9 +31,9 @@ async def test_async_play_sound_stores_uuid() -> None:
 
     api_calls: list[SimpleNamespace] = []
 
-    async def _async_play_sound(device_id: str) -> tuple[bool, str]:
+    async def _async_play_sound(device_id: str) -> PlaySoundResult:
         api_calls.append(SimpleNamespace(device_id=device_id))
-        return True, "uuid-1"
+        return PlaySoundResult(SoundDispatchOutcome.ACCEPTED, "uuid-1")
 
     coordinator.api = SimpleNamespace(async_play_sound=_async_play_sound)  # type: ignore[attr-defined]
 
@@ -61,9 +65,9 @@ async def test_async_play_sound_skips_store_on_non_accepted_play() -> None:
     )
     coordinator._set_auth_state = lambda **kwargs: None  # type: ignore[attr-defined]
 
-    async def _async_play_sound(device_id: str) -> tuple[bool, str | None]:
+    async def _async_play_sound(device_id: str) -> PlaySoundResult:
         # Non-accepted play (pre-dispatch guard / rejection): no cancel key.
-        return False, None
+        return PlaySoundResult(SoundDispatchOutcome.TRANSPORT_FAILED)
 
     coordinator.api = SimpleNamespace(async_play_sound=_async_play_sound)  # type: ignore[attr-defined]
 
@@ -95,10 +99,10 @@ async def test_non_accepted_play_keeps_existing_cancel_key() -> None:
     coordinator._note_push_transport_problem = lambda: None  # type: ignore[attr-defined]
     coordinator._set_auth_state = lambda **kwargs: None  # type: ignore[attr-defined]
 
-    async def _async_play_sound(device_id: str) -> tuple[bool, str | None]:
+    async def _async_play_sound(device_id: str) -> PlaySoundResult:
         # New attempt not accepted (e.g. server 401/403, or pre-dispatch): the
         # success-only contract yields (False, None) — no cancel key.
-        return False, None
+        return PlaySoundResult(SoundDispatchOutcome.TRANSPORT_FAILED)
 
     coordinator.api = SimpleNamespace(async_play_sound=_async_play_sound)  # type: ignore[attr-defined]
 
@@ -130,10 +134,10 @@ async def test_post_dispatch_ambiguous_play_caches_uuid() -> None:
     )
     coordinator._set_auth_state = lambda **kwargs: None  # type: ignore[attr-defined]
 
-    async def _async_play_sound(device_id: str) -> tuple[bool, str | None]:
+    async def _async_play_sound(device_id: str) -> PlaySoundResult:
         # Post-dispatch ambiguity: not confirmed (ok=False), but a ring may be
         # active, so the cancel key is returned for caching.
-        return False, "uuid-postsend"
+        return PlaySoundResult(SoundDispatchOutcome.TRANSPORT_FAILED, "uuid-postsend")
 
     coordinator.api = SimpleNamespace(async_play_sound=_async_play_sound)  # type: ignore[attr-defined]
 
@@ -170,9 +174,11 @@ async def test_ambiguous_play_does_not_overwrite_known_cancel_key() -> None:
     )
     coordinator._set_auth_state = lambda **kwargs: None  # type: ignore[attr-defined]
 
-    async def _async_play_sound(device_id: str) -> tuple[bool, str | None]:
+    async def _async_play_sound(device_id: str) -> PlaySoundResult:
         # Ambiguous transient 5xx: not accepted (ok=False), fresh UUID present.
-        return False, "uuid-ambiguous-new"
+        return PlaySoundResult(
+            SoundDispatchOutcome.TRANSPORT_FAILED, "uuid-ambiguous-new"
+        )
 
     coordinator.api = SimpleNamespace(async_play_sound=_async_play_sound)  # type: ignore[attr-defined]
 
@@ -201,8 +207,10 @@ async def test_ambiguous_play_keeps_fresh_tracked_cancel_key() -> None:
     coordinator._note_push_transport_problem = lambda: None  # type: ignore[attr-defined]
     coordinator._set_auth_state = lambda **kwargs: None  # type: ignore[attr-defined]
 
-    async def _async_play_sound(device_id: str) -> tuple[bool, str | None]:
-        return False, "uuid-ambiguous-new"
+    async def _async_play_sound(device_id: str) -> PlaySoundResult:
+        return PlaySoundResult(
+            SoundDispatchOutcome.TRANSPORT_FAILED, "uuid-ambiguous-new"
+        )
 
     coordinator.api = SimpleNamespace(async_play_sound=_async_play_sound)  # type: ignore[attr-defined]
 
@@ -237,8 +245,10 @@ async def test_ambiguous_play_replaces_expired_cancel_key() -> None:
     )
     coordinator._set_auth_state = lambda **kwargs: None  # type: ignore[attr-defined]
 
-    async def _async_play_sound(device_id: str) -> tuple[bool, str | None]:
-        return False, "uuid-fresh-ambiguous"
+    async def _async_play_sound(device_id: str) -> PlaySoundResult:
+        return PlaySoundResult(
+            SoundDispatchOutcome.TRANSPORT_FAILED, "uuid-fresh-ambiguous"
+        )
 
     coordinator.api = SimpleNamespace(async_play_sound=_async_play_sound)  # type: ignore[attr-defined]
 
@@ -277,9 +287,11 @@ async def test_async_stop_sound_sends_expired_cached_uuid_uncorrelated() -> None
 
     api_calls: list[tuple[str, str | None]] = []
 
-    async def _async_stop_sound(device_id: str, request_uuid: str | None) -> bool:
+    async def _async_stop_sound(
+        device_id: str, request_uuid: str | None
+    ) -> SoundDispatchOutcome:
         api_calls.append((device_id, request_uuid))
-        return True
+        return SoundDispatchOutcome.ACCEPTED
 
     coordinator.api = SimpleNamespace(async_stop_sound=_async_stop_sound)  # type: ignore[attr-defined]
 
@@ -317,9 +329,11 @@ async def test_fresh_cancel_key_is_reported_cancelled_and_spent() -> None:
 
     api_calls: list[tuple[str, str | None]] = []
 
-    async def _async_stop_sound(device_id: str, request_uuid: str | None) -> bool:
+    async def _async_stop_sound(
+        device_id: str, request_uuid: str | None
+    ) -> SoundDispatchOutcome:
         api_calls.append((device_id, request_uuid))
-        return True
+        return SoundDispatchOutcome.ACCEPTED
 
     coordinator.api = SimpleNamespace(async_stop_sound=_async_stop_sound)  # type: ignore[attr-defined]
 
@@ -348,8 +362,10 @@ async def test_ambiguous_play_keeps_untracked_cancel_key() -> None:
     coordinator._note_push_transport_problem = lambda: None  # type: ignore[attr-defined]
     coordinator._set_auth_state = lambda **kwargs: None  # type: ignore[attr-defined]
 
-    async def _async_play_sound(device_id: str) -> tuple[bool, str | None]:
-        return False, "uuid-ambiguous-new"
+    async def _async_play_sound(device_id: str) -> PlaySoundResult:
+        return PlaySoundResult(
+            SoundDispatchOutcome.TRANSPORT_FAILED, "uuid-ambiguous-new"
+        )
 
     coordinator.api = SimpleNamespace(async_play_sound=_async_play_sound)  # type: ignore[attr-defined]
 
@@ -389,9 +405,11 @@ async def test_async_stop_sound_uses_cached_uuid() -> None:
 
     api_calls: list[tuple[str, str | None]] = []
 
-    async def _async_stop_sound(device_id: str, request_uuid: str | None) -> bool:
+    async def _async_stop_sound(
+        device_id: str, request_uuid: str | None
+    ) -> SoundDispatchOutcome:
         api_calls.append((device_id, request_uuid))
-        return True
+        return SoundDispatchOutcome.ACCEPTED
 
     coordinator.api = SimpleNamespace(async_stop_sound=_async_stop_sound)  # type: ignore[attr-defined]
 
@@ -416,9 +434,11 @@ async def test_async_stop_sound_warns_when_uuid_missing(
 
     api_calls: list[tuple[str, str | None]] = []
 
-    async def _async_stop_sound(device_id: str, request_uuid: str | None) -> bool:
+    async def _async_stop_sound(
+        device_id: str, request_uuid: str | None
+    ) -> SoundDispatchOutcome:
         api_calls.append((device_id, request_uuid))
-        return True
+        return SoundDispatchOutcome.ACCEPTED
 
     coordinator.api = SimpleNamespace(async_stop_sound=_async_stop_sound)  # type: ignore[attr-defined]
 
@@ -456,9 +476,11 @@ async def test_blank_request_uuid_falls_back_to_the_cached_cancel_key() -> None:
 
         coordinator._async_save_sound_uuids = _save  # type: ignore[attr-defined]
 
-        async def _api_stop(device_id: str, request_uuid: str | None) -> bool:
+        async def _api_stop(
+            device_id: str, request_uuid: str | None
+        ) -> SoundDispatchOutcome:
             sent.append(request_uuid)
-            return True
+            return SoundDispatchOutcome.ACCEPTED
 
         coordinator.api = SimpleNamespace(async_stop_sound=_api_stop)  # type: ignore[attr-defined]
 
@@ -482,9 +504,11 @@ async def test_blank_request_uuid_without_a_cached_key_is_uncorrelated() -> None
         coordinator._note_push_transport_problem = lambda: None  # type: ignore[attr-defined]
         coordinator._set_auth_state = lambda **kwargs: None  # type: ignore[attr-defined]
 
-        async def _api_stop(device_id: str, request_uuid: str | None) -> bool:
+        async def _api_stop(
+            device_id: str, request_uuid: str | None
+        ) -> SoundDispatchOutcome:
             sent.append(request_uuid)
-            return True
+            return SoundDispatchOutcome.ACCEPTED
 
         coordinator.api = SimpleNamespace(async_stop_sound=_api_stop)  # type: ignore[attr-defined]
 
@@ -522,9 +546,11 @@ async def test_blank_uuid_falls_through_to_the_aged_cached_key() -> None:
 
     sent: list[str | None] = []
 
-    async def _api_stop(device_id: str, request_uuid: str | None) -> bool:
+    async def _api_stop(
+        device_id: str, request_uuid: str | None
+    ) -> SoundDispatchOutcome:
         sent.append(request_uuid)
-        return True
+        return SoundDispatchOutcome.ACCEPTED
 
     coordinator.api = SimpleNamespace(async_stop_sound=_api_stop)  # type: ignore[attr-defined]
 
@@ -560,11 +586,13 @@ async def test_a_play_landing_during_the_stop_keeps_its_fresh_key() -> None:
 
     coordinator._async_save_sound_uuids = _save  # type: ignore[attr-defined]
 
-    async def _async_stop_sound(device_id: str, request_uuid: str | None) -> bool:
+    async def _async_stop_sound(
+        device_id: str, request_uuid: str | None
+    ) -> SoundDispatchOutcome:
         # A Play completes while the stop is in flight.
         coordinator._sound_request_uuids[device_id] = "uuid-new"  # type: ignore[attr-defined]
         coordinator._sound_request_timestamps[device_id] = time.time()  # type: ignore[attr-defined]
-        return True
+        return SoundDispatchOutcome.ACCEPTED
 
     coordinator.api = SimpleNamespace(async_stop_sound=_async_stop_sound)  # type: ignore[attr-defined]
 
@@ -592,8 +620,10 @@ async def test_a_rejected_stop_does_not_clear_the_auth_failure_state() -> None:
     auth_calls: list[dict[str, object]] = []
     coordinator._set_auth_state = lambda **kwargs: auth_calls.append(kwargs)  # type: ignore[attr-defined]
 
-    async def _async_stop_sound(device_id: str, request_uuid: str | None) -> bool:
-        return False
+    async def _async_stop_sound(
+        device_id: str, request_uuid: str | None
+    ) -> SoundDispatchOutcome:
+        return SoundDispatchOutcome.TRANSPORT_FAILED
 
     coordinator.api = SimpleNamespace(async_stop_sound=_async_stop_sound)  # type: ignore[attr-defined]
 
@@ -622,8 +652,10 @@ async def test_an_explicit_key_that_is_ours_but_aged_is_not_called_foreign(
     coordinator._note_push_transport_problem = lambda: None  # type: ignore[attr-defined]
     coordinator._set_auth_state = lambda **kwargs: None  # type: ignore[attr-defined]
 
-    async def _async_stop_sound(device_id: str, request_uuid: str | None) -> bool:
-        return True
+    async def _async_stop_sound(
+        device_id: str, request_uuid: str | None
+    ) -> SoundDispatchOutcome:
+        return SoundDispatchOutcome.ACCEPTED
 
     coordinator.api = SimpleNamespace(async_stop_sound=_async_stop_sound)  # type: ignore[attr-defined]
 

@@ -14,13 +14,17 @@ from __future__ import annotations
 
 import asyncio
 import math
+import time
 from unittest.mock import MagicMock
 
 import pytest
+from aiohttp import ClientConnectionError
 from homeassistant.exceptions import HomeAssistantError
 
 from custom_components.googlefindmy.const import (
     DEFAULT_MIN_POLL_INTERVAL,
+    PlaySoundResult,
+    SoundDispatchOutcome,
     StopSoundOutcome,
 )
 from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker.decrypt_locations import (
@@ -360,6 +364,20 @@ class TestAsyncLocateDeviceDecryptFailure:
         coord.config_entry.async_start_reauth.assert_called_once()
 
 
+# One row per ``SoundDispatchOutcome`` member: (outcome, accepted, may arm the
+# push cooldown). Kept at module level so the exhaustiveness guard below reads
+# the same table the parametrisation runs on.
+PLAY_OUTCOME_CASES: list[tuple[SoundDispatchOutcome, bool, bool]] = [
+    (SoundDispatchOutcome.ACCEPTED, True, False),
+    (SoundDispatchOutcome.REJECTED_AUTH, False, False),
+    (SoundDispatchOutcome.REJECTED_RATE_LIMIT, False, False),
+    (SoundDispatchOutcome.REJECTED_SERVER, False, False),
+    (SoundDispatchOutcome.NOT_SENT, False, False),
+    (SoundDispatchOutcome.INTERNAL_ERROR, False, False),
+    (SoundDispatchOutcome.TRANSPORT_FAILED, False, True),
+]
+
+
 class TestAsyncPlaySoundGating:
     """Exercise gating branches of ``async_play_sound``."""
 
@@ -378,22 +396,177 @@ class TestAsyncPlaySoundGating:
 
     async def test_failure_notes_problem(self, coord: LocateStub) -> None:
         coord._device_caps["dev-1"] = {"can_ring": True}
-        coord.api.async_play_sound.return_value = (False, None)
+        coord.api.async_play_sound.return_value = PlaySoundResult(
+            SoundDispatchOutcome.TRANSPORT_FAILED
+        )
         ok = await coord.async_play_sound("dev-1")
         assert ok is False
         coord._note_push_transport_problem.assert_called_once()
 
-    async def test_unexpected_exception_returns_false(self, coord: LocateStub) -> None:
+    async def test_unexpected_exception_is_not_a_transport_problem(
+        self, coord: LocateStub
+    ) -> None:
+        """A bug of our own must not be reported as a broken push transport.
+
+        ``api.async_play_sound`` classifies every ``Exception`` in band and
+        returns ``INTERNAL_ERROR`` instead of raising, so nothing that reaches
+        this handler came from the push transport: what is left is the
+        coordinator's own body around the call, or an ``api`` implementation
+        that breaks the Protocol. Arming the push cooldown for either is the
+        self-inflicted outage this contract was written to stop. The error is
+        still recorded.
+        """
+
         coord._device_caps["dev-1"] = {"can_ring": True}
         coord.api.async_play_sound.side_effect = RuntimeError("boom")
         ok = await coord.async_play_sound("dev-1")
         assert ok is False
         coord.note_error.assert_called_once()
-        coord._note_push_transport_problem.assert_called_once()
+        coord._note_push_transport_problem.assert_not_called()
+
+    async def test_failed_play_does_not_clear_auth_state(
+        self, coord: LocateStub
+    ) -> None:
+        """A play that was not accepted must not vouch for the credentials.
+
+        ``api.async_play_sound`` collapses a 401/403 rejection into the same
+        ``(False, None)`` as a timeout, so clearing the auth-failure state here
+        deleted the signal an expired sign-in produces. The stop path never did
+        this (see ``async_stop_sound``); the two paths now agree.
+        """
+
+        coord._device_caps["dev-1"] = {"can_ring": True}
+        coord.api.async_play_sound.return_value = PlaySoundResult(
+            SoundDispatchOutcome.TRANSPORT_FAILED
+        )
+
+        assert await coord.async_play_sound("dev-1") is False
+
+        coord._set_auth_state.assert_not_called()
+
+    async def test_accepted_play_still_clears_auth_state(
+        self, coord: LocateStub
+    ) -> None:
+        """The positive half of the rule must not be lost with the fix."""
+
+        coord._device_caps["dev-1"] = {"can_ring": True}
+
+        assert await coord.async_play_sound("dev-1") is True
+
+        coord._set_auth_state.assert_called_once_with(failed=False)
+
+    @pytest.mark.parametrize(
+        ("outcome", "expect_accepted", "expect_cooldown"), PLAY_OUTCOME_CASES
+    )
+    async def test_only_a_transport_failure_arms_the_push_cooldown(
+        self,
+        coord: LocateStub,
+        outcome: SoundDispatchOutcome,
+        expect_accepted: bool,
+        expect_cooldown: bool,
+    ) -> None:
+        """A server saying no is not a network outage.
+
+        Every non-acceptance used to arrive as a plain ``False``, so all of them
+        armed the 90-second push cooldown, flipped the integration to
+        ``FcmStatus.DEGRADED`` and made ``can_play_sound`` report the button as
+        unavailable. ``SoundDispatchOutcome`` names the cause; only a transport
+        that never gave us a usable answer may arm that cooldown. The list is
+        exhaustive over the enum on purpose: a new member added without a
+        decision here shows up as a missing parametrisation, not as a silent
+        default.
+        """
+
+        coord._device_caps["dev-1"] = {"can_ring": True}
+        coord.api.async_play_sound.return_value = PlaySoundResult(outcome)
+
+        assert await coord.async_play_sound("dev-1") is expect_accepted
+
+        assert coord._note_push_transport_problem.called is expect_cooldown
+
+    def test_the_play_parametrisation_covers_every_outcome(self) -> None:
+        """Guard the exhaustiveness the case table claims for itself.
+
+        The decision "which outcome may arm the cooldown" has to be taken for
+        every member of the enum. A member added later without a row here would
+        otherwise silently inherit whatever the ``if`` cascade happens to do.
+        """
+
+        assert {case[0] for case in PLAY_OUTCOME_CASES} == set(SoundDispatchOutcome)
+
+
+# One row per ``SoundDispatchOutcome`` member on the stop side: (dispatch,
+# resulting StopSoundOutcome, may arm the push cooldown, may vouch for the
+# credentials). ACCEPTED lands on UNCORRELATED here because the key is passed
+# in by the caller and is none of ours -- that split is pinned by its own tests.
+STOP_OUTCOME_CASES: list[tuple[SoundDispatchOutcome, StopSoundOutcome, bool, bool]] = [
+    (SoundDispatchOutcome.ACCEPTED, StopSoundOutcome.UNCORRELATED, False, True),
+    (SoundDispatchOutcome.REJECTED_AUTH, StopSoundOutcome.FAILED, False, False),
+    (SoundDispatchOutcome.REJECTED_RATE_LIMIT, StopSoundOutcome.FAILED, False, False),
+    (SoundDispatchOutcome.REJECTED_SERVER, StopSoundOutcome.FAILED, False, False),
+    # NOT_SENT is FAILED, not SUPPRESSED: it never reached the wire, but a
+    # receiver that is up and yields no action token is not answered by
+    # waiting. StopSoundOutcome.FAILED states the rule; this row enforces it.
+    (SoundDispatchOutcome.NOT_SENT, StopSoundOutcome.FAILED, False, False),
+    (SoundDispatchOutcome.INTERNAL_ERROR, StopSoundOutcome.FAILED, False, False),
+    (SoundDispatchOutcome.TRANSPORT_FAILED, StopSoundOutcome.FAILED, True, False),
+]
 
 
 class TestAsyncStopSoundGating:
     """Exercise gating branches of ``async_stop_sound``."""
+
+    @pytest.mark.parametrize(
+        ("dispatch", "expect_outcome", "expect_cooldown", "expect_auth_cleared"),
+        STOP_OUTCOME_CASES,
+    )
+    async def test_only_a_transport_failure_arms_the_push_cooldown(
+        self,
+        coord: LocateStub,
+        dispatch: SoundDispatchOutcome,
+        expect_outcome: StopSoundOutcome,
+        expect_cooldown: bool,
+        expect_auth_cleared: bool,
+    ) -> None:
+        """The same rule as on the play path, on the stop path.
+
+        A stop the server refused on credentials, refused outright or rate
+        limited reached this method as a plain ``False`` before the contract
+        existed, so each of them armed the 90-second cooldown -- which then
+        suppressed the user's next attempt for a minute and a half over a
+        problem the network never had.
+        """
+
+        coord.api.async_stop_sound.return_value = dispatch
+
+        outcome = await coord.async_stop_sound("dev-1", request_uuid="foreign-key")
+
+        assert outcome is expect_outcome
+        assert coord._note_push_transport_problem.called is expect_cooldown
+        assert coord._set_auth_state.called is expect_auth_cleared
+
+    def test_the_stop_parametrisation_covers_every_outcome(self) -> None:
+        """Guard the exhaustiveness the case table claims for itself."""
+
+        assert {case[0] for case in STOP_OUTCOME_CASES} == set(SoundDispatchOutcome)
+
+    async def test_unexpected_exception_is_not_a_transport_problem(
+        self, coord: LocateStub
+    ) -> None:
+        """Mirror of the play-path rule: our own bug is not an outage.
+
+        ``api.async_stop_sound`` returns ``INTERNAL_ERROR`` for every unexpected
+        ``Exception`` instead of raising, so this handler only sees failures of
+        the coordinator's own bookkeeping around the call.
+        """
+
+        coord.api.async_stop_sound.side_effect = RuntimeError("boom")
+
+        outcome = await coord.async_stop_sound("dev-1", request_uuid="x")
+
+        assert outcome is StopSoundOutcome.FAILED
+        coord.note_error.assert_called_once()
+        coord._note_push_transport_problem.assert_not_called()
 
     async def test_blocks_when_push_not_ready(self, coord: LocateStub) -> None:
         coord._api_push_ready.return_value = False
@@ -410,13 +583,14 @@ class TestAsyncStopSoundGating:
     ) -> None:
         """A stop the transport refused must not claim a local, transient cause.
 
-        ``api.async_stop_sound`` swallows every exception and returns False, so
-        auth failures, 401/403, server errors, rate limits and network errors
-        all arrive as a plain False. Reporting them as SUPPRESSED would tell a
-        user with an expired sign-in to wait a moment.
+        ``api.async_stop_sound`` swallows every exception and returns a
+        ``SoundDispatchOutcome`` instead of raising, so auth failures, 401/403,
+        server errors, rate limits and network errors all arrive as a
+        non-ACCEPTED value here. Reporting them as SUPPRESSED would tell a user
+        with an expired sign-in to wait a moment.
         """
 
-        coord.api.async_stop_sound.return_value = False
+        coord.api.async_stop_sound.return_value = SoundDispatchOutcome.TRANSPORT_FAILED
         outcome = await coord.async_stop_sound("dev-1")
         assert outcome is StopSoundOutcome.FAILED
         coord.api.async_stop_sound.assert_awaited_once()
@@ -469,7 +643,7 @@ class TestAsyncStopSoundGating:
         coord.api.async_stop_sound.assert_awaited_once_with("dev-1", None)
 
     async def test_failure_notes_problem(self, coord: LocateStub) -> None:
-        coord.api.async_stop_sound.return_value = False
+        coord.api.async_stop_sound.return_value = SoundDispatchOutcome.TRANSPORT_FAILED
         outcome = await coord.async_stop_sound("dev-1", request_uuid="x")
         assert outcome is StopSoundOutcome.FAILED
         coord._note_push_transport_problem.assert_called_once()
@@ -480,10 +654,356 @@ class TestAsyncStopSoundGating:
         """IRR-CA-CANCEL-KEY-ON-SUCCESS-ONLY: a rejected stop spends nothing."""
 
         coord._sound_request_uuids["dev-1"] = "cached-uuid"
-        coord.api.async_stop_sound.return_value = False
+        coord.api.async_stop_sound.return_value = SoundDispatchOutcome.TRANSPORT_FAILED
         outcome = await coord.async_stop_sound("dev-1")
         assert outcome is StopSoundOutcome.FAILED
         assert coord._sound_request_uuids["dev-1"] == "cached-uuid"
+
+
+class TestStopBreaksSelfInflictedCooldown:
+    """AP-5 / F2: the cancel key a failed play preserved must be usable at once.
+
+    A play that reached the wire and then lost the answer does two things in the
+    same breath: it stores a cancel key, and it arms the 90-second push cooldown
+    (correctly, because that IS a transport failure). ``_api_push_ready()``
+    short-circuits to False while the cooldown runs, so the stop that the key
+    exists for was suppressed for the first 90 seconds after that play, which is
+    exactly when a user reaches for the Stop button. (How long the ring itself
+    lasts is a different timer on a different layer and is not claimed here.)
+    See IRR-CA-STOP-BREAKS-SELF-INFLICTED-COOLDOWN.
+
+    The exception is deliberately narrow. It applies only when the stop would be
+    correlated (our own, fresh cancel key); a stop that would report
+    UNCORRELATED buys nothing, so the anti-spam purpose of the cooldown is kept
+    for every case that has no provable benefit. It is not free either: a stop
+    that used to end as SUPPRESSED now reaches the transport and can end as
+    FAILED instead, which is a different service-level message. That change of
+    outcome class is pinned below rather than left implicit.
+    """
+
+    async def test_ambiguous_play_does_not_block_the_following_stop(
+        self, coord: LocateStub
+    ) -> None:
+        """The whole F2 chain, end to end: play loses the answer, stop follows."""
+
+        coord._device_caps["dev-1"] = {"can_ring": True}
+
+        def _note(cooldown_s: int = 90) -> None:
+            coord._push_cooldown_until = time.monotonic() + cooldown_s
+
+        coord._note_push_transport_problem = MagicMock(side_effect=_note)
+        coord._api_push_ready = MagicMock(
+            side_effect=lambda: time.monotonic() >= coord._push_cooldown_until
+        )
+        coord.api.async_play_sound.return_value = PlaySoundResult(
+            SoundDispatchOutcome.TRANSPORT_FAILED, cancel_key="uuid-ambiguous"
+        )
+
+        assert await coord.async_play_sound("dev-1") is False
+        assert coord._sound_request_uuids.get("dev-1") == "uuid-ambiguous"
+        assert coord._push_cooldown_until > time.monotonic()
+
+        coord.api.async_stop_sound.return_value = SoundDispatchOutcome.ACCEPTED
+        outcome = await coord.async_stop_sound("dev-1")
+
+        assert outcome is StopSoundOutcome.CANCELLED
+        coord.api.async_stop_sound.assert_awaited_once_with("dev-1", "uuid-ambiguous")
+
+    async def test_explicit_own_fresh_key_breaks_the_cooldown(
+        self, coord: LocateStub
+    ) -> None:
+        """The service handler passes the key explicitly; same right to be sent."""
+
+        coord._api_push_ready.return_value = False
+        coord._push_cooldown_until = time.monotonic() + 90.0
+        coord._sound_request_uuids["dev-1"] = "uuid-fresh"
+
+        outcome = await coord.async_stop_sound("dev-1", request_uuid="uuid-fresh")
+
+        assert outcome is StopSoundOutcome.CANCELLED
+        coord.api.async_stop_sound.assert_awaited_once_with("dev-1", "uuid-fresh")
+
+    async def test_blank_explicit_key_falls_back_to_the_cached_key(
+        self, coord: LocateStub
+    ) -> None:
+        """A blank argument means "no opinion" here too, not "no key"."""
+
+        coord._api_push_ready.return_value = False
+        coord._push_cooldown_until = time.monotonic() + 90.0
+        coord._sound_request_uuids["dev-1"] = "uuid-fresh"
+
+        outcome = await coord.async_stop_sound("dev-1", request_uuid="   ")
+
+        assert outcome is StopSoundOutcome.CANCELLED
+        coord.api.async_stop_sound.assert_awaited_once_with("dev-1", "uuid-fresh")
+
+    async def test_a_broken_through_stop_that_fails_does_not_extend_the_window(
+        self, coord: LocateStub
+    ) -> None:
+        """Breaking a window must never lengthen it (the amplification guard).
+
+        ``_note_push_transport_problem`` sets ``_push_cooldown_until`` to
+        ``monotonic() + 90`` ABSOLUTELY and flags the transport DEGRADED, so
+        every call restarts the window rather than topping it up. Before this
+        package that call was unreachable while a window ran -- the suppression
+        was the first statement of the method -- and the stop button has no
+        availability guard (``can_stop_sound`` does not exist on the
+        coordinator, button.py only probes for it). Without this guard a user
+        who keeps pressing Stop during an outage would restart the window on
+        every press, and that window also gates Play Sound and manual locate:
+        two unrelated features stay disabled for as long as the pressing goes
+        on. The stop itself is still sent -- that is the point of the exception
+        -- it just may not lengthen the window that let it through.
+        """
+
+        def _arm(cooldown_s: int = 90) -> None:
+            coord._push_cooldown_until = time.monotonic() + cooldown_s
+
+        coord._note_push_transport_problem = MagicMock(side_effect=_arm)
+        coord._api_push_ready.return_value = False
+        window_ends_at = time.monotonic() + 90.0
+        coord._push_cooldown_until = window_ends_at
+        coord._sound_request_uuids["dev-1"] = "uuid-fresh"
+        coord.api.async_stop_sound.return_value = SoundDispatchOutcome.TRANSPORT_FAILED
+
+        outcome = await coord.async_stop_sound("dev-1")
+
+        assert outcome is StopSoundOutcome.FAILED
+        coord.api.async_stop_sound.assert_awaited_once_with("dev-1", "uuid-fresh")
+        assert coord._push_cooldown_until == window_ends_at
+
+    async def test_repeated_broken_through_stops_never_move_the_window_end(
+        self, coord: LocateStub
+    ) -> None:
+        """The amplification chain: repeated presses must not push the end forward.
+
+        All five presses fall inside the one window under test, which is the
+        situation the guard is for. The claim is constancy of the end within a
+        window, not termination in general: that already follows from
+        ``_note_push_transport_problem`` setting the deadline absolutely.
+        """
+
+        def _arm(cooldown_s: int = 90) -> None:
+            coord._push_cooldown_until = time.monotonic() + cooldown_s
+
+        coord._note_push_transport_problem = MagicMock(side_effect=_arm)
+        coord._api_push_ready.side_effect = lambda: (
+            time.monotonic() >= coord._push_cooldown_until
+        )
+        window_ends_at = time.monotonic() + 90.0
+        coord._push_cooldown_until = window_ends_at
+        coord._sound_request_uuids["dev-1"] = "uuid-fresh"
+        coord.api.async_stop_sound.return_value = SoundDispatchOutcome.TRANSPORT_FAILED
+
+        for _ in range(5):
+            assert await coord.async_stop_sound("dev-1") is StopSoundOutcome.FAILED
+
+        assert coord.api.async_stop_sound.await_count == 5
+        assert coord._push_cooldown_until == window_ends_at
+
+    async def test_a_failing_stop_still_arms_a_window_when_none_is_running(
+        self, coord: LocateStub
+    ) -> None:
+        """The guard is about EXTENDING, not about arming: the normal path is untouched."""
+
+        coord._api_push_ready.return_value = True
+        coord._push_cooldown_until = 0.0
+        coord._sound_request_uuids["dev-1"] = "uuid-fresh"
+        coord.api.async_stop_sound.return_value = SoundDispatchOutcome.TRANSPORT_FAILED
+
+        assert await coord.async_stop_sound("dev-1") is StopSoundOutcome.FAILED
+        coord._note_push_transport_problem.assert_called_once()
+
+    async def test_a_raised_connection_error_does_not_extend_the_window_either(
+        self, coord: LocateStub
+    ) -> None:
+        """The same guard covers the typed exception handler, not just the outcome.
+
+        ``api`` is a Protocol, so an implementation that lets an aiohttp error
+        escape reaches the typed handler rather than returning
+        TRANSPORT_FAILED. That handler arms the cooldown too, and a
+        broken-through stop can now reach it, so it must not restart a running
+        window either.
+        """
+
+        def _arm(cooldown_s: int = 90) -> None:
+            coord._push_cooldown_until = time.monotonic() + cooldown_s
+
+        coord._note_push_transport_problem = MagicMock(side_effect=_arm)
+        coord._api_push_ready.return_value = False
+        window_ends_at = time.monotonic() + 90.0
+        coord._push_cooldown_until = window_ends_at
+        coord._sound_request_uuids["dev-1"] = "uuid-fresh"
+        coord.api.async_stop_sound.side_effect = ClientConnectionError("boom")
+
+        assert await coord.async_stop_sound("dev-1") is StopSoundOutcome.FAILED
+        coord.api.async_stop_sound.assert_awaited_once_with("dev-1", "uuid-fresh")
+        assert coord._push_cooldown_until == window_ends_at
+
+    async def test_a_raised_connection_error_arms_a_window_when_none_is_running(
+        self, coord: LocateStub
+    ) -> None:
+        """Counter-case, so the guard above cannot pass by disarming the handler."""
+
+        coord._api_push_ready.return_value = True
+        coord._push_cooldown_until = 0.0
+        coord._sound_request_uuids["dev-1"] = "uuid-fresh"
+        coord.api.async_stop_sound.side_effect = ClientConnectionError("boom")
+
+        assert await coord.async_stop_sound("dev-1") is StopSoundOutcome.FAILED
+        coord._note_push_transport_problem.assert_called_once()
+
+    async def test_the_exception_changes_the_reported_outcome_class(
+        self, coord: LocateStub
+    ) -> None:
+        """The price of the exception, stated as a test rather than as prose.
+
+        Breaking the window means the stop reaches the transport, so a case that
+        used to end as SUPPRESSED can now end as FAILED. services.py maps the
+        two to different exception translation keys
+        (``stop_sound_suppressed`` vs ``stop_sound_rejected``), so this is
+        user-visible and must not drift unnoticed. The counter-case in the same
+        test keeps the old class for a stop that is NOT correlated.
+        """
+
+        coord._api_push_ready.return_value = False
+        coord._push_cooldown_until = time.monotonic() + 90.0
+        coord.api.async_stop_sound.return_value = SoundDispatchOutcome.TRANSPORT_FAILED
+
+        # No key: unchanged, still never sent.
+        assert await coord.async_stop_sound("dev-1") is StopSoundOutcome.SUPPRESSED
+        coord.api.async_stop_sound.assert_not_called()
+
+        # Same window, same transport, but now a proven key.
+        coord._sound_request_uuids["dev-1"] = "uuid-fresh"
+        assert await coord.async_stop_sound("dev-1") is StopSoundOutcome.FAILED
+        coord.api.async_stop_sound.assert_awaited_once_with("dev-1", "uuid-fresh")
+
+    # ---- the boundary: everything below must stay suppressed ----
+
+    async def test_keyless_stop_stays_suppressed_during_the_cooldown(
+        self, coord: LocateStub
+    ) -> None:
+        """Without a key the stop would be UNCORRELATED, so it buys nothing."""
+
+        coord._api_push_ready.return_value = False
+        coord._push_cooldown_until = time.monotonic() + 90.0
+
+        assert await coord.async_stop_sound("dev-1") is StopSoundOutcome.SUPPRESSED
+        coord.api.async_stop_sound.assert_not_called()
+
+    async def test_stop_stays_suppressed_when_push_is_down_without_a_cooldown(
+        self, coord: LocateStub
+    ) -> None:
+        """The exception is bound to the cooldown, not to push readiness at large.
+
+        A genuinely disconnected push transport is not something this stop
+        inflicted on itself, and sending into it proves nothing.
+        """
+
+        coord._api_push_ready.return_value = False
+        coord._push_cooldown_until = 0.0
+        coord._sound_request_uuids["dev-1"] = "uuid-fresh"
+
+        assert await coord.async_stop_sound("dev-1") is StopSoundOutcome.SUPPRESSED
+        coord.api.async_stop_sound.assert_not_called()
+
+    async def test_expired_cooldown_does_not_break_a_push_outage(
+        self, coord: LocateStub
+    ) -> None:
+        """Boundary of the window: a cooldown that has run out grants nothing."""
+
+        coord._api_push_ready.return_value = False
+        coord._push_cooldown_until = time.monotonic() - 0.01
+        coord._sound_request_uuids["dev-1"] = "uuid-fresh"
+
+        assert await coord.async_stop_sound("dev-1") is StopSoundOutcome.SUPPRESSED
+        coord.api.async_stop_sound.assert_not_called()
+
+    async def test_stale_cached_key_stays_suppressed_during_the_cooldown(
+        self, coord: LocateStub
+    ) -> None:
+        """A key older than SOUND_UUID_MAX_AGE_S cannot be the one this cooldown made.
+
+        The cooldown lasts 90 seconds, the key aged past 30 minutes: it belongs
+        to an older play, and a stop carrying it would report UNCORRELATED. That
+        is the keyless case with extra steps, so it stays suppressed.
+        """
+
+        coord._api_push_ready.return_value = False
+        coord._push_cooldown_until = time.monotonic() + 90.0
+        coord._sound_request_uuids["dev-1"] = "uuid-old"
+        coord._sound_request_timestamps["dev-1"] = time.time() - 3600.0
+
+        assert await coord.async_stop_sound("dev-1") is StopSoundOutcome.SUPPRESSED
+        coord.api.async_stop_sound.assert_not_called()
+
+    async def test_foreign_explicit_key_stays_suppressed_during_the_cooldown(
+        self, coord: LocateStub
+    ) -> None:
+        """An unverifiable key is a claim, not a handle, so it grants no exception.
+
+        Mirrors the rule one layer down: an explicitly passed key only proves
+        correlation when it IS our own fresh cached key.
+
+        We DO hold a live key for this device here, and that is the point: the
+        discriminating fact is not "some key exists for dev-1" but "the key
+        going on the wire is ours". Sending the caller's string would report
+        CANCELLED for a ring we never addressed, and spend our own handle doing
+        it.
+        """
+
+        coord._api_push_ready.return_value = False
+        coord._push_cooldown_until = time.monotonic() + 90.0
+        coord._sound_request_uuids["dev-1"] = "uuid-ours-fresh"
+
+        outcome = await coord.async_stop_sound("dev-1", request_uuid="foreign-uuid")
+
+        assert outcome is StopSoundOutcome.SUPPRESSED
+        coord.api.async_stop_sound.assert_not_called()
+
+
+class TestCorrelationPredicateIsShared:
+    """The cooldown gate and the outcome/pop branch must read ONE definition.
+
+    ``_stop_would_be_correlated`` was extracted precisely because two decisions
+    depend on the same question -- may this stop break a self-inflicted push
+    cooldown, and may an accepted stop spend the cached key -- and a second,
+    inline re-derivation at either site is free to drift away from the first.
+    These two tests bind the sites to the predicate by making the predicate
+    disagree with the raw cache state: an inline re-derivation would read the
+    cache and answer the opposite, so it cannot pass.
+    """
+
+    async def test_gate_follows_the_predicate_against_the_raw_cache(
+        self, coord: LocateStub
+    ) -> None:
+        """Predicate says no while the cache holds a fresh key of ours."""
+
+        coord._api_push_ready.return_value = False
+        coord._push_cooldown_until = time.monotonic() + 90.0
+        coord._sound_request_uuids["dev-1"] = "uuid-fresh"
+        coord._stop_would_be_correlated = MagicMock(return_value=False)
+
+        assert await coord.async_stop_sound("dev-1") is StopSoundOutcome.SUPPRESSED
+        coord.api.async_stop_sound.assert_not_called()
+        coord._stop_would_be_correlated.assert_called_once_with("dev-1", None)
+
+    async def test_outcome_and_pop_follow_the_predicate_against_the_raw_cache(
+        self, coord: LocateStub
+    ) -> None:
+        """Predicate says yes while the cached key has aged past the limit."""
+
+        coord._api_push_ready.return_value = True
+        coord._sound_request_uuids["dev-1"] = "uuid-old"
+        coord._sound_request_timestamps["dev-1"] = time.time() - 3600.0
+        coord._stop_would_be_correlated = MagicMock(return_value=True)
+        coord.api.async_stop_sound.return_value = SoundDispatchOutcome.ACCEPTED
+
+        outcome = await coord.async_stop_sound("dev-1")
+
+        assert outcome is StopSoundOutcome.CANCELLED
+        assert "dev-1" not in coord._sound_request_uuids
 
 
 _ = DEFAULT_MIN_POLL_INTERVAL  # silence unused-import lint when production no-ops

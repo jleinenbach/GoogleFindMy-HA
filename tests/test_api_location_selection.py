@@ -11,6 +11,10 @@ from aiohttp import ClientSession
 
 import custom_components.googlefindmy.api as api_module
 from custom_components.googlefindmy.api import GoogleFindMyAPI
+from custom_components.googlefindmy.const import (
+    PlaySoundResult,
+    SoundDispatchOutcome,
+)
 from tests.helpers import drain_loop
 
 
@@ -53,15 +57,15 @@ class _SyncHarness(GoogleFindMyAPI):
         self.calls.append(("loc", (device_id, device_name)))
         return {"id": device_id, "name": device_name}
 
-    async def async_play_sound(self, device_id: str) -> tuple[bool, str | None]:
+    async def async_play_sound(self, device_id: str) -> PlaySoundResult:
         self.calls.append(("play", (device_id,)))
-        return True, "uuid-play"
+        return PlaySoundResult(SoundDispatchOutcome.ACCEPTED, "uuid-play")
 
     async def async_stop_sound(
         self, device_id: str, request_uuid: str | None = None
-    ) -> bool:
+    ) -> SoundDispatchOutcome:
         self.calls.append(("stop", (device_id, request_uuid)))
-        return True
+        return SoundDispatchOutcome.ACCEPTED
 
 
 class _LoopCaptureHarness(GoogleFindMyAPI):

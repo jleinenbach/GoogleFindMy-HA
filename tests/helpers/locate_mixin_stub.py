@@ -19,6 +19,10 @@ from __future__ import annotations
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
+from custom_components.googlefindmy.const import (
+    PlaySoundResult,
+    SoundDispatchOutcome,
+)
 from custom_components.googlefindmy.coordinator.locate import LocateOperations
 
 
@@ -73,8 +77,12 @@ class LocateStub(LocateOperations):
         self.min_poll_interval = min_poll_interval
         self.api = api if api is not None else MagicMock()
         self.api.async_get_device_location = AsyncMock(return_value={})
-        self.api.async_play_sound = AsyncMock(return_value=(True, "uuid-stub"))
-        self.api.async_stop_sound = AsyncMock(return_value=True)
+        self.api.async_play_sound = AsyncMock(
+            return_value=PlaySoundResult(SoundDispatchOutcome.ACCEPTED, "uuid-stub")
+        )
+        self.api.async_stop_sound = AsyncMock(
+            return_value=SoundDispatchOutcome.ACCEPTED
+        )
 
         # Cross-mixin methods owned by other mixins or DataUpdateCoordinator:
         # mock them so default behavior is a no-op. Tests override per-case.

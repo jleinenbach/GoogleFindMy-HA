@@ -11,6 +11,7 @@ import hashlib
 import math
 import time
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from enum import StrEnum
 from types import MappingProxyType
 from typing import Final, Literal
@@ -36,6 +37,107 @@ CONFIG_ENTRY_VERSION: int = 2
 INTEGRATION_VERSION = "1.7.15.10"
 
 # --------------------------------------------------------------------------------------
+# Sound dispatch outcome (API -> coordinator boundary)
+# --------------------------------------------------------------------------------------
+
+
+class SoundDispatchOutcome(StrEnum):
+    """Why a sound command did or did not reach Google, as classified by ``api.py``.
+
+    ``api.py`` already reaches nine distinct exits (missing action token, empty
+    submitter reply, HTTP 200, NovaAuthError, HTTP 401/403, other HTTP status,
+    rate limit, network error, unexpected exception). Until this type existed,
+    all of them collapsed into a single ``False``, and the coordinator had no
+    choice but to read that ``False`` as "the push transport is broken". A server
+    saying no and a network that never answered then produced the same 90-second
+    cooldown and the same ``FcmStatus.DEGRADED``. This is the same failure class
+    ``StopSoundOutcome`` documents one layer up: a bool cannot carry the state
+    space.
+
+    Only ``TRANSPORT_FAILED`` justifies a push cooldown. Only ``ACCEPTED`` proves
+    that the credentials worked.
+    """
+
+    ACCEPTED = "accepted"
+    """Nova answered HTTP 200. Acceptance of the submission, not proof of a ring.
+
+    See IRR-CA-NO-RING-CONFIRMATION in ``docs/PLAY_SOUND_ARCHITECTURE.md``.
+    """
+
+    REJECTED_AUTH = "rejected_auth"
+    """The server answered and refused on credentials: HTTP 401 or 403.
+
+    The transport worked. A cooldown would mislabel an expired sign-in as a
+    network outage and hide it behind a self-clearing timer.
+
+    The criterion is the STATUS, not the exception type. ``NovaAuthError`` is
+    raised for every non-retryable 4xx (its own docstring says "4xx client
+    errors", and ``HTTP_RETRY_ELIGIBLE`` holds no 4xx besides 408 and 429), so
+    reading the type alone filed a deleted device under "check your sign-in".
+    ``NovaAuthPermanentError`` and any error flagged ``is_permanent`` belong
+    here whatever their status: they say re-authentication is required.
+    """
+
+    REJECTED_RATE_LIMIT = "rejected_rate_limit"
+    """The server answered HTTP 429. The transport worked; only the pace was wrong."""
+
+    REJECTED_SERVER = "rejected_server"
+    """The server answered and refused for any other reason.
+
+    Covers 5xx, a Nova logic error, and the non-credential client rejections --
+    400, 404, 405, 409, 422 -- that arrive as ``NovaAuthError`` despite naming
+    no credential problem. The enum has no ``REJECTED_CLIENT`` member because
+    no consumer branches on the distinction; what the two share, and what the
+    name is chosen for, is that the SERVER answered, so the transport worked
+    and no cooldown may be armed. For an HTTP refusal the log line names the
+    status; a Nova logic error carries no HTTP status (the request was a 200)
+    and its log line names the payload error code instead.
+    """
+
+    TRANSPORT_FAILED = "transport_failed"
+    """No usable answer was obtained: DNS, connect refused/timeout, disconnect,
+    read timeout, or a NovaError leaving the transport after its retries.
+
+    This is the ONLY outcome that justifies arming the push cooldown.
+    """
+
+    NOT_SENT = "not_sent"
+    """A local precondition failed before any transport was used (no action token).
+
+    Neither the server nor the network said anything, so neither may be blamed.
+    """
+
+    INTERNAL_ERROR = "internal_error"
+    """This integration failed on its own: an unexpected exception, or a contract
+    violation such as an empty reply from the submitter.
+
+    Classifying such a bug as a network outage is what this type was written to
+    stop; it is logged with a traceback and never arms the cooldown.
+    """
+
+
+@dataclass(frozen=True, slots=True)
+class PlaySoundResult:
+    """Result of ``api.async_play_sound``: a classification plus the cancel key.
+
+    ``cancel_key`` is non-None in exactly the cases where the device may be
+    ringing and a later Stop needs the handle: an accepted command, or a failure
+    that latched dispatch (``NovaError.dispatched``). Read ``cancel_key`` ONLY for
+    the question "may the device be ringing"; read ``outcome`` for every question
+    about the cause. Deriving the cause from the key is the out-of-band channel
+    this type replaces.
+    """
+
+    outcome: SoundDispatchOutcome
+    cancel_key: str | None = None
+
+    @property
+    def accepted(self) -> bool:
+        """Return True when Nova accepted the submission (HTTP 200)."""
+        return self.outcome is SoundDispatchOutcome.ACCEPTED
+
+
+# --------------------------------------------------------------------------------------
 # Stop Sound outcome
 # --------------------------------------------------------------------------------------
 
@@ -52,9 +154,14 @@ class StopSoundOutcome(StrEnum):
 
     The two failure states are kept apart for the same reason the middle state
     exists: they differ in what the user has to do about them. ``SUPPRESSED``
-    never left this machine and clears itself; ``FAILED`` reached the transport
-    and may need credentials, a network, or patience with a rate limit. One
-    message cannot advise on both without misleading half its readers.
+    clears itself and is answered by waiting; ``FAILED`` may need credentials, a
+    network, or patience with a rate limit. One message cannot advise on both
+    without misleading half its readers.
+
+    They are NOT told apart by how far the request travelled. Both contain a
+    member that never left the machine -- see ``FAILED`` on
+    ``SoundDispatchOutcome.NOT_SENT`` -- and reading "did it reach the wire"
+    as the criterion is what makes a missing action token look suppressible.
 
     Note that even ``CANCELLED`` means "submitted with a correlated cancel key",
     not "the device stopped". Nova returns no parsable ExecuteActionResponse, so
@@ -84,16 +191,37 @@ class StopSoundOutcome(StrEnum):
     Today the sole cause is a push transport that is not ready yet. The command
     never reached the network, the condition is local and transient, and the
     only useful advice is to retry shortly.
+
+    "Never sent" alone does not qualify: ``SoundDispatchOutcome.NOT_SENT`` (the
+    readiness gate let the command through, but no action token was to be had)
+    never leaves the machine either and is filed under ``FAILED``. The dividing
+    line is the remedy, not the distance travelled -- see ``FAILED``.
     """
 
     FAILED = "failed"
-    """Handed to the transport, but not accepted.
+    """The attempt was made, and it did not succeed.
 
-    Covers every way the attempt can die once it leaves this integration:
-    missing action token, authentication failure, HTTP 401/403, server error,
-    rate limit, network error, and an empty reply. These need different remedies
-    from ``SUPPRESSED`` -- often re-authentication -- so telling the user to
-    "try again in a moment" would be wrong for most of them.
+    Covers every way it can die once this integration has committed to making
+    it: authentication failure, HTTP 401/403, a server rejection, a rate limit,
+    a network error, an empty reply -- and the missing action token, which
+    never reaches the wire.
+
+    That last member is why this docstring does not read "handed to the
+    transport". ``SoundDispatchOutcome.NOT_SENT`` is filed here rather than
+    under ``SUPPRESSED`` because the two failure states are told apart by the
+    REMEDY they call for, not by how far the request travelled. ``SUPPRESSED``
+    means "the push transport is not up yet, try again in a moment", and it is
+    reached only by the readiness gate saying so. ``NOT_SENT`` is what the gate
+    could NOT see: it inspects the receiver's state (``is_push_ready``) while
+    the token is fetched separately (``_get_fcm_token_for_action``), so a
+    command the gate waved through can still find no action token. That is a
+    setup or credential problem far more often than a moment's patience, and
+    the advice such a user needs is the one ``stop_sound_rejected`` already
+    gives -- "an expired sign-in, a missing token, a server or network error,
+    or a rate limit", plus a look at the log. Re-authentication is the usual
+    remedy across this member, which is why "try again in a moment" would be
+    wrong for most of it. Routing ``NOT_SENT`` to ``SUPPRESSED`` would answer a
+    missing token with an unbounded "try again shortly".
     """
 
 

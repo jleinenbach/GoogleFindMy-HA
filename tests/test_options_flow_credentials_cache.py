@@ -28,6 +28,7 @@ from custom_components.googlefindmy.const import (
     SUBENTRY_TYPE_SERVICE,
     SUBENTRY_TYPE_TRACKER,
     TRACKER_SUBENTRY_KEY,
+    SoundDispatchOutcome,
 )
 from custom_components.googlefindmy.NovaApi.ExecuteAction.PlaySound import (
     start_sound_request as start_module,
@@ -492,10 +493,14 @@ def test_play_stop_sound_uses_entry_cache(  # noqa: PLR0915
         monkeypatch.setattr(start_module, "async_nova_request", _fake_start)
         monkeypatch.setattr(stop_module, "async_nova_request", _fake_stop)
 
-        success, request_uuid = await api_primary.async_play_sound("device-42")
+        play = await api_primary.async_play_sound("device-42")
+        success, request_uuid = play.accepted, play.cancel_key
         assert success is True
         assert request_uuid is not None
-        assert await api_primary.async_stop_sound("device-42", request_uuid)
+        assert (
+            await api_primary.async_stop_sound("device-42", request_uuid)
+            is SoundDispatchOutcome.ACCEPTED
+        )
 
         assert start_calls and stop_calls
 

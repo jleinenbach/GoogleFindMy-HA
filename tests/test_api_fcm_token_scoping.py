@@ -10,6 +10,7 @@ import pytest
 
 from custom_components.googlefindmy import api as api_module
 from custom_components.googlefindmy.api import GoogleFindMyAPI
+from custom_components.googlefindmy.const import SoundDispatchOutcome
 
 
 @dataclass
@@ -137,14 +138,22 @@ def test_actions_use_scoped_tokens(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
     async def _exercise() -> None:
-        ok1, uuid1 = await api_entry_1.async_play_sound("device-1")
-        ok2, uuid2 = await api_entry_2.async_play_sound("device-2")
+        play1 = await api_entry_1.async_play_sound("device-1")
+        play2 = await api_entry_2.async_play_sound("device-2")
+        ok1, uuid1 = play1.accepted, play1.cancel_key
+        ok2, uuid2 = play2.accepted, play2.cancel_key
         assert ok1 and ok2
         # Each play generates its own client-side cancel key (non-None, distinct).
         assert uuid1 and uuid2
         assert uuid1 != uuid2
-        assert await api_entry_1.async_stop_sound("device-1")
-        assert await api_entry_2.async_stop_sound("device-2")
+        assert (
+            await api_entry_1.async_stop_sound("device-1")
+            is SoundDispatchOutcome.ACCEPTED
+        )
+        assert (
+            await api_entry_2.async_stop_sound("device-2")
+            is SoundDispatchOutcome.ACCEPTED
+        )
 
     asyncio.run(_exercise())
 
@@ -223,10 +232,14 @@ def test_play_sound_returns_uuid_and_passes_to_stop(
     monkeypatch.setattr(api, "_get_fcm_token_for_action", lambda: "tok-uuid")
 
     async def _exercise() -> None:
-        success, request_uuid = await api.async_play_sound("device-uuid")
+        play = await api.async_play_sound("device-uuid")
+        success, request_uuid = play.accepted, play.cancel_key
         assert success is True
         assert request_uuid == "uuid-device-uuid"
-        assert await api.async_stop_sound("device-uuid", request_uuid)
+        assert (
+            await api.async_stop_sound("device-uuid", request_uuid)
+            is SoundDispatchOutcome.ACCEPTED
+        )
 
     asyncio.run(_exercise())
 
