@@ -839,6 +839,104 @@ async def test_poll_cycle_transient_nova_auth_starts_reauth_after_threshold() ->
 
 
 @pytest.mark.asyncio
+async def test_poll_cycle_client_error_never_starts_reauth() -> None:
+    """A rejected REQUEST must not feed the transient-auth countdown.
+
+    NovaAuthError covers every non-retryable 4xx, so a device removed from the
+    account raised the counter once per cycle and produced a re-auth prompt
+    after exactly three of them, with the sign-in intact throughout.
+
+    Reachability note: after the api.py narrowing this branch is production-
+    unreachable, because async_get_device_location returns {} for such a status.
+    The API double bypasses api.py entirely, so what this test proves is that
+    the rule holds locally in the file that owns the counter -- not that the
+    path is still walked.
+    """
+    coordinator = _polling_coordinator({}, _TrackingFilter(), {})
+    coordinator.api = _DecryptFailAPI(NovaAuthError(404, "gone"))
+    coordinator.config_entry.async_start_reauth = MagicMock()
+    # The base fixture stubs _set_auth_state with a no-op, which would let a
+    # re-inserted call slip through unseen; bind it the way this file already
+    # does elsewhere so the assertion below can observe anything at all.
+    auth_calls: list[dict[str, Any]] = []
+    coordinator._set_auth_state = lambda **kwargs: auth_calls.append(kwargs)
+
+    for _ in range(_MAX_TRANSIENT_AUTH_FAILURES + 2):
+        await coordinator._async_start_poll_cycle([{"id": "dev-1", "name": "Hub"}])
+
+    coordinator.config_entry.async_start_reauth.assert_not_called()
+    assert coordinator._consecutive_transient_auth_failures == 0
+    assert not [c for c in auth_calls if c.get("failed")]
+
+
+@pytest.mark.asyncio
+async def test_poll_cycle_client_error_is_recorded_as_an_ordinary_error() -> None:
+    """Quiet is not the same as invisible: the skip stays in the diagnostics."""
+    coordinator = _polling_coordinator({}, _TrackingFilter(), {})
+    coordinator.api = _DecryptFailAPI(NovaAuthError(404, "gone"))
+    coordinator.config_entry.async_start_reauth = MagicMock()
+    # The polling fixture stubs note_error with a no-op as well.
+    coordinator.note_error = MagicMock()
+
+    await coordinator._async_start_poll_cycle([{"id": "dev-1", "name": "Hub"}])
+
+    assert coordinator.note_error.call_count == 1
+    assert coordinator.note_error.call_args.kwargs["where"] == "poll_client_error"
+
+
+@pytest.mark.asyncio
+async def test_poll_cycle_credential_rejection_still_escalates() -> None:
+    """The counterpart, and with 403: the existing test only covers 401.
+
+    Without this row the narrowing is satisfied by a branch that never counts
+    anything, which would bury a real expired sign-in.
+    """
+    coordinator = _polling_coordinator({}, _TrackingFilter(), {})
+    coordinator.api = _DecryptFailAPI(NovaAuthError(403, "denied"))
+    coordinator.config_entry.async_start_reauth = MagicMock()
+
+    for _ in range(_MAX_TRANSIENT_AUTH_FAILURES):
+        await coordinator._async_start_poll_cycle([{"id": "dev-1", "name": "Hub"}])
+
+    coordinator.config_entry.async_start_reauth.assert_called_once_with(
+        coordinator.hass
+    )
+    assert coordinator._reauth_reason is not None
+    assert (
+        coordinator._reauth_reason.code
+        is ReauthReasonCode.NOVA_AUTH_TRANSIENT_EXHAUSTED
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_client_error_does_not_clear_a_pending_auth_countdown() -> None:
+    """The counter is untouched in BOTH directions.
+
+    A 404 says nothing about the credentials -- neither that they are broken
+    nor that they work. A test that only checks "stays at 0" would let a reset
+    through, and a reset would make a real 401/404/401 sequence unescalatable.
+    """
+    coordinator = _polling_coordinator({}, _TrackingFilter(), {})
+    api = _DecryptFailAPI(NovaAuthError(401, "transient"))
+    coordinator.api = api
+    coordinator.config_entry.async_start_reauth = MagicMock()
+
+    for _ in range(_MAX_TRANSIENT_AUTH_FAILURES - 1):
+        await coordinator._async_start_poll_cycle([{"id": "dev-1", "name": "Hub"}])
+    coordinator.config_entry.async_start_reauth.assert_not_called()
+
+    api._exc = NovaAuthError(404, "gone")
+    await coordinator._async_start_poll_cycle([{"id": "dev-1", "name": "Hub"}])
+    coordinator.config_entry.async_start_reauth.assert_not_called()
+
+    api._exc = NovaAuthError(401, "transient")
+    await coordinator._async_start_poll_cycle([{"id": "dev-1", "name": "Hub"}])
+    coordinator.config_entry.async_start_reauth.assert_called_once_with(
+        coordinator.hass
+    )
+
+
+@pytest.mark.asyncio
 async def test_poll_cycle_reauth_noop_without_config_entry() -> None:
     """Defensive guard: with no config entry bound the poll cycle cannot start
     reauth, but it must not crash (``_request_poll_reauth`` no-entry branch)."""

@@ -60,7 +60,11 @@ from ..NovaApi.ExecuteAction.LocateTracker.decrypt_locations import (
     StaleOwnerKeyError,
     is_real_location_record,
 )
-from ..NovaApi.nova_request import NovaAuthError, NovaAuthPermanentError
+from ..NovaApi.nova_request import (
+    NovaAuthError,
+    NovaAuthPermanentError,
+    is_credential_rejection,
+)
 from ..SpotApi.GetEidInfoForE2eeDevices.get_eid_info_request import (
     SpotApiEmptyResponseError,
 )
@@ -2070,6 +2074,37 @@ class PollingOperations(_MixinBase):
                         self._request_poll_reauth(reauth_exc)
                         return
                     except NovaAuthError as transient_err:
+                        # Branch on the STATUS, never on the type. The transport
+                        # raises this class for every non-retryable 4xx, so a
+                        # device removed from the account fed the transient-auth
+                        # counter and produced a re-auth prompt after exactly
+                        # three cycles, with the sign-in intact the whole time.
+                        # api.async_get_device_location already returns {} for
+                        # such a status, so this branch is the local statement of
+                        # the rule rather than the only place it holds. Do not
+                        # remove it as dead code: it is the reason the next
+                        # feeder cannot bring the cascade back.
+                        if not is_credential_rejection(transient_err):
+                            _LOGGER.warning(
+                                "Client error (HTTP %s) for %s: %s. "
+                                "Skipping this device; the sign-in is not in question.",
+                                getattr(transient_err, "status", "unknown"),
+                                dev_name,
+                                transient_err,
+                            )
+                            self.note_error(
+                                transient_err,
+                                where="poll_client_error",
+                                device=dev_name,
+                            )
+                            cycle_failed = True
+                            # Deliberately NOT touched: the transient-auth counter
+                            # is neither raised nor reset. A client rejection says
+                            # nothing about the credentials in either direction.
+                            if last_exception is None:
+                                last_exception = transient_err
+                            continue
+
                         # Transient auth failure - may self-heal in subsequent poll cycles.
                         # Only trigger reauth after multiple consecutive failures.
                         self._consecutive_transient_auth_failures += 1
