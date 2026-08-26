@@ -1037,7 +1037,7 @@ async def test_a_client_error_does_not_overwrite_an_earlier_failure() -> None:
     coordinator._set_auth_state = lambda **kwargs: None
     coordinator.config_entry.async_start_reauth = MagicMock()
     recorded: list[Exception] = []
-    coordinator.async_set_update_error = lambda exc: recorded.append(exc)
+    coordinator.async_set_update_error = recorded.append
 
     await coordinator._async_start_poll_cycle(
         [{"id": "dev-1", "name": "Hub"}, {"id": "dev-2", "name": "Gone"}]
