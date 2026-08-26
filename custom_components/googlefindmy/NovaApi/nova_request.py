@@ -462,9 +462,11 @@ def is_credential_rejection(err: NovaAuthError) -> bool:
         True when the refusal names the credentials (permanent, 401, 403, or
         no readable status), False for every other client rejection.
 
-    Example:
-        >>> is_credential_rejection(NovaAuthError(404, "gone"))
-        False
+    The doctest form is deliberately avoided here: `pyproject.toml` does not
+    pass `--doctest-modules`, so a `>>>` block would read like a verified
+    assurance while never running. The behaviour is pinned by
+    `tests/test_nova_request.py` instead, which asserts among other rows that a
+    `NovaAuthError(404, "gone")` yields False.
     """
     if getattr(err, "is_permanent", False):
         return True

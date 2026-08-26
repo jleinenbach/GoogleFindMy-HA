@@ -1098,6 +1098,36 @@ class TestAsyncBasicDeviceListErrorMapping:
             is ReauthReasonCode.NOVA_AUTH_FAILED
         )
 
+    def test_a_rejected_probe_reaches_the_config_flow_as_a_non_auth_key(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The user-visible end of the device-list narrowing, driven end to end.
+
+        The config flow probes the account with this very call and maps whatever
+        it raises through `_map_api_exc_to_error_key`. Asserting the mapper alone
+        does not pin this change: the mapper is untouched, and both of its rows
+        were already true before. Only by taking the exception FROM the narrowed
+        handler does the assertion break when the handler is reverted, which is
+        the whole point of pinning a moved user-facing message.
+        """
+        from custom_components.googlefindmy import config_flow as cf
+
+        self._patch_request(monkeypatch, NovaAuthError(404, "gone"))
+        api = _make_api_with_session()
+        with pytest.raises(Exception) as excinfo:  # noqa: PT011 - class is the assertion
+            run_coro(api.async_get_basic_device_list())
+        # 404 is a refusal of the request, not of the credentials: the probe now
+        # ends at "unknown" instead of sending an intact sign-in to the re-auth
+        # form. Revert api.py's client-error branch and this becomes
+        # "invalid_auth" again.
+        assert cf._map_api_exc_to_error_key(excinfo.value) == "unknown"
+
+        self._patch_request(monkeypatch, NovaAuthError(403, "denied"))
+        api = _make_api_with_session()
+        with pytest.raises(Exception) as excinfo:  # noqa: PT011 - class is the assertion
+            run_coro(api.async_get_basic_device_list())
+        assert cf._map_api_exc_to_error_key(excinfo.value) == "invalid_auth"
+
     def test_the_sound_classifier_follows_the_shared_predicate(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:

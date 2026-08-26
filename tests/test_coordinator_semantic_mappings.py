@@ -980,13 +980,19 @@ async def test_a_rejected_device_never_clears_the_auth_state() -> None:
     auth_calls: list[dict[str, Any]] = []
     coordinator._set_auth_state = lambda **kwargs: auth_calls.append(kwargs)
     coordinator._consecutive_transient_auth_failures = 2
-    coordinator._last_transient_auth_error = NovaAuthError(401, "earlier")
+    # Seed the declared type, not an exception object: `_last_transient_auth_error`
+    # is `str | None` (polling.py:189) and its only production writer stores
+    # `str(transient_err)`. `mypy` does not catch a wrong shape here because
+    # `pyproject.toml` sets `ignore_errors` for `tests.*`.
+    coordinator._last_transient_auth_error = "earlier"
 
     await coordinator._async_start_poll_cycle([{"id": "dev-1", "name": "Hub"}])
 
     assert not [kw for kw in auth_calls if kw.get("failed") is False]
     assert coordinator._consecutive_transient_auth_failures == 2
-    assert coordinator._last_transient_auth_error is not None
+    # Unchanged, not merely non-empty: a client error must not overwrite the
+    # message that a real transient auth failure left behind.
+    assert coordinator._last_transient_auth_error == "earlier"
 
 
 @pytest.mark.asyncio

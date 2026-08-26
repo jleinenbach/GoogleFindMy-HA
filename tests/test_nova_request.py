@@ -3,10 +3,12 @@
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import logging
 import time
 from collections.abc import Awaitable, Callable
+from pathlib import Path
 from typing import Any
 
 import aiohttp
@@ -3139,3 +3141,104 @@ class TestIsCredentialRejection:
         err = NovaAuthError(404, "double without a status")
         delattr(err, "status")
         assert is_credential_rejection(err)
+
+
+class TestTheDocumentedExtentStaysTrue:
+    """The AGENTS.md paragraph counts call sites and handlers; nothing enforced it.
+
+    `custom_components/googlefindmy/AGENTS.md` states the extent of the
+    status-based classification in prose ("six call sites in four files",
+    "ten try blocks catch NovaAuthError", "eight carry a broad except
+    Exception"). That paragraph calls itself "the only thing standing in
+    [the defect's] way", which makes an unenforced number the load-bearing
+    part of the contract: a seventh handler, or a refactor that drops one,
+    leaves the prose quietly wrong while every test stays green.
+
+    `tests/AGENTS.md` already establishes the remedy for exactly this shape --
+    a tuple that "must still equal the AST-derived set" rather than a
+    hand-maintained copy. These rows apply it to the numbers above. They are
+    deliberately AST-derived and not grep-derived: a comment mentioning the
+    predicate must not count as a call site.
+
+    When the extent legitimately changes, update BOTH this test and the
+    paragraph in the same commit. A failure here is not a bug in the code; it
+    is the contract telling you it went stale.
+    """
+
+    _ROOT = Path(__file__).resolve().parents[1] / "custom_components" / "googlefindmy"
+
+    def _modules(self) -> list[tuple[Path, ast.Module]]:
+        return [
+            (path, ast.parse(path.read_text(encoding="utf-8")))
+            for path in sorted(self._ROOT.rglob("*.py"))
+        ]
+
+    def test_the_predicate_has_the_documented_six_call_sites_in_four_files(
+        self,
+    ) -> None:
+        per_file: dict[str, int] = {}
+        for path, tree in self._modules():
+            calls = [
+                node
+                for node in ast.walk(tree)
+                if isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id == "is_credential_rejection"
+            ] + [
+                node
+                for node in ast.walk(tree)
+                if isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "is_credential_rejection"
+            ]
+            if calls:
+                per_file[path.relative_to(self._ROOT).as_posix()] = len(calls)
+
+        assert sum(per_file.values()) == 6, per_file
+        assert len(per_file) == 4, per_file
+        assert per_file.get("api.py") == 3, per_file
+
+    def test_ten_try_blocks_catch_the_auth_error_and_eight_have_a_broad_handler(
+        self,
+    ) -> None:
+        """The count that gates the open follow-up (a dedicated client-error class).
+
+        Splitting NovaAuthError is only safe once every catcher is known: the
+        eight blocks with a broad `except Exception` would swallow a new class
+        silently, the two sound handlers would let it escape. Both numbers are
+        the reason that follow-up is not a one-liner, so both are pinned.
+        """
+
+        def _names(handler: ast.ExceptHandler) -> set[str]:
+            node = handler.type
+            if node is None:
+                return {"Exception"}
+            parts = node.elts if isinstance(node, ast.Tuple) else [node]
+            out: set[str] = set()
+            for part in parts:
+                if isinstance(part, ast.Name):
+                    out.add(part.id)
+                elif isinstance(part, ast.Attribute):
+                    out.add(part.attr)
+            return out
+
+        catching: list[str] = []
+        with_broad: list[str] = []
+        for path, tree in self._modules():
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Try):
+                    continue
+                handlers = [_names(h) for h in node.handlers]
+                if not any("NovaAuthError" in names for names in handlers):
+                    continue
+                where = f"{path.relative_to(self._ROOT).as_posix()}:{node.lineno}"
+                catching.append(where)
+                if any(
+                    "Exception" in names or "BaseException" in names
+                    for names in handlers
+                ):
+                    with_broad.append(where)
+
+        assert len(catching) == 10, catching
+        assert len(with_broad) == 8, with_broad
+        assert len(catching) - len(with_broad) == 2, (catching, with_broad)

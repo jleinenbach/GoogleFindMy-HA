@@ -279,7 +279,9 @@ class GoogleFindMyAPIProtocol(Protocol):  # pylint: disable=unnecessary-ellipsis
     ) -> dict[str, Any]:
         """Request location for a specific device (async).
 
-        Returns location data dict or empty dict on failure.
+        Returns location data on success and an empty dict on a transient
+        failure. A credential rejection raises `ConfigEntryAuthFailed`; a
+        non-credential refusal (non-retryable 4xx) raises `NovaAuthError`.
         """
         ...
 
@@ -1281,7 +1283,10 @@ class GoogleFindMyAPI:
               or no readable status).
             - Any OTHER `NovaAuthError` is the server refusing the request, not
               the credentials -- a device removed from the account, a malformed
-              body -- and returns `{}` like a 5xx does.
+              body -- and is re-raised unchanged. It is deliberately NOT turned
+              into an empty result: a normal return is what both callers read as
+              "the credentials worked", and they clear the account auth state on
+              it. Only a transient/5xx failure returns `{}`.
             - Rate limit / other server issues are treated as transient and return `{}`.
 
         Args:
@@ -1289,8 +1294,19 @@ class GoogleFindMyAPI:
             device_name: The human-readable name of the device for logging.
 
         Returns:
-            A dictionary containing the best available location data for the device.
-            Returns an empty dictionary on failure.
+            A dictionary containing the best available location data for the
+            device, or an empty dictionary on a transient failure (5xx, rate
+            limit, timeout). A normal return therefore means the credentials
+            were accepted; callers rely on that.
+
+        Raises:
+            ConfigEntryAuthFailed: The credentials were rejected (401/403, or a
+                `NovaAuthError` for which `nova_request.is_credential_rejection`
+                holds). The coordinator starts re-authentication.
+            NovaAuthError: The server refused this request without rejecting the
+                credentials (a non-retryable 4xx such as 400/404/422). Callers
+                must classify it with `nova_request.is_credential_rejection`
+                rather than by its type.
         """
 
         # Register cache provider for multi-entry support

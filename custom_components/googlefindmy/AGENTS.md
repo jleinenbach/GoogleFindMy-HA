@@ -140,6 +140,11 @@ exhaustiveness test over `NovaError.__subclasses__()` first. Measured over the A
 hides the status; the two sound-request handlers catch it in a tuple with no broad handler, so a new class would
 propagate uncaught there instead. Two opposite failure modes in one change. Narrowing a handler is a behaviour change that needs its own regression test, not a
 drive-by edit; do not assume a green suite proves the rest of the tree already follows this rule.
+Every count in the two paragraphs above (six call sites in four files, ten `try` blocks, eight of them with a broad
+handler) is enforced by `tests/test_nova_request.py::TestTheDocumentedExtentStaysTrue`, which derives them from the AST
+rather than from grep, following the rule `tests/AGENTS.md` states for shared tuples. Prose that carries a number and
+calls itself "the only thing standing in its way" must not be the only copy of that number: change the extent and this
+paragraph in the same commit, and let the test tell you when one of them went stale.
 
 ### Import deferral reminder
 
