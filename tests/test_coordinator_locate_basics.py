@@ -783,8 +783,8 @@ class TestStopBreaksSelfInflictedCooldown:
             coord._push_cooldown_until = time.monotonic() + cooldown_s
 
         coord._note_push_transport_problem = MagicMock(side_effect=_arm)
-        coord._api_push_ready.side_effect = (
-            lambda: time.monotonic() >= coord._push_cooldown_until
+        coord._api_push_ready.side_effect = lambda: (
+            time.monotonic() >= coord._push_cooldown_until
         )
         window_ends_at = time.monotonic() + 90.0
         coord._push_cooldown_until = window_ends_at
