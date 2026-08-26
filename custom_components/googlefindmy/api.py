@@ -18,8 +18,12 @@ Token/Auth handling (Step 5.1-D):
   transport raises `NovaAuthError` for every non-retryable 4xx (400, 404, 405,
   409, 422 included), so a type check reads "device not found" as "your sign-in
   expired". A non-credential rejection therefore leaves the device list as
-  `UpdateFailed` and the location request as an empty result, and neither starts
-  a re-auth flow. `_classify_nova_auth_error` is the sound-path adapter over the
+  `UpdateFailed`, and the location request passes the error on to its callers,
+  whose own branches skip the device without touching the re-auth machinery. It
+  is deliberately NOT collapsed to an empty result: both callers read a
+  non-raising return as proof that the credentials work and clear the auth state
+  before they check for emptiness, so a permanently rejected tracker would have
+  masked a real 401 on another tracker. `_classify_nova_auth_error` is the sound-path adapter over the
   same predicate. Still open, stated so it is not mistaken for coverage: the
   transport keeps raising a type named "auth" for all of them, so a future
   handler that reads the type instead of the predicate repeats the defect.
@@ -1374,19 +1378,38 @@ class GoogleFindMyAPI:
             # nova_request.is_credential_rejection.
             if not is_credential_rejection(err):
                 # The server refused the REQUEST, not the credentials: a device
-                # removed from the account, a malformed body. Take the exact exit
-                # the 5xx branch below takes -- return {} and keep polling the
-                # other devices -- instead of raising into the coordinator's
-                # transient-auth counter, where three cycles of a permanently
-                # missing device produced a re-auth prompt for an intact login.
-                _LOGGER.warning(
+                # removed from the account, a malformed body. Pass it through so
+                # each caller can take its own non-auth exit; both of them have a
+                # branch for exactly this status.
+                #
+                # Do NOT collapse this to `return {}`. That was the first attempt
+                # and it traded one defect for another: a non-raising return is
+                # what both callers read as positive proof that the sign-in
+                # works. coordinator/polling.py clears the auth state and resets
+                # the transient-auth counter, and coordinator/locate.py clears
+                # the auth state, each BEFORE looking at whether the result is
+                # empty. A permanently rejected tracker would then wipe a real
+                # 401 from another tracker in every cycle, and the re-auth prompt
+                # that this whole change exists to postpone would never appear at
+                # all. Raising keeps that reset out of reach.
+                #
+                # The 5xx branch below still returns {} and still reaches that
+                # reset. That is pre-existing, it is wrong on its own terms, and
+                # it is tracked as a separate finding -- not fixed here, and not
+                # made worse here either.
+                #
+                # DEBUG, not WARNING: both callers already log a WARNING naming
+                # the device, so a WARNING here would print the same event twice
+                # per device per poll cycle. This line exists for the sync
+                # wrapper, which has no handler behind it.
+                _LOGGER.debug(
                     "Client error (HTTP %s) while getting location for %s (%s): %s",
                     getattr(err, "status", "unknown"),
                     device_name,
                     device_id,
                     _short_err(err),
                 )
-                return {}
+                raise
 
             # Transient auth failure - may self-heal in subsequent poll cycles.
             # Re-raise so coordinator can track consecutive failures before triggering reauth.

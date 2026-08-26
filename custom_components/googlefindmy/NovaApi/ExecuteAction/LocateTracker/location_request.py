@@ -893,8 +893,9 @@ async def get_location_data_for_device(  # noqa: PLR0911, PLR0912, PLR0913, PLR0
         # Re-raise so api.py can handle appropriately: it, not this layer, tells
         # a credential rejection from a rejected request. The second half of this
         # note used to say transient errors are tracked by the coordinator. That
-        # holds for a credential rejection only -- a non-credential 4xx never
-        # reaches a counter, because api.py returns {} for it.
+        # holds for a credential rejection only -- api.py passes a
+        # non-credential 4xx on to its callers, whose branches skip the counter
+        # deliberately.
         raise
     except DecryptionError:
         # Auth-fatal crypto failure surfaced from ctx.error above: must propagate so

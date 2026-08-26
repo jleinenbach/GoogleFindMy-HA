@@ -846,10 +846,11 @@ async def test_poll_cycle_client_error_never_starts_reauth() -> None:
     account raised the counter once per cycle and produced a re-auth prompt
     after exactly three of them, with the sign-in intact throughout.
 
-    Reachability note: after the api.py narrowing this branch is production-
-    unreachable, because async_get_device_location returns {} for such a status.
-    The API double bypasses api.py entirely, so what this test proves is that
-    the rule holds locally in the file that owns the counter -- not that the
+    Reachability note: async_get_device_location passes such a status through,
+    so this branch is what a rejected device really takes. The API double
+    bypasses api.py entirely, so what this test proves is that the rule holds
+    locally in the file that owns the counter; the seam itself is pinned by
+    test_a_non_credential_4xx_location_is_passed_through. Not proved here: the
     path is still walked.
     """
     coordinator = _polling_coordinator({}, _TrackingFilter(), {})
@@ -873,11 +874,9 @@ async def test_poll_cycle_client_error_never_starts_reauth() -> None:
 async def test_poll_cycle_client_error_is_recorded_as_an_ordinary_error() -> None:
     """Quiet is not the same as invisible: this branch keeps the skip on record.
 
-    Scope, stated so the assertion is not read as more than it is: api.py
-    returns {} for such a status, so in production the device takes the poll
-    loop's empty-result path, which calls no note_error at all. What this pins
-    is that the branch does not degrade into a silent skip -- not that a
-    rejected device shows up in the diagnostics today. It does not.
+    api.py passes such a status through, so a rejected device really does take
+    this branch and really does show up in the diagnostics. What this pins is
+    that the branch does not degrade into a silent skip.
     """
     coordinator = _polling_coordinator({}, _TrackingFilter(), {})
     coordinator.api = _DecryptFailAPI(NovaAuthError(404, "gone"))
@@ -941,6 +940,105 @@ async def test_a_client_error_does_not_clear_a_pending_auth_countdown() -> None:
     coordinator.config_entry.async_start_reauth.assert_called_once_with(
         coordinator.hass
     )
+
+
+class _PerDeviceAPI:
+    """Location stub that answers per device id: raise, or return a payload.
+
+    ``_DecryptFailAPI`` always raises the same error for every device, which
+    cannot express "one tracker is rejected while another one is fine" -- the
+    exact shape in which a rejected device masks a real credential failure.
+    """
+
+    def __init__(self, answers: dict[str, Any]) -> None:
+        self._answers = answers
+        self.calls = 0
+
+    async def async_get_device_location(
+        self, device_id: str, *_args: Any, **_kwargs: Any
+    ) -> dict[str, Any]:
+        self.calls += 1
+        answer = self._answers[device_id]
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+
+@pytest.mark.asyncio
+async def test_a_rejected_device_never_clears_the_auth_state() -> None:
+    """The reported defect, at the seam where it lives.
+
+    ``api.async_get_device_location`` passes a non-credential 4xx through
+    instead of returning ``{}``, so the poll loop never reaches the success
+    path for that device. Were it to return ``{}``, the loop would call
+    ``_set_auth_state(failed=False)`` and reset the transient counter BEFORE
+    the empty guard, and a permanently deleted tracker would wipe a pending
+    401 from another tracker in every single cycle.
+    """
+    coordinator = _polling_coordinator({}, _TrackingFilter(), {})
+    coordinator.api = _DecryptFailAPI(NovaAuthError(404, "gone"))
+    auth_calls: list[dict[str, Any]] = []
+    coordinator._set_auth_state = lambda **kwargs: auth_calls.append(kwargs)
+    coordinator._consecutive_transient_auth_failures = 2
+    coordinator._last_transient_auth_error = NovaAuthError(401, "earlier")
+
+    await coordinator._async_start_poll_cycle([{"id": "dev-1", "name": "Hub"}])
+
+    assert not [kw for kw in auth_calls if kw.get("failed") is False]
+    assert coordinator._consecutive_transient_auth_failures == 2
+    assert coordinator._last_transient_auth_error is not None
+
+
+@pytest.mark.asyncio
+async def test_an_empty_return_still_clears_the_counter() -> None:
+    """Characterisation of the reset this change deliberately leaves alone.
+
+    An empty result still counts as success: the counter goes back to zero and
+    the auth state is cleared. That is true today for every 5xx and every 429,
+    it predates this work, and it is wrong on its own terms -- an empty result
+    proves only that nothing raised, not that the credentials work. It is
+    tracked as a finding of its own with its own approval gate. This test is
+    here so the day it changes, it changes on purpose.
+    """
+    coordinator = _polling_coordinator({}, _TrackingFilter(), {})
+    coordinator.api = _PerDeviceAPI({"dev-1": {}})
+    auth_calls: list[dict[str, Any]] = []
+    coordinator._set_auth_state = lambda **kwargs: auth_calls.append(kwargs)
+    coordinator._consecutive_transient_auth_failures = 2
+
+    await coordinator._async_start_poll_cycle([{"id": "dev-1", "name": "Hub"}])
+
+    assert [kw for kw in auth_calls if kw.get("failed") is False]
+    assert coordinator._consecutive_transient_auth_failures == 0
+
+
+@pytest.mark.asyncio
+async def test_a_client_error_does_not_overwrite_an_earlier_failure() -> None:
+    """``last_exception`` keeps the FIRST failure of the cycle.
+
+    A credential failure on one tracker must stay the reported cause even when
+    a rejected tracker follows it in the same cycle; otherwise the surviving
+    error names the harmless device and hides the one that needs attention.
+    Covers the false side of the ``if last_exception is None`` guard.
+    """
+    coordinator = _polling_coordinator({}, _TrackingFilter(), {})
+    coordinator.api = _PerDeviceAPI(
+        {
+            "dev-1": NovaAuthError(401, "expired"),
+            "dev-2": NovaAuthError(404, "gone"),
+        }
+    )
+    coordinator._set_auth_state = lambda **kwargs: None
+    coordinator.config_entry.async_start_reauth = MagicMock()
+    recorded: list[Exception] = []
+    coordinator.async_set_update_error = lambda exc: recorded.append(exc)
+
+    await coordinator._async_start_poll_cycle(
+        [{"id": "dev-1", "name": "Hub"}, {"id": "dev-2", "name": "Gone"}]
+    )
+
+    assert recorded, "the cycle reported no error at all"
+    assert getattr(recorded[-1], "status", None) == 401
 
 
 @pytest.mark.asyncio

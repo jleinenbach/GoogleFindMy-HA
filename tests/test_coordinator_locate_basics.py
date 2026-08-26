@@ -401,6 +401,14 @@ class TestAsyncLocateDeviceNovaAuthClassification:
     async def test_manual_locate_client_error_leaves_the_auth_state_alone(
         self, coord: LocateStub
     ) -> None:
+        """Neither direction: the state is not flagged AND not cleared.
+
+        Flagging it was the original defect. Clearing it is the mirror image and
+        just as wrong: a manual locate on a tracker the server rejects proves
+        nothing about the credentials, so it must not wipe a pending auth error
+        raised by some other device. Only the second half of this assertion pair
+        depends on api.py passing the error through rather than returning {}.
+        """
         coord.api.async_get_device_location.side_effect = NovaAuthError(404, "gone")
 
         result = await coord.async_locate_device("dev-1")
@@ -409,15 +417,19 @@ class TestAsyncLocateDeviceNovaAuthClassification:
         assert not [
             c for c in coord._set_auth_state.call_args_list if c.kwargs.get("failed")
         ]
+        assert not [
+            c
+            for c in coord._set_auth_state.call_args_list
+            if c.kwargs.get("failed") is False
+        ]
 
     async def test_manual_locate_client_error_is_still_recorded(
         self, coord: LocateStub
     ) -> None:
         """This branch keeps the failure on record; a silent {} would be worse.
 
-        Same scope caveat as the poll-cycle counterpart: api.py returns {} for
-        such a status, so a real manual locate on a deleted tracker takes the
-        success path and records nothing. The assertion is about the branch.
+        api.py passes a non-credential rejection through, so a real manual
+        locate on a deleted tracker reaches exactly this branch.
         """
         coord.api.async_get_device_location.side_effect = NovaAuthError(404, "gone")
 

@@ -112,23 +112,26 @@ Extent today, stated so it is not mistaken for coverage: six call sites in four 
 `coordinator/polling.py`, `coordinator/locate.py`, `location_request.py`), and they serve seven handlers, because the two
 sound handlers share the `_classify_nova_auth_error` adapter. In order: the two sound handlers via
 `_classify_nova_auth_error`; the device-list handler (`api.py`, `except NovaAuthError` before `NovaProtobufDecodeError`),
-which now raises `UpdateFailed` for a non-credential rejection; the location handler, which returns `{}`;
-`coordinator/polling.py`, whose `except NovaAuthError` branch leaves the transient-auth counter alone in both directions;
-and `coordinator/locate.py`, whose branch does not flip the account-wide auth state. `location_request.py` names the
-status in its log records instead of calling every 4xx an authentication error, but still only re-raises -- it does not
-classify.
-Read those last two claims narrowly, they are about the BRANCH and not about the path: since `api.py` returns `{}` for
-such a status, neither branch is reachable in production any more, and what the device actually takes is the SUCCESS
-path -- `polling.py` "Success path: ensure any previous auth error is cleared" and `locate.py` "Success path: clear any
-auth error state", both of which run BEFORE the `if not location` guard. So a 404 now RESETS the transient-auth counter
-and clears the auth state, which is the opposite of what the branch says. The mechanism is not new -- every 5xx and 429
-already returns `{}` and reaches it -- but what a client rejection adds is PERMANENCE, and that is a real behaviour
-change: a 5xx clears up, a device deleted from the account does not. With one deleted tracker in the list every cycle
-resets the counter, so a genuinely expired sign-in on another tracker never reaches `_MAX_TRANSIENT_AUTH_FAILURES` and
-the user never sees the reauth prompt at all. Before this change that 404 raised the counter itself, so the escalation
-did happen, for the wrong reason. Fixing it means deciding what an empty result is allowed to prove about credentials,
-which is a behaviour change of its own with a far wider blast radius (every healthy idle BLE poll takes the same path);
-it is tracked separately and must not be assumed done.
+which now raises `UpdateFailed` for a non-credential rejection; the location handler, which passes the error on to its
+callers instead of returning `{}`; `coordinator/polling.py`, whose `except NovaAuthError` branch leaves the
+transient-auth counter alone in both directions; and `coordinator/locate.py`, whose branch does not flip the
+account-wide auth state. `location_request.py` names the status in its log records instead of calling every 4xx an
+authentication error, but still only re-raises -- it does not classify.
+Why the location handler raises rather than returning `{}`, since the empty return looks like the gentler option: both
+callers treat ANY non-raising return as positive proof that the credentials work. `polling.py` runs "Success path:
+ensure any previous auth error is cleared" and `locate.py` runs "Success path: clear any auth error state", and both run
+BEFORE the `if not location` guard. An empty return for a rejected device would therefore have RESET the transient-auth
+counter and cleared the auth state, which is the opposite of what those branches say. Worse, it would have done so
+PERMANENTLY: a 5xx clears up, a device deleted from the account does not, so one deleted tracker in the list would reset
+the counter every cycle and a genuinely expired sign-in on another tracker would never reach
+`_MAX_TRANSIENT_AUTH_FAILURES`. The user would never see the reauth prompt at all -- a worse outcome than the defect
+this change exists to fix. Raising keeps a rejected device out of that reset.
+What is still NOT fixed there, stated so it is not mistaken for solved: that success path still treats every empty
+result as proof of working credentials, and every 5xx, every 429 and every idle BLE tag reaches it. Deciding what an
+empty result may prove about credentials is a behaviour change of its own with a far wider blast radius (every healthy
+idle poll takes the same path); it is tracked separately and must not be assumed done. Two tests pin the current state
+so it cannot drift silently: `test_an_empty_return_still_clears_the_counter` characterises the reset that stays, and
+`test_a_non_credential_4xx_location_is_passed_through` pins the seam that keeps a rejection out of it.
 What is NOT fixed, stated so the rule is not mistaken for a solved problem: `nova_request.py` still raises a type named
 "auth" for all of them, so a new handler that reads the type repeats the defect, and this paragraph is the only thing
 standing in its way. Giving the non-credential case its own exception class is the open follow-up; it needs an

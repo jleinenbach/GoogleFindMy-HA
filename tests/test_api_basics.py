@@ -1243,48 +1243,73 @@ class TestAsyncDeviceLocationErrorMapping:
         api = _make_api_with_session()
         assert run_coro(api.async_get_device_location("d", "name")) == {}
 
-    def test_a_non_credential_4xx_location_returns_empty_instead_of_raising(
+    def test_a_non_credential_4xx_location_is_passed_through(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A device removed from the account is not a rejected sign-in.
+        """A device removed from the account is not a rejected sign-in, and it is
+        not an empty result either.
 
-        Raising here fed the coordinator's transient-auth counter, and three
-        cycles of a permanently missing device produced a re-auth prompt while
-        the sign-in was intact the whole time. This takes the exact exit the
-        5xx branch below already takes.
+        Collapsing it to ``{}`` was the first attempt and it traded one defect for
+        another. Both production callers read a NON-RAISING return as positive
+        proof that the sign-in works: ``coordinator/polling.py`` clears the auth
+        state and resets the transient-auth counter, and ``coordinator/locate.py``
+        clears the auth state, each BEFORE it looks at whether the result is
+        empty. A permanently rejected tracker would therefore have wiped a real
+        401 on another tracker in every cycle.
+
+        Passing the error through keeps that reset out of reach and lets each
+        handler state the rule at its own site, which is what those two branches
+        were written for. The counterpart lives in
+        ``test_an_empty_return_still_clears_the_counter``: the pre-existing reset
+        on an empty result is deliberately NOT changed here.
         """
 
         self._patch_request(monkeypatch, NovaAuthError(404, "gone"))
         api = _make_api_with_session()
-        assert run_coro(api.async_get_device_location("d", "name")) == {}
+        with pytest.raises(NovaAuthError) as excinfo:
+            run_coro(api.async_get_device_location("d", "name"))
+        assert excinfo.value.status == 404
 
     def test_a_non_credential_4xx_location_does_not_log_an_authentication_error(
         self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
     ) -> None:
+        """The wording stays, the level drops.
+
+        Each caller writes its own WARNING for this device, so a WARNING here too
+        would print the same event twice per device per poll cycle. DEBUG keeps
+        the trail for the sync wrapper, which has no handler behind it.
+        """
         self._patch_request(monkeypatch, NovaAuthError(404, "gone"))
         api = _make_api_with_session()
         with caplog.at_level(logging.DEBUG):
-            assert run_coro(api.async_get_device_location("d", "name")) == {}
+            with pytest.raises(NovaAuthError):
+                run_coro(api.async_get_device_location("d", "name"))
         assert "Client error (HTTP 404)" in caplog.text
         assert "Transient authentication error" not in caplog.text
         levels = {
             r.levelno for r in caplog.records if "Client error (HTTP 404)" in r.message
         }
-        assert levels == {logging.WARNING}
+        assert levels == {logging.DEBUG}
 
-    def test_a_credential_rejection_location_is_still_reraised(
-        self, monkeypatch: pytest.MonkeyPatch
+    def test_a_credential_rejection_location_takes_the_auth_exit(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
     ) -> None:
         """The counterpart: 403 must still reach the coordinator's counter.
 
-        Without this row the previous two are satisfied by a branch that always
-        returns {}, which would silence a real expired sign-in.
+        Both exits now raise ``NovaAuthError``, so ``pytest.raises`` alone no
+        longer tells them apart -- it would pass even if every status took the
+        client-rejection branch and a real expired sign-in went unescalated. The
+        log record is what separates them: the auth exit announces a transient
+        authentication error at WARNING, the client exit does not.
         """
 
         self._patch_request(monkeypatch, NovaAuthError(403, "denied"))
         api = _make_api_with_session()
-        with pytest.raises(NovaAuthError):
-            run_coro(api.async_get_device_location("d", "name"))
+        with caplog.at_level(logging.DEBUG):
+            with pytest.raises(NovaAuthError):
+                run_coro(api.async_get_device_location("d", "name"))
+        assert "Transient authentication error" in caplog.text
+        assert "Client error (HTTP 403)" not in caplog.text
 
     def test_a_permanent_non_credential_status_still_maps_to_auth_failed(
         self, monkeypatch: pytest.MonkeyPatch

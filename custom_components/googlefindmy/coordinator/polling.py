@@ -2079,11 +2079,12 @@ class PollingOperations(_MixinBase):
                         # device removed from the account fed the transient-auth
                         # counter and produced a re-auth prompt after exactly
                         # three cycles, with the sign-in intact the whole time.
-                        # api.async_get_device_location already returns {} for
-                        # such a status, so this branch is the local statement of
-                        # the rule rather than the only place it holds. Do not
-                        # remove it as dead code: it is the reason the next
-                        # feeder cannot bring the cascade back.
+                        # api.async_get_device_location passes such a status
+                        # through rather than collapsing it to {}, precisely so
+                        # this branch is the one that runs. A non-raising return
+                        # would take the success path above, which clears the
+                        # auth state and resets the counter before it looks at
+                        # whether the result is empty.
                         if not is_credential_rejection(transient_err):
                             _LOGGER.warning(
                                 "Client error (HTTP %s) for %s: %s. "
@@ -2102,19 +2103,15 @@ class PollingOperations(_MixinBase):
                             # counter is neither raised nor reset. A client
                             # rejection says nothing about the credentials in
                             # either direction.
-                            # Read that narrowly. api.async_get_device_location
-                            # returns {} for such a status, so in production the
-                            # device takes the success path above instead, which
-                            # DOES reset the counter and clear the auth state
-                            # before it ever looks at whether the result is
-                            # empty. That reset predates this branch (every 5xx
-                            # and 429 already reaches it), but a client rejection
-                            # newly reaches it too, and it can mask a genuine 401
-                            # on another tracker in the same cycle. Deciding what
-                            # an empty result may prove about credentials is a
-                            # behaviour change of its own and is tracked
-                            # separately -- do not read this branch as if it were
-                            # already done.
+                            # The neighbouring success path still treats ANY
+                            # non-raising return as proof that the credentials
+                            # work: it resets this counter and clears the auth
+                            # state before it looks at whether the result is
+                            # empty. Every 5xx, every 429 and every idle BLE tag
+                            # still reaches that reset. It is pre-existing, it is
+                            # wrong on its own terms, and it is tracked as a
+                            # finding of its own -- a client rejection is kept out
+                            # of it by raising in api.py, nothing more.
                             if last_exception is None:
                                 last_exception = transient_err
                             continue

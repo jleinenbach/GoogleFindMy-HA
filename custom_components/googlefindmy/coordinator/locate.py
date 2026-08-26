@@ -563,12 +563,13 @@ class LocateOperations(_MixinBase):
                 # the account arrived here as an auth error and flipped the
                 # integration-wide auth state: Repairs issue, EVENT_AUTH_ERROR,
                 # diagnostic sensor on. The sign-in was fine the whole time.
-                # Narrow claim, about this branch only: api returns {} for such a
-                # status, so a manual locate on a deleted tracker now takes the
-                # success path above, which calls _set_auth_state(failed=False)
-                # before the empty guard and therefore CLEARS a pending auth
-                # error. Pre-existing for every 5xx, newly reachable for a client
-                # rejection, tracked separately.
+                # api passes such a status through instead of returning {}, so a
+                # manual locate on a deleted tracker reaches this branch and not
+                # the success path above -- which calls _set_auth_state(failed=
+                # False) before the empty guard and would therefore CLEAR a
+                # pending auth error. That clearing still happens for every 5xx
+                # and every empty result; it is pre-existing and tracked as a
+                # finding of its own.
                 if not is_credential_rejection(auth_err):
                     _LOGGER.warning(
                         "Manual locate for %s failed (client error): HTTP %s - %s",
