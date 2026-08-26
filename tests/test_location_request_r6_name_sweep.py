@@ -189,6 +189,34 @@ async def test_nova_auth_error_redacts_name_and_reraises(
             cache=_FakeTokenCache(),
         )
     _assert_name_only_at_debug(caplog)
+    # Pin the wording, not just the redaction: without this the branch could
+    # say anything at all about a 401 and stay green, which is exactly how the
+    # non-credential counterpart below would lose its only counter-test.
+    assert "Authentication error while requesting location" in caplog.text
+
+
+async def test_a_client_error_is_not_logged_as_an_authentication_error(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """NovaAuthError covers every non-retryable 4xx, so this WARNING must not
+    pre-empt api.py's verdict by calling a 404 an authentication problem. The
+    re-raise is unchanged: this layer still does not classify, it just stops
+    claiming to."""
+    _wire_nova_raises(monkeypatch, nova_exc=NovaAuthError(404, "gone"))
+    caplog.set_level(logging.DEBUG, logger=location_request.__name__)
+
+    with pytest.raises(NovaAuthError):
+        await location_request.get_location_data_for_device(
+            canonic_device_id=_CANONIC,
+            name=_SENTINEL_NAME,
+            session=None,
+            username="user@example.com",
+            cache=_FakeTokenCache(),
+        )
+    assert "Client error (HTTP 404) while requesting location" in caplog.text
+    assert "Authentication error" not in caplog.text
+    _assert_name_only_at_debug(caplog)
 
 
 async def test_fcm_registration_failure_redacts_name(
