@@ -1358,6 +1358,25 @@ class GoogleFindMyAPI:
             raise exc from err
 
         except NovaAuthError as err:
+            # Branch on the STATUS, never on the type. Same criterion as the
+            # device-list handler and the two sound handlers; see
+            # nova_request.is_credential_rejection.
+            if not is_credential_rejection(err):
+                # The server refused the REQUEST, not the credentials: a device
+                # removed from the account, a malformed body. Take the exact exit
+                # the 5xx branch below takes -- return {} and keep polling the
+                # other devices -- instead of raising into the coordinator's
+                # transient-auth counter, where three cycles of a permanently
+                # missing device produced a re-auth prompt for an intact login.
+                _LOGGER.warning(
+                    "Client error (HTTP %s) while getting location for %s (%s): %s",
+                    getattr(err, "status", "unknown"),
+                    device_name,
+                    device_id,
+                    _short_err(err),
+                )
+                return {}
+
             # Transient auth failure - may self-heal in subsequent poll cycles.
             # Re-raise so coordinator can track consecutive failures before triggering reauth.
             if err.is_permanent:

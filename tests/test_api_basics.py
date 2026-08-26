@@ -1243,6 +1243,62 @@ class TestAsyncDeviceLocationErrorMapping:
         api = _make_api_with_session()
         assert run_coro(api.async_get_device_location("d", "name")) == {}
 
+    def test_a_non_credential_4xx_location_returns_empty_instead_of_raising(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A device removed from the account is not a rejected sign-in.
+
+        Raising here fed the coordinator's transient-auth counter, and three
+        cycles of a permanently missing device produced a re-auth prompt while
+        the sign-in was intact the whole time. This takes the exact exit the
+        5xx branch below already takes.
+        """
+
+        self._patch_request(monkeypatch, NovaAuthError(404, "gone"))
+        api = _make_api_with_session()
+        assert run_coro(api.async_get_device_location("d", "name")) == {}
+
+    def test_a_non_credential_4xx_location_does_not_log_an_authentication_error(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        self._patch_request(monkeypatch, NovaAuthError(404, "gone"))
+        api = _make_api_with_session()
+        with caplog.at_level(logging.DEBUG):
+            assert run_coro(api.async_get_device_location("d", "name")) == {}
+        assert "Client error (HTTP 404)" in caplog.text
+        assert "Transient authentication error" not in caplog.text
+        levels = {
+            r.levelno for r in caplog.records if "Client error (HTTP 404)" in r.message
+        }
+        assert levels == {logging.WARNING}
+
+    def test_a_credential_rejection_location_is_still_reraised(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The counterpart: 403 must still reach the coordinator's counter.
+
+        Without this row the previous two are satisfied by a branch that always
+        returns {}, which would silence a real expired sign-in.
+        """
+
+        self._patch_request(monkeypatch, NovaAuthError(403, "denied"))
+        api = _make_api_with_session()
+        with pytest.raises(NovaAuthError):
+            run_coro(api.async_get_device_location("d", "name"))
+
+    def test_a_permanent_non_credential_status_still_maps_to_auth_failed(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Permanence outranks the status, at the place it is easiest to lose."""
+        self._patch_request(monkeypatch, NovaAuthError(404, "perm", is_permanent=True))
+        api = _make_api_with_session()
+        with pytest.raises(ConfigEntryAuthFailed) as excinfo:
+            run_coro(api.async_get_device_location("d", "name"))
+        assert (
+            getattr(excinfo.value, "reauth_code", None)
+            is ReauthReasonCode.NOVA_AUTH_PERMANENT
+        )
+
 
 class TestAsyncPlaySoundErrorMapping:
     """Each documented exception class for the play-sound branch."""
