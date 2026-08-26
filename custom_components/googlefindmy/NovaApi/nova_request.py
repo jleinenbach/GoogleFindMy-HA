@@ -384,14 +384,20 @@ class NovaError(Exception):
 
 
 class NovaAuthError(NovaError):
-    """Raised on 4xx client errors after retries.
+    """Raised on every non-retryable 4xx client error after retries.
 
-    This is the base class for authentication errors. It may be transient
-    (e.g., temporary 401 after token refresh due to backend propagation delay)
-    or permanent (e.g., AAS token invalidated by Google).
+    The name is narrower than the type. This is the base class for
+    authentication errors, but the transport raises it for any 4xx that
+    ``HTTP_RETRY_ELIGIBLE`` does not cover, which is every one except 408 and
+    429. Do NOT read the type as a verdict on the credentials: ask
+    :func:`is_credential_rejection`, which is what every handler in this
+    integration does. It may be transient (e.g., temporary 401 after token
+    refresh due to backend propagation delay) or permanent (e.g., AAS token
+    invalidated by Google).
 
     Attributes:
-        status: HTTP status code (typically 401 or 403).
+        status: HTTP status code. Any non-retryable 4xx: 401 and 403 name the
+            credentials, 400, 404, 405, 409 and 422 name a rejected request.
         detail: Human-readable error detail.
         is_permanent: If True, re-authentication is required. If False,
             the error may resolve on its own in subsequent poll cycles.
@@ -1384,7 +1390,9 @@ async def async_nova_request(  # noqa: PLR0913,PLR0912,PLR0915
 
     Raises:
         ValueError: if the hex_payload is invalid or username is unavailable.
-        NovaAuthError: on 4xx client errors.
+        NovaAuthError: on non-retryable 4xx client errors; use
+            is_credential_rejection to tell a credential rejection from a
+            rejected request.
         NovaRateLimitError: on 429 errors after all retries.
         NovaHTTPError: on 5xx server errors after all retries.
         NovaError: on other unrecoverable errors like network issues after retries.
@@ -1794,6 +1802,17 @@ async def async_nova_request(  # noqa: PLR0913,PLR0912,PLR0915
                     # Non-retryable errors: distinguish between client (4xx) and server (5xx)
                     # - 4xx: Client errors (e.g., 403 Forbidden, 404 Not Found) → NovaAuthError
                     # - 5xx: Server errors (e.g., 501 Not Implemented, 505) → NovaHTTPError
+                    #
+                    # This raise is why the type name is wider than its content:
+                    # 400, 404, 405, 409 and 422 all leave here as "auth".
+                    # Consumers MUST call is_credential_rejection instead of
+                    # reading the type. Splitting a separate exception class off
+                    # here would let the typing carry the truth, but it is a
+                    # behaviour change of its own: a new class is uncaught at
+                    # every site that catches this one, and each of those eight
+                    # try blocks has a broad `except Exception` below it, so the
+                    # new class would be swallowed under a name that hides the
+                    # status. Needs an exhaustiveness test first.
                     if status >= HTTP_INTERNAL_SERVER_ERROR:
                         raise NovaHTTPError(status, text_snippet)
                     raise NovaAuthError(status, text_snippet)

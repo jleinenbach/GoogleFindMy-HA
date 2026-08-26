@@ -413,7 +413,12 @@ class TestAsyncLocateDeviceNovaAuthClassification:
     async def test_manual_locate_client_error_is_still_recorded(
         self, coord: LocateStub
     ) -> None:
-        """Quiet is not invisible: a silent {} would be worse than today."""
+        """This branch keeps the failure on record; a silent {} would be worse.
+
+        Same scope caveat as the poll-cycle counterpart: api.py returns {} for
+        such a status, so a real manual locate on a deleted tracker takes the
+        success path and records nothing. The assertion is about the branch.
+        """
         coord.api.async_get_device_location.side_effect = NovaAuthError(404, "gone")
 
         await coord.async_locate_device("dev-1")

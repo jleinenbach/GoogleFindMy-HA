@@ -2098,9 +2098,23 @@ class PollingOperations(_MixinBase):
                                 device=dev_name,
                             )
                             cycle_failed = True
-                            # Deliberately NOT touched: the transient-auth counter
-                            # is neither raised nor reset. A client rejection says
-                            # nothing about the credentials in either direction.
+                            # Deliberately NOT touched HERE: the transient-auth
+                            # counter is neither raised nor reset. A client
+                            # rejection says nothing about the credentials in
+                            # either direction.
+                            # Read that narrowly. api.async_get_device_location
+                            # returns {} for such a status, so in production the
+                            # device takes the success path above instead, which
+                            # DOES reset the counter and clear the auth state
+                            # before it ever looks at whether the result is
+                            # empty. That reset predates this branch (every 5xx
+                            # and 429 already reaches it), but a client rejection
+                            # newly reaches it too, and it can mask a genuine 401
+                            # on another tracker in the same cycle. Deciding what
+                            # an empty result may prove about credentials is a
+                            # behaviour change of its own and is tracked
+                            # separately -- do not read this branch as if it were
+                            # already done.
                             if last_exception is None:
                                 last_exception = transient_err
                             continue

@@ -871,7 +871,14 @@ async def test_poll_cycle_client_error_never_starts_reauth() -> None:
 
 @pytest.mark.asyncio
 async def test_poll_cycle_client_error_is_recorded_as_an_ordinary_error() -> None:
-    """Quiet is not the same as invisible: the skip stays in the diagnostics."""
+    """Quiet is not the same as invisible: this branch keeps the skip on record.
+
+    Scope, stated so the assertion is not read as more than it is: api.py
+    returns {} for such a status, so in production the device takes the poll
+    loop's empty-result path, which calls no note_error at all. What this pins
+    is that the branch does not degrade into a silent skip -- not that a
+    rejected device shows up in the diagnostics today. It does not.
+    """
     coordinator = _polling_coordinator({}, _TrackingFilter(), {})
     coordinator.api = _DecryptFailAPI(NovaAuthError(404, "gone"))
     coordinator.config_entry.async_start_reauth = MagicMock()

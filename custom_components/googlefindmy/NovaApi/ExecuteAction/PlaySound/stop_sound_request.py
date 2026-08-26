@@ -178,7 +178,9 @@ async def async_submit_stop_sound_request(  # noqa: PLR0913
         # Propagate all errors to caller for proper handling and logging.
         # - CancelledError: Must propagate for proper task cancellation.
         # - NovaAuthPermanentError: Permanent auth failure - immediate reauth required.
-        # - NovaAuthError: Transient auth error - let coordinator track consecutive failures.
+        # - NovaAuthError: every non-retryable 4xx, not only a credential
+        #   rejection; api.py asks nova_request.is_credential_rejection and
+        #   maps the rest to REJECTED_SERVER. Nothing here feeds a counter.
         # - NovaRateLimitError/NovaHTTPError/ClientError: Transient errors with details.
         raise
 

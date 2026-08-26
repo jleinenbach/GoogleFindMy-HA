@@ -12,12 +12,17 @@ Token/Auth handling (Step 5.1-D):
 - **401/403 (auth failures)** raised by Nova helpers are mapped to
   `homeassistant.exceptions.ConfigEntryAuthFailed` so the *coordinator* can
   trigger HA’s re-auth UX and Repairs issue workflow.
-  Known gap, stated so it is not mistaken for the current behaviour: the device
-  list and location handlers still key off the `NovaAuthError` TYPE, which the
-  transport also raises for non-credential 4xx (400, 404, 405, 409, 422), so a
-  deleted device can currently reach the re-auth flow. The sound handlers were
-  narrowed to the status; see `_classify_nova_auth_error`. Extending that to the
-  other two is a behaviour change of its own and is tracked separately.
+  Every handler branches on the STATUS, via
+  `NovaApi.nova_request.is_credential_rejection`: permanent first, then 401/403,
+  an unreadable status keeps the conservative verdict. That matters because the
+  transport raises `NovaAuthError` for every non-retryable 4xx (400, 404, 405,
+  409, 422 included), so a type check reads "device not found" as "your sign-in
+  expired". A non-credential rejection therefore leaves the device list as
+  `UpdateFailed` and the location request as an empty result, and neither starts
+  a re-auth flow. `_classify_nova_auth_error` is the sound-path adapter over the
+  same predicate. Still open, stated so it is not mistaken for coverage: the
+  transport keeps raising a type named "auth" for all of them, so a future
+  handler that reads the type instead of the predicate repeats the defect.
 - **gpsoauth/ADM failures** (e.g., "BadAuthentication", "Missing 'Token' in gpsoauth")
   are normalized to `ConfigEntryAuthFailed` as well, even if they bubble up as a
   `RuntimeError`/`ValueError` rather than a `NovaAuthError`.
@@ -1265,8 +1270,14 @@ class GoogleFindMyAPI:
         relevant location record from the response.
 
         **Auth mapping (5.1-D):**
-            - If `NovaAuthError` or `NovaHTTPError` with status 401/403 occurs,
-              raise `ConfigEntryAuthFailed` so the coordinator can start re-auth.
+            - A credential rejection raises `ConfigEntryAuthFailed` so the
+              coordinator can start re-auth. That means a `NovaHTTPError` with
+              status 401/403, or a `NovaAuthError` for which
+              `nova_request.is_credential_rejection` holds (permanent, 401, 403,
+              or no readable status).
+            - Any OTHER `NovaAuthError` is the server refusing the request, not
+              the credentials -- a device removed from the account, a malformed
+              body -- and returns `{}` like a 5xx does.
             - Rate limit / other server issues are treated as transient and return `{}`.
 
         Args:
