@@ -1325,6 +1325,25 @@ class TestAsyncPlaySoundErrorMapping:
         ("raised", "expected"),
         [
             (NovaAuthError(401, "expired"), SoundDispatchOutcome.REJECTED_AUTH),
+            (NovaAuthError(403, "forbidden"), SoundDispatchOutcome.REJECTED_AUTH),
+            # NovaAuthError is raised for EVERY non-retryable 4xx, not only for
+            # credential rejections: nova_request.py names "403 Forbidden, 404
+            # Not Found" in the very comment above the raise, and
+            # HTTP_RETRY_ELIGIBLE holds no 4xx besides 408 and 429. A missing
+            # device or a malformed request must therefore not be reported as
+            # REJECTED_AUTH, whose contract is "refused on credentials".
+            (
+                NovaAuthError(404, "no such device"),
+                SoundDispatchOutcome.REJECTED_SERVER,
+            ),
+            (NovaAuthError(400, "bad request"), SoundDispatchOutcome.REJECTED_SERVER),
+            # Permanence outranks the status code: the subclass exists to say
+            # "re-authentication is definitively required", so it stays AUTH
+            # even if it ever carries a status outside 401/403.
+            (
+                api_module.NovaAuthPermanentError(404, "aas rejected"),
+                SoundDispatchOutcome.REJECTED_AUTH,
+            ),
             (NovaHTTPError(403, "forbidden"), SoundDispatchOutcome.REJECTED_AUTH),
             (NovaHTTPError(503, "unavailable"), SoundDispatchOutcome.REJECTED_SERVER),
             (NovaRateLimitError("slow down"), SoundDispatchOutcome.REJECTED_RATE_LIMIT),
@@ -1355,6 +1374,87 @@ class TestAsyncPlaySoundErrorMapping:
         self._patch_generate_uuid(monkeypatch)
         self._patch_submit(monkeypatch, None, raises=raised)
         assert run_coro(api.async_play_sound("d")).outcome is expected
+
+    def test_a_non_auth_4xx_does_not_log_an_authentication_failure(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """The log line IS the user-visible effect of this classification.
+
+        Both outcomes reach the same ``StopSoundOutcome.FAILED`` and the same
+        ``stop_sound_rejected`` message downstream, so nothing but the log tells
+        the user whether to check their sign-in or their device list. Pinning
+        only the returned enum would leave the whole point of the split
+        unguarded: the branch could collapse back to a single
+        ``_LOGGER.error("Authentication failed ...")`` with every enum
+        assertion still green. Mirrors the "assert both the warning log and the
+        exception" rule in ``tests/AGENTS.md``.
+        """
+
+        api = self._api_with_token(monkeypatch)
+        self._patch_generate_uuid(monkeypatch)
+        self._patch_submit(monkeypatch, None, raises=NovaAuthError(404, "gone"))
+        with caplog.at_level(logging.DEBUG):
+            assert (
+                run_coro(api.async_play_sound("d")).outcome
+                is SoundDispatchOutcome.REJECTED_SERVER
+            )
+        assert "Client error (HTTP 404)" in caplog.text
+        assert "Authentication failed" not in caplog.text
+        # The level is part of the user-visible effect: HA's log panel and its
+        # error counter treat ERROR differently from WARNING, so a silent
+        # promotion would put a deleted device back among the alarms.
+        levels = {
+            r.levelno for r in caplog.records if "Client error (HTTP 404)" in r.message
+        }
+        assert levels == {logging.WARNING}
+
+    def test_a_credential_rejection_still_logs_an_authentication_failure(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """The counterpart: 403 must keep naming credentials.
+
+        Without this row the previous test is satisfied by a branch that never
+        says "Authentication failed" at all, which would bury a real expired
+        sign-in instead of the reverse.
+        """
+
+        api = self._api_with_token(monkeypatch)
+        self._patch_generate_uuid(monkeypatch)
+        self._patch_submit(monkeypatch, None, raises=NovaAuthError(403, "denied"))
+        with caplog.at_level(logging.DEBUG):
+            assert (
+                run_coro(api.async_play_sound("d")).outcome
+                is SoundDispatchOutcome.REJECTED_AUTH
+            )
+        assert "Authentication failed" in caplog.text
+        assert "Client error (HTTP 403)" not in caplog.text
+        levels = {
+            r.levelno for r in caplog.records if "Authentication failed" in r.message
+        }
+        assert levels == {logging.ERROR}
+
+    def test_auth_error_without_a_readable_status_stays_auth(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A NovaAuthError whose status cannot be read keeps the old verdict.
+
+        Every real instance carries one (the constructor takes it positionally),
+        so this is the test-double and future-subclass case. The conservative
+        reading of a type named "auth" is auth, and pinning it here keeps the
+        fallback from being a claim in a comment.
+        """
+
+        api = self._api_with_token(monkeypatch)
+        self._patch_generate_uuid(monkeypatch)
+        err = NovaAuthError(404, "double without a status")
+        # delattr, not `= None`: the annotation says int, and removing the
+        # instance attribute is exactly what makes getattr fall back.
+        delattr(err, "status")
+        self._patch_submit(monkeypatch, None, raises=err)
+        assert (
+            run_coro(api.async_play_sound("d")).outcome
+            is SoundDispatchOutcome.REJECTED_AUTH
+        )
 
     def test_missing_action_token_is_not_sent(self) -> None:
         """No FCM token means no transport was used, so nobody may be blamed."""
@@ -1539,6 +1639,18 @@ class TestAsyncStopSoundErrorMapping:
         ("exc", "expected"),
         [
             (NovaAuthError(401, "auth"), SoundDispatchOutcome.REJECTED_AUTH),
+            (NovaAuthError(403, "forbidden"), SoundDispatchOutcome.REJECTED_AUTH),
+            # Same rule as on the play path: the exception type is wider than
+            # its name, so the status decides.
+            (
+                NovaAuthError(404, "no such device"),
+                SoundDispatchOutcome.REJECTED_SERVER,
+            ),
+            (NovaAuthError(400, "bad request"), SoundDispatchOutcome.REJECTED_SERVER),
+            (
+                api_module.NovaAuthPermanentError(404, "aas rejected"),
+                SoundDispatchOutcome.REJECTED_AUTH,
+            ),
             (NovaHTTPError(403, "http"), SoundDispatchOutcome.REJECTED_AUTH),
             (NovaHTTPError(500, "http"), SoundDispatchOutcome.REJECTED_SERVER),
             (NovaRateLimitError("rate"), SoundDispatchOutcome.REJECTED_RATE_LIMIT),
@@ -1568,3 +1680,55 @@ class TestAsyncStopSoundErrorMapping:
         api = self._api_with_token(monkeypatch)
         self._patch_submit(monkeypatch, None, raises=exc)
         assert run_coro(api.async_stop_sound("d")) is expected
+
+    def test_a_non_auth_4xx_does_not_log_an_authentication_failure(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Same log guard as on the play path, and for the same reason."""
+
+        api = self._api_with_token(monkeypatch)
+        self._patch_submit(monkeypatch, None, raises=NovaAuthError(404, "gone"))
+        with caplog.at_level(logging.DEBUG):
+            assert (
+                run_coro(api.async_stop_sound("d"))
+                is SoundDispatchOutcome.REJECTED_SERVER
+            )
+        assert "Client error (HTTP 404)" in caplog.text
+        assert "Authentication failed" not in caplog.text
+        # The level is part of the user-visible effect: HA's log panel and its
+        # error counter treat ERROR differently from WARNING, so a silent
+        # promotion would put a deleted device back among the alarms.
+        levels = {
+            r.levelno for r in caplog.records if "Client error (HTTP 404)" in r.message
+        }
+        assert levels == {logging.WARNING}
+
+    def test_a_credential_rejection_still_logs_an_authentication_failure(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """The counterpart on the stop path."""
+
+        api = self._api_with_token(monkeypatch)
+        self._patch_submit(monkeypatch, None, raises=NovaAuthError(403, "denied"))
+        with caplog.at_level(logging.DEBUG):
+            assert (
+                run_coro(api.async_stop_sound("d"))
+                is SoundDispatchOutcome.REJECTED_AUTH
+            )
+        assert "Authentication failed" in caplog.text
+        assert "Client error (HTTP 403)" not in caplog.text
+        levels = {
+            r.levelno for r in caplog.records if "Authentication failed" in r.message
+        }
+        assert levels == {logging.ERROR}
+
+    def test_auth_error_without_a_readable_status_stays_auth(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Same fallback as on the play path, pinned on both sides."""
+
+        api = self._api_with_token(monkeypatch)
+        err = NovaAuthError(404, "double without a status")
+        delattr(err, "status")
+        self._patch_submit(monkeypatch, None, raises=err)
+        assert run_coro(api.async_stop_sound("d")) is SoundDispatchOutcome.REJECTED_AUTH

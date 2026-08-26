@@ -504,6 +504,9 @@ STOP_OUTCOME_CASES: list[tuple[SoundDispatchOutcome, StopSoundOutcome, bool, boo
     (SoundDispatchOutcome.REJECTED_AUTH, StopSoundOutcome.FAILED, False, False),
     (SoundDispatchOutcome.REJECTED_RATE_LIMIT, StopSoundOutcome.FAILED, False, False),
     (SoundDispatchOutcome.REJECTED_SERVER, StopSoundOutcome.FAILED, False, False),
+    # NOT_SENT is FAILED, not SUPPRESSED: it never reached the wire, but a
+    # receiver that is up and yields no action token is not answered by
+    # waiting. StopSoundOutcome.FAILED states the rule; this row enforces it.
     (SoundDispatchOutcome.NOT_SENT, StopSoundOutcome.FAILED, False, False),
     (SoundDispatchOutcome.INTERNAL_ERROR, StopSoundOutcome.FAILED, False, False),
     (SoundDispatchOutcome.TRANSPORT_FAILED, StopSoundOutcome.FAILED, True, False),
@@ -580,10 +583,11 @@ class TestAsyncStopSoundGating:
     ) -> None:
         """A stop the transport refused must not claim a local, transient cause.
 
-        ``api.async_stop_sound`` swallows every exception and returns False, so
-        auth failures, 401/403, server errors, rate limits and network errors
-        all arrive as a plain False. Reporting them as SUPPRESSED would tell a
-        user with an expired sign-in to wait a moment.
+        ``api.async_stop_sound`` swallows every exception and returns a
+        ``SoundDispatchOutcome`` instead of raising, so auth failures, 401/403,
+        server errors, rate limits and network errors all arrive as a
+        non-ACCEPTED value here. Reporting them as SUPPRESSED would tell a user
+        with an expired sign-in to wait a moment.
         """
 
         coord.api.async_stop_sound.return_value = SoundDispatchOutcome.TRANSPORT_FAILED

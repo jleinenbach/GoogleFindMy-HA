@@ -420,10 +420,11 @@ class TestResolverDispatch:
     ) -> None:
         """A refused stop must not be reported as a local, transient condition.
 
-        SUPPRESSED means "we never sent it, retry shortly". FAILED means the
-        transport refused it, most often because the sign-in expired. Sharing
-        one message would give the wrong advice to whichever half is not the
-        actual cause.
+        SUPPRESSED means "the push transport is not up yet, retry shortly".
+        FAILED means the attempt was made and failed, most often because the
+        sign-in expired. Sharing one message would give the wrong advice to
+        whichever half is not the actual cause. Note that "was it sent" is not
+        the criterion -- SoundDispatchOutcome.NOT_SENT is a FAILED as well.
         """
 
         coord = SimpleNamespace(

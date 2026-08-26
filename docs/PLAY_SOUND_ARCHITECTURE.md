@@ -163,9 +163,9 @@ knowledge across the boundary instead of collapsing it into a bool:
 | Outcome | The server answered | May a caller arm a push cooldown |
 |---|---|---|
 | `ACCEPTED` | yes, HTTP 200 | no |
-| `REJECTED_AUTH` | yes, on credentials | no |
+| `REJECTED_AUTH` | yes, on credentials (HTTP 401/403, or a permanent auth error) | no |
 | `REJECTED_RATE_LIMIT` | yes, HTTP 429 | no |
-| `REJECTED_SERVER` | yes, for any other reason | no |
+| `REJECTED_SERVER` | yes, for any other reason (5xx, a Nova logic error, and the non-credential 4xx such as 400/404) | no |
 | `TRANSPORT_FAILED` | no usable answer was obtained | **yes** (see the stop-path qualifier below) |
 | `NOT_SENT` | no transport was used at all | no |
 | `INTERNAL_ERROR` | our own defect or a broken contract | no |

@@ -941,10 +941,13 @@ class LocateOperations(_MixinBase):
             A :class:`StopSoundOutcome`. The state space is four-valued on
             purpose: ``CANCELLED`` (submitted with a correlated cancel key),
             ``UNCORRELATED`` (submitted without one, so nothing proves an
-            effect), ``SUPPRESSED`` (never sent by this integration) and
-            ``FAILED`` (handed to the transport and not accepted). A bool cannot
-            carry the middle state, and collapsing it into success is what
-            reported a stop for a ring that kept playing (BSkando#195).
+            effect), ``SUPPRESSED`` (declined here because the push transport is
+            not up yet, so waiting is the remedy) and ``FAILED`` (attempted and
+            unsuccessful, which includes the missing action token that never
+            reaches the wire). A bool cannot carry the middle state, and
+            collapsing it into success is what reported a stop for a ring that
+            kept playing (BSkando#195). The two failure states split by REMEDY,
+            not by distance travelled; see ``StopSoundOutcome``.
         """
         # Blank means "no opinion" -- an optional field left empty, a template
         # that rendered to nothing -- so it must fall through to the cached key

@@ -12,6 +12,12 @@ Token/Auth handling (Step 5.1-D):
 - **401/403 (auth failures)** raised by Nova helpers are mapped to
   `homeassistant.exceptions.ConfigEntryAuthFailed` so the *coordinator* can
   trigger HA’s re-auth UX and Repairs issue workflow.
+  Known gap, stated so it is not mistaken for the current behaviour: the device
+  list and location handlers still key off the `NovaAuthError` TYPE, which the
+  transport also raises for non-credential 4xx (400, 404, 405, 409, 422), so a
+  deleted device can currently reach the re-auth flow. The sound handlers were
+  narrowed to the status; see `_classify_nova_auth_error`. Extending that to the
+  other two is a behaviour change of its own and is tracked separately.
 - **gpsoauth/ADM failures** (e.g., "BadAuthentication", "Missing 'Token' in gpsoauth")
   are normalized to `ConfigEntryAuthFailed` as well, even if they bubble up as a
   `RuntimeError`/`ValueError` rather than a `NovaAuthError`.
@@ -103,6 +109,40 @@ def _short_err(e: Exception | str) -> str:
     if len(msg) > _MAX_ERR_CHARS:
         return msg[: _MAX_ERR_CHARS - 3] + "..."
     return msg
+
+
+def _classify_nova_auth_error(err: NovaAuthError) -> SoundDispatchOutcome:
+    """Name who refused when the transport raised ``NovaAuthError``.
+
+    The exception type is wider than its name. ``nova_request`` raises it for
+    EVERY non-retryable 4xx, not only for credential rejections -- the comment
+    above that raise names "403 Forbidden, 404 Not Found" itself, and
+    ``HTTP_RETRY_ELIGIBLE`` holds no 4xx besides 408 and 429, so 400, 404, 405,
+    409 and 422 all arrive here. A 401 that survived the refresh sequence is
+    raised separately with ``is_permanent=True``, which leaves 403 as the only
+    plain credential rejection reaching this handler.
+
+    Reading the type alone therefore told a user with a deleted device to check
+    their sign-in. ``REJECTED_AUTH`` is for a refusal "on credentials: HTTP 401
+    or 403", so a missing device or a malformed request belongs in
+    ``REJECTED_SERVER``, which names the non-credential client rejections
+    alongside the 5xx. Both docstrings state the criterion as the STATUS, not
+    the exception type; keep the three in step when any of them moves.
+
+    Permanence outranks the status: ``NovaAuthPermanentError`` exists to say
+    "re-authentication is definitively required", so it stays ``REJECTED_AUTH``
+    even if it ever carries a status outside 401/403.
+
+    An error without a readable status keeps the old classification. That case
+    is a test double or a future subclass, not an observed server answer, and
+    the conservative reading of a type named "auth" is auth.
+    """
+    if getattr(err, "is_permanent", False):
+        return SoundDispatchOutcome.REJECTED_AUTH
+    status = getattr(err, "status", None)
+    if status is None or status in (401, 403):
+        return SoundDispatchOutcome.REJECTED_AUTH
+    return SoundDispatchOutcome.REJECTED_SERVER
 
 
 def _play_result_after_failure(
@@ -1611,9 +1651,13 @@ class GoogleFindMyAPI:
         """Send a 'Play Sound' command to a device (async path for HA).
 
         Auth mapping note:
-            If an auth error occurs here, we log and return REJECTED_AUTH (service
-            call context), since re-auth is primarily driven by the coordinator’s
-            data update path.
+            A credential rejection here is logged and returned as REJECTED_AUTH
+            (service call context), since re-auth is primarily driven by the
+            coordinator’s data update path. "Credential rejection" means the
+            STATUS says so (401/403) or the error is flagged permanent, not
+            merely that the transport raised ``NovaAuthError`` -- that type also
+            carries 400, 404 and the other non-retryable 4xx, which return
+            REJECTED_SERVER. See ``_classify_nova_auth_error``.
 
         Args:
             device_id: The canonical ID of the device.
@@ -1717,22 +1761,30 @@ class GoogleFindMyAPI:
             )
 
         except NovaAuthError as err:
-            _LOGGER.error(
-                "Authentication failed while playing sound on %s: %s",
-                device_id,
-                _short_err(err),
-            )
+            # The server answered and refused: never a transport failure, so an
+            # expired sign-in is not hidden behind a self-clearing 90-second
+            # cooldown. WHICH refusal it was is decided by the status, not by
+            # the exception type; see _classify_nova_auth_error.
+            outcome = _classify_nova_auth_error(err)
+            if outcome is SoundDispatchOutcome.REJECTED_AUTH:
+                _LOGGER.error(
+                    "Authentication failed while playing sound on %s: %s",
+                    device_id,
+                    _short_err(err),
+                )
+            else:
+                _LOGGER.warning(
+                    "Client error (HTTP %s) while playing sound on %s: %s",
+                    getattr(err, "status", "unknown"),
+                    device_id,
+                    _short_err(err),
+                )
             # A raised error is never an acceptance (the submitter returns a tuple
             # only on a 200). Keep the cancel key only if an earlier attempt
-            # latched dispatch (err.dispatched): a pure 401/403 rejection with no
+            # latched dispatch (err.dispatched): a pure rejection with no
             # wire-reaching attempt drops it, so it can never overwrite a
             # previous, possibly still-ringing play's valid key.
-            # The server answered and refused: REJECTED_AUTH, not a transport
-            # failure. An expired sign-in must not be hidden behind a self-clearing
-            # 90-second cooldown.
-            return _play_result_after_failure(
-                err, request_uuid, SoundDispatchOutcome.REJECTED_AUTH
-            )
+            return _play_result_after_failure(err, request_uuid, outcome)
 
         except NovaHTTPError as err:
             # Non-acceptance (401/403/5xx/other): drop the key UNLESS an earlier
@@ -1861,9 +1913,13 @@ class GoogleFindMyAPI:
         """Send a 'Stop Sound' command to a device (async path for HA).
 
         Auth mapping note:
-            If an auth error occurs here, we log and return REJECTED_AUTH (service
-            call context), since re-auth is primarily driven by the coordinator’s
-            data update path.
+            A credential rejection here is logged and returned as REJECTED_AUTH
+            (service call context), since re-auth is primarily driven by the
+            coordinator’s data update path. "Credential rejection" means the
+            STATUS says so (401/403) or the error is flagged permanent, not
+            merely that the transport raised ``NovaAuthError`` -- that type also
+            carries 400, 404 and the other non-retryable 4xx, which return
+            REJECTED_SERVER. See ``_classify_nova_auth_error``.
 
         Args:
             device_id: The canonical ID of the device.
@@ -1961,14 +2017,24 @@ class GoogleFindMyAPI:
             return SoundDispatchOutcome.INTERNAL_ERROR
 
         except NovaAuthError as err:
-            _LOGGER.error(
-                "Authentication failed while stopping sound on %s: %s",
-                device_id,
-                _short_err(err),
-            )
-            # The server answered and refused on credentials. The transport
-            # worked, so no cooldown may be armed for this.
-            return SoundDispatchOutcome.REJECTED_AUTH
+            # The server answered and refused. The transport worked, so no
+            # cooldown may be armed for this. Same rule as on the play path:
+            # the status names the refusal, not the exception type.
+            outcome = _classify_nova_auth_error(err)
+            if outcome is SoundDispatchOutcome.REJECTED_AUTH:
+                _LOGGER.error(
+                    "Authentication failed while stopping sound on %s: %s",
+                    device_id,
+                    _short_err(err),
+                )
+            else:
+                _LOGGER.warning(
+                    "Client error (HTTP %s) while stopping sound on %s: %s",
+                    getattr(err, "status", "unknown"),
+                    device_id,
+                    _short_err(err),
+                )
+            return outcome
 
         except NovaHTTPError as err:
             if getattr(err, "status", None) in (401, 403):

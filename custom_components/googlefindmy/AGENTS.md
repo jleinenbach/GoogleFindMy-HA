@@ -101,6 +101,17 @@ When a location decrypt/FCM callback encounters `SpotApiEmptyResponseError`, sto
 re-raise it after the waiter resumes so the coordinator can translate it into `ConfigEntryAuthFailed`. This keeps invalid
 sessions flowing into Home Assistant's reauthentication UI instead of being swallowed in background threads.
 
+Classify an auth rejection by the HTTP **status**, never by the exception type. `NovaAuthError` is raised for every
+non-retryable 4xx (`nova_request.py` raises it for 400, 404, 405, 409, 422 as well; `HTTP_RETRY_ELIGIBLE` holds no 4xx
+besides 408 and 429), so a type check reads "device not found" as "your sign-in expired". A 401 that survived the refresh
+sequence arrives flagged `is_permanent=True`, which leaves 403 as the only plain credential rejection a handler sees.
+`api._classify_nova_auth_error` is the shared predicate: permanent first, then 401/403, everything else is a server-side
+rejection. Extent today, stated so it is not mistaken for coverage: the two sound handlers use it; the device-list handler
+(`api.py`, `except NovaAuthError` before `NovaProtobufDecodeError`), the location handler, `coordinator/polling.py` and
+`coordinator/locate.py` still key off the type, and each of those turns a 404 into `ConfigEntryAuthFailed` or a reauth
+countdown. Narrowing them is a behaviour change that needs its own regression test, not a drive-by edit; do not assume a
+green suite proves the rest of the tree already follows this rule.
+
 ### Import deferral reminder
 
 Heavyweight runtime dependencies (for example, browser drivers such as `undetected_chromedriver`) must be imported lazily inside
