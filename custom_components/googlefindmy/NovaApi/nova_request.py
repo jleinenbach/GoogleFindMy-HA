@@ -422,6 +422,50 @@ class NovaAuthPermanentError(NovaAuthError):
         super().__init__(status, detail, is_permanent=True)
 
 
+_CREDENTIAL_REJECTION_STATUSES = frozenset({401, 403})
+
+
+def is_credential_rejection(err: NovaAuthError) -> bool:
+    """Answer whether this NovaAuthError really names a credential problem.
+
+    The type is wider than its name. This module raises it for EVERY
+    non-retryable 4xx (see the raise below the HTTP_RETRY_ELIGIBLE branch,
+    whose own comment names "403 Forbidden, 404 Not Found"), and
+    HTTP_RETRY_ELIGIBLE holds no 4xx besides 408 and 429, so 400, 404, 405,
+    409 and 422 all arrive as "auth". A 401 that survived the refresh
+    sequence is raised separately with is_permanent=True, which leaves 403
+    as the only plain credential rejection a handler sees.
+
+    Reading the type alone therefore tells a user with a deleted device to
+    check their sign-in. Every handler in this integration branches on THIS
+    predicate instead; api._classify_nova_auth_error is its sound-path
+    adapter. Keep them in step when either moves.
+
+    Permanence outranks the status: NovaAuthPermanentError exists to say
+    "re-authentication is definitively required", so it stays a credential
+    rejection whatever status it carries.
+
+    An error without a readable status keeps the conservative verdict. That
+    case is a test double or a future subclass, not an observed server
+    answer, and the conservative reading of a type named "auth" is auth.
+
+    Args:
+        err: The error the transport raised.
+
+    Returns:
+        True when the refusal names the credentials (permanent, 401, 403, or
+        no readable status), False for every other client rejection.
+
+    Example:
+        >>> is_credential_rejection(NovaAuthError(404, "gone"))
+        False
+    """
+    if getattr(err, "is_permanent", False):
+        return True
+    status = getattr(err, "status", None)
+    return status is None or status in _CREDENTIAL_REJECTION_STATUSES
+
+
 class NovaRateLimitError(NovaError):
     """Raised on 429 rate-limiting errors after retries."""
 

@@ -1043,6 +1043,77 @@ class TestAsyncBasicDeviceListErrorMapping:
         with pytest.raises(UpdateFailed):
             run_coro(api.async_get_basic_device_list())
 
+    def test_a_non_credential_4xx_on_the_device_list_is_not_a_reauth(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A rejected REQUEST must not read as a rejected sign-in.
+
+        The transport raises NovaAuthError for every non-retryable 4xx, so a
+        device removed from the account arrived here as "your sign-in expired"
+        and produced an immediate re-auth prompt with no threshold in front of
+        it. It takes the same exit a 5xx takes one branch up.
+        """
+
+        self._patch_request(monkeypatch, NovaAuthError(404, "gone"))
+        api = _make_api_with_session()
+        with pytest.raises(UpdateFailed) as excinfo:
+            run_coro(api.async_get_basic_device_list())
+        assert not hasattr(excinfo.value, "reauth_code")
+
+    def test_a_non_credential_4xx_on_the_device_list_does_not_log_an_authentication_failure(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        self._patch_request(monkeypatch, NovaAuthError(404, "gone"))
+        api = _make_api_with_session()
+        with caplog.at_level(logging.DEBUG), pytest.raises(UpdateFailed):
+            run_coro(api.async_get_basic_device_list())
+        assert "Device list rejected by the server (HTTP 404)" in caplog.text
+        assert "Authentication failed" not in caplog.text
+        # The level is part of the user-visible effect: HA's log panel and its
+        # error counter treat ERROR differently from WARNING, so a silent
+        # promotion would put a deleted device back among the alarms.
+        levels = {
+            r.levelno
+            for r in caplog.records
+            if "Device list rejected by the server (HTTP 404)" in r.message
+        }
+        assert levels == {logging.WARNING}
+
+    def test_a_credential_rejection_on_the_device_list_still_starts_reauth(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The counterpart: 403 must keep reaching the re-auth flow.
+
+        Without this row the previous two are satisfied by a branch that never
+        raises ConfigEntryAuthFailed at all, which would bury a real expired
+        sign-in instead of the reverse.
+        """
+
+        self._patch_request(monkeypatch, NovaAuthError(403, "denied"))
+        api = _make_api_with_session()
+        with pytest.raises(ConfigEntryAuthFailed) as excinfo:
+            run_coro(api.async_get_basic_device_list())
+        assert (
+            getattr(excinfo.value, "reauth_code", None)
+            is ReauthReasonCode.NOVA_AUTH_FAILED
+        )
+
+    def test_the_sound_classifier_follows_the_shared_predicate(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """_classify_nova_auth_error must READ the predicate, not re-derive it.
+
+        A second copy of the status test is exactly how the sound handlers and
+        the four other handlers drifted apart in the first place. Patching the
+        predicate to lie proves the classifier asks it.
+        """
+
+        monkeypatch.setattr(api_module, "is_credential_rejection", lambda _e: False)
+        assert (
+            api_module._classify_nova_auth_error(NovaAuthError(401, "x"))
+            is SoundDispatchOutcome.REJECTED_SERVER
+        )
+
 
 class TestAsyncDeviceLocationErrorMapping:
     """Each documented exception class for the location request branch."""

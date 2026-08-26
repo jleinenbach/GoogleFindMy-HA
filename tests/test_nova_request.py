@@ -31,11 +31,13 @@ from custom_components.googlefindmy.NovaApi.ListDevices.nbe_list_devices import 
 from custom_components.googlefindmy.NovaApi.nova_request import (
     AsyncTTLPolicy,
     NovaAuthError,
+    NovaAuthPermanentError,
     NovaError,
     NovaHTTPError,
     NovaRateLimitError,
     TTLPolicy,
     async_nova_request,
+    is_credential_rejection,
     register_cache_provider,
     unregister_cache_provider,
 )
@@ -3094,3 +3096,46 @@ async def test_both_adm_and_aas_tokens_have_min_ttl_protection() -> None:
             await cache.close()
 
     await _run()
+
+
+class TestIsCredentialRejection:
+    """The shared status criterion every NovaAuthError handler reads.
+
+    The type covers every non-retryable 4xx, so only these rows may read as
+    "your sign-in expired"; every other client rejection is the server
+    refusing the REQUEST, not the credentials.
+    """
+
+    @pytest.mark.parametrize(
+        ("status", "expected"),
+        [
+            (401, True),
+            (403, True),
+            (400, False),
+            (404, False),
+            (405, False),
+            (409, False),
+            (422, False),
+        ],
+    )
+    def test_the_status_alone_decides_for_a_plain_error(
+        self, status: int, expected: bool
+    ) -> None:
+        assert is_credential_rejection(NovaAuthError(status, "detail")) is expected
+
+    def test_permanence_outranks_a_non_credential_status(self) -> None:
+        """is_permanent means "re-authentication is definitively required"."""
+        assert is_credential_rejection(NovaAuthError(404, "perm", is_permanent=True))
+
+    def test_the_permanent_subclass_stays_a_credential_rejection(self) -> None:
+        assert is_credential_rejection(NovaAuthPermanentError(404, "aas rejected"))
+
+    def test_an_unreadable_status_keeps_the_conservative_verdict(self) -> None:
+        """A test double or a future subclass reads as auth, not as client error.
+
+        delattr, not ``= None``: the annotation says int, and removing the
+        instance attribute is exactly what makes getattr fall back.
+        """
+        err = NovaAuthError(404, "double without a status")
+        delattr(err, "status")
+        assert is_credential_rejection(err)

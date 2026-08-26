@@ -76,6 +76,7 @@ from .NovaApi.nova_request import (
     NovaLogicError,
     NovaProtobufDecodeError,
     NovaRateLimitError,
+    is_credential_rejection,
 )
 from .NovaApi.util import generate_random_uuid
 from .ProtoDecoders.decoder import (
@@ -114,33 +115,18 @@ def _short_err(e: Exception | str) -> str:
 def _classify_nova_auth_error(err: NovaAuthError) -> SoundDispatchOutcome:
     """Name who refused when the transport raised ``NovaAuthError``.
 
-    The exception type is wider than its name. ``nova_request`` raises it for
-    EVERY non-retryable 4xx, not only for credential rejections -- the comment
-    above that raise names "403 Forbidden, 404 Not Found" itself, and
-    ``HTTP_RETRY_ELIGIBLE`` holds no 4xx besides 408 and 429, so 400, 404, 405,
-    409 and 422 all arrive here. A 401 that survived the refresh sequence is
-    raised separately with ``is_permanent=True``, which leaves 403 as the only
-    plain credential rejection reaching this handler.
+    The criterion lives in ``nova_request.is_credential_rejection``; this is
+    only its sound-path adapter. That predicate carries the full reasoning:
+    the type is wider than its name, permanence outranks the status, and an
+    unreadable status keeps the conservative verdict.
 
-    Reading the type alone therefore told a user with a deleted device to check
-    their sign-in. ``REJECTED_AUTH`` is for a refusal "on credentials: HTTP 401
-    or 403", so a missing device or a malformed request belongs in
-    ``REJECTED_SERVER``, which names the non-credential client rejections
-    alongside the 5xx. Both docstrings state the criterion as the STATUS, not
-    the exception type; keep the three in step when any of them moves.
-
-    Permanence outranks the status: ``NovaAuthPermanentError`` exists to say
-    "re-authentication is definitively required", so it stays ``REJECTED_AUTH``
-    even if it ever carries a status outside 401/403.
-
-    An error without a readable status keeps the old classification. That case
-    is a test double or a future subclass, not an observed server answer, and
-    the conservative reading of a type named "auth" is auth.
+    ``REJECTED_AUTH`` is for a refusal "on credentials: HTTP 401 or 403", so a
+    missing device or a malformed request belongs in ``REJECTED_SERVER``, which
+    names the non-credential client rejections alongside the 5xx. Do NOT
+    re-derive the status test here: a second copy is exactly how the two sound
+    handlers and the four other handlers drifted apart in the first place.
     """
-    if getattr(err, "is_permanent", False):
-        return SoundDispatchOutcome.REJECTED_AUTH
-    status = getattr(err, "status", None)
-    if status is None or status in (401, 403):
+    if is_credential_rejection(err):
         return SoundDispatchOutcome.REJECTED_AUTH
     return SoundDispatchOutcome.REJECTED_SERVER
 
@@ -1124,6 +1110,21 @@ class GoogleFindMyAPI:
             raise UpdateFailed(_short_err(err)) from err
 
         except NovaAuthError as err:
+            # Branch on the STATUS, never on the type. The transport raises this
+            # class for every non-retryable 4xx, so a deleted device or a
+            # malformed request arrived here as "your sign-in expired" and
+            # produced an immediate re-auth prompt with no threshold in front of
+            # it. A non-credential rejection is a server-side refusal and takes
+            # the same exit as a 5xx one branch up: UpdateFailed,
+            # ApiStatus.ERROR, no reauth reason, no Repairs issue.
+            if not is_credential_rejection(err):
+                _LOGGER.warning(
+                    "Device list rejected by the server (HTTP %s): %s",
+                    getattr(err, "status", "unknown"),
+                    _short_err(err),
+                )
+                raise UpdateFailed(_short_err(err)) from err
+
             # Mirror the location path's base handler: a permanent credential
             # failure (NovaAuthPermanentError subclass, or a base NovaAuthError
             # flagged is_permanent=True after token refresh) must record the

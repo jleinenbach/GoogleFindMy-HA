@@ -390,6 +390,30 @@ class TestMapApiExcToErrorKey:
     def test_plain_runtime_error_unknown(self) -> None:
         assert cf._map_api_exc_to_error_key(RuntimeError("boom")) == "unknown"
 
+    def test_a_rejected_device_probe_no_longer_reads_as_a_bad_sign_in(self) -> None:
+        """Characterisation: the device-list narrowing moves this error key.
+
+        The device-list handler used to raise ConfigEntryAuthFailed for every
+        non-retryable 4xx. That class carries "auth" in its name, so a probe
+        rejected with 400/404/422 showed the user ``invalid_auth`` and sent an
+        intact sign-in to the re-authentication form. It now raises
+        UpdateFailed, which matches neither the name test nor the status test
+        above and therefore ends at ``unknown``.
+
+        Both rows are already true today; this test pins the pair so the shift
+        is a recorded decision rather than a silent change of a user-facing
+        message. Retire it when a dedicated error key for "the server refused
+        the request" exists, which needs strings.json and the full translation
+        sync of its own.
+        """
+        from homeassistant.exceptions import ConfigEntryAuthFailed
+        from homeassistant.helpers.update_coordinator import UpdateFailed
+
+        assert cf._map_api_exc_to_error_key(UpdateFailed("x")) == "unknown"
+        assert (
+            cf._map_api_exc_to_error_key(ConfigEntryAuthFailed("x")) == "invalid_auth"
+        )
+
 
 # ---------------------------------------------------------------------------
 # Block F: secrets extractors (cf.py lines 1167-1251)
