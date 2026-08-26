@@ -13,6 +13,7 @@ and stay for Phase 4.
 from __future__ import annotations
 
 import asyncio
+import logging
 import math
 import time
 from unittest.mock import MagicMock
@@ -33,6 +34,7 @@ from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker.decrypt_
     SharedKeyMismatchError,
     StaleOwnerKeyError,
 )
+from custom_components.googlefindmy.NovaApi.nova_request import NovaAuthError
 from tests.helpers.config_entries_stub import make_config_entry
 from tests.helpers.locate_mixin_stub import LocateStub
 
@@ -362,6 +364,79 @@ class TestAsyncLocateDeviceDecryptFailure:
         coord._set_auth_state.assert_called_once()
         assert coord._set_auth_state.call_args.kwargs.get("failed") is True
         coord.config_entry.async_start_reauth.assert_called_once()
+
+
+class TestAsyncLocateDeviceNovaAuthClassification:
+    """Manual locate must classify a Nova refusal by its STATUS, not its type.
+
+    NovaAuthError covers every non-retryable 4xx, so a device removed from the
+    account flipped the integration-wide auth state: Repairs issue,
+    EVENT_AUTH_ERROR, diagnostic sensor on -- with the sign-in intact. The
+    403 row is a characterisation test: it was green before this change and
+    must stay green, otherwise the narrowing is satisfied by a branch that
+    never names credentials at all.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _pass_cooldown(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Move the clock past every cooldown gate so the Nova call is reached."""
+        monkeypatch.setattr(
+            "custom_components.googlefindmy.coordinator.locate.time.monotonic",
+            lambda: 1000.0,
+        )
+
+    async def test_manual_locate_credential_rejection_sets_the_auth_state(
+        self, coord: LocateStub, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        coord.api.async_get_device_location.side_effect = NovaAuthError(403, "denied")
+
+        with caplog.at_level(logging.DEBUG):
+            result = await coord.async_locate_device("dev-1")
+
+        assert result == {}
+        coord._set_auth_state.assert_called_once()
+        assert coord._set_auth_state.call_args.kwargs.get("failed") is True
+        assert "failed (authentication)" in caplog.text
+
+    async def test_manual_locate_client_error_leaves_the_auth_state_alone(
+        self, coord: LocateStub
+    ) -> None:
+        coord.api.async_get_device_location.side_effect = NovaAuthError(404, "gone")
+
+        result = await coord.async_locate_device("dev-1")
+
+        assert result == {}
+        assert not [
+            c for c in coord._set_auth_state.call_args_list if c.kwargs.get("failed")
+        ]
+
+    async def test_manual_locate_client_error_is_still_recorded(
+        self, coord: LocateStub
+    ) -> None:
+        """Quiet is not invisible: a silent {} would be worse than today."""
+        coord.api.async_get_device_location.side_effect = NovaAuthError(404, "gone")
+
+        await coord.async_locate_device("dev-1")
+
+        coord.note_error.assert_called_once()
+        assert coord.note_error.call_args.kwargs.get("where") == "async_locate_device"
+
+    async def test_manual_locate_client_error_does_not_say_authentication(
+        self, coord: LocateStub, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        coord.api.async_get_device_location.side_effect = NovaAuthError(404, "gone")
+
+        with caplog.at_level(logging.DEBUG):
+            await coord.async_locate_device("dev-1")
+
+        assert "failed (client error): HTTP 404" in caplog.text
+        assert "failed (authentication)" not in caplog.text
+        levels = {
+            r.levelno
+            for r in caplog.records
+            if "failed (client error): HTTP 404" in r.message
+        }
+        assert levels == {logging.WARNING}
 
 
 # One row per ``SoundDispatchOutcome`` member: (outcome, accepted, may arm the

@@ -41,6 +41,7 @@ from ..NovaApi.nova_request import (
     NovaLogicError,
     NovaProtobufDecodeError,
     NovaRateLimitError,
+    is_credential_rejection,
 )
 from ..SpotApi.spot_request import SpotAuthPermanentError
 from ._mixin_typing import _MixinBase
@@ -558,6 +559,20 @@ class LocateOperations(_MixinBase):
                     pass
                 return {}
             except NovaAuthError as auth_err:
+                # Branch on the STATUS, never on the type. A device removed from
+                # the account arrived here as an auth error and flipped the
+                # integration-wide auth state: Repairs issue, EVENT_AUTH_ERROR,
+                # diagnostic sensor on. The sign-in was fine the whole time.
+                if not is_credential_rejection(auth_err):
+                    _LOGGER.warning(
+                        "Manual locate for %s failed (client error): HTTP %s - %s",
+                        name,
+                        getattr(auth_err, "status", "?"),
+                        auth_err,
+                    )
+                    self.note_error(auth_err, where="async_locate_device", device=name)
+                    return {}
+
                 # Expected: Authentication/permission issue from Nova API
                 _LOGGER.warning(
                     "Manual locate for %s failed (authentication): HTTP %s - %s",
