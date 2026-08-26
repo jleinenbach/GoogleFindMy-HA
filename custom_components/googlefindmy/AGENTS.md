@@ -108,7 +108,9 @@ sequence arrives flagged `is_permanent=True`, which leaves 403 as the only plain
 `nova_request.is_credential_rejection` is the shared predicate: permanent first, then 401/403, an unreadable status keeps
 the conservative verdict, everything else is a server-side rejection. `api._classify_nova_auth_error` is its sound-path
 adapter and must not re-derive the status test -- a second copy is how the handlers drifted apart in the first place.
-Extent today, stated so it is not mistaken for coverage: six sites read it. The two sound handlers via
+Extent today, stated so it is not mistaken for coverage: six call sites in four files read it (`api.py` three times,
+`coordinator/polling.py`, `coordinator/locate.py`, `location_request.py`), and they serve seven handlers, because the two
+sound handlers share the `_classify_nova_auth_error` adapter. In order: the two sound handlers via
 `_classify_nova_auth_error`; the device-list handler (`api.py`, `except NovaAuthError` before `NovaProtobufDecodeError`),
 which now raises `UpdateFailed` for a non-credential rejection; the location handler, which returns `{}`;
 `coordinator/polling.py`, whose `except NovaAuthError` branch leaves the transient-auth counter alone in both directions;
@@ -119,16 +121,21 @@ Read those last two claims narrowly, they are about the BRANCH and not about the
 such a status, neither branch is reachable in production any more, and what the device actually takes is the SUCCESS
 path -- `polling.py` "Success path: ensure any previous auth error is cleared" and `locate.py` "Success path: clear any
 auth error state", both of which run BEFORE the `if not location` guard. So a 404 now RESETS the transient-auth counter
-and clears the auth state, which is the opposite of what the branch says and can mask a genuine 401 on another tracker in
-the same cycle. That reset is not new (every 5xx and 429 already returns `{}` and takes it), but it is newly reachable
-for a client rejection. Fixing it means deciding what an empty result is allowed to prove about credentials, which is a
-behaviour change of its own; it is tracked separately and must not be assumed done.
+and clears the auth state, which is the opposite of what the branch says. The mechanism is not new -- every 5xx and 429
+already returns `{}` and reaches it -- but what a client rejection adds is PERMANENCE, and that is a real behaviour
+change: a 5xx clears up, a device deleted from the account does not. With one deleted tracker in the list every cycle
+resets the counter, so a genuinely expired sign-in on another tracker never reaches `_MAX_TRANSIENT_AUTH_FAILURES` and
+the user never sees the reauth prompt at all. Before this change that 404 raised the counter itself, so the escalation
+did happen, for the wrong reason. Fixing it means deciding what an empty result is allowed to prove about credentials,
+which is a behaviour change of its own with a far wider blast radius (every healthy idle BLE poll takes the same path);
+it is tracked separately and must not be assumed done.
 What is NOT fixed, stated so the rule is not mistaken for a solved problem: `nova_request.py` still raises a type named
 "auth" for all of them, so a new handler that reads the type repeats the defect, and this paragraph is the only thing
 standing in its way. Giving the non-credential case its own exception class is the open follow-up; it needs an
-exhaustiveness test over `NovaError.__subclasses__()` first: measured, all eight `try` blocks that catch `NovaAuthError`
-carry a broad `except Exception` in the same block, so a new class would be swallowed at every one of them under a name
-that hides the status. Narrowing a handler is a behaviour change that needs its own regression test, not a
+exhaustiveness test over `NovaError.__subclasses__()` first. Measured over the AST: ten `try` blocks catch
+`NovaAuthError`. Eight carry a broad `except Exception` in the same block and would swallow a new class under a name that
+hides the status; the two sound-request handlers catch it in a tuple with no broad handler, so a new class would
+propagate uncaught there instead. Two opposite failure modes in one change. Narrowing a handler is a behaviour change that needs its own regression test, not a
 drive-by edit; do not assume a green suite proves the rest of the tree already follows this rule.
 
 ### Import deferral reminder

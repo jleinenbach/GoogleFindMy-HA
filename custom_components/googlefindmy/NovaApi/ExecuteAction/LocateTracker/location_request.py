@@ -890,8 +890,11 @@ async def get_location_data_for_device(  # noqa: PLR0911, PLR0912, PLR0913, PLR0
         # Permanent auth failure (AAS token invalid) - must re-raise for immediate reauth.
         raise
     except NovaAuthError:
-        # Re-raise auth errors (permanent or transient) so api.py can handle appropriately.
-        # Transient errors will be tracked by the coordinator; permanent ones trigger reauth.
+        # Re-raise so api.py can handle appropriately: it, not this layer, tells
+        # a credential rejection from a rejected request. The second half of this
+        # note used to say transient errors are tracked by the coordinator. That
+        # holds for a credential rejection only -- a non-credential 4xx never
+        # reaches a counter, because api.py returns {} for it.
         raise
     except DecryptionError:
         # Auth-fatal crypto failure surfaced from ctx.error above: must propagate so

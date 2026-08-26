@@ -1808,11 +1808,15 @@ async def async_nova_request(  # noqa: PLR0913,PLR0912,PLR0915
                     # Consumers MUST call is_credential_rejection instead of
                     # reading the type. Splitting a separate exception class off
                     # here would let the typing carry the truth, but it is a
-                    # behaviour change of its own: a new class is uncaught at
-                    # every site that catches this one, and each of those eight
-                    # try blocks has a broad `except Exception` below it, so the
-                    # new class would be swallowed under a name that hides the
-                    # status. Needs an exhaustiveness test first.
+                    # behaviour change of its own. Measured over the AST: ten
+                    # try blocks catch this class. Eight carry a broad
+                    # `except Exception` in the same block and would swallow a
+                    # new class under a name that hides the status; the two
+                    # sound-request handlers catch it in a tuple with no broad
+                    # handler at all, so there a new class would propagate
+                    # uncaught instead. Two opposite failure modes, which is why
+                    # the follow-up needs an exhaustiveness test over
+                    # NovaError.__subclasses__() before it is attempted.
                     if status >= HTTP_INTERNAL_SERVER_ERROR:
                         raise NovaHTTPError(status, text_snippet)
                     raise NovaAuthError(status, text_snippet)
