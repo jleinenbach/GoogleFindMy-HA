@@ -166,7 +166,7 @@ knowledge across the boundary instead of collapsing it into a bool:
 | `REJECTED_AUTH` | yes, on credentials | no |
 | `REJECTED_RATE_LIMIT` | yes, HTTP 429 | no |
 | `REJECTED_SERVER` | yes, for any other reason | no |
-| `TRANSPORT_FAILED` | no usable answer was obtained | **yes** |
+| `TRANSPORT_FAILED` | no usable answer was obtained | **yes** (see the stop-path qualifier below) |
 | `NOT_SENT` | no transport was used at all | no |
 | `INTERNAL_ERROR` | our own defect or a broken contract | no |
 
@@ -185,7 +185,11 @@ outcome and never inferred from the presence or absence of a key.
 The rule has exactly one consumer, and stating it in a type is not the same as
 enforcing it. `coordinator/locate.py` holds every call to
 `_note_push_transport_problem()` on the sound paths, and `async_play_sound` and
-`async_stop_sound` each arm it on `TRANSPORT_FAILED` alone. Their blanket
+`async_stop_sound` each arm it on `TRANSPORT_FAILED` alone. On the stop path the
+call is indirect and carries one further condition: it goes through
+`_note_stop_transport_problem_without_extending()`, which reports the failure in
+full but restores a window that was already running instead of restarting it
+(IRR-CA-STOP-BREAKS-SELF-INFLICTED-COOLDOWN below). Their blanket
 `except Exception` handlers do not arm it at all: `api.py` classifies every
 unexpected exception in band and returns `INTERNAL_ERROR` rather than raising
 (`api.py`, the final handler of both sound methods), so what still reaches those
@@ -198,7 +202,58 @@ in `tests/test_coordinator_locate_basics.py` carry one row per enum member and
 are guarded against a member being added without a decision, so the "may a
 caller arm a push cooldown" column above is a measured claim, not a wish.
 
+**IRR-CA-STOP-BREAKS-SELF-INFLICTED-COOLDOWN (the window must not silence its
+own remedy).** A play that reaches the wire and then loses the answer does two
+things in one breath: it stores a cancel key, and it correctly arms the
+90-second push cooldown. `_api_push_ready()` short-circuits on that cooldown, so
+the stop the key exists for used to be suppressed for the first 90 seconds after
+that play, which is exactly when a user reaches for the Stop button. (How long
+the ring itself lasts is a different timer on a different layer, and nothing
+here claims to know it -- see the note on the aged cached key in
+`async_stop_sound`.) `async_stop_sound` therefore passes the readiness
+gate in exactly one case: a window is running **and** the stop would be
+correlated, that is, it carries our own cached key and that key is still fresh.
+
+The polarity is deliberately the opposite of `can_play_sound()` and the manual
+locate guard, which treat a running window as the hard block and an unconfirmed
+transport as passable. Two limits keep the exception honest:
+
+- **What it can distinguish.** While a window runs, `_api_push_ready()` never
+  asks the transport, so the transport state is unknown. The guard separates
+  "not ready because a window is running" from "not ready for another reason"
+  and nothing more; a transport failure is the only thing that arms the window,
+  so the two overlap by construction.
+- **It cannot feed itself.** A broken-through stop that fails on the transport
+  must not restart the window. `_note_push_transport_problem()` sets
+  `_push_cooldown_until` absolutely, and the stop button has no availability
+  guard, so an unguarded call would let repeated presses keep Play Sound and
+  manual locate disabled indefinitely. `async_stop_sound` routes both of its
+  cooldown calls through
+  `_note_stop_transport_problem_without_extending()`, which arms a window only
+  when none is running.
+
+`_stop_would_be_correlated()` is the single definition of "correlated" behind
+both this gate and the decision to spend the cached key
+(IRR-CA-POP-ON-CORRELATED-CANCEL-ONLY); a second inline derivation at either
+site is the drift the extraction exists to prevent, and
+`tests/test_coordinator_locate_basics.py` pins both sites to it.
+
+The exception is not free, and the price is a changed outcome class rather than
+a changed guarantee: a stop that used to end as `SUPPRESSED` now reaches the
+transport and can end as `FAILED`, which `services.py` reports with a different
+translation key (`stop_sound_rejected` instead of `stop_sound_suppressed`). It
+also removes, for the duration of a window, the only rate brake that sat in
+front of the stop dispatch -- outside a window there never was one, and a
+`REJECTED_RATE_LIMIT` answer deliberately arms no cooldown.
+
 #### Follow-up (not in this change)
+
+The play path arms the same cooldown without this guard
+(`coordinator/locate.py`, `async_play_sound`), and `can_play_sound()` returns
+early on a cached `can_ring` capability before it ever looks at the window, so a
+play can reach the arming call while a window runs. That behaviour predates the
+stop-path exception and is unchanged by it; guarding it is a separate decision
+with its own tests.
 
 Closing the boundary on the cloud path means wiring **Path B**: registering an
 FCM callback for sound events and matching the incoming
