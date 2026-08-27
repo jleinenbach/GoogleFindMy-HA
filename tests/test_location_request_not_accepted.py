@@ -38,6 +38,7 @@ import ast
 import asyncio
 import inspect
 import logging
+import runpy
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -407,6 +408,55 @@ async def test_api_passes_the_signal_through_untouched(
     assert excinfo.value.status == 503
 
 
+def test_the_module_cli_reports_the_signal_and_exits_non_zero(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The module's own ``__main__`` block must not end on a traceback either.
+
+    It is the second of the two CLI edges. The first (the interactive selection
+    loop in ``nbe_list_devices``) prints and continues, because there is a next
+    prompt to return to. This one has none, so it prints and exits non-zero: a
+    script wrapping it has to be able to tell "no location" from "the request
+    never got out", and an exit code is the only channel it has.
+
+    Driven through ``runpy`` because a guarded ``__main__`` block is otherwise
+    unreachable from a test and is excluded from coverage
+    (``pyproject.toml``), which is exactly the combination in which an
+    unhandled raise survives unnoticed. The pattern is the one already used by
+    ``test_get_oauth_token.py``.
+    """
+
+    # ``runpy`` executes the file as a FRESH module, which has two consequences
+    # the seam has to respect. Patching attributes on the already-imported module
+    # would not be seen, so the seam sits on ``asyncio`` -- the one object the
+    # block reaches that the fresh execution does not rebind. And the fresh module
+    # defines its OWN ``LocationRequestNotAcceptedError`` class, so raising the
+    # one imported at the top of this file would sail straight past the
+    # ``except``: same name, different class object. The class is therefore taken
+    # from the coroutine's own globals, which are the fresh module's.
+    #
+    # The coroutine is closed rather than dropped, otherwise the run emits
+    # "coroutine was never awaited" and the test buys a warning it did not mean
+    # to introduce.
+    def _run_raising(coro: Any) -> Any:
+        fresh_signal_cls = coro.cr_frame.f_globals["LocationRequestNotAcceptedError"]
+        assert fresh_signal_cls is not LocationRequestNotAcceptedError, (
+            "runpy stopped duplicating the module; the indirection below is no "
+            "longer needed and this test can raise the imported class directly"
+        )
+        coro.close()
+        raise fresh_signal_cls(stage="server_error", status=503)
+
+    monkeypatch.setattr(asyncio, "run", _run_raising)
+
+    with pytest.raises(SystemExit) as excinfo:
+        runpy.run_path(location_request_module.__file__, run_name="__main__")
+
+    assert excinfo.value.code == 1
+    out = capsys.readouterr().out
+    assert "not accepted" in out and "server_error" in out, out
+
+
 @pytest.mark.asyncio
 async def test_a_pre_accept_import_failure_still_arrives_as_an_empty_dict(
     monkeypatch: pytest.MonkeyPatch,
@@ -658,9 +708,13 @@ def test_the_sync_wrapper_still_flattens_the_signal_to_an_empty_dict(
     shape this change removes everywhere else.
 
     Pinned rather than fixed, and pinned HERE rather than left implicit, because an
-    unstated exception is indistinguishable from an oversight. No coordinator uses
-    this entry point; closing it belongs to the step that tightens the CLI edges.
-    If that step lands and forgets this test, the failure is the reminder.
+    unstated exception is indistinguishable from an oversight. The step that
+    tightened the CLI edges has landed and deliberately did NOT close this one:
+    the two are different things. Those were unguarded call sites that ended an
+    interactive session on a traceback; this is a documented contract for non-HA
+    callers, whose whole promise is that it never raises. Changing it is a
+    breaking change for anyone outside this repository, so it is tracked on its
+    own rather than folded into a CLI fix. No coordinator uses this entry point.
 
     This test keeps a loop of its OWN, and that is deliberate rather than an
     oversight the sibling poll tests already corrected. Those drive a coroutine and

@@ -1167,10 +1167,20 @@ if __name__ == "__main__":
         async def async_set_cached_value(self, key: str, value: Any) -> None:
             self._values[key] = value
 
-    asyncio.run(
-        get_location_data_for_device(
-            get_example_data("sample_canonic_device_id"),
-            "Test",
-            cache=cast(TokenCache, _CliTokenCache()),
+    # Same reason as the interactive CLI in `nbe_list_devices.py`: a request the
+    # server never accepted raises, and an uncaught raise here would end this
+    # experiment on a traceback whose top frame is an implementation detail. The
+    # exit code is deliberately non-zero -- unlike the interactive loop there is
+    # no next prompt to return to, and a script wrapping this must be able to
+    # tell "no location" from "the request never got out".
+    try:
+        asyncio.run(
+            get_location_data_for_device(
+                get_example_data("sample_canonic_device_id"),
+                "Test",
+                cache=cast(TokenCache, _CliTokenCache()),
+            )
         )
-    )
+    except LocationRequestNotAcceptedError as not_accepted:
+        print(str(not_accepted))
+        raise SystemExit(1) from not_accepted

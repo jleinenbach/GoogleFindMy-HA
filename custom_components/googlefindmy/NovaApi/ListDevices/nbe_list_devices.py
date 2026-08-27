@@ -350,29 +350,59 @@ async def _async_cli_main(
 
             print("Fetching location...")
 
-            # Lazy import: only needed for the CLI branch
-            get_location_data_for_device = import_module(
+            # Lazy import: only needed for the CLI branch. The signal type is
+            # read off the SAME module object simply because the function is --
+            # one lookup, one source. Do NOT read this as "a module-scope import
+            # would be expensive": measured, `location_request` is already in
+            # `sys.modules` by the time this module is imported (the package
+            # `__init__` reaches it through `api.py`), and `api.py`, `locate.py`
+            # and `polling.py` all import the class at module scope.
+            location_request_module = import_module(
                 "custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker.location_request"
-            ).get_location_data_for_device
+            )
+            get_location_data_for_device = (
+                location_request_module.get_location_data_for_device
+            )
+            LocationRequestNotAcceptedError = (
+                location_request_module.LocationRequestNotAcceptedError
+            )
 
-            # Known open edge, stated so it is not mistaken for an oversight:
-            # since PLAN_GFMY_EMPTY_RESULT_DISTINGUISHABLE this call raises
+            # `get_location_data_for_device` raises
             # `LocationRequestNotAcceptedError` for a request the server never
             # accepted (a 5xx, a 429, a network error, a failed FCM
-            # registration) where it used to return an empty list. Nothing here
-            # catches it, so the interactive loop ends on a traceback instead of
-            # printing "no location". Turning that into a readable CLI line is
-            # the job of the step that tightens the CLI edges; it is deliberately
-            # not done inside the change that armed the raise sites, because the
-            # coordinator paths and the CLI paths fail for different reasons and
-            # want different words.
-            locations = await get_location_data_for_device(
-                selected_canonic_id,
-                selected_device_name,
-                session=session,
-                cache=cache,
-                namespace=namespace,
-            )
+            # registration) where it used to return an empty list. Caught here
+            # rather than left to escape: this is an interactive loop, a routine
+            # service failure must not end the whole session on a traceback, and
+            # the user is meant to be able to pick another device and try again.
+            #
+            # The wording is the point of the change, not an afterthought. The
+            # empty-list path below says "the tracker may be out of range",
+            # which for a 503 would be a plain lie about which side is at
+            # fault; that conflation is what the signal exists to end. The
+            # device name is absent from the line because the signal does not
+            # carry one, and it is not missed: the user picked the device from
+            # the numbered list this loop printed a moment ago. This is NOT an
+            # R6 redaction -- that rule (`AGENTS.md` Section 5) governs logs and
+            # diagnostics, and this same loop prints names and canonic ids to
+            # the console by design.
+            try:
+                locations = await get_location_data_for_device(
+                    selected_canonic_id,
+                    selected_device_name,
+                    session=session,
+                    cache=cache,
+                    namespace=namespace,
+                )
+            except LocationRequestNotAcceptedError as not_accepted:
+                # `str(...)` already reads "Location request not accepted
+                # (stage=..., status=...)", so the sentence around it must not
+                # repeat that or the line ends up saying it twice inside nested
+                # brackets.
+                print(
+                    f"\n{not_accepted}. Nothing was learned about the tracker's "
+                    "position; try again, or pick another device."
+                )
+                continue
 
             _print_locations(locations)
 
