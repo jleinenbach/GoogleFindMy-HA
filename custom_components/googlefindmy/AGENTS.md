@@ -170,18 +170,28 @@ status-based classification the mixed cycle DID surface, because the 4xx took th
 `last_exception` there -- the same branch that fed the counter behind the false sign-in prompt. The signal was a
 side effect of the misclassification, not a contract, and it cannot be kept without keeping the defect. Buying it
 back by gating the guard on positive success does not work at this layer either, and the reason is mechanical rather
-than a forecast about accounts: the only positive proof the poll loop holds is `_any_device_got_data`, which records
-that a device COMMITTED data, not that its request reached the server. Gating on it turns
-`test_a_rejected_device_does_not_make_every_tracker_unavailable` red, because the sibling in that test returns exactly
-`{}` -- so the stricter guard withdraws the very fix that test was written for. One rejection plus one empty sibling
-would have to stay silent for that test and surface for the mixed-failure one, from the same observable state. That is
-not a judgement call to be argued either way; it is an ambiguity, and only the layer that produced the empty result can
-resolve it.
-Where that resolution belongs is measured, so the follow-up does not start by re-deriving it:
-`location_request.py` logs `Location request accepted` once the RPC is through, and every `return []` BEFORE that point
-(no FCM token, FCM registration failure, 429, 5xx, `aiohttp.ClientError`, the generic guard around the Nova request,
-and the outer surfacing handler) is a failure, while every empty result AFTER it is legitimate. Note that
-`location_request` catches the 5xx itself, so the `NovaHTTPError` handler in `api.py` never sees that case: an
+than a forecast about accounts. The only positive marker on the REQUEST path is `_any_device_got_data`; the
+neighbouring `cycle_had_successful_decrypt` is a positive proof as well, but about the shared key, and both are False
+for either kind of empty result. `_any_device_got_data` records that a device COMMITTED data, not that its request
+reached the server. Gating on it turns `test_a_rejected_device_does_not_make_every_tracker_unavailable` red, because
+the sibling in that test returns exactly `{}` -- the stricter guard withdraws the very fix that test was written for.
+One rejection plus one empty sibling would have to stay silent for that test and surface for the mixed-failure one,
+from the same observable state. That is not a judgement call to be argued either way; it is an ambiguity, and only the
+layer that produced the empty result can resolve it.
+What the earlier wording got right must not be thrown out with its wrong quantifier: an account with one deleted
+tracker and otherwise idle BLE tags WOULD go unavailable on every cycle under a stricter gate. That was never true of
+"every healthy BLE-only account" -- the guard is conjunctive with a rejection, so an account without one is untouched
+-- but it is exactly true of that one shape, and it is the concrete price of tightening here.
+Where the resolution belongs is measured, so the follow-up does not start by re-deriving it. `location_request.py`
+logs `Location request accepted` once the RPC is through, and the `return []` paths reachable only BEFORE that log
+(no FCM token, FCM registration failure, 429, 5xx, `aiohttp.ClientError`, the generic guard around the Nova request)
+are failures. Two qualifications, both measured, because the log line is not a clean split. The outer surfacing
+handler wraps the WHOLE body, so its own `return []` sits AFTER the log while the exceptions it catches may come from
+either side of it; a follow-up therefore needs a flag set at the log line, not a position in the file. And not every
+empty result after the log is benign either: the unexpected-device branch logs a WARNING and returns empty.
+Note also where the empty dict actually comes from. `location_request` catches the 5xx, the 429, the protobuf decode
+failure and the Nova logic error itself, so `api.py`'s handlers for those four never run on the locate path; the dict
+is produced by the no-location fallthrough instead. The outcome is as described above, the mechanism is not, and an
 intervention confined to `api.py` would be inert.
 Note what the mixed cycle is NOT: silent everywhere. The rejection still sets `cycle_failed`, so `last_poll_result`
 reports `failed` and the diagnostic binary sensor shows it; only entity availability is left alone.

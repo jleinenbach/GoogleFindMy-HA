@@ -1311,9 +1311,16 @@ async def test_a_rejected_device_does_not_make_every_tracker_unavailable() -> No
     layer is indistinguishable from a 5xx. That is deliberate -- it is the
     cheapest shape of the case, and it is also why the guard cannot be tightened
     to require positive success. ``_any_device_got_data`` is the only positive
-    proof the loop holds, and gating on it would turn THIS test red. The two
-    demands meet in one observable state, so the ambiguity has to be resolved
-    where the empty result is produced, not here.
+    marker on the REQUEST path (``cycle_had_successful_decrypt`` is a positive
+    proof too, but about the shared key), and gating on it would turn THIS test
+    red. The two demands meet in one observable state, so the ambiguity has to
+    be resolved where the empty result is produced, not here.
+
+    This test and ``test_known_gap_a_mixed_cycle_of_rejection_and_empty_siblings_stays_silent``
+    use the same stub and the same three assertions; only the display name
+    differs. That is not sloppiness left unnoticed but the very point: they are
+    the SAME observable state, read once as "must stay silent" and once as
+    "should have surfaced". Whoever resolves the ambiguity should merge them.
     """
     coordinator = _polling_coordinator({}, _TrackingFilter(), {})
     coordinator.api = _PerDeviceAPI({"dev-1": NovaAuthError(404, "gone"), "dev-2": {}})
@@ -1476,7 +1483,8 @@ async def test_known_gap_a_mixed_cycle_of_rejection_and_empty_siblings_stays_sil
     the request path has no counterpart for. ``_any_device_got_data`` is not
     that counterpart: it records that a device COMMITTED data, so gating on it
     would turn ``test_a_rejected_device_does_not_make_every_tracker_unavailable``
-    red, whose sibling returns the same ``{}`` as this one.
+    red -- which uses the same stub and the same assertions as this test, only
+    read with the opposite expectation. Two names, one observable state.
 
     Not silent everywhere, and that is the point: the rejection still sets
     ``cycle_failed``, so ``last_poll_result`` reports ``failed`` and the

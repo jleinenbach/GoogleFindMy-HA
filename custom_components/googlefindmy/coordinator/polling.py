@@ -2321,24 +2321,38 @@ class PollingOperations(_MixinBase):
                 # cannot be kept without keeping the defect. Gating this
                 # guard on positive success instead fails at this layer for
                 # a mechanical reason, not a forecast about accounts: the
-                # only positive proof the loop holds is
-                # `_any_device_got_data`, and it records that a device
-                # COMMITTED data, not that its request reached the server.
-                # Gating on it turns
+                # only positive marker on the REQUEST path is
+                # `_any_device_got_data` (`cycle_had_successful_decrypt`
+                # above is a positive proof too, but about the shared key,
+                # and both are False for either empty result), and it
+                # records that a device COMMITTED data, not that its
+                # request reached the server. Gating on it turns
                 # `test_a_rejected_device_does_not_make_every_tracker_unavailable`
                 # red, because that test's sibling returns exactly `{}` --
                 # the stricter guard would withdraw the very fix that test
                 # was written for. One rejection plus one empty sibling
                 # would have to stay silent there and surface here, from
                 # the same observable state. That is an ambiguity, not a
-                # judgement call, and only the layer that produced the
-                # empty result can resolve it: `location_request.py` logs
+                # judgement call.
+                #
+                # The concrete price of tightening anyway, stated so it is
+                # not lost: an account with one deleted tracker and
+                # otherwise idle BLE tags would go unavailable on EVERY
+                # cycle. Not "every healthy BLE-only account" (this guard
+                # is conjunctive with a rejection, so an account without
+                # one is untouched), but exactly that one shape.
+                #
+                # Only the layer that produced the empty result can resolve
+                # this. Where, is measured: `location_request.py` logs
                 # `Location request accepted` once the RPC is through, and
-                # every `return []` before that point is a failure while
-                # every empty result after it is legitimate. It catches the
-                # 5xx itself, so `api.py`'s `NovaHTTPError` handler never
-                # sees that case and an intervention confined to `api.py`
-                # would be inert.
+                # the `return []` paths reachable only before that log are
+                # failures. The split is not positional -- the outer
+                # surfacing handler wraps the whole body, so its `return
+                # []` sits after the log while its exceptions come from
+                # either side, and the unexpected-device branch after the
+                # log returns empty on a WARNING. A follow-up needs a flag
+                # set at the log line. See
+                # `PLAN_GFMY_EMPTY_RESULT_DISTINGUISHABLE`.
                 # `test_known_gap_a_mixed_cycle_of_rejection_and_empty_siblings_stays_silent`
                 # pins the current state so it cannot drift unnoticed.
                 if (
