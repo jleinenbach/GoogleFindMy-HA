@@ -423,7 +423,8 @@ async def test_the_typeerror_cascade_does_not_retry_on_the_signal(
     assert calls == 1
 
 
-def test_poll_treats_the_signal_as_a_per_device_skip_for_now(
+@pytest.mark.asyncio
+async def test_poll_treats_the_signal_as_a_per_device_skip_for_now(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The poll loop skips the device and keeps going; the cycle does not fail.
@@ -442,7 +443,7 @@ def test_poll_treats_the_signal_as_a_per_device_skip_for_now(
     is not the proof of the skip, and thinning out "redundant" assertions here
     would remove the ones that carry the test.
     """
-    loop = asyncio.new_event_loop()
+    loop = asyncio.get_running_loop()
     devices = [
         {"id": "dev-refused", "name": "Refused Tag"},
         {"id": "dev-sibling", "name": "Sibling Tag"},
@@ -454,13 +455,7 @@ def test_poll_treats_the_signal_as_a_per_device_skip_for_now(
     note_error = MagicMock(return_value=None)
     coordinator.note_error = note_error
 
-    try:
-        loop.run_until_complete(
-            coordinator._async_start_poll_cycle(devices, force=True)
-        )
-    finally:
-        drain_loop(loop)
-        loop.close()
+    await coordinator._async_start_poll_cycle(devices, force=True)
 
     assert api.calls == ["dev-refused", "dev-sibling"]
     assert coordinator.last_update_success is True
@@ -471,7 +466,8 @@ def test_poll_treats_the_signal_as_a_per_device_skip_for_now(
     note_error.assert_not_called()
 
 
-def test_poll_does_not_clear_the_auth_state_on_the_signal(
+@pytest.mark.asyncio
+async def test_poll_does_not_clear_the_auth_state_on_the_signal(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A refused request must not be read as proof that the credentials work.
@@ -484,7 +480,7 @@ def test_poll_does_not_clear_the_auth_state_on_the_signal(
     entirely. Asserting the counter is untouched is what would catch a well-meant
     "restore previous behaviour" edit putting it back.
     """
-    loop = asyncio.new_event_loop()
+    loop = asyncio.get_running_loop()
     devices = [{"id": "dev-refused", "name": "Refused Tag"}]
     api = _NotAcceptedAPI(
         LocationRequestNotAcceptedError(stage="fcm_registration_failed")
@@ -495,13 +491,7 @@ def test_poll_does_not_clear_the_auth_state_on_the_signal(
     coordinator._consecutive_transient_auth_failures = 3
     coordinator._consecutive_timeouts = 2
 
-    try:
-        loop.run_until_complete(
-            coordinator._async_start_poll_cycle(devices, force=True)
-        )
-    finally:
-        drain_loop(loop)
-        loop.close()
+    await coordinator._async_start_poll_cycle(devices, force=True)
 
     set_auth_state.assert_not_called()
     assert coordinator._consecutive_transient_auth_failures == 3
@@ -592,6 +582,17 @@ def test_the_sync_wrapper_still_flattens_the_signal_to_an_empty_dict(
     unstated exception is indistinguishable from an oversight. No coordinator uses
     this entry point; closing it belongs to the step that tightens the CLI edges.
     If that step lands and forgets this test, the failure is the reminder.
+
+    This test keeps a loop of its OWN, and that is deliberate rather than an
+    oversight the sibling poll tests already corrected. Those drive a coroutine and
+    therefore belong on pytest's managed loop (tests/AGENTS.md:94). This one drives
+    a SYNCHRONOUS entry point whose helper calls ``loop.run_until_complete`` itself
+    (api.py:713), behind a guard that returns the default unchanged when the target
+    loop is already running (api.py:705). Handing it the managed loop would take
+    that guard's exit: the test would stay green while never reaching
+    ``get_location_data_for_device`` at all, so it would stop witnessing the
+    flattening it exists to pin. Green for the wrong reason is worse than the
+    inconsistency, so the loop stays -- drained through the shared helper.
     """
     signal = LocationRequestNotAcceptedError(stage="no_fcm_token")
 
@@ -607,6 +608,6 @@ def test_the_sync_wrapper_still_flattens_the_signal_to_an_empty_dict(
     try:
         result = api.get_device_location("device-xyz", "Tracker")
     finally:
-        sync_loop.close()
+        drain_loop(sync_loop)
 
     assert result == {}
