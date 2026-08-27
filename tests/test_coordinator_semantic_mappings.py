@@ -1040,6 +1040,9 @@ async def test_a_client_error_does_not_overwrite_an_earlier_failure() -> None:
     )
     coordinator._set_auth_state = lambda **kwargs: None
     coordinator.config_entry.async_start_reauth = MagicMock()
+    # The polling fixture stubs note_error with a no-op; the reachability
+    # assertion below needs a recording double.
+    coordinator.note_error = MagicMock()
     recorded: list[Exception] = []
     coordinator.async_set_update_error = recorded.append
 
@@ -1049,6 +1052,14 @@ async def test_a_client_error_does_not_overwrite_an_earlier_failure() -> None:
 
     assert recorded, "the cycle reported no error at all"
     assert getattr(recorded[-1], "status", None) == 401
+    # The name says "client error", so pin that the client branch really ran.
+    # Without this the test passes even if that branch is deleted outright,
+    # because the 404 would then fall through to the transient-auth path whose
+    # own `if last_exception is None` guard preserves the 401 just the same.
+    assert any(
+        call.kwargs.get("where") == "poll_client_error"
+        for call in coordinator.note_error.call_args_list
+    )
 
 
 @pytest.mark.asyncio
@@ -1308,6 +1319,12 @@ async def test_a_rejected_device_does_not_make_every_tracker_unavailable() -> No
         "a rejected device failed the coordinator update, which makes every "
         f"tracker entity unavailable: {recorded}"
     )
+    # Reachability, so the negative assertion cannot pass vacuously: both
+    # devices were actually requested, and the cycle did enter the client
+    # branch (which is the only thing that can mark this cycle failed -- the
+    # empty success path of dev-2 leaves `cycle_failed` alone).
+    assert coordinator.api.calls == 2
+    assert coordinator.last_poll_result == "failed"
 
 
 @pytest.mark.asyncio
@@ -1366,3 +1383,32 @@ async def test_a_rejected_device_does_not_hide_a_later_credential_failure() -> N
         "the reported cause names the harmless rejected device instead of the "
         f"tracker whose sign-in expired: {recorded[-1]!r}"
     )
+
+
+@pytest.mark.asyncio
+async def test_a_cycle_where_every_device_is_rejected_still_reports_an_error() -> None:
+    """The sibling-success rule needs a sibling. With none, the cycle failed.
+
+    A rejection is treated as a per-device skip because another device's
+    success refutes it as an account-wide problem. When EVERY device is
+    rejected there is no such refutation, and staying silent would leave the
+    coordinator reporting healthy while it delivered nothing at all. The
+    device list cannot be relied on to catch this one layer up: it is a
+    different RPC, and `DEVICE_LIST_POLL_INTERVAL` (300s) means most cycles
+    reuse the cached list without calling it at all.
+    """
+    coordinator = _polling_coordinator({}, _TrackingFilter(), {})
+    coordinator.api = _PerDeviceAPI(
+        {"dev-1": NovaAuthError(404, "gone"), "dev-2": NovaAuthError(400, "bad")}
+    )
+    coordinator._set_auth_state = lambda **kwargs: None
+    coordinator.config_entry.async_start_reauth = MagicMock()
+    recorded: list[Exception] = []
+    coordinator.async_set_update_error = recorded.append
+
+    await coordinator._async_start_poll_cycle(
+        [{"id": "dev-1", "name": "Gone"}, {"id": "dev-2", "name": "Bad"}]
+    )
+
+    assert recorded, "every device was rejected and the cycle still reported success"
+    assert coordinator.last_poll_result == "failed"

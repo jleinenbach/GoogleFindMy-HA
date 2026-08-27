@@ -1696,6 +1696,11 @@ class PollingOperations(_MixinBase):
                 # requires this proof, not merely the absence of a decrypt error
                 # (a cycle of pure timeouts must not flicker a stale key to OK).
                 cycle_had_successful_decrypt = False
+                # Devices this cycle whose location request the server refused
+                # with a non-credential 4xx. A single rejection is a per-device
+                # skip because a sibling's success refutes it as account-wide;
+                # with no sibling left to refute it, the cycle really did fail.
+                cycle_rejected_devices = 0
                 for idx, dev in enumerate(devices):
                     dev_id = dev["id"]
                     dev_name = dev.get("name", dev_id)
@@ -2116,10 +2121,13 @@ class PollingOperations(_MixinBase):
                             # availability outage is not a fix. So: keep
                             # ``cycle_failed`` (the cycle really did not poll
                             # every device) and leave ``last_exception`` to the
-                            # failures that are about the account. Same shape as
-                            # the OwnerKeyLookupTransientError branch below --
-                            # an ordinary per-device skip.
+                            # failures that are about the account. This is the
+                            # only branch here that sets one without the other,
+                            # deliberately: every other one reports a condition
+                            # that says something about the account, this one
+                            # does not.
                             cycle_failed = True
+                            cycle_rejected_devices += 1
                             # Deliberately NOT touched HERE: the transient-auth
                             # counter is neither raised nor reset. A client
                             # rejection says nothing about the credentials in
@@ -2133,15 +2141,12 @@ class PollingOperations(_MixinBase):
                             # wrong on its own terms, and it is tracked as a
                             # finding of its own -- a client rejection is kept out
                             # of it by raising in api.py, nothing more.
-                            # Residual gap, named so it is not mistaken for
-                            # covered: if EVERY device is rejected the cycle now
-                            # reports no error at all. That window is narrow --
-                            # an account-wide rejection already fails
-                            # ``async_get_basic_device_list`` with
-                            # ``UpdateFailed`` one layer up -- and it is not
-                            # silent: ``last_poll_result`` reads "failed",
-                            # ``note_error`` records it and every rejected device
-                            # gets its own WARNING.
+                            # The all-rejected case is caught after the loop,
+                            # not here: whether a rejection is per-device or
+                            # account-wide is only knowable once every device
+                            # has been tried. Same reasoning as
+                            # _finalize_cycle_decrypt_state, which defers the
+                            # decrypt verdict for exactly that reason.
                             continue
 
                         # Transient auth failure - may self-heal in subsequent poll cycles.
@@ -2278,6 +2283,21 @@ class PollingOperations(_MixinBase):
                         await asyncio.sleep(self.device_poll_delay)
 
                 _LOGGER.debug("Completed polling cycle for %d devices", len(devices))
+                # No device survived its request: there is no sibling success
+                # left to refute the rejections as account-wide, so the cycle
+                # must surface. Do NOT lean on the device list to catch this one
+                # layer up -- it is a different RPC (`nbe_list_devices`), and
+                # DEVICE_LIST_POLL_INTERVAL means most cycles reuse the cached
+                # list without calling it at all.
+                if (
+                    cycle_rejected_devices
+                    and cycle_rejected_devices == len(devices)
+                    and last_exception is None
+                ):
+                    last_exception = UpdateFailed(
+                        f"Every device ({cycle_rejected_devices}) was rejected by "
+                        "the server this cycle"
+                    )
                 # Resolve the cycle's decrypt verdict AND reconcile the cycle's
                 # failure state with it in one place (positive proof dominates: a
                 # sibling success refutes a single device's failure as account-wide).

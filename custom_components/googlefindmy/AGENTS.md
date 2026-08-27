@@ -131,23 +131,31 @@ PERMANENTLY: a 5xx clears up, a device deleted from the account does not, so one
 the counter every cycle and a genuinely expired sign-in on another tracker would never reach
 `_MAX_TRANSIENT_AUTH_FAILURES`. The user would never see the reauth prompt at all -- a worse outcome than the defect
 this change exists to fix. Raising keeps a rejected device out of that reset.
-Why the poll branch records the rejection without failing the cycle: in the cycle's `finally` block `cycle_failed`
-and `last_exception` drive two different things. `cycle_failed` only writes the `last_poll_result` diagnostic
-attribute that `binary_sensor.py` exposes; `last_exception` drives `async_set_update_error`, and
-`GoogleFindMyEntity.available` follows the coordinator's `last_update_success`. Recording a per-device client
-rejection as `last_exception` therefore marked EVERY tracker entity unavailable, and because a tracker deleted from
-the account never recovers the way a 5xx does, the outage repeated on every poll for as long as that tracker stayed
-in the cached device list -- trading a spurious re-auth prompt for a permanent availability outage. The branch keeps
-`cycle_failed` and leaves `last_exception` to the failures that are actually about the account, the same shape the
-`OwnerKeyLookupTransientError` branch below it already uses. A side effect worth naming: while the client branch held
-the `last_exception` slot, a rejected tracker polled BEFORE a genuinely expired one made the coordinator report the
-harmless 404 and hide the 401. Residual gap, stated so it is not mistaken for covered: if EVERY device is rejected
-the cycle now reports no error at all. That window is narrow, because an account-wide rejection already fails
-`async_get_basic_device_list` with `UpdateFailed` one layer up, and it is not silent (`last_poll_result` reads
-"failed", `note_error` records it, every rejected device gets its own WARNING). Three tests pin this:
-`test_a_rejected_device_does_not_make_every_tracker_unavailable`,
-`test_a_rejected_device_still_marks_the_poll_result_failed` and
-`test_a_rejected_device_does_not_hide_a_later_credential_failure`.
+Why the poll branch records the rejection without failing the coordinator UPDATE (it does fail the cycle): in the
+cycle's `finally` block `cycle_failed` and `last_exception` drive two different things. `cycle_failed` only writes
+the `last_poll_result` diagnostic attribute that `binary_sensor.py` exposes; `last_exception` drives
+`async_set_update_error`, and `GoogleFindMyEntity.available` follows the coordinator's `last_update_success`.
+Recording a per-device client rejection as `last_exception` therefore marked EVERY tracker entity unavailable, and
+because a tracker deleted from the account never recovers the way a 5xx does, the outage repeated on every poll for
+as long as that tracker stayed in the cached device list -- trading a spurious re-auth prompt for a permanent
+availability outage. The branch keeps `cycle_failed` and leaves `last_exception` to the failures that are actually
+about the account. It is the ONLY branch in that loop which sets one without the other, and that is deliberate, not
+an oversight: every other branch there reports a condition that says something about the account, this one does not.
+(The `OwnerKeyLookupTransientError` branch is close in spirit -- also an ordinary per-device skip -- but sets
+neither flag, so it is not the same shape.) A side effect worth naming: while the client branch held the
+`last_exception` slot, a rejected tracker polled BEFORE a genuinely expired one made the coordinator report the
+harmless 404 and hide the 401.
+The all-rejected case is handled after the loop, not in the branch: whether a rejection is per-device or
+account-wide is only knowable once every device has been tried, the same reasoning by which
+`_finalize_cycle_decrypt_state` defers the decrypt verdict. If `cycle_rejected_devices == len(devices)` there is no
+sibling success left to refute the rejections, and the cycle surfaces an `UpdateFailed`. Do NOT replace that check
+with "the device list would have caught it one layer up": `async_get_basic_device_list` is a different RPC
+(`nbe_list_devices`) from the per-device location request, and `DEVICE_LIST_POLL_INTERVAL` (300s, `const.py`) means
+most cycles reuse the cached list without calling it at all. That claim was written here once and was wrong.
+Four tests pin this: `test_a_rejected_device_does_not_make_every_tracker_unavailable`,
+`test_a_rejected_device_still_marks_the_poll_result_failed`,
+`test_a_rejected_device_does_not_hide_a_later_credential_failure` and
+`test_a_cycle_where_every_device_is_rejected_still_reports_an_error`.
 What is still NOT fixed there, stated so it is not mistaken for solved: that success path still treats every empty
 result as proof of working credentials, and every 5xx, every 429 and every idle BLE tag reaches it. Deciding what an
 empty result may prove about credentials is a behaviour change of its own with a far wider blast radius (every healthy
