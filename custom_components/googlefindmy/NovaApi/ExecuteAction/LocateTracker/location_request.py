@@ -42,6 +42,7 @@ from custom_components.googlefindmy.NovaApi.ExecuteAction.nbe_execute_action imp
     serialize_action_request,
 )
 from custom_components.googlefindmy.NovaApi.nova_request import (
+    HTTP_TOO_MANY_REQUESTS,
     NovaAuthError,
     NovaAuthPermanentError,
     NovaHTTPError,
@@ -62,12 +63,14 @@ _LOGGER = logging.getLogger(__name__)
 # but "still only re-raises -- it does not classify"
 # (``custom_components/googlefindmy/AGENTS.md``, the paragraph on how this layer
 # treats a Nova auth error).
-# Six markers name a ``return []`` reachable ONLY before the accept log line. The
-# seventh, ``surfacing_before_accept``, belongs to the outer handler, whose own
-# return sits AFTER that line; telling its two sides apart therefore needs a flag
-# set AT the log line rather than a position in the file. That flag does not exist
-# yet -- AP-3 introduces it together with the raise sites, and until then nothing
-# enforces this set either: the AST test over the raise sites is xfail.
+# Six markers name a former ``return []`` reachable ONLY before the accept log
+# line. The seventh, ``surfacing_before_accept``, belongs to the outer handler,
+# whose own return sits AFTER that line; telling its two sides apart therefore
+# needs a flag set AT the log line rather than a position in the file. That flag
+# is ``request_accepted`` in ``get_location_data_for_device``. The set is enforced
+# in both directions by ``test_the_stage_markers_are_a_closed_set``, which reads
+# the raise sites out of the AST: a marker added here without a raise site fails
+# it just as a raise site with an undeclared marker does.
 LOCATION_REQUEST_NOT_ACCEPTED_STAGES: frozenset[str] = frozenset(
     {
         "no_fcm_token",
@@ -100,8 +103,9 @@ class LocationRequestNotAcceptedError(Exception):
     ``Location request accepted`` log line was not reached. That position cannot
     be read off the file layout, because the outer surfacing handler wraps the
     whole body and its own return sits AFTER the log line; it has to be read off
-    a flag set AT the line. AP-3 introduces that flag when it arms the raise
-    sites -- as of this commit the class exists and nothing raises it yet.
+    a flag set AT the line. That flag is ``request_accepted``; the outer handler
+    reads it to decide whether the failure it caught fell before or after the
+    accept point.
     ``stage`` is a flow-position marker from the closed set
     ``LOCATION_REQUEST_NOT_ACCEPTED_STAGES``; growing it into a cause taxonomy
     would break the classifier discipline this layer is held to.
@@ -144,14 +148,31 @@ class LocationRequestNotAcceptedError(Exception):
     (the per-device handler in ``coordinator/polling.py`` and the one in
     ``coordinator/locate.py``). Every one of them needs an explicit
     ``except LocationRequestNotAcceptedError: raise`` -- or a dedicated branch --
-    placed BEFORE it. One more sits a level up: the cycle-level handler in
-    ``polling.py``'s update method turns anything escaping the per-device loop
+    placed BEFORE it, and all five carry one. Deleting any of them, or moving it
+    behind its broad neighbour, silently restores the empty result this type was
+    introduced to replace; that is what the seam tests in
+    ``tests/test_location_request_not_accepted.py`` exist to catch.
+
+    A SIXTH broad handler exists and deliberately has no guard:
+    ``api._run_sync_helper`` flattens every exception to the caller's default, so
+    the synchronous ``api.get_device_location`` still hands back ``{}`` for this
+    signal too. That is the documented contract of the sync entry point rather
+    than an oversight, and it is pinned as such by
+    ``test_the_sync_wrapper_still_flattens_the_signal_to_an_empty_dict``. Counting
+    it among the five would be wrong; leaving it out of the count without saying
+    so would read as a completeness claim the path does not support.
+
+    One more handler sits a level UP rather than on the path: the cycle-level one
+    in ``polling.py``'s update method turns anything escaping the per-device loop
     into an ``UpdateFailed`` for the WHOLE cycle, so the per-device branch must
     not re-raise. The base class only guarantees that no NARROW handler
     misroutes the signal along the way.
 
     The payload is ``stage`` plus an optional HTTP ``status`` -- carried wherever
-    the failing layer knows one, in practice the server error and the rate limit.
+    the failing layer knows one, measured today at exactly two sites: the server
+    error, which reads it off ``NovaHTTPError.status``, and the rate limit, which
+    has no such attribute and takes the transport's ``HTTP_TOO_MANY_REQUESTS``
+    because 429 is definitional for that class.
     The device display name is deliberately absent: the raw name belongs at DEBUG
     (AGENTS.md Section 5 redaction, "Name@DEBUG"), and this message reaches
     user-facing records.
@@ -625,7 +646,7 @@ def _make_location_callback(  # noqa: PLR0915, PLR0913
 # -----------------------------------------------------------------------------
 # Public API
 # -----------------------------------------------------------------------------
-async def get_location_data_for_device(  # noqa: PLR0911, PLR0912, PLR0913, PLR0915
+async def get_location_data_for_device(  # noqa: PLR0912, PLR0913, PLR0915
     canonic_device_id: str,
     name: str,
     session: aiohttp.ClientSession | None = None,
@@ -670,7 +691,28 @@ async def get_location_data_for_device(  # noqa: PLR0911, PLR0912, PLR0913, PLR0
         last_mode_switch: Epoch timestamp when the contributor mode last changed.
 
     Returns:
-        A list of dictionaries containing location data, or an empty list on failure.
+        A list of dictionaries containing location data, or an empty list when the
+        server ACCEPTED the request and no usable record came back. That is the
+        healthy idle outcome of a BLE tag, but not only that: a failure after the
+        accept line returns empty too -- the unexpected-device mismatch, anything
+        the outer surfacing handler catches from there on, and every error the FCM
+        callback absorbs on its own. What an empty list no longer means is "the
+        request never got there"; that is what the exception below is for, and
+        that is the whole of the distinction this function draws.
+
+    Raises:
+        LocationRequestNotAcceptedError: The request never reached the server's
+            accept point (no FCM token, failed FCM registration, 429, 5xx, network
+            error, an unclassified Nova failure, or a surfacing error before the
+            accept line). Callers that only need a location may treat it as an
+            empty result, but must not read it as proof that the credentials work.
+        MissingTokenCacheError: No entry-scoped cache was supplied. A configuration
+            defect, raised before any request is built.
+        RuntimeError: No FCM receiver provider is registered, or it returned None.
+            Likewise a programming/configuration defect rather than a locate outcome.
+        NovaAuthError / NovaAuthPermanentError / SpotAuthPermanentError /
+            SpotApiEmptyResponseError / DecryptionError / OwnerKeyLookupTransientError:
+            re-raised unchanged; this layer still does not classify them.
     """
     _LOGGER.info("Requesting location data for %s...", name)
 
@@ -693,6 +735,13 @@ async def get_location_data_for_device(  # noqa: PLR0911, PLR0912, PLR0913, PLR0
         raise RuntimeError("FCM receiver provider returned None.")
 
     registered = False
+    # The accept line below is the only thing that tells a request the server took
+    # from one it never got. The outer handler wraps the WHOLE body, so its own
+    # return sits AFTER that line while the exceptions it catches come from both
+    # sides of it -- the split has to be read off a flag set AT the line, never off
+    # a position in the file (``custom_components/googlefindmy/AGENTS.md``, the
+    # paragraph beginning "Where the resolution belongs is measured").
+    request_accepted = False
     ctx = _CallbackContext()
     loop = asyncio.get_running_loop()
 
@@ -851,15 +900,28 @@ async def get_location_data_for_device(  # noqa: PLR0911, PLR0912, PLR0913, PLR0
                     "(see the preceding warning for the specific cause)",
                 )
                 _LOGGER.debug("No FCM token for %s; skipping this locate", name)
-                return []
+                # No exception to chain from: the register call returned a falsy
+                # token rather than raising, so ``from`` would have nothing to
+                # attach. The stage marker IS the whole cause here.
+                raise LocationRequestNotAcceptedError(stage="no_fcm_token")
             registered = True
             _LOGGER.debug("FCM token obtained for %s (len=%d)", name, len(fcm_token))
+        except LocationRequestNotAcceptedError:
+            # The no-FCM-token branch above raises INSIDE this try body, so the
+            # broad handler below would catch the signal and flatten it right back
+            # into the empty result this change exists to tell apart. ``Exception``
+            # is its base by design (see the class docstring), which is precisely
+            # why the base cannot buy this and an explicit re-raise must sit ahead
+            # of every broad handler on the path.
+            raise
         except Exception as fcm_error:
             # R6 (AGENTS.md Section 5): device name to DEBUG only.
             _LOGGER.error("FCM registration failed: %s", fcm_error)
             _LOGGER.debug("FCM registration failed for %s", name)
             _LOGGER.debug("FCM registration traceback: %s", traceback.format_exc())
-            return []
+            raise LocationRequestNotAcceptedError(
+                stage="fcm_registration_failed"
+            ) from fcm_error
 
         # Create location request payload
         hex_payload = create_location_request(
@@ -891,14 +953,22 @@ async def get_location_data_for_device(  # noqa: PLR0911, PLR0912, PLR0913, PLR0
             # R6 (AGENTS.md Section 5): device name to DEBUG only.
             _LOGGER.warning("Rate limited while requesting location: %s", e)
             _LOGGER.debug("Rate limited while requesting location for %s", name)
-            return []
+            # Measured: ``NovaRateLimitError`` carries ``detail`` but no ``status``
+            # attribute -- the status is definitional for the class ("Raised on 429
+            # rate-limiting errors after retries"), so it comes from the transport's
+            # own constant rather than from a getattr that would silently yield None.
+            raise LocationRequestNotAcceptedError(
+                stage="rate_limited", status=HTTP_TOO_MANY_REQUESTS
+            ) from e
         except NovaHTTPError as e:
             # R6 (AGENTS.md Section 5): device name to DEBUG only.
             _LOGGER.warning(
                 "Server error (%s) while requesting location: %s", e.status, e
             )
             _LOGGER.debug("Server error while requesting location for %s", name)
-            return []
+            raise LocationRequestNotAcceptedError(
+                stage="server_error", status=e.status
+            ) from e
         except NovaAuthError as e:
             # Re-raise auth errors so api.py can convert to ConfigEntryAuthFailed
             # and trigger re-authentication flow. Previously this was swallowed,
@@ -928,15 +998,19 @@ async def get_location_data_for_device(  # noqa: PLR0911, PLR0912, PLR0913, PLR0
             # R6 (AGENTS.md Section 5): device name to DEBUG only.
             _LOGGER.warning("Network/client error while requesting location: %s", e)
             _LOGGER.debug("Network/client error while requesting location for %s", name)
-            return []
+            raise LocationRequestNotAcceptedError(stage="network_error") from e
         except Exception as e:
             # R6 (AGENTS.md Section 5): device name to DEBUG only.
             _LOGGER.error("Nova API request failed: %s", e)
             _LOGGER.debug("Nova API request failed for %s", name)
-            return []
+            raise LocationRequestNotAcceptedError(stage="nova_request_failed") from e
 
         # For this RPC the server often returns HTTP 200 with empty body (FCM delivers the data).
         _LOGGER.info("Location request accepted for %s; awaiting FCM data...", name)
+        # Everything from here on is an ACCEPTED request. An empty result below is
+        # the healthy idle outcome of a BLE tag, and the outer handler must stop
+        # calling it "not accepted" from this point.
+        request_accepted = True
 
         # Wait efficiently for FCM callback to signal completion
         timeout = LOCATION_REQUEST_TIMEOUT_S
@@ -951,6 +1025,10 @@ async def get_location_data_for_device(  # noqa: PLR0911, PLR0912, PLR0913, PLR0
             _LOGGER.info(
                 "No location response received for %s (timeout: %ss)", name, timeout
             )
+            # Deliberately still an empty return: the server ACCEPTED this request,
+            # no reporter was in range within the window. This is the very outcome
+            # LocationRequestNotAcceptedError exists to keep distinguishable from a
+            # request that never arrived -- raising here would re-merge them.
             return []
 
         if ctx.error:
@@ -987,6 +1065,13 @@ async def get_location_data_for_device(  # noqa: PLR0911, PLR0912, PLR0913, PLR0
                 "Received location data for an unexpected device; ignoring."
             )
             _LOGGER.debug("Unexpected-device mismatch in locate flow for %s", name)
+        # Also unchanged, and for the branch above only half by right: the request
+        # was accepted, so it is out of this plan's scope by definition. But the
+        # ``else`` arm is a FAILURE, not an idle outcome -- data arrived for the
+        # wrong device. It escapes only because the line drawn here is
+        # accepted-versus-not-accepted, not healthy-versus-failed
+        # (``custom_components/googlefindmy/AGENTS.md``: "not every empty result
+        # after the log is benign either").
         return []
 
     except asyncio.CancelledError:
@@ -1020,6 +1105,13 @@ async def get_location_data_for_device(  # noqa: PLR0911, PLR0912, PLR0913, PLR0
         # (DEBUG skip, no counter touch) instead of being swallowed by the broad
         # ``except Exception`` into ``return []``.
         raise
+    except LocationRequestNotAcceptedError:
+        # Second and last swallow guard. Six of the seven raise sites are inside
+        # this try body, so without it the broad handler below would catch the
+        # signal and hand back the empty result again -- and worse, the branch at
+        # the end of that handler would re-wrap it under ``surfacing_before_accept``,
+        # discarding the stage that named the real position.
+        raise
     except Exception as e:
         # R6 (AGENTS.md Section 5 redaction): the raw device display name must not
         # leak into a user-facing WARNING/ERROR. Surface only the error type and
@@ -1035,6 +1127,16 @@ async def get_location_data_for_device(  # noqa: PLR0911, PLR0912, PLR0913, PLR0
         )
         _LOGGER.debug("Location request failure detail for %s", name)
         _LOGGER.debug("Traceback: %s", traceback.format_exc())
+        # Both records above stay on BOTH sides of the branch: they are the R6 and
+        # R9c diagnostics, and which side of the accept line the failure fell on
+        # says nothing about whether the operator needs them.
+        if not request_accepted:
+            # This handler wraps the whole body, so its position in the file cannot
+            # tell the two sides apart -- only the flag can. Anything reaching here
+            # before the accept line means the request never got to the server.
+            raise LocationRequestNotAcceptedError(
+                stage="surfacing_before_accept"
+            ) from e
         return []
     finally:
         # Clean up - unregister callback only (receiver lifecycle is owned by integration)

@@ -1325,11 +1325,19 @@ class GoogleFindMyAPI:
             That reliance is only as sound as the layer below. It holds exactly
             to the extent that a request which never reached the server raises
             rather than returning empty -- see `LocationRequestNotAcceptedError`
-            below. As of this step the raise sites do not exist yet, so a 5xx, a
-            429, a network error or a failed FCM registration still arrive here
-            as an empty list and leave through this exit indistinguishable from
-            a healthy idle BLE tag. That is the defect the signal is being
-            introduced to close, not a property to design against.
+            below. Those raise sites now exist: a 5xx, a 429, a network error and
+            a failed FCM registration leave `location_request.py` as that
+            exception, not through this exit. What still arrives here as an empty
+            list is what the layer below vouches for as ACCEPTED, which is not
+            the same as healthy, and is deliberately NOT a closed list: the idle
+            BLE tag; the post-accept branches of the locate flow (the
+            unexpected-device mismatch, and any error the outer surfacing handler
+            catches once the accept line has been passed); and every failure the
+            FCM callback absorbs on its own, which is a fully-catching layer of
+            its own after that line -- an unreadable push, a decode failure, a
+            push for another device. Reading an empty result as "healthy" was the
+            defect; reading it as "one of exactly three things" would be the next
+            one.
 
         Raises:
             ConfigEntryAuthFailed: Re-auth must start at once -- an HTTP 401/403
@@ -1351,7 +1359,7 @@ class GoogleFindMyAPI:
                 It claims a POSITION in the request flow, never a cause, so it is
                 NOT an auth verdict: an unreachable server says nothing about the
                 credentials, and this exit must not be folded into the auth
-                mapping above. Nothing raises it yet as of this step.
+                mapping above.
         """
 
         # Register cache provider for multi-entry support
@@ -1593,12 +1601,16 @@ class GoogleFindMyAPI:
             # auth mapping documented above is untouched by it -- an unreachable
             # server says nothing about the credentials.
             #
-            # As of this step nothing raises this type yet; the raise sites in
-            # `location_request.py` follow. The receivers are installed first on
-            # purpose: with the sender armed first, the signal would reach the
-            # coordinator's broad per-device handler, which sets both
-            # `cycle_failed` and `last_exception`, and a single 5xx on a single
-            # tracker would mark every entity of the account unavailable.
+            # This receiver was installed one step BEFORE the seven raise sites in
+            # `location_request.py` existed. The order is deliberate, though not
+            # for the reason it is tempting to state: with NO receiver anywhere,
+            # a sender-first step would have been INERT rather than dangerous,
+            # because the broad `except Exception` below flattens the signal to
+            # `{}` before any coordinator sees it. The danger is the half-wired
+            # state -- this pass-through present and the coordinator's not: the
+            # signal then reaches the poll loop's broad per-device handler, which
+            # sets both `cycle_failed` and `last_exception`, and a single 5xx on a
+            # single tracker would mark every entity of the account unavailable.
             raise
 
         except RuntimeError as err:

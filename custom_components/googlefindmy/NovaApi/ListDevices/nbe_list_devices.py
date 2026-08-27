@@ -355,6 +355,17 @@ async def _async_cli_main(
                 "custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker.location_request"
             ).get_location_data_for_device
 
+            # Known open edge, stated so it is not mistaken for an oversight:
+            # since PLAN_GFMY_EMPTY_RESULT_DISTINGUISHABLE this call raises
+            # `LocationRequestNotAcceptedError` for a request the server never
+            # accepted (a 5xx, a 429, a network error, a failed FCM
+            # registration) where it used to return an empty list. Nothing here
+            # catches it, so the interactive loop ends on a traceback instead of
+            # printing "no location". Turning that into a readable CLI line is
+            # the job of the step that tightens the CLI edges; it is deliberately
+            # not done inside the change that armed the raise sites, because the
+            # coordinator paths and the CLI paths fail for different reasons and
+            # want different words.
             locations = await get_location_data_for_device(
                 selected_canonic_id,
                 selected_device_name,

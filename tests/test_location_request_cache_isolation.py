@@ -14,6 +14,9 @@ from custom_components.googlefindmy.exceptions import (
 from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker import (
     location_request,
 )
+from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker.location_request import (
+    LocationRequestNotAcceptedError,
+)
 from custom_components.googlefindmy.NovaApi.ExecuteAction.PlaySound import (
     start_sound_request,
     stop_sound_request,
@@ -406,12 +409,27 @@ def test_locate_request_requires_cache(monkeypatch: pytest.MonkeyPatch) -> None:
     asyncio.run(_run())
 
 
-def test_locate_request_requires_namespace(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Caches with empty entry_id proceed without namespace prefix and may fail gracefully.
+@pytest.mark.asyncio
+async def test_locate_request_requires_namespace(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Caches with empty entry_id proceed without namespace prefix and fail downstream.
 
     The production code no longer raises MissingNamespaceError for empty
     entry_id caches.  Instead, it falls through to un-namespaced cache
-    access and the nova request may fail, returning an empty list.
+    access and the nova request fails there.
+
+    That downstream failure now surfaces as ``LocationRequestNotAcceptedError``
+    rather than as an empty list (PLAN_GFMY_EMPTY_RESULT_DISTINGUISHABLE): the
+    request never reached the server. The assertion this test exists for is the
+    NEGATIVE one -- no ``MissingNamespaceError``. ``pytest.raises`` carries it:
+    the two classes are disjoint, so a regression to the namespace error fails
+    the block rather than any assertion inside it. Spelling it out as a second
+    ``isinstance`` check would look like the guard while never being able to fire.
+
+    Driven on pytest's managed loop instead of ``asyncio.run`` (tests/AGENTS.md:
+    "Never call ``asyncio.run()`` inside tests."); the surrounding module still
+    carries the older shape, which is a separate cleanup.
     """
 
     class _CacheWithoutEntry(FakeTokenCache):
@@ -424,18 +442,14 @@ def test_locate_request_requires_namespace(monkeypatch: pytest.MonkeyPatch) -> N
 
     cache = _CacheWithoutEntry()
 
-    async def _run() -> list:
-        result = await location_request.get_location_data_for_device(
+    with pytest.raises(LocationRequestNotAcceptedError) as excinfo:
+        await location_request.get_location_data_for_device(
             canonic_device_id="device-456",
             name="Tracker",
             cache=cache,
         )
-        return result
 
-    result = asyncio.run(_run())
-    # With an empty-namespace cache, the request proceeds but
-    # the downstream nova call fails; the function returns [].
-    assert result == []
+    assert excinfo.value.stage == "nova_request_failed"
 
 
 def test_create_location_request_rejects_a_blank_request_uuid() -> None:

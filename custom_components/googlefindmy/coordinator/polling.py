@@ -1715,12 +1715,26 @@ class PollingOperations(_MixinBase):
                 # refused is account-wide on the rejections' own terms.
                 # Deliberately NOT the same shape as the decrypt verdict above:
                 # that one gates on `cycle_had_successful_decrypt`, a positive
-                # proof. The request path has no such proof to gate on, because
-                # `api.async_get_device_location` returns the same empty dict
-                # for a healthy idle BLE tag and for a 5xx, a 429, a protobuf
-                # decode failure or a Nova logic error. So a non-rejected
-                # sibling is NOT evidence that anything worked, and this counter
-                # must not be read as if it were.
+                # proof. The request path has no such proof to gate on. It used
+                # to have none at all, because `api.async_get_device_location`
+                # returned the same empty dict for a healthy idle BLE tag as for
+                # a 5xx, a 429, a protobuf decode failure or a Nova logic error.
+                # PLAN_GFMY_EMPTY_RESULT_DISTINGUISHABLE narrowed that, and
+                # measured, it narrowed LESS than the old list suggests: what now
+                # arrives as `LocationRequestNotAcceptedError` on the branch below
+                # is what `async_nova_request` raises -- the 5xx and the 429 on
+                # their own rungs, anything else through the generic guard. The
+                # protobuf decode failure does NOT: on this path it is raised
+                # inside the FCM callback, i.e. AFTER the accept line, and the
+                # callback catches it itself and hands back an empty result. The
+                # Nova logic error is not raised anywhere in the tree at all
+                # (`grep -rn "raise NovaLogicError" custom_components/`), so it
+                # never told us anything either way.
+                # So an empty result is narrower evidence than it was, and still
+                # not proof that anything worked. It remains the outcome of the
+                # idle tag, of every failure the FCM callback absorbs, and of the
+                # post-accept branches of the locate flow -- not a closed list,
+                # which is the point: this counter must not be read as evidence.
                 cycle_rejected_devices = 0
                 for idx, dev in enumerate(devices):
                     dev_id = dev["id"]
@@ -2307,12 +2321,14 @@ class PollingOperations(_MixinBase):
                         # * NO `_set_auth_state(failed=False)` and NO reset of
                         #   `_consecutive_transient_auth_failures`. Those sit on
                         #   the success path above and are skipped by construction
-                        #   once the raise sites exist. That skip IS the fix for
+                        #   now that the raise sites exist. That skip IS the fix for
                         #   the counter being wiped by a 5xx on its way through;
                         #   re-doing the reset here would hand it straight back.
-                        # * NO reset of `_consecutive_timeouts`. Measured: today
-                        #   a failed request reaches the `if not location:`
-                        #   branch, which does NOT reset that counter. Resetting
+                        # * NO reset of `_consecutive_timeouts`. Measured before
+                        #   the raise sites were armed: a failed request reached
+                        #   the `if not location:` branch, which does NOT reset
+                        #   that counter -- so leaving it alone here is what
+                        #   preserves the behaviour, not what changes it. Resetting
                         #   it here would therefore not preserve current
                         #   behaviour but invent a health signal the request
                         #   never earned -- the same false-success reasoning this
@@ -2362,8 +2378,8 @@ class PollingOperations(_MixinBase):
                 # What this guard does NOT claim, stated so the next reader does
                 # not infer it: that a cycle which fails the check had a
                 # sibling success. A mixed cycle -- one tracker refused, the
-                # others back empty from a 5xx -- stays silent here, and so does
-                # that same 5xx outage with no rejection in it at all
+                # others back empty -- stays silent here, and so does an outage
+                # with no rejection in it at all
                 # (`test_known_gap_a_cycle_of_only_empty_results_reports_success` pins
                 # that reference case). Hanging the error signal on whether some
                 # unrelated tracker happens to be deleted would be a
@@ -2411,11 +2427,14 @@ class PollingOperations(_MixinBase):
                 # surfacing handler wraps the whole body, so its `return
                 # []` sits after the log while its exceptions come from
                 # either side, and the unexpected-device branch after the
-                # log returns empty on a WARNING. A follow-up needs a flag
-                # set at the log line, and has to carry that outcome ACROSS
-                # the boundary (a typed result, for example) rather than
-                # reconstruct it here, where the empty collection has
-                # already flattened it. The layer that flattens it is
+                # log returns empty on a WARNING. That flag now exists --
+                # `request_accepted` in `get_location_data_for_device` -- and
+                # the outcome is carried ACROSS the boundary as
+                # `LocationRequestNotAcceptedError` rather than reconstructed
+                # here. What is NOT yet done is the cycle-level evaluation of
+                # that signal; the per-device branch below still only skips.
+                # Do not read the sentences around this one as an open
+                # instruction to build the flag a second time. The layer that flattens it is
                 # `location_request.py`, not `api.py`: aiming a fix at the
                 # file where the empty dict is built would sit behind the
                 # point where the evidence is gone. See

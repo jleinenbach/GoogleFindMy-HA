@@ -37,15 +37,20 @@ from __future__ import annotations
 import ast
 import asyncio
 import inspect
+import logging
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
+import aiohttp
 import pytest
 from homeassistant.exceptions import HomeAssistantError
 
 import custom_components.googlefindmy.api as api_module
 from custom_components.googlefindmy.coordinator import GoogleFindMyCoordinator
+from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker import (
+    location_request as location_request_module,
+)
 from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker.decrypt_locations import (
     DecryptionError,
 )
@@ -53,7 +58,12 @@ from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker.location
     LOCATION_REQUEST_NOT_ACCEPTED_STAGES,
     LocationRequestNotAcceptedError,
 )
-from custom_components.googlefindmy.NovaApi.nova_request import NovaAuthError, NovaError
+from custom_components.googlefindmy.NovaApi.nova_request import (
+    NovaAuthError,
+    NovaError,
+    NovaHTTPError,
+    NovaRateLimitError,
+)
 from tests.helpers import drain_loop
 from tests.helpers.config_entries_stub import make_config_entry
 from tests.helpers.locate_mixin_stub import LocateStub
@@ -156,10 +166,10 @@ def test_no_sound_path_reaches_the_location_request_module() -> None:
     """The second failure mode is constructively absent, measured rather than asserted.
 
     The two sound-request handlers catch a fixed tuple with no broad fallback, so a
-    signal that reached them would propagate uncaught. It cannot, because every raise
-    site AP-3 adds sits inside ``get_location_data_for_device`` (today there are none
-    yet) and no module under ``PlaySound/`` reaches that function -- not by call, not
-    by import, not by a string handed to ``getattr``/``import_module``.
+    signal that reached them would propagate uncaught. It cannot, because all seven
+    raise sites sit inside ``get_location_data_for_device`` and no module under
+    ``PlaySound/`` reaches that function -- not by call, not by import, not by a
+    string handed to ``getattr``/``import_module``.
 
     Stated so it is not mistaken for a full reachability proof: the scan is one hop
     and package-local. Four routes pass it -- reaching the locate path THROUGH a third
@@ -214,26 +224,11 @@ def test_no_sound_path_reaches_the_location_request_module() -> None:
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "the raise sites are not armed yet; until then no stage marker is in use. "
-        "This is also the tripwire for the prose that is only true until they are: "
-        "when it flips to XPASS, re-read the 'as of this step' paragraphs in "
-        "api.async_get_device_location's Returns and Raises sections, its "
-        "LocationRequestNotAcceptedError pass-through comment, the class "
-        "docstring in location_request.py, the module comment above "
-        "LOCATION_REQUEST_NOT_ACCEPTED_STAGES (which asserts both that the flag "
-        "does not exist and that nothing enforces the set), and the 'Measured: "
-        "today' paragraph in coordinator/polling.py's handler. Nothing else "
-        "enforces those."
-    ),
-)
 def test_the_stage_markers_are_a_closed_set() -> None:
     """Every raise site uses a declared marker, and every declared marker is used."""
     stages = _raised_stages(_LOCATION_REQUEST_PY.read_text(encoding="utf-8"))
 
-    assert stages, "no raise site uses the signal yet"
+    assert stages, "no raise site uses the signal at all -- the sender is disarmed"
     assert set(stages) <= LOCATION_REQUEST_NOT_ACCEPTED_STAGES
     assert set(stages) == LOCATION_REQUEST_NOT_ACCEPTED_STAGES
     assert len(stages) == len(set(stages)), f"a marker is used twice: {stages}"
@@ -253,10 +248,13 @@ def test_the_stage_markers_are_a_closed_set() -> None:
 #
 # Injecting at the api seam rather than deep in ``location_request`` is deliberate
 # and mirrors ``tests/test_transient_owner_key_propagation.py``: the receivers must
-# be provably correct while the sender is still silent, because arming the sender
-# first would let the signal reach the poll loop's broad per-device handler, which
-# sets both ``cycle_failed`` and ``last_exception`` -- one 5xx on one tracker would
-# mark every entity of the account unavailable.
+# be provably correct while the sender is still silent. What that ordering buys is
+# NOT what it first looks like -- with no receiver anywhere, an armed sender would
+# have been inert, since ``api.py``'s own broad handler flattens the signal to
+# ``{}``. The state to avoid is the HALF-wired one, api pass-through installed and
+# coordinator branch not: there the signal reaches the poll loop's broad per-device
+# handler, which sets both ``cycle_failed`` and ``last_exception``, and one 5xx on
+# one tracker marks every entity of the account unavailable.
 # ===========================================================================
 
 
@@ -611,3 +609,374 @@ def test_the_sync_wrapper_still_flattens_the_signal_to_an_empty_dict(
         drain_loop(sync_loop)
 
     assert result == {}
+
+
+# ===========================================================================
+# AP-3: the sender. Seven raise sites, two swallow guards, three empty returns
+# that must STAY empty.
+#
+# The two sections above pin the type and the receivers. This one pins the only
+# thing that makes either matter: that the seven pre-accept paths raise at all,
+# under the marker that names WHERE they are, and that the three post-accept
+# paths are untouched. Both halves are load-bearing -- a change that raised
+# everywhere would be just as wrong as one that raised nowhere, because it would
+# re-merge the accepted-but-idle outcome with the never-arrived one from the
+# other side.
+#
+# These tests drive the REAL ``get_location_data_for_device`` (no api-seam
+# injection): what is under test here is the function's own control flow.
+# ===========================================================================
+
+
+class _RaisingFcmReceiver:
+    """Receiver whose registration raises, exercising the fcm_registration path."""
+
+    def __init__(self, exc: Exception) -> None:
+        self._exc = exc
+
+    async def async_register_for_location_updates(
+        self, _device_id: str, _callback: Any
+    ) -> str:
+        raise self._exc
+
+    async def async_unregister_for_location_updates(self, _device_id: str) -> None:
+        return None
+
+
+class _TokenFcmReceiver:
+    """Receiver whose registration yields a token; the locate fails downstream."""
+
+    def __init__(self, token: str = "fcm-token") -> None:
+        self._token = token
+
+    async def async_register_for_location_updates(
+        self, _device_id: str, _callback: Any
+    ) -> str:
+        return self._token
+
+    async def async_unregister_for_location_updates(self, _device_id: str) -> None:
+        return None
+
+
+class _SenderTokenCache:
+    """Minimal entry-scoped cache the locate flow accepts."""
+
+    def __init__(self, label: str = "entry-sender") -> None:
+        self.entry_id = label
+        self.values: dict[str, Any] = {}
+
+    async def async_get_cached_value(self, key: str) -> Any:
+        return self.values.get(key)
+
+    async def async_set_cached_value(self, key: str, value: Any) -> None:
+        self.values[key] = value
+
+    async def get(self, key: str) -> Any:
+        return self.values.get(key)
+
+    async def set(self, key: str, value: Any) -> None:
+        self.values[key] = value
+
+
+def _capture_ctx(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+    """Replace the callback factory and hand back the context it was built with.
+
+    The post-accept tests need to drive ``ctx`` directly: the accept line is only
+    reachable with a Nova request that succeeds, and everything after it waits on
+    ``ctx.event``. Capturing the context the production code created is the only
+    way to reach those branches without a real FCM delivery.
+    """
+    captured: dict[str, Any] = {}
+
+    def _fake_make_callback(*, ctx: Any, **_: Any) -> Any:
+        captured["ctx"] = ctx
+        return lambda *_a: None
+
+    monkeypatch.setattr(
+        location_request_module, "_make_location_callback", _fake_make_callback
+    )
+    return captured
+
+
+async def _locate(**kwargs: Any) -> list[dict[str, Any]]:
+    """Call the real entry point with the fixed arguments every case below shares."""
+    return await location_request_module.get_location_data_for_device(
+        canonic_device_id="device-sender",
+        name="Tracker",
+        session=None,
+        username="user@example.com",
+        cache=_SenderTokenCache(),
+        **kwargs,
+    )
+
+
+@pytest.mark.asyncio
+async def test_no_fcm_token_raises_instead_of_returning_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A registration that yields no token never reaches the server."""
+    monkeypatch.setattr(
+        location_request_module,
+        "_FCM_ReceiverGetter",
+        lambda *_a: _TokenFcmReceiver(token=""),
+    )
+    _capture_ctx(monkeypatch)
+
+    with pytest.raises(LocationRequestNotAcceptedError) as excinfo:
+        await _locate()
+
+    assert excinfo.value.stage == "no_fcm_token"
+    # No exception to chain from here: the falsy token is not an error object.
+    assert excinfo.value.__cause__ is None
+    assert excinfo.value.status is None
+
+
+@pytest.mark.asyncio
+async def test_fcm_registration_failed_raises_instead_of_returning_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A raising registration never reaches the server either."""
+    boom = RuntimeError("registration backend down")
+    monkeypatch.setattr(
+        location_request_module,
+        "_FCM_ReceiverGetter",
+        lambda *_a: _RaisingFcmReceiver(boom),
+    )
+    _capture_ctx(monkeypatch)
+
+    with pytest.raises(LocationRequestNotAcceptedError) as excinfo:
+        await _locate()
+
+    assert excinfo.value.stage == "fcm_registration_failed"
+    assert excinfo.value.__cause__ is boom
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("nova_exc", "expected_stage", "expected_status"),
+    [
+        (NovaRateLimitError("upstream quota exceeded"), "rate_limited", 429),
+        (NovaHTTPError(503, "backend unavailable"), "server_error", 503),
+        (aiohttp.ClientError("connection reset"), "network_error", None),
+        (RuntimeError("unclassified nova failure"), "nova_request_failed", None),
+    ],
+)
+async def test_the_nova_ladder_raises_instead_of_returning_empty(
+    monkeypatch: pytest.MonkeyPatch,
+    nova_exc: Exception,
+    expected_stage: str,
+    expected_status: int | None,
+) -> None:
+    """Each rung of the Nova exception ladder carries its own marker.
+
+    The status column is the reason this is parametrised rather than four copies:
+    two rungs know a status and two do not, and a marker that silently lost its
+    status would otherwise look exactly like one that never had one. 429 is
+    asserted as a literal on purpose -- the production code reads it from the
+    transport's constant, and a test that imported the same constant would agree
+    with it by construction.
+    """
+    monkeypatch.setattr(
+        location_request_module, "_FCM_ReceiverGetter", lambda *_a: _TokenFcmReceiver()
+    )
+    _capture_ctx(monkeypatch)
+    monkeypatch.setattr(
+        location_request_module, "create_location_request", lambda *a, **k: "deadbeef"
+    )
+
+    async def _raise_nova(*_a: object, **_k: object) -> bytes:
+        raise nova_exc
+
+    monkeypatch.setattr(location_request_module, "async_nova_request", _raise_nova)
+
+    with pytest.raises(LocationRequestNotAcceptedError) as excinfo:
+        await _locate()
+
+    assert excinfo.value.stage == expected_stage
+    assert excinfo.value.status == expected_status
+    assert excinfo.value.__cause__ is nova_exc
+
+
+@pytest.mark.asyncio
+async def test_surfacing_before_accept_raises_instead_of_returning_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failure the outer handler catches BEFORE the accept line is not an idle result.
+
+    This is the marker that cannot be read off the file: the handler wraps the
+    whole body, so its own return sits after the accept line. Only the flag tells
+    the two sides apart.
+    """
+    boom = RuntimeError("payload build failed")
+    monkeypatch.setattr(
+        location_request_module, "_FCM_ReceiverGetter", lambda *_a: _TokenFcmReceiver()
+    )
+    _capture_ctx(monkeypatch)
+
+    def _boom(*_a: object, **_k: object) -> str:
+        raise boom
+
+    monkeypatch.setattr(location_request_module, "create_location_request", _boom)
+
+    with pytest.raises(LocationRequestNotAcceptedError) as excinfo:
+        await _locate()
+
+    assert excinfo.value.stage == "surfacing_before_accept"
+    assert excinfo.value.__cause__ is boom
+
+
+@pytest.mark.asyncio
+async def test_the_fcm_inner_handler_does_not_swallow_the_signal(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The most load-bearing test of this step.
+
+    ``no_fcm_token`` raises INSIDE the inner try body, and the handler that closes
+    that body is a broad ``except Exception``. ``Exception`` is this type's base by
+    design, so without the explicit re-raise placed ahead of it the signal is
+    caught there, relabelled ``fcm_registration_failed`` and handed on -- or, in the
+    pre-guard shape, turned straight back into the empty list. Both outcomes leave
+    a green suite and an inert change.
+
+    The assertion is therefore on the MARKER, not merely on the type: the swallow
+    would produce the same class under a different stage, and a test that only
+    checked ``pytest.raises(LocationRequestNotAcceptedError)`` would pass through
+    it.
+
+    It also asserts on the RECORD, which is what keeps it from being a second copy
+    of ``test_no_fcm_token_raises_instead_of_returning_empty``: the swallow path
+    runs the registration handler's own ``FCM registration failed`` ERROR on its
+    way through. That record is present exactly when the guard is missing, so its
+    absence is an observation the sibling test does not make.
+    """
+    monkeypatch.setattr(
+        location_request_module,
+        "_FCM_ReceiverGetter",
+        lambda *_a: _TokenFcmReceiver(token=""),
+    )
+    _capture_ctx(monkeypatch)
+    caplog.set_level(logging.DEBUG, logger=location_request_module.__name__)
+
+    with pytest.raises(LocationRequestNotAcceptedError) as excinfo:
+        await _locate()
+
+    assert excinfo.value.stage == "no_fcm_token", (
+        "the inner broad handler swallowed the signal and re-raised it under its "
+        "own marker; the explicit re-raise ahead of it is gone or misordered"
+    )
+    assert not [
+        rec for rec in caplog.records if "FCM registration failed" in rec.getMessage()
+    ], "the registration handler ran, so the signal passed through it"
+
+
+def _wire_accepted_flow(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+    """Wire a locate whose Nova request SUCCEEDS, so the accept line is reached."""
+    monkeypatch.setattr(
+        location_request_module, "_FCM_ReceiverGetter", lambda *_a: _TokenFcmReceiver()
+    )
+    captured = _capture_ctx(monkeypatch)
+    monkeypatch.setattr(
+        location_request_module, "create_location_request", lambda *a, **k: "deadbeef"
+    )
+
+    async def _ok(*_a: object, **_k: object) -> bytes:
+        return b""
+
+    monkeypatch.setattr(location_request_module, "async_nova_request", _ok)
+    return captured
+
+
+@pytest.mark.asyncio
+async def test_an_accepted_request_that_times_out_still_returns_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The healthy idle outcome of a BLE tag: accepted, nobody in range, empty."""
+    _wire_accepted_flow(monkeypatch)
+    monkeypatch.setattr(location_request_module, "LOCATION_REQUEST_TIMEOUT_S", 0.01)
+
+    assert await _locate() == []
+
+
+@pytest.mark.asyncio
+async def test_an_accepted_request_with_no_matching_record_still_returns_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Accepted, delivered, nothing for this device: still an empty result."""
+    captured = _wire_accepted_flow(monkeypatch)
+    monkeypatch.setattr(location_request_module, "LOCATION_REQUEST_TIMEOUT_S", 5)
+
+    async def _deliver_nothing(*_a: object, **_k: object) -> bytes:
+        ctx = captured["ctx"]
+        ctx.data = []
+        ctx.event.set()
+        return b""
+
+    monkeypatch.setattr(location_request_module, "async_nova_request", _deliver_nothing)
+
+    assert await _locate() == []
+
+
+@pytest.mark.asyncio
+async def test_a_failure_after_the_accept_line_still_returns_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failure AFTER the accept line reaches the same broad handler and must not raise.
+
+    This is the other half of ``surfacing_before_accept`` and the reason the branch
+    exists at all: the same handler, the same exception type, opposite verdicts,
+    decided solely by the flag. Delivering a record that is not a mapping makes the
+    match check blow up after the accept line, which is a genuine post-accept
+    surfacing failure rather than a simulated one.
+    """
+    captured = _wire_accepted_flow(monkeypatch)
+    monkeypatch.setattr(location_request_module, "LOCATION_REQUEST_TIMEOUT_S", 5)
+
+    async def _deliver_garbage(*_a: object, **_k: object) -> bytes:
+        ctx = captured["ctx"]
+        ctx.data = [object()]  # no ``.get`` -- AttributeError past the accept line
+        ctx.event.set()
+        return b""
+
+    monkeypatch.setattr(location_request_module, "async_nova_request", _deliver_garbage)
+
+    assert await _locate() == []
+
+
+@pytest.mark.asyncio
+async def test_data_for_the_wrong_device_still_returns_empty_and_warns(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The one post-accept branch that is a FAILURE and still returns empty.
+
+    Both the production comment at that branch and the ``Returns`` section of
+    ``api.async_get_device_location`` now single it out: it escapes this change not
+    because it is healthy but because the line drawn here is accepted-versus-not,
+    not healthy-versus-failed. A claim of that shape needs a test, or the next
+    change is free to turn the branch into a raise -- or to drop its WARNING -- with
+    a green suite.
+
+    It is deliberately NOT covered by the no-matching-record test above: that one
+    delivers an EMPTY list and takes the ``if not data`` arm (DEBUG), this one
+    delivers a record for a different device and takes the ``else`` arm (WARNING).
+    """
+    captured = _wire_accepted_flow(monkeypatch)
+    monkeypatch.setattr(location_request_module, "LOCATION_REQUEST_TIMEOUT_S", 5)
+    caplog.set_level(logging.DEBUG, logger=location_request_module.__name__)
+
+    async def _deliver_stranger(*_a: object, **_k: object) -> bytes:
+        ctx = captured["ctx"]
+        ctx.data = [{"canonic_id": "a-completely-different-device"}]
+        ctx.event.set()
+        return b""
+
+    monkeypatch.setattr(
+        location_request_module, "async_nova_request", _deliver_stranger
+    )
+
+    assert await _locate() == []
+    warnings = [rec for rec in caplog.records if rec.levelno == logging.WARNING]
+    assert any("unexpected device" in rec.getMessage() for rec in warnings), (
+        "the mismatch must stay visible; it is a failure, not an idle outcome"
+    )
