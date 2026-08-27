@@ -105,12 +105,127 @@ Classify an auth rejection by the HTTP **status**, never by the exception type. 
 non-retryable 4xx (`nova_request.py` raises it for 400, 404, 405, 409, 422 as well; `HTTP_RETRY_ELIGIBLE` holds no 4xx
 besides 408 and 429), so a type check reads "device not found" as "your sign-in expired". A 401 that survived the refresh
 sequence arrives flagged `is_permanent=True`, which leaves 403 as the only plain credential rejection a handler sees.
-`api._classify_nova_auth_error` is the shared predicate: permanent first, then 401/403, everything else is a server-side
-rejection. Extent today, stated so it is not mistaken for coverage: the two sound handlers use it; the device-list handler
-(`api.py`, `except NovaAuthError` before `NovaProtobufDecodeError`), the location handler, `coordinator/polling.py` and
-`coordinator/locate.py` still key off the type, and each of those turns a 404 into `ConfigEntryAuthFailed` or a reauth
-countdown. Narrowing them is a behaviour change that needs its own regression test, not a drive-by edit; do not assume a
-green suite proves the rest of the tree already follows this rule.
+`nova_request.is_credential_rejection` is the shared predicate: permanent first, then 401/403, an unreadable status keeps
+the conservative verdict, everything else is a server-side rejection. `api._classify_nova_auth_error` is its sound-path
+adapter and must not re-derive the status test -- a second copy is how the handlers drifted apart in the first place.
+Extent today, stated so it is not mistaken for coverage: six call sites in four files read it (`api.py` three times,
+`coordinator/polling.py`, `coordinator/locate.py`, `location_request.py`), and they serve seven handlers, because the two
+sound handlers share the `_classify_nova_auth_error` adapter. In order: the two sound handlers via
+`_classify_nova_auth_error`; the device-list handler (`api.py`, `except NovaAuthError` before `NovaProtobufDecodeError`),
+which now raises `UpdateFailed` for a non-credential rejection; the location handler, which passes the error on to its
+callers instead of returning `{}` -- and which, unlike the device-list handler, also passes on a plain
+NON-permanent credential rejection (a 403) rather than converting it to `ConfigEntryAuthFailed`, because
+`polling.py` counts consecutive transient auth failures and escalates at its own threshold instead of
+prompting on the first one; only a PERMANENT auth failure (or an HTTP 401/403 `NovaHTTPError`) converts
+there. Both cases therefore leave that handler as `NovaAuthError`, which is precisely why a caller must ask
+the predicate and not the type; `coordinator/polling.py`, whose `except NovaAuthError` branch leaves the
+transient-auth counter alone in both directions AND does not record the rejection as the cycle's `last_exception`;
+and `coordinator/locate.py`, whose branch does not flip the account-wide auth state. `location_request.py` names the status in its log records instead of calling every 4xx an
+authentication error, but still only re-raises -- it does not classify.
+Why the location handler raises rather than returning `{}`, since the empty return looks like the gentler option: both
+callers treat ANY non-raising return as positive proof that the credentials work. `polling.py` runs "Success path:
+ensure any previous auth error is cleared" and `locate.py` runs "Success path: clear any auth error state", and both run
+BEFORE the `if not location` guard. An empty return for a rejected device would therefore have RESET the transient-auth
+counter and cleared the auth state, which is the opposite of what those branches say. Worse, it would have done so
+PERMANENTLY: a 5xx clears up, a device deleted from the account does not, so one deleted tracker in the list would reset
+the counter every cycle and a genuinely expired sign-in on another tracker would never reach
+`_MAX_TRANSIENT_AUTH_FAILURES`. The user would never see the reauth prompt at all -- a worse outcome than the defect
+this change exists to fix. Raising keeps a rejected device out of that reset.
+Why the poll branch records the rejection without failing the coordinator UPDATE (it does fail the cycle): in the
+cycle's `finally` block `cycle_failed` and `last_exception` drive two different things. `cycle_failed` only writes
+the `last_poll_result` diagnostic attribute that `binary_sensor.py` exposes; `last_exception` drives
+`async_set_update_error`, and `GoogleFindMyEntity.available` follows the coordinator's `last_update_success`.
+Recording a per-device client rejection as `last_exception` therefore marked EVERY tracker entity unavailable, and
+because a tracker deleted from the account never recovers the way a 5xx does, the outage repeated on every poll for
+as long as that tracker stayed in the cached device list -- trading a spurious re-auth prompt for a permanent
+availability outage. The branch keeps `cycle_failed` and leaves `last_exception` to the failures that are actually
+about the account. It is the ONLY branch in that loop which sets one without the other, and that is deliberate, not
+an oversight: every other branch there reports a condition that says something about the account, this one does not.
+(The `OwnerKeyLookupTransientError` branch is close in spirit -- also an ordinary per-device skip -- but sets
+neither flag, so it is not the same shape.) A side effect worth naming: while the client branch held the
+`last_exception` slot, a rejected tracker polled BEFORE a genuinely expired one made the coordinator report the
+harmless 404 and hide the 401.
+The all-rejected case is handled after the loop, not in the branch: whether a rejection is per-device or
+account-wide is only knowable once every device has been tried, the same reasoning by which
+`_finalize_cycle_decrypt_state` defers the decrypt verdict. If `cycle_rejected_devices == len(devices)` every device
+was refused, which is account-wide on the rejections' own terms, and the cycle surfaces an `UpdateFailed`. Do NOT
+replace that check with "the device list would have caught it one layer up": `async_get_basic_device_list` is a
+different RPC (`nbe_list_devices`) from the per-device location request, and `DEVICE_LIST_POLL_INTERVAL` (300s,
+`const.py`) means most cycles reuse the cached list without calling it at all. That claim was written here once and
+was wrong.
+Read the check for exactly what it tests, and no more. It does NOT say that a cycle failing the equality had a sibling
+success: a non-rejected sibling proves nothing, because `api.async_get_device_location` returns the same empty dict for
+a healthy idle BLE tag and for a 5xx, a 429, a protobuf decode failure and a Nova logic error. So a mixed cycle -- one
+tracker refused, the others back empty from a server outage -- stays silent, and so does that same outage with no
+rejection in it at all: measured, a cycle in which EVERY device returns empty reports `success` and leaves every entity
+available with its cached position. That is pre-existing and independent of the rejection branch, and it is why the
+rejection branch must not be made stricter on its own: making the error signal depend on whether some unrelated tracker
+happens to have been deleted is a coincidence, not a contract. The empty result is what has to become distinguishable
+(`PLAN_GFMY_EMPTY_RESULT_DISTINGUISHABLE`), and until it is, both states are pinned:
+`test_known_gap_a_cycle_of_only_empty_results_reports_success` holds the reference case and
+`test_known_gap_a_mixed_cycle_of_rejection_and_empty_siblings_stays_silent` holds the mixed one. When that change lands they are
+expected to flip deliberately, not silently.
+This is a regression against the pre-change behaviour, named here rather than left to be discovered: before the
+status-based classification the mixed cycle DID surface, because the 4xx took the transient-auth branch and set
+`last_exception` there -- the same branch that fed the counter behind the false sign-in prompt. The signal was a
+side effect of the misclassification, not a contract, and it cannot be kept without keeping the defect. Buying it
+back by gating the guard on positive success does not work at this layer either, and the reason is mechanical rather
+than a forecast about accounts. The only positive marker on the REQUEST path is `_any_device_got_data`; the
+neighbouring `cycle_had_successful_decrypt` is a positive proof as well, but about the shared key, and both are False
+for either kind of empty result. `_any_device_got_data` records that a device COMMITTED data, not that its request
+reached the server. Gating on it turns `test_a_rejected_device_does_not_make_every_tracker_unavailable` red, because
+the sibling in that test returns exactly `{}` -- the stricter guard withdraws the very fix that test was written for.
+One rejection plus one empty sibling would have to stay silent for that test and surface for the mixed-failure one,
+from the same observable state. That is not a judgement call to be argued either way; it is an ambiguity, and only the
+layer that produced the empty result can resolve it.
+What the earlier wording got right must not be thrown out with its wrong quantifier: an account with one deleted
+tracker and otherwise idle BLE tags WOULD go unavailable on every cycle under a stricter gate. That was never true of
+"every healthy BLE-only account" -- the guard is conjunctive with a rejection, so an account without one is untouched
+-- but it is exactly true of that one shape, and it is the concrete price of tightening here.
+Where the resolution belongs is measured, so the follow-up does not start by re-deriving it. `location_request.py`
+logs `Location request accepted` once the RPC is through, and the `return []` paths reachable only BEFORE that log
+(no FCM token, FCM registration failure, 429, 5xx, `aiohttp.ClientError`, the generic guard around the Nova request)
+are failures. Two qualifications, both measured, because the log line is not a clean split. The outer surfacing
+handler wraps the WHOLE body, so its own `return []` sits AFTER the log while the exceptions it catches may come from
+either side of it; a follow-up therefore needs a flag set at the log line, not a position in the file. And not every
+empty result after the log is benign either: the unexpected-device branch logs a WARNING and returns empty.
+Note also where the empty dict actually comes from. `location_request` catches the 5xx, the 429, the protobuf decode
+failure and the Nova logic error itself, so `api.py`'s handlers for those four never run on the locate path; the dict
+is produced by the no-location fallthrough instead. The outcome is as described above, the mechanism is not, and an
+intervention confined to `api.py` would be inert.
+Two constraints on the follow-up fall out of that, stated here because a plausible reading of the paragraph above
+gets the second one backwards. First, the accepted-versus-failed outcome has to be preserved ACROSS the
+`location_request.py` boundary -- a typed result, for example -- rather than reconstructed downstream once the empty
+collection has flattened it. Second, the layer that flattens it is `location_request.py` itself, NOT `api.py`: aiming
+the follow-up at the file where the empty dict is built would put the fix behind the point where the evidence is
+already gone.
+Note what the mixed cycle is NOT: silent everywhere. The rejection still sets `cycle_failed`, so `last_poll_result`
+reports `failed` and the diagnostic binary sensor shows it; only entity availability is left alone.
+Six tests pin this: `test_a_rejected_device_does_not_make_every_tracker_unavailable`,
+`test_a_rejected_device_still_marks_the_poll_result_failed`,
+`test_a_rejected_device_does_not_hide_a_later_credential_failure`,
+`test_a_cycle_where_every_device_is_rejected_still_reports_an_error`,
+`test_known_gap_a_cycle_of_only_empty_results_reports_success` and
+`test_known_gap_a_mixed_cycle_of_rejection_and_empty_siblings_stays_silent`.
+What is still NOT fixed there, stated so it is not mistaken for solved: that success path still treats every empty
+result as proof of working credentials, and every 5xx, every 429 and every idle BLE tag reaches it. Deciding what an
+empty result may prove about credentials is a behaviour change of its own with a far wider blast radius (every healthy
+idle poll takes the same path); it is tracked separately (`PLAN_GFMY_AUTH_RESET_POSITIVE_PROOF`) and must not be assumed done. Two tests pin the current state
+so it cannot drift silently: `test_an_empty_return_still_clears_the_counter` characterises the reset that stays, and
+`test_a_non_credential_4xx_location_is_passed_through` pins the seam that keeps a rejection out of it.
+What is NOT fixed, stated so the rule is not mistaken for a solved problem: `nova_request.py` still raises a type named
+"auth" for all of them, so a new handler that reads the type repeats the defect, and this paragraph is the only thing
+standing in its way. Giving the non-credential case its own exception class is the open follow-up; it needs an
+exhaustiveness test over `NovaError.__subclasses__()` first. Measured over the AST: ten `try` blocks catch
+`NovaAuthError`. Eight carry a broad `except Exception` in the same block and would swallow a new class under a name that
+hides the status; the two sound-request handlers catch it in a tuple with no broad handler, so a new class would
+propagate uncaught there instead. Two opposite failure modes in one change. Narrowing a handler is a behaviour change that needs its own regression test, not a
+drive-by edit; do not assume a green suite proves the rest of the tree already follows this rule.
+Every count in the two paragraphs above (six call sites in four files, ten `try` blocks, eight of them with a broad
+handler) is enforced by `tests/test_nova_request.py::TestTheDocumentedExtentStaysTrue`, which derives them from the AST
+rather than from grep, following the rule `tests/AGENTS.md` states for shared tuples. Prose that carries a number and
+calls itself "the only thing standing in its way" must not be the only copy of that number: change the extent and this
+paragraph in the same commit, and let the test tell you when one of them went stale.
 
 ### Import deferral reminder
 

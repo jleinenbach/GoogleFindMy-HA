@@ -11,13 +11,27 @@ backend and exposes a small, HA-oriented API surface:
 Token/Auth handling (Step 5.1-D):
 - **401/403 (auth failures)** raised by Nova helpers are mapped to
   `homeassistant.exceptions.ConfigEntryAuthFailed` so the *coordinator* can
-  trigger HA’s re-auth UX and Repairs issue workflow.
-  Known gap, stated so it is not mistaken for the current behaviour: the device
-  list and location handlers still key off the `NovaAuthError` TYPE, which the
-  transport also raises for non-credential 4xx (400, 404, 405, 409, 422), so a
-  deleted device can currently reach the re-auth flow. The sound handlers were
-  narrowed to the status; see `_classify_nova_auth_error`. Extending that to the
-  other two is a behaviour change of its own and is tracked separately.
+  trigger HA’s re-auth UX and Repairs issue workflow. One documented
+  asymmetry: the per-device location path converts only a PERMANENT auth
+  failure (and an HTTP 401/403). A plain non-permanent 403 is re-raised as
+  `NovaAuthError` on purpose, because the polling coordinator counts
+  consecutive transient auth failures and escalates at its own threshold
+  rather than on the first occurrence.
+  Every handler branches on the STATUS, via
+  `NovaApi.nova_request.is_credential_rejection`: permanent first, then 401/403,
+  an unreadable status keeps the conservative verdict. That matters because the
+  transport raises `NovaAuthError` for every non-retryable 4xx (400, 404, 405,
+  409, 422 included), so a type check reads "device not found" as "your sign-in
+  expired". A non-credential rejection therefore leaves the device list as
+  `UpdateFailed`, and the location request passes the error on to its callers,
+  whose own branches skip the device without touching the re-auth machinery. It
+  is deliberately NOT collapsed to an empty result: both callers read a
+  non-raising return as proof that the credentials work and clear the auth state
+  before they check for emptiness, so a permanently rejected tracker would have
+  masked a real 401 on another tracker. `_classify_nova_auth_error` is the sound-path adapter over the
+  same predicate. Still open, stated so it is not mistaken for coverage: the
+  transport keeps raising a type named "auth" for all of them, so a future
+  handler that reads the type instead of the predicate repeats the defect.
 - **gpsoauth/ADM failures** (e.g., "BadAuthentication", "Missing 'Token' in gpsoauth")
   are normalized to `ConfigEntryAuthFailed` as well, even if they bubble up as a
   `RuntimeError`/`ValueError` rather than a `NovaAuthError`.
@@ -76,6 +90,7 @@ from .NovaApi.nova_request import (
     NovaLogicError,
     NovaProtobufDecodeError,
     NovaRateLimitError,
+    is_credential_rejection,
 )
 from .NovaApi.util import generate_random_uuid
 from .ProtoDecoders.decoder import (
@@ -114,33 +129,18 @@ def _short_err(e: Exception | str) -> str:
 def _classify_nova_auth_error(err: NovaAuthError) -> SoundDispatchOutcome:
     """Name who refused when the transport raised ``NovaAuthError``.
 
-    The exception type is wider than its name. ``nova_request`` raises it for
-    EVERY non-retryable 4xx, not only for credential rejections -- the comment
-    above that raise names "403 Forbidden, 404 Not Found" itself, and
-    ``HTTP_RETRY_ELIGIBLE`` holds no 4xx besides 408 and 429, so 400, 404, 405,
-    409 and 422 all arrive here. A 401 that survived the refresh sequence is
-    raised separately with ``is_permanent=True``, which leaves 403 as the only
-    plain credential rejection reaching this handler.
+    The criterion lives in ``nova_request.is_credential_rejection``; this is
+    only its sound-path adapter. That predicate carries the full reasoning:
+    the type is wider than its name, permanence outranks the status, and an
+    unreadable status keeps the conservative verdict.
 
-    Reading the type alone therefore told a user with a deleted device to check
-    their sign-in. ``REJECTED_AUTH`` is for a refusal "on credentials: HTTP 401
-    or 403", so a missing device or a malformed request belongs in
-    ``REJECTED_SERVER``, which names the non-credential client rejections
-    alongside the 5xx. Both docstrings state the criterion as the STATUS, not
-    the exception type; keep the three in step when any of them moves.
-
-    Permanence outranks the status: ``NovaAuthPermanentError`` exists to say
-    "re-authentication is definitively required", so it stays ``REJECTED_AUTH``
-    even if it ever carries a status outside 401/403.
-
-    An error without a readable status keeps the old classification. That case
-    is a test double or a future subclass, not an observed server answer, and
-    the conservative reading of a type named "auth" is auth.
+    ``REJECTED_AUTH`` is for a refusal "on credentials: HTTP 401 or 403", so a
+    missing device or a malformed request belongs in ``REJECTED_SERVER``, which
+    names the non-credential client rejections alongside the 5xx. Do NOT
+    re-derive the status test here: a second copy is exactly how the two sound
+    handlers and the four other handlers drifted apart in the first place.
     """
-    if getattr(err, "is_permanent", False):
-        return SoundDispatchOutcome.REJECTED_AUTH
-    status = getattr(err, "status", None)
-    if status is None or status in (401, 403):
+    if is_credential_rejection(err):
         return SoundDispatchOutcome.REJECTED_AUTH
     return SoundDispatchOutcome.REJECTED_SERVER
 
@@ -284,7 +284,15 @@ class GoogleFindMyAPIProtocol(Protocol):  # pylint: disable=unnecessary-ellipsis
     ) -> dict[str, Any]:
         """Request location for a specific device (async).
 
-        Returns location data dict or empty dict on failure.
+        Returns location data on success and an empty dict on a transient
+        failure. `ConfigEntryAuthFailed` is raised only where re-auth must
+        start at once: an HTTP 401/403 (`NovaHTTPError`), or a PERMANENT Nova
+        auth failure. Every other `NovaAuthError` is re-raised unchanged --
+        including a plain, non-permanent credential rejection such as a 403,
+        which the polling coordinator counts against its own threshold instead
+        of prompting on the first occurrence. Callers must therefore classify
+        a `NovaAuthError` with `nova_request.is_credential_rejection` rather
+        than assume the type already means "credentials rejected".
         """
         ...
 
@@ -1124,6 +1132,21 @@ class GoogleFindMyAPI:
             raise UpdateFailed(_short_err(err)) from err
 
         except NovaAuthError as err:
+            # Branch on the STATUS, never on the type. The transport raises this
+            # class for every non-retryable 4xx, so a deleted device or a
+            # malformed request arrived here as "your sign-in expired" and
+            # produced an immediate re-auth prompt with no threshold in front of
+            # it. A non-credential rejection is a server-side refusal and takes
+            # the same exit as a 5xx one branch up: UpdateFailed,
+            # ApiStatus.ERROR, no reauth reason, no Repairs issue.
+            if not is_credential_rejection(err):
+                _LOGGER.warning(
+                    "Device list rejected by the server (HTTP %s): %s",
+                    getattr(err, "status", "unknown"),
+                    _short_err(err),
+                )
+                raise UpdateFailed(_short_err(err)) from err
+
             # Mirror the location path's base handler: a permanent credential
             # failure (NovaAuthPermanentError subclass, or a base NovaAuthError
             # flagged is_permanent=True after token refresh) must record the
@@ -1264,8 +1287,28 @@ class GoogleFindMyAPI:
         relevant location record from the response.
 
         **Auth mapping (5.1-D):**
-            - If `NovaAuthError` or `NovaHTTPError` with status 401/403 occurs,
-              raise `ConfigEntryAuthFailed` so the coordinator can start re-auth.
+            - `ConfigEntryAuthFailed` is raised ONLY where re-auth must start
+              immediately, without a threshold in front of it: a `NovaHTTPError`
+              with status 401/403, or a PERMANENT Nova auth failure (the
+              `NovaAuthPermanentError` subclass, or a base `NovaAuthError`
+              flagged `is_permanent=True` after the refresh sequence).
+            - A plain, NON-permanent credential rejection -- in practice a 403,
+              since a 401 that survives the refresh arrives flagged permanent --
+              is re-raised as `NovaAuthError`, NOT converted. That is deliberate:
+              the polling coordinator counts consecutive transient auth failures
+              and escalates only at its own threshold, so converting here would
+              prompt the user on the first occurrence. This asymmetry is the one
+              difference to the device-list handler, which converts every
+              credential rejection because it has no such counter behind it.
+            - Any OTHER `NovaAuthError` is the server refusing the request, not
+              the credentials -- a device removed from the account, a malformed
+              body -- and is re-raised unchanged. It is deliberately NOT turned
+              into an empty result: a normal return is what both callers read as
+              "the credentials worked", and they clear the account auth state on
+              it. Only a transient/5xx failure returns `{}`.
+            - Because the previous two bullets BOTH arrive as `NovaAuthError`,
+              the type alone never tells a caller which one it holds. Every
+              caller must ask `nova_request.is_credential_rejection`.
             - Rate limit / other server issues are treated as transient and return `{}`.
 
         Args:
@@ -1273,8 +1316,24 @@ class GoogleFindMyAPI:
             device_name: The human-readable name of the device for logging.
 
         Returns:
-            A dictionary containing the best available location data for the device.
-            Returns an empty dictionary on failure.
+            A dictionary containing the best available location data for the
+            device, or an empty dictionary on a transient failure (5xx, rate
+            limit, timeout). A normal return therefore means the credentials
+            were accepted; callers rely on that.
+
+        Raises:
+            ConfigEntryAuthFailed: Re-auth must start at once -- an HTTP 401/403
+                (`NovaHTTPError`), or a permanent Nova auth failure. The
+                coordinator starts re-authentication.
+            NovaAuthError: Everything else the transport raised under that name,
+                re-raised unchanged. Two distinct cases share this exit: a
+                NON-permanent credential rejection (403), which the polling
+                coordinator counts toward its own threshold, and a server-side
+                refusal of this request (a non-retryable 4xx such as 400/404/422)
+                that says nothing about the credentials. Callers MUST tell them
+                apart with `nova_request.is_credential_rejection`; the type does
+                not, and reading the type is the defect this contract exists to
+                prevent.
         """
 
         # Register cache provider for multi-entry support
@@ -1357,6 +1416,45 @@ class GoogleFindMyAPI:
             raise exc from err
 
         except NovaAuthError as err:
+            # Branch on the STATUS, never on the type. Same criterion as the
+            # device-list handler and the two sound handlers; see
+            # nova_request.is_credential_rejection.
+            if not is_credential_rejection(err):
+                # The server refused the REQUEST, not the credentials: a device
+                # removed from the account, a malformed body. Pass it through so
+                # each caller can take its own non-auth exit; both of them have a
+                # branch for exactly this status.
+                #
+                # Do NOT collapse this to `return {}`. That was the first attempt
+                # and it traded one defect for another: a non-raising return is
+                # what both callers read as positive proof that the sign-in
+                # works. coordinator/polling.py clears the auth state and resets
+                # the transient-auth counter, and coordinator/locate.py clears
+                # the auth state, each BEFORE looking at whether the result is
+                # empty. A permanently rejected tracker would then wipe a real
+                # 401 from another tracker in every cycle, and the re-auth prompt
+                # that this whole change exists to postpone would never appear at
+                # all. Raising keeps that reset out of reach.
+                #
+                # The 5xx branch below still returns {} and still reaches that
+                # reset. That is pre-existing, it is wrong on its own terms, and
+                # it is tracked as a separate finding
+                # (`PLAN_GFMY_EMPTY_RESULT_DISTINGUISHABLE`) -- not fixed here,
+                # and not made worse here either.
+                #
+                # DEBUG, not WARNING: both callers already log a WARNING naming
+                # the device, so a WARNING here would print the same event twice
+                # per device per poll cycle. This line exists for the sync
+                # wrapper, which has no handler behind it.
+                _LOGGER.debug(
+                    "Client error (HTTP %s) while getting location for %s (%s): %s",
+                    getattr(err, "status", "unknown"),
+                    device_name,
+                    device_id,
+                    _short_err(err),
+                )
+                raise
+
             # Transient auth failure - may self-heal in subsequent poll cycles.
             # Re-raise so coordinator can track consecutive failures before triggering reauth.
             if err.is_permanent:

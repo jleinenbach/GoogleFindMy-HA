@@ -71,8 +71,9 @@ class SoundDispatchOutcome(StrEnum):
     network outage and hide it behind a self-clearing timer.
 
     The criterion is the STATUS, not the exception type. ``NovaAuthError`` is
-    raised for every non-retryable 4xx (its own docstring says "4xx client
-    errors", and ``HTTP_RETRY_ELIGIBLE`` holds no 4xx besides 408 and 429), so
+    raised for every non-retryable 4xx (its own docstring says "every
+    non-retryable 4xx client error", and ``HTTP_RETRY_ELIGIBLE`` holds no 4xx
+    besides 408 and 429), so
     reading the type alone filed a deleted device under "check your sign-in".
     ``NovaAuthPermanentError`` and any error flagged ``is_permanent`` belong
     here whatever their status: they say re-authentication is required.

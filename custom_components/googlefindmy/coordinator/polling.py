@@ -60,7 +60,11 @@ from ..NovaApi.ExecuteAction.LocateTracker.decrypt_locations import (
     StaleOwnerKeyError,
     is_real_location_record,
 )
-from ..NovaApi.nova_request import NovaAuthError, NovaAuthPermanentError
+from ..NovaApi.nova_request import (
+    NovaAuthError,
+    NovaAuthPermanentError,
+    is_credential_rejection,
+)
 from ..SpotApi.GetEidInfoForE2eeDevices.get_eid_info_request import (
     SpotApiEmptyResponseError,
 )
@@ -1692,6 +1696,19 @@ class PollingOperations(_MixinBase):
                 # requires this proof, not merely the absence of a decrypt error
                 # (a cycle of pure timeouts must not flicker a stale key to OK).
                 cycle_had_successful_decrypt = False
+                # Devices this cycle whose location request the server refused
+                # with a non-credential 4xx. A single rejection stays a
+                # per-device skip; only a cycle in which EVERY device was
+                # refused is account-wide on the rejections' own terms.
+                # Deliberately NOT the same shape as the decrypt verdict above:
+                # that one gates on `cycle_had_successful_decrypt`, a positive
+                # proof. The request path has no such proof to gate on, because
+                # `api.async_get_device_location` returns the same empty dict
+                # for a healthy idle BLE tag and for a 5xx, a 429, a protobuf
+                # decode failure or a Nova logic error. So a non-rejected
+                # sibling is NOT evidence that anything worked, and this counter
+                # must not be read as if it were.
+                cycle_rejected_devices = 0
                 for idx, dev in enumerate(devices):
                     dev_id = dev["id"]
                     dev_name = dev.get("name", dev_id)
@@ -2070,6 +2087,76 @@ class PollingOperations(_MixinBase):
                         self._request_poll_reauth(reauth_exc)
                         return
                     except NovaAuthError as transient_err:
+                        # Branch on the STATUS, never on the type. The transport
+                        # raises this class for every non-retryable 4xx, so a
+                        # device removed from the account fed the transient-auth
+                        # counter and produced a re-auth prompt after exactly
+                        # three cycles, with the sign-in intact the whole time.
+                        # api.async_get_device_location passes such a status
+                        # through rather than collapsing it to {}, precisely so
+                        # this branch is the one that runs. A non-raising return
+                        # would take the success path above, which clears the
+                        # auth state and resets the counter before it looks at
+                        # whether the result is empty.
+                        if not is_credential_rejection(transient_err):
+                            _LOGGER.warning(
+                                "Client error (HTTP %s) for %s: %s. "
+                                "Skipping this device; the sign-in is not in question.",
+                                getattr(transient_err, "status", "unknown"),
+                                dev_name,
+                                transient_err,
+                            )
+                            self.note_error(
+                                transient_err,
+                                where="poll_client_error",
+                                device=dev_name,
+                            )
+                            # Recorded, but deliberately NOT account-wide.
+                            # ``cycle_failed`` and ``last_exception`` drive two
+                            # different things in the ``finally`` block:
+                            # ``cycle_failed`` only writes the
+                            # ``last_poll_result`` diagnostic attribute, while
+                            # ``last_exception`` drives
+                            # ``async_set_update_error`` -- and
+                            # ``GoogleFindMyEntity.available`` follows the
+                            # coordinator's ``last_update_success``. Setting it
+                            # here made ONE rejected tracker mark EVERY tracker
+                            # entity unavailable, and unlike a 5xx a device
+                            # deleted from the account never recovers, so the
+                            # outage repeated on every poll for as long as the
+                            # tracker stayed in the cached list. Trading a
+                            # spurious re-auth prompt for a permanent
+                            # availability outage is not a fix. So: keep
+                            # ``cycle_failed`` (the cycle really did not poll
+                            # every device) and leave ``last_exception`` to the
+                            # failures that are about the account. This is the
+                            # only branch here that sets one without the other,
+                            # deliberately: every other one reports a condition
+                            # that says something about the account, this one
+                            # does not.
+                            cycle_failed = True
+                            cycle_rejected_devices += 1
+                            # Deliberately NOT touched HERE: the transient-auth
+                            # counter is neither raised nor reset. A client
+                            # rejection says nothing about the credentials in
+                            # either direction.
+                            # The neighbouring success path still treats ANY
+                            # non-raising return as proof that the credentials
+                            # work: it resets this counter and clears the auth
+                            # state before it looks at whether the result is
+                            # empty. Every 5xx, every 429 and every idle BLE tag
+                            # still reaches that reset. It is pre-existing, it is
+                            # wrong on its own terms, and it is tracked as a
+                            # finding of its own -- a client rejection is kept out
+                            # of it by raising in api.py, nothing more.
+                            # The all-rejected case is caught after the loop,
+                            # not here: whether a rejection is per-device or
+                            # account-wide is only knowable once every device
+                            # has been tried. Same reasoning as
+                            # _finalize_cycle_decrypt_state, which defers the
+                            # decrypt verdict for exactly that reason.
+                            continue
+
                         # Transient auth failure - may self-heal in subsequent poll cycles.
                         # Only trigger reauth after multiple consecutive failures.
                         self._consecutive_transient_auth_failures += 1
@@ -2204,6 +2291,85 @@ class PollingOperations(_MixinBase):
                         await asyncio.sleep(self.device_poll_delay)
 
                 _LOGGER.debug("Completed polling cycle for %d devices", len(devices))
+                # Every device was refused: on the rejections' own terms
+                # that is account-wide, so the cycle must surface. Do NOT lean
+                # on the device list to catch this one layer up -- it is a
+                # different RPC (`nbe_list_devices`), and
+                # DEVICE_LIST_POLL_INTERVAL means most cycles reuse the cached
+                # list without calling it at all.
+                #
+                # What this guard does NOT claim, stated so the next reader does
+                # not infer it: that a cycle which fails the check had a
+                # sibling success. A mixed cycle -- one tracker refused, the
+                # others back empty from a 5xx -- stays silent here, and so does
+                # that same 5xx outage with no rejection in it at all
+                # (`test_known_gap_a_cycle_of_only_empty_results_reports_success` pins
+                # that reference case). Hanging the error signal on whether some
+                # unrelated tracker happens to be deleted would be a
+                # coincidence, not a contract; the empty result is what has to
+                # become distinguishable, and that is tracked separately
+                # (`PLAN_GFMY_EMPTY_RESULT_DISTINGUISHABLE`).
+                #
+                # Named because it is a real regression and not a neutral
+                # gap: BEFORE this change the mixed cycle did surface. The
+                # 4xx took the transient-auth branch, which set
+                # `last_exception` -- and fed the counter that produced the
+                # false sign-in prompt this whole change exists to remove.
+                # That signal was a side effect of the misclassification,
+                # not a contract: a tracker deleted from the account says
+                # nothing about whether its siblings reached the server. It
+                # cannot be kept without keeping the defect. Gating this
+                # guard on positive success instead fails at this layer for
+                # a mechanical reason, not a forecast about accounts: the
+                # only positive marker on the REQUEST path is
+                # `_any_device_got_data` (`cycle_had_successful_decrypt`
+                # above is a positive proof too, but about the shared key,
+                # and both are False for either empty result), and it
+                # records that a device COMMITTED data, not that its
+                # request reached the server. Gating on it turns
+                # `test_a_rejected_device_does_not_make_every_tracker_unavailable`
+                # red, because that test's sibling returns exactly `{}` --
+                # the stricter guard would withdraw the very fix that test
+                # was written for. One rejection plus one empty sibling
+                # would have to stay silent there and surface here, from
+                # the same observable state. That is an ambiguity, not a
+                # judgement call.
+                #
+                # The concrete price of tightening anyway, stated so it is
+                # not lost: an account with one deleted tracker and
+                # otherwise idle BLE tags would go unavailable on EVERY
+                # cycle. Not "every healthy BLE-only account" (this guard
+                # is conjunctive with a rejection, so an account without
+                # one is untouched), but exactly that one shape.
+                #
+                # Only the layer that produced the empty result can resolve
+                # this. Where, is measured: `location_request.py` logs
+                # `Location request accepted` once the RPC is through, and
+                # the `return []` paths reachable only before that log are
+                # failures. The split is not positional -- the outer
+                # surfacing handler wraps the whole body, so its `return
+                # []` sits after the log while its exceptions come from
+                # either side, and the unexpected-device branch after the
+                # log returns empty on a WARNING. A follow-up needs a flag
+                # set at the log line, and has to carry that outcome ACROSS
+                # the boundary (a typed result, for example) rather than
+                # reconstruct it here, where the empty collection has
+                # already flattened it. The layer that flattens it is
+                # `location_request.py`, not `api.py`: aiming a fix at the
+                # file where the empty dict is built would sit behind the
+                # point where the evidence is gone. See
+                # `PLAN_GFMY_EMPTY_RESULT_DISTINGUISHABLE`.
+                # `test_known_gap_a_mixed_cycle_of_rejection_and_empty_siblings_stays_silent`
+                # pins the current state so it cannot drift unnoticed.
+                if (
+                    cycle_rejected_devices
+                    and cycle_rejected_devices == len(devices)
+                    and last_exception is None
+                ):
+                    last_exception = UpdateFailed(
+                        f"Every device ({cycle_rejected_devices}) was rejected by "
+                        "the server this cycle"
+                    )
                 # Resolve the cycle's decrypt verdict AND reconcile the cycle's
                 # failure state with it in one place (positive proof dominates: a
                 # sibling success refutes a single device's failure as account-wide).

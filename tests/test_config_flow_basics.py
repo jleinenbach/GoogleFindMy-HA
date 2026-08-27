@@ -390,6 +390,38 @@ class TestMapApiExcToErrorKey:
     def test_plain_runtime_error_unknown(self) -> None:
         assert cf._map_api_exc_to_error_key(RuntimeError("boom")) == "unknown"
 
+    def test_the_two_mapper_rows_the_device_list_narrowing_relies_on(self) -> None:
+        """Characterisation of the MAPPER only; it does not pin the narrowing.
+
+        Read the name literally: this asserts the two rows of
+        `_map_api_exc_to_error_key` that the device-list change depends on, and
+        nothing more. Both rows are true with or without that change, so
+        reverting `api.py`'s client-error branch leaves this test green. The end
+        to end pin lives in
+        `tests/test_api_basics.py::TestAsyncBasicDeviceListErrorMapping::test_a_rejected_probe_reaches_the_config_flow_as_a_non_auth_key`,
+        which takes the exception from the narrowed handler itself.
+
+        The device-list handler used to raise ConfigEntryAuthFailed for every
+        non-retryable 4xx. That class carries "auth" in its name, so a probe
+        rejected with 400/404/422 showed the user ``invalid_auth`` and sent an
+        intact sign-in to the re-authentication form. It now raises
+        UpdateFailed, which matches neither the name test nor the status test
+        above and therefore ends at ``unknown``.
+
+        Both rows are already true today; this test pins the pair so the shift
+        is a recorded decision rather than a silent change of a user-facing
+        message. Retire it when a dedicated error key for "the server refused
+        the request" exists, which needs strings.json and the full translation
+        sync of its own.
+        """
+        from homeassistant.exceptions import ConfigEntryAuthFailed
+        from homeassistant.helpers.update_coordinator import UpdateFailed
+
+        assert cf._map_api_exc_to_error_key(UpdateFailed("x")) == "unknown"
+        assert (
+            cf._map_api_exc_to_error_key(ConfigEntryAuthFailed("x")) == "invalid_auth"
+        )
+
 
 # ---------------------------------------------------------------------------
 # Block F: secrets extractors (cf.py lines 1167-1251)

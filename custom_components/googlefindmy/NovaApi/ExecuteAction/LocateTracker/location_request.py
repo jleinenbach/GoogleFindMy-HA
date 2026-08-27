@@ -47,6 +47,7 @@ from custom_components.googlefindmy.NovaApi.nova_request import (
     NovaHTTPError,
     NovaRateLimitError,
     async_nova_request,
+    is_credential_rejection,
 )
 from custom_components.googlefindmy.NovaApi.scopes import NOVA_ACTION_API_SCOPE
 from custom_components.googlefindmy.NovaApi.util import generate_random_uuid
@@ -791,9 +792,26 @@ async def get_location_data_for_device(  # noqa: PLR0911, PLR0912, PLR0913, PLR0
             # Re-raise auth errors so api.py can convert to ConfigEntryAuthFailed
             # and trigger re-authentication flow. Previously this was swallowed,
             # causing users to see only "No location data" without re-auth prompt.
+            # This layer still does not classify -- api.py decides between
+            # ConfigEntryAuthFailed and an ordinary empty result. The records
+            # below must not pre-empt that decision, though: the class covers
+            # every non-retryable 4xx, so calling a 404 an authentication error
+            # contradicted the very line api.py logs a moment later. Both the
+            # WARNING and the DEBUG record are branched; naming only one of them
+            # would leave the same false claim standing in the other channel.
             # R6 (AGENTS.md Section 5): device name to DEBUG only.
-            _LOGGER.warning("Authentication error while requesting location: %s", e)
-            _LOGGER.debug("Authentication error while requesting location for %s", name)
+            if is_credential_rejection(e):
+                _LOGGER.warning("Authentication error while requesting location: %s", e)
+                _LOGGER.debug(
+                    "Authentication error while requesting location for %s", name
+                )
+            else:
+                _LOGGER.warning(
+                    "Client error (HTTP %s) while requesting location: %s",
+                    getattr(e, "status", "unknown"),
+                    e,
+                )
+                _LOGGER.debug("Client error while requesting location for %s", name)
             raise
         except aiohttp.ClientError as e:
             # R6 (AGENTS.md Section 5): device name to DEBUG only.
@@ -872,8 +890,12 @@ async def get_location_data_for_device(  # noqa: PLR0911, PLR0912, PLR0913, PLR0
         # Permanent auth failure (AAS token invalid) - must re-raise for immediate reauth.
         raise
     except NovaAuthError:
-        # Re-raise auth errors (permanent or transient) so api.py can handle appropriately.
-        # Transient errors will be tracked by the coordinator; permanent ones trigger reauth.
+        # Re-raise so api.py can handle appropriately: it, not this layer, tells
+        # a credential rejection from a rejected request. The second half of this
+        # note used to say transient errors are tracked by the coordinator. That
+        # holds for a credential rejection only -- api.py passes a
+        # non-credential 4xx on to its callers, whose branches skip the counter
+        # deliberately.
         raise
     except DecryptionError:
         # Auth-fatal crypto failure surfaced from ctx.error above: must propagate so

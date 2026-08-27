@@ -1043,6 +1043,107 @@ class TestAsyncBasicDeviceListErrorMapping:
         with pytest.raises(UpdateFailed):
             run_coro(api.async_get_basic_device_list())
 
+    def test_a_non_credential_4xx_on_the_device_list_is_not_a_reauth(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A rejected REQUEST must not read as a rejected sign-in.
+
+        The transport raises NovaAuthError for every non-retryable 4xx, so a
+        device removed from the account arrived here as "your sign-in expired"
+        and produced an immediate re-auth prompt with no threshold in front of
+        it. It takes the same exit a 5xx takes one branch up.
+        """
+
+        self._patch_request(monkeypatch, NovaAuthError(404, "gone"))
+        api = _make_api_with_session()
+        with pytest.raises(UpdateFailed) as excinfo:
+            run_coro(api.async_get_basic_device_list())
+        assert not hasattr(excinfo.value, "reauth_code")
+
+    def test_a_non_credential_4xx_on_the_device_list_does_not_log_an_authentication_failure(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        self._patch_request(monkeypatch, NovaAuthError(404, "gone"))
+        api = _make_api_with_session()
+        with caplog.at_level(logging.DEBUG), pytest.raises(UpdateFailed):
+            run_coro(api.async_get_basic_device_list())
+        assert "Device list rejected by the server (HTTP 404)" in caplog.text
+        assert "Authentication failed" not in caplog.text
+        # The level is part of the user-visible effect: HA's log panel and its
+        # error counter treat ERROR differently from WARNING, so a silent
+        # promotion would put a deleted device back among the alarms.
+        levels = {
+            r.levelno
+            for r in caplog.records
+            if "Device list rejected by the server (HTTP 404)" in r.message
+        }
+        assert levels == {logging.WARNING}
+
+    def test_a_credential_rejection_on_the_device_list_still_starts_reauth(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The counterpart: 403 must keep reaching the re-auth flow.
+
+        Without this row the previous two are satisfied by a branch that never
+        raises ConfigEntryAuthFailed at all, which would bury a real expired
+        sign-in instead of the reverse.
+        """
+
+        self._patch_request(monkeypatch, NovaAuthError(403, "denied"))
+        api = _make_api_with_session()
+        with pytest.raises(ConfigEntryAuthFailed) as excinfo:
+            run_coro(api.async_get_basic_device_list())
+        assert (
+            getattr(excinfo.value, "reauth_code", None)
+            is ReauthReasonCode.NOVA_AUTH_FAILED
+        )
+
+    def test_a_rejected_probe_reaches_the_config_flow_as_a_non_auth_key(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The user-visible end of the device-list narrowing, driven end to end.
+
+        The config flow probes the account with this very call and maps whatever
+        it raises through `_map_api_exc_to_error_key`. Asserting the mapper alone
+        does not pin this change: the mapper is untouched, and both of its rows
+        were already true before. Only by taking the exception FROM the narrowed
+        handler does the assertion break when the handler is reverted, which is
+        the whole point of pinning a moved user-facing message.
+        """
+        from custom_components.googlefindmy import config_flow as cf
+
+        self._patch_request(monkeypatch, NovaAuthError(404, "gone"))
+        api = _make_api_with_session()
+        with pytest.raises(Exception) as excinfo:  # noqa: PT011 - class is the assertion
+            run_coro(api.async_get_basic_device_list())
+        # 404 is a refusal of the request, not of the credentials: the probe now
+        # ends at "unknown" instead of sending an intact sign-in to the re-auth
+        # form. Revert api.py's client-error branch and this becomes
+        # "invalid_auth" again.
+        assert cf._map_api_exc_to_error_key(excinfo.value) == "unknown"
+
+        self._patch_request(monkeypatch, NovaAuthError(403, "denied"))
+        api = _make_api_with_session()
+        with pytest.raises(Exception) as excinfo:  # noqa: PT011 - class is the assertion
+            run_coro(api.async_get_basic_device_list())
+        assert cf._map_api_exc_to_error_key(excinfo.value) == "invalid_auth"
+
+    def test_the_sound_classifier_follows_the_shared_predicate(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """_classify_nova_auth_error must READ the predicate, not re-derive it.
+
+        A second copy of the status test is exactly how the sound handlers and
+        the four other handlers drifted apart in the first place. Patching the
+        predicate to lie proves the classifier asks it.
+        """
+
+        monkeypatch.setattr(api_module, "is_credential_rejection", lambda _e: False)
+        assert (
+            api_module._classify_nova_auth_error(NovaAuthError(401, "x"))
+            is SoundDispatchOutcome.REJECTED_SERVER
+        )
+
 
 class TestAsyncDeviceLocationErrorMapping:
     """Each documented exception class for the location request branch."""
@@ -1171,6 +1272,95 @@ class TestAsyncDeviceLocationErrorMapping:
         self._patch_request(monkeypatch, ValueError("boom"))
         api = _make_api_with_session()
         assert run_coro(api.async_get_device_location("d", "name")) == {}
+
+    def test_a_non_credential_4xx_location_is_passed_through(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A device removed from the account is not a rejected sign-in, and it is
+        not an empty result either.
+
+        Collapsing it to ``{}`` was the first attempt and it traded one defect for
+        another. Both production callers read a NON-RAISING return as positive
+        proof that the sign-in works: ``coordinator/polling.py`` clears the auth
+        state and resets the transient-auth counter, and ``coordinator/locate.py``
+        clears the auth state, each BEFORE it looks at whether the result is
+        empty. A permanently rejected tracker would therefore have wiped a real
+        401 on another tracker in every cycle.
+
+        Passing the error through keeps that reset out of reach and lets each
+        handler state the rule at its own site, which is what those two branches
+        were written for. The counterpart lives in
+        ``test_an_empty_return_still_clears_the_counter``: the pre-existing reset
+        on an empty result is deliberately NOT changed here.
+        """
+
+        self._patch_request(monkeypatch, NovaAuthError(404, "gone"))
+        api = _make_api_with_session()
+        with pytest.raises(NovaAuthError) as excinfo:
+            run_coro(api.async_get_device_location("d", "name"))
+        assert excinfo.value.status == 404
+
+    def test_a_non_credential_4xx_location_does_not_log_an_authentication_error(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """The wording stays, the level drops.
+
+        Each caller writes its own WARNING for this device, so a WARNING here too
+        would print the same event twice per device per poll cycle. DEBUG keeps
+        the trail for the sync wrapper, which has no handler behind it.
+        """
+        self._patch_request(monkeypatch, NovaAuthError(404, "gone"))
+        api = _make_api_with_session()
+        with caplog.at_level(logging.DEBUG):
+            with pytest.raises(NovaAuthError):
+                run_coro(api.async_get_device_location("d", "name"))
+        assert "Client error (HTTP 404)" in caplog.text
+        assert "Transient authentication error" not in caplog.text
+        levels = {
+            r.levelno for r in caplog.records if "Client error (HTTP 404)" in r.message
+        }
+        assert levels == {logging.DEBUG}
+
+    def test_a_credential_rejection_location_takes_the_auth_exit(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """The counterpart: 403 must still reach the coordinator's counter.
+
+        Both exits now raise ``NovaAuthError``, so ``pytest.raises`` alone no
+        longer tells them apart -- it would pass even if every status took the
+        client-rejection branch and a real expired sign-in went unescalated. The
+        log record is what separates them: the auth exit announces a transient
+        authentication error at WARNING, the client exit does not.
+
+        This is also the guard on the documented contract of
+        ``async_get_device_location``: a plain, non-permanent credential
+        rejection is re-raised, NOT converted to ``ConfigEntryAuthFailed``.
+        ``ConfigEntryAuthFailed`` does not inherit from ``NovaAuthError``, so
+        anyone who "aligns" the code with a docstring that promises conversion
+        for every credential rejection turns this test red. The docstring said
+        exactly that until an external review caught it.
+        """
+
+        self._patch_request(monkeypatch, NovaAuthError(403, "denied"))
+        api = _make_api_with_session()
+        with caplog.at_level(logging.DEBUG):
+            with pytest.raises(NovaAuthError):
+                run_coro(api.async_get_device_location("d", "name"))
+        assert "Transient authentication error" in caplog.text
+        assert "Client error (HTTP 403)" not in caplog.text
+
+    def test_a_permanent_non_credential_status_still_maps_to_auth_failed(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Permanence outranks the status, at the place it is easiest to lose."""
+        self._patch_request(monkeypatch, NovaAuthError(404, "perm", is_permanent=True))
+        api = _make_api_with_session()
+        with pytest.raises(ConfigEntryAuthFailed) as excinfo:
+            run_coro(api.async_get_device_location("d", "name"))
+        assert (
+            getattr(excinfo.value, "reauth_code", None)
+            is ReauthReasonCode.NOVA_AUTH_PERMANENT
+        )
 
 
 class TestAsyncPlaySoundErrorMapping:
