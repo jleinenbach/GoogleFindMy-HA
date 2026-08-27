@@ -1697,9 +1697,17 @@ class PollingOperations(_MixinBase):
                 # (a cycle of pure timeouts must not flicker a stale key to OK).
                 cycle_had_successful_decrypt = False
                 # Devices this cycle whose location request the server refused
-                # with a non-credential 4xx. A single rejection is a per-device
-                # skip because a sibling's success refutes it as account-wide;
-                # with no sibling left to refute it, the cycle really did fail.
+                # with a non-credential 4xx. A single rejection stays a
+                # per-device skip; only a cycle in which EVERY device was
+                # refused is account-wide on the rejections' own terms.
+                # Deliberately NOT the same shape as the decrypt verdict above:
+                # that one gates on `cycle_had_successful_decrypt`, a positive
+                # proof. The request path has no such proof to gate on, because
+                # `api.async_get_device_location` returns the same empty dict
+                # for a healthy idle BLE tag and for a 5xx, a 429, a protobuf
+                # decode failure or a Nova logic error. So a non-rejected
+                # sibling is NOT evidence that anything worked, and this counter
+                # must not be read as if it were.
                 cycle_rejected_devices = 0
                 for idx, dev in enumerate(devices):
                     dev_id = dev["id"]
@@ -2283,12 +2291,26 @@ class PollingOperations(_MixinBase):
                         await asyncio.sleep(self.device_poll_delay)
 
                 _LOGGER.debug("Completed polling cycle for %d devices", len(devices))
-                # No device survived its request: there is no sibling success
-                # left to refute the rejections as account-wide, so the cycle
-                # must surface. Do NOT lean on the device list to catch this one
-                # layer up -- it is a different RPC (`nbe_list_devices`), and
+                # Every device was refused: on the rejections' own terms
+                # that is account-wide, so the cycle must surface. Do NOT lean
+                # on the device list to catch this one layer up -- it is a
+                # different RPC (`nbe_list_devices`), and
                 # DEVICE_LIST_POLL_INTERVAL means most cycles reuse the cached
                 # list without calling it at all.
+                #
+                # What this guard does NOT claim, stated so the next reader does
+                # not infer it: that a cycle which fails the check had a
+                # sibling success. A mixed cycle -- one tracker refused, the
+                # others back empty from a 5xx -- stays silent here, and so does
+                # that same 5xx outage with no rejection in it at all
+                # (`test_a_cycle_of_only_empty_results_reports_success` pins
+                # that reference case). Hanging the error signal on whether some
+                # unrelated tracker happens to be deleted would be a
+                # coincidence, not a contract; the empty result is what has to
+                # become distinguishable, and that is tracked separately
+                # (`PLAN_GFMY_AUTH_RESET_POSITIVE_PROOF`).
+                # `test_a_mixed_cycle_of_rejection_and_empty_siblings_stays_silent`
+                # pins the current state so it cannot drift unnoticed.
                 if (
                     cycle_rejected_devices
                     and cycle_rejected_devices == len(devices)

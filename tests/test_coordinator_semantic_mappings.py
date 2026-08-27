@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import ast
 import asyncio
+import re
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
@@ -1412,3 +1415,142 @@ async def test_a_cycle_where_every_device_is_rejected_still_reports_an_error() -
 
     assert recorded, "every device was rejected and the cycle still reported success"
     assert coordinator.last_poll_result == "failed"
+
+
+@pytest.mark.asyncio
+async def test_a_cycle_of_only_empty_results_reports_success() -> None:
+    """The reference measurement, with NOT ONE rejection involved.
+
+    ``api.async_get_device_location`` collapses four distinct outcomes into the
+    same empty dict: a 5xx, a 429, a protobuf decode failure and a Nova logic
+    error all ``return {}``, and so does the healthy idle BLE tag whose inner
+    FCM wait simply found no reporter nearby. The poll loop cannot tell them
+    apart, so a cycle in which every single request failed server-side reports
+    ``success`` and leaves every entity available with its cached position.
+
+    This is pre-existing and has nothing to do with the client-rejection branch
+    -- it is pinned here precisely so that claim stays checkable: any argument
+    that the neighbouring rejection branch should surface a mixed
+    rejection-plus-empty cycle has to explain why THIS cycle, in which just as
+    little worked, may stay silent. Deciding what an empty result may prove is
+    tracked as its own change (`PLAN_GFMY_AUTH_RESET_POSITIVE_PROOF`); when it
+    lands, this test is expected to flip deliberately, not silently.
+    """
+    coordinator = _polling_coordinator({}, _TrackingFilter(), {})
+    coordinator.api = _PerDeviceAPI({"dev-1": {}, "dev-2": {}})
+    coordinator._set_auth_state = lambda **kwargs: None
+    coordinator.config_entry.async_start_reauth = MagicMock()
+    recorded: list[Exception] = []
+    coordinator.async_set_update_error = recorded.append
+
+    await coordinator._async_start_poll_cycle(
+        [{"id": "dev-1", "name": "A"}, {"id": "dev-2", "name": "B"}]
+    )
+
+    assert not recorded, f"an all-empty cycle surfaced an error: {recorded}"
+    assert coordinator.last_poll_result == "success"
+    # Reachability, so neither assertion can pass vacuously.
+    assert coordinator.api.calls == 2
+
+
+@pytest.mark.asyncio
+async def test_a_mixed_cycle_of_rejection_and_empty_siblings_stays_silent() -> None:
+    """One rejected tracker plus siblings that came back empty: still silent.
+
+    The post-loop guard fires only when EVERY device was rejected. Here one was
+    and the other returned empty, so ``cycle_rejected_devices != len(devices)``
+    and the cycle surfaces nothing. Whether that empty sibling was a healthy
+    idle tag or a 5xx is not knowable at this layer, so the guard cannot lean on
+    it as evidence either way -- and the neighbouring decrypt verdict shows the
+    difference: it gates on ``cycle_had_successful_decrypt``, a positive proof
+    the request path has no counterpart for.
+
+    Not silent everywhere, and that is the point: the rejection still sets
+    ``cycle_failed``, so ``last_poll_result`` reports ``failed`` and the
+    diagnostic binary sensor shows it. Only entity availability is left alone,
+    which is the deliberate trade -- one deleted tracker must not take the whole
+    account offline on every poll.
+    """
+    coordinator = _polling_coordinator({}, _TrackingFilter(), {})
+    coordinator.api = _PerDeviceAPI({"dev-1": NovaAuthError(404, "gone"), "dev-2": {}})
+    coordinator._set_auth_state = lambda **kwargs: None
+    coordinator.config_entry.async_start_reauth = MagicMock()
+    recorded: list[Exception] = []
+    coordinator.async_set_update_error = recorded.append
+
+    await coordinator._async_start_poll_cycle(
+        [{"id": "dev-1", "name": "Gone"}, {"id": "dev-2", "name": "Idle"}]
+    )
+
+    assert not recorded, f"the mixed cycle surfaced an error: {recorded}"
+    # The failure IS recorded, just not account-wide.
+    assert coordinator.last_poll_result == "failed"
+    assert coordinator.api.calls == 2
+
+
+class TestTheDocumentedRejectionGuardStaysTrue:
+    """The AGENTS.md paragraph on the rejection guard names its tests and counts them.
+
+    That count is load-bearing in the same way `tests/AGENTS.md` describes for
+    shared tuples: the paragraph is what stops the next reader from inferring
+    that a non-rejected sibling proved something, and it points at the tests
+    that hold the two states apart. A hand-maintained "Six tests pin this" goes
+    stale the moment one is renamed or added -- it already had to be corrected
+    from four to six once -- and nothing would turn red.
+
+    Derived from the AST, not from grep: a name in a docstring or a comment
+    must not count as a test.
+
+    When the set legitimately changes, update BOTH the paragraph and nothing
+    else -- this row reads the number out of the prose itself, so the prose
+    stays the single source.
+    """
+
+    _AGENTS = (
+        Path(__file__).resolve().parents[1]
+        / "custom_components"
+        / "googlefindmy"
+        / "AGENTS.md"
+    )
+    _NUMBER_WORDS = {
+        "Two": 2,
+        "Three": 3,
+        "Four": 4,
+        "Five": 5,
+        "Six": 6,
+        "Seven": 7,
+        "Eight": 8,
+    }
+
+    def _claim(self) -> tuple[int, list[str]]:
+        text = self._AGENTS.read_text(encoding="utf-8")
+        match = re.search(
+            r"^(\w+) tests pin this:(.*?)\.\n", text, re.MULTILINE | re.DOTALL
+        )
+        assert match is not None, (
+            "the 'N tests pin this' sentence vanished from AGENTS.md"
+        )
+        claimed = self._NUMBER_WORDS.get(match.group(1))
+        assert claimed is not None, f"unhandled number word: {match.group(1)!r}"
+        return claimed, re.findall(r"`([A-Za-z0-9_]+)`", match.group(2))
+
+    def _defined_test_names(self) -> set[str]:
+        names: set[str] = set()
+        for path in sorted(Path(__file__).resolve().parent.rglob("test_*.py")):
+            for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+                if isinstance(
+                    node, ast.FunctionDef | ast.AsyncFunctionDef
+                ) and node.name.startswith("test_"):
+                    names.add(node.name)
+        return names
+
+    def test_the_stated_number_matches_the_names_it_lists(self) -> None:
+        claimed, listed = self._claim()
+        assert claimed == len(listed), (claimed, listed)
+
+    def test_every_named_test_exists(self) -> None:
+        _, listed = self._claim()
+        defined = self._defined_test_names()
+        assert not [name for name in listed if name not in defined], [
+            name for name in listed if name not in defined
+        ]

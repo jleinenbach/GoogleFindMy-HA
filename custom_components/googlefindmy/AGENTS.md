@@ -147,15 +147,32 @@ neither flag, so it is not the same shape.) A side effect worth naming: while th
 harmless 404 and hide the 401.
 The all-rejected case is handled after the loop, not in the branch: whether a rejection is per-device or
 account-wide is only knowable once every device has been tried, the same reasoning by which
-`_finalize_cycle_decrypt_state` defers the decrypt verdict. If `cycle_rejected_devices == len(devices)` there is no
-sibling success left to refute the rejections, and the cycle surfaces an `UpdateFailed`. Do NOT replace that check
-with "the device list would have caught it one layer up": `async_get_basic_device_list` is a different RPC
-(`nbe_list_devices`) from the per-device location request, and `DEVICE_LIST_POLL_INTERVAL` (300s, `const.py`) means
-most cycles reuse the cached list without calling it at all. That claim was written here once and was wrong.
-Four tests pin this: `test_a_rejected_device_does_not_make_every_tracker_unavailable`,
+`_finalize_cycle_decrypt_state` defers the decrypt verdict. If `cycle_rejected_devices == len(devices)` every device
+was refused, which is account-wide on the rejections' own terms, and the cycle surfaces an `UpdateFailed`. Do NOT
+replace that check with "the device list would have caught it one layer up": `async_get_basic_device_list` is a
+different RPC (`nbe_list_devices`) from the per-device location request, and `DEVICE_LIST_POLL_INTERVAL` (300s,
+`const.py`) means most cycles reuse the cached list without calling it at all. That claim was written here once and
+was wrong.
+Read the check for exactly what it tests, and no more. It does NOT say that a cycle failing the equality had a sibling
+success: a non-rejected sibling proves nothing, because `api.async_get_device_location` returns the same empty dict for
+a healthy idle BLE tag and for a 5xx, a 429, a protobuf decode failure and a Nova logic error. So a mixed cycle -- one
+tracker refused, the others back empty from a server outage -- stays silent, and so does that same outage with no
+rejection in it at all: measured, a cycle in which EVERY device returns empty reports `success` and leaves every entity
+available with its cached position. That is pre-existing and independent of the rejection branch, and it is why the
+rejection branch must not be made stricter on its own: making the error signal depend on whether some unrelated tracker
+happens to have been deleted is a coincidence, not a contract. The empty result is what has to become distinguishable
+(`PLAN_GFMY_AUTH_RESET_POSITIVE_PROOF`), and until it is, both states are pinned:
+`test_a_cycle_of_only_empty_results_reports_success` holds the reference case and
+`test_a_mixed_cycle_of_rejection_and_empty_siblings_stays_silent` holds the mixed one. When that change lands they are
+expected to flip deliberately, not silently.
+Note what the mixed cycle is NOT: silent everywhere. The rejection still sets `cycle_failed`, so `last_poll_result`
+reports `failed` and the diagnostic binary sensor shows it; only entity availability is left alone.
+Six tests pin this: `test_a_rejected_device_does_not_make_every_tracker_unavailable`,
 `test_a_rejected_device_still_marks_the_poll_result_failed`,
-`test_a_rejected_device_does_not_hide_a_later_credential_failure` and
-`test_a_cycle_where_every_device_is_rejected_still_reports_an_error`.
+`test_a_rejected_device_does_not_hide_a_later_credential_failure`,
+`test_a_cycle_where_every_device_is_rejected_still_reports_an_error`,
+`test_a_cycle_of_only_empty_results_reports_success` and
+`test_a_mixed_cycle_of_rejection_and_empty_siblings_stays_silent`.
 What is still NOT fixed there, stated so it is not mistaken for solved: that success path still treats every empty
 result as proof of working credentials, and every 5xx, every 429 and every idle BLE tag reaches it. Deciding what an
 empty result may prove about credentials is a behaviour change of its own with a far wider blast radius (every healthy
