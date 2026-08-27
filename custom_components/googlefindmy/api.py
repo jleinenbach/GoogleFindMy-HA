@@ -73,6 +73,7 @@ from .NovaApi.ExecuteAction.LocateTracker.decrypt_locations import (
     any_real_location_record,
 )
 from .NovaApi.ExecuteAction.LocateTracker.location_request import (
+    LocationRequestNotAcceptedError,
     get_location_data_for_device,
 )
 from .NovaApi.ExecuteAction.PlaySound.start_sound_request import (
@@ -1321,6 +1322,15 @@ class GoogleFindMyAPI:
             limit, timeout). A normal return therefore means the credentials
             were accepted; callers rely on that.
 
+            That reliance is only as sound as the layer below. It holds exactly
+            to the extent that a request which never reached the server raises
+            rather than returning empty -- see `LocationRequestNotAcceptedError`
+            below. As of this step the raise sites do not exist yet, so a 5xx, a
+            429, a network error or a failed FCM registration still arrive here
+            as an empty list and leave through this exit indistinguishable from
+            a healthy idle BLE tag. That is the defect the signal is being
+            introduced to close, not a property to design against.
+
         Raises:
             ConfigEntryAuthFailed: Re-auth must start at once -- an HTTP 401/403
                 (`NovaHTTPError`), or a permanent Nova auth failure. The
@@ -1334,6 +1344,14 @@ class GoogleFindMyAPI:
                 apart with `nova_request.is_credential_rejection`; the type does
                 not, and reading the type is the defect this contract exists to
                 prevent.
+            LocationRequestNotAcceptedError: The locate request never reached the
+                server's accept point. Re-raised unchanged so the accepted-versus-
+                failed outcome survives this boundary instead of being flattened
+                into `{}` and reconstructed downstream once the evidence is gone.
+                It claims a POSITION in the request flow, never a cause, so it is
+                NOT an auth verdict: an unreachable server says nothing about the
+                credentials, and this exit must not be folded into the auth
+                mapping above. Nothing raises it yet as of this step.
         """
 
         # Register cache provider for multi-entry support
@@ -1554,6 +1572,33 @@ class GoogleFindMyAPI:
             # `except Exception` below would otherwise turn it into an empty result,
             # hiding the transient from the coordinator. Analog to the A1
             # `except DecryptionError: raise` guard above.
+            raise
+
+        except LocationRequestNotAcceptedError:
+            # The locate request never reached the server's accept point (no FCM
+            # token, a failed FCM registration, a 429, a 5xx, a network error, an
+            # unclassified Nova failure, or a surfacing error before the accept
+            # line). This layer must stay transparent for it, exactly like the two
+            # guards above: the broad `except Exception` below would turn it back
+            # into `return {}`, and an empty dict is precisely the evidence loss
+            # the signal exists to prevent. That one handler is the whole reason
+            # this branch exists -- `except RuntimeError` in between never sees the
+            # type, whose base is `Exception` and deliberately NOT `RuntimeError`
+            # (see the class docstring). Placement is therefore load-bearing
+            # against the broad handler specifically: being LAST would make this
+            # branch unreachable, while sitting anywhere ahead of it suffices.
+            #
+            # Note what this pass-through does NOT do: it does not classify. The
+            # signal names a POSITION in the request flow, never a cause, so the
+            # auth mapping documented above is untouched by it -- an unreachable
+            # server says nothing about the credentials.
+            #
+            # As of this step nothing raises this type yet; the raise sites in
+            # `location_request.py` follow. The receivers are installed first on
+            # purpose: with the sender armed first, the signal would reach the
+            # coordinator's broad per-device handler, which sets both
+            # `cycle_failed` and `last_exception`, and a single 5xx on a single
+            # tracker would mark every entity of the account unavailable.
             raise
 
         except RuntimeError as err:

@@ -60,6 +60,9 @@ from ..NovaApi.ExecuteAction.LocateTracker.decrypt_locations import (
     StaleOwnerKeyError,
     is_real_location_record,
 )
+from ..NovaApi.ExecuteAction.LocateTracker.location_request import (
+    LocationRequestNotAcceptedError,
+)
 from ..NovaApi.nova_request import (
     NovaAuthError,
     NovaAuthPermanentError,
@@ -283,7 +286,17 @@ class PollingOperations(_MixinBase):
 
         Only rendered at DEBUG level, so this stays silent during normal
         operation and adds no WARNING/INFO noise. ``source`` distinguishes the
-        inner empty result from the outer poll-guard timeout.
+        inner empty result (``empty-result``) from the outer poll-guard timeout
+        (``outer-timeout``) and from a request the server never accepted
+        (``not-accepted``).
+
+        The rendered line still opens with "Idle poll", which for the third
+        source is the very conflation this diagnostic is meant to help take
+        apart. Left as it is on purpose: four assertions in
+        ``tests/test_poll_timeout_hardening.py`` match on that exact prefix, so
+        renaming it is a change with its own blast radius and does not belong to
+        the step that merely adds the source. ``source`` disambiguates it in the
+        meantime.
         """
         if not _LOGGER.isEnabledFor(logging.DEBUG):
             return
@@ -2274,6 +2287,54 @@ class PollingOperations(_MixinBase):
                         self._consecutive_timeouts = 0
                         cycle_decrypt_error = self._prefer_account_wide_decrypt_error(
                             cycle_decrypt_error, dec_err
+                        )
+                        continue
+                    except LocationRequestNotAcceptedError as not_accepted_err:
+                        # The request never reached the server's accept point, so
+                        # this device produced no evidence in either direction --
+                        # neither that the account is healthy nor that it is
+                        # broken. For now that stays a per-device skip: keep
+                        # polling the siblings and leave the cycle bookkeeping
+                        # alone. The cycle-level evaluation follows in a later
+                        # step; installing it here as well would make a single 5xx
+                        # on a single tracker mark every entity of the account
+                        # unavailable.
+                        #
+                        # Deliberately absent, each for its own measured reason:
+                        #
+                        # * NO `cycle_failed` / `last_exception` -- see above; the
+                        #   cycle-wide verdict is not this branch's to cast.
+                        # * NO `_set_auth_state(failed=False)` and NO reset of
+                        #   `_consecutive_transient_auth_failures`. Those sit on
+                        #   the success path above and are skipped by construction
+                        #   once the raise sites exist. That skip IS the fix for
+                        #   the counter being wiped by a 5xx on its way through;
+                        #   re-doing the reset here would hand it straight back.
+                        # * NO reset of `_consecutive_timeouts`. Measured: today
+                        #   a failed request reaches the `if not location:`
+                        #   branch, which does NOT reset that counter. Resetting
+                        #   it here would therefore not preserve current
+                        #   behaviour but invent a health signal the request
+                        #   never earned -- the same false-success reasoning this
+                        #   change exists to remove. Nor is the counter a general
+                        #   liveness mark to be refreshed by anything that ran:
+                        #   it is incremented in exactly one place, the outer
+                        #   timeout branch, and a refused request is not a
+                        #   timeout. Its only consumer is the connectivity binary
+                        #   sensor's attribute dict, so it feeds no verdict.
+                        #   The sibling handlers here are NOT unanimous, which is
+                        #   why their shape is a weak argument either way: eight
+                        #   of the ten clear it unconditionally, `TimeoutError`
+                        #   never does (it increments), and `NovaAuthError`
+                        #   clears it on only one of its three exits.
+                        _LOGGER.debug(
+                            "Location request for %s was not accepted (%s); "
+                            "skipping this device for this cycle",
+                            dev_name,
+                            not_accepted_err,
+                        )
+                        self._log_idle_poll_diagnostics(
+                            dev_id, dev_name, source="not-accepted"
                         )
                         continue
                     except Exception as err:

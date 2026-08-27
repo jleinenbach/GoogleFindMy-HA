@@ -35,6 +35,9 @@ from ..NovaApi.ExecuteAction.LocateTracker.decrypt_locations import (
     OwnerKeyLookupTransientError,
     StaleOwnerKeyError,
 )
+from ..NovaApi.ExecuteAction.LocateTracker.location_request import (
+    LocationRequestNotAcceptedError,
+)
 from ..NovaApi.nova_request import (
     NovaAuthError,
     NovaHTTPError,
@@ -715,6 +718,31 @@ class LocateOperations(_MixinBase):
                     "(the shared key is stale); please re-authenticate."
                 )
                 raise HomeAssistantError(message) from dec_err
+            except LocationRequestNotAcceptedError as not_accepted_err:
+                # The request never reached the server's accept point. For the
+                # manual path that is an ordinary empty result, exactly as it
+                # looks to the user today -- a locate that found nothing. What
+                # changes is what does NOT happen on the way there: the
+                # `_set_auth_state(failed=False)` on the success path above is
+                # skipped by construction, so a 5xx can no longer clear the
+                # account's auth-failure state on its way through. That skip is
+                # the whole point of catching this here.
+                #
+                # Returns rather than raises, unlike the broad handler below: a
+                # failed request is not an "unexpected error" worth a red toast
+                # in the UI, and re-wrapping it into a `HomeAssistantError` would
+                # be a behaviour change this step does not intend. It must still
+                # sit BEFORE that handler, though -- `Exception` is the base, so
+                # the broad branch would otherwise claim it first.
+                _LOGGER.debug(
+                    "Manual locate for %s skipped (request not accepted): %s",
+                    name,
+                    not_accepted_err,
+                )
+                self.note_error(
+                    not_accepted_err, where="async_locate_device", device=name
+                )
+                return {}
             except Exception as err:
                 short_err = self._short_error_message(err)
                 _LOGGER.error("Manual locate for %s failed: %s", name, short_err)
