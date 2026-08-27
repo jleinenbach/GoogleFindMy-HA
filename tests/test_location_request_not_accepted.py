@@ -288,15 +288,30 @@ class _NotAcceptedAPI:
     it precedes carries neither ``continue`` nor ``raise`` -- after it the loop body
     only reaches the inter-device delay and iterates on. The one observable
     difference the ``continue`` makes is skipping that delay, which is what the
-    empty-result arm does today for the same 429 or 5xx.
+    empty-result arm still does for a request the server accepted and answered
+    with nothing. It no longer does so for the 429 or the 5xx: those raise before
+    they reach it.
     """
 
-    def __init__(self, error: LocationRequestNotAcceptedError) -> None:
+    def __init__(
+        self,
+        error: LocationRequestNotAcceptedError,
+        healthy: set[str] | None = None,
+    ) -> None:
         self._error = error
+        # Device ids that answer with an empty dict instead of raising. That is
+        # the shape of a healthy idle BLE tag: a request the server took, with no
+        # reporter nearby to answer it. The cycle-level guard needs a device that
+        # is NOT counted as missed, so a stub that can only raise cannot express
+        # the per-device skip any more -- with every device raising, the cycle
+        # really is an account-wide outage and is supposed to surface.
+        self._healthy = healthy or set()
         self.calls: list[str] = []
 
     async def async_get_device_location(self, dev_id: str, _dev_name: str):
         self.calls.append(dev_id)
+        if dev_id in self._healthy:
+            return {}
         raise self._error
 
 
@@ -393,6 +408,62 @@ async def test_api_passes_the_signal_through_untouched(
 
 
 @pytest.mark.asyncio
+async def test_a_pre_accept_import_failure_still_arrives_as_an_empty_dict(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The named limit of the signal, pinned so the claim stays checkable.
+
+    The cycle-level guard in ``polling.py`` documents that FOUR pre-accept faults
+    still reach the poll loop as an empty dict rather than as the signal, because
+    they are raised above ``get_location_data_for_device``'s outer ``try``. Three
+    are obvious from reading it (unregistered FCM provider, provider returning
+    ``None``, missing token cache); the fourth is not, and is the reason this test
+    exists: the lazy binding of the decrypt and eid-info modules sits above that
+    ``try`` too, even though the SAME import inside the FCM callback is guarded.
+
+    This does not assert that the current behaviour is desirable -- an
+    ``ImportError`` here is a packaging fault, not an operating state, which is
+    why it was left alone. It asserts that the enumeration is honest. Move those
+    bindings inside the ``try`` and this test turns red, which is the moment the
+    guard's comment and ``AGENTS.md`` have to be corrected with it.
+    """
+
+    calls = 0
+
+    def _boom() -> object:
+        nonlocal calls
+        calls += 1
+        raise ImportError("decrypt_locations unavailable")
+
+    # An FCM provider that resolves, so the RUN reaches the binding under test.
+    # Without this the call would fail earlier on the unregistered provider and
+    # return an empty dict for a different reason -- the assertion below would
+    # hold and prove nothing.
+    monkeypatch.setattr(
+        location_request_module, "_FCM_ReceiverGetter", lambda _entry: MagicMock()
+    )
+    monkeypatch.setattr(
+        location_request_module, "_import_decrypt_locations_module", _boom
+    )
+    monkeypatch.setattr(
+        api_module,
+        "get_location_data_for_device",
+        location_request_module.get_location_data_for_device,
+    )
+
+    result = await _make_api().async_get_device_location("device-xyz", "Tracker")
+
+    assert calls == 1, (
+        "the run never reached the lazy binding, so the empty dict below says "
+        "nothing about it"
+    )
+    assert result == {}, (
+        "the pre-accept import failure no longer flattens to an empty dict; the "
+        "enumeration at the post-loop guard in polling.py is now wrong"
+    )
+
+
+@pytest.mark.asyncio
 async def test_the_typeerror_cascade_does_not_retry_on_the_signal(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -422,19 +493,28 @@ async def test_the_typeerror_cascade_does_not_retry_on_the_signal(
 
 
 @pytest.mark.asyncio
-async def test_poll_treats_the_signal_as_a_per_device_skip_for_now(
+async def test_poll_treats_the_signal_as_a_per_device_skip_when_a_sibling_gets_through(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The poll loop skips the device and keeps going; the cycle does not fail.
+    """The poll loop skips the device and keeps going; the account stays available.
 
-    "For now" is load-bearing. Evaluating the signal cycle-wide is a later step;
-    at this point the correct outcome is deliberately the modest one, because the
-    broad handler this branch precedes would set ``cycle_failed`` AND
-    ``last_exception``, and that turns one refused tracker into an account-wide
-    ``unavailable``.
+    "Stays available" and not "the cycle does not fail": the branch DOES set
+    ``cycle_failed``, so ``last_poll_result`` reports ``failed`` for this cycle.
+    What it must not set is ``last_exception``, because that is what drives
+    ``async_set_update_error`` and with it every entity's availability.
 
-    The load-bearing assertions are ``note_error`` and the two cycle fields, not
-    the call list. Without this branch the broad neighbour sets ``last_exception``,
+    The sibling is load-bearing and used to be scenery. While the signal was
+    only ever a per-device skip, this test could let both devices raise and
+    still expect ``last_update_success is True``. Once the cycle-level guard
+    landed, that same input became an account-wide outage by definition -- no
+    device reached the server -- and the expectation flipped. It is pinned in
+    ``test_a_cycle_where_no_request_was_accepted_reports_an_error``, deliberately
+    and in the file that owns cycle semantics.
+
+    What is left here is the narrower claim this file is for: one refused
+    tracker next to one that got through must not take the account offline. The
+    load-bearing assertions are ``note_error`` and the two cycle fields, not the
+    call list. Without this branch the broad neighbour sets ``last_exception``,
     the ``finally`` block feeds it to ``async_set_update_error``, and
     ``last_update_success`` goes False -- that is what turns red. The call list
     pins the weaker, still worth-having claim that the cycle was not aborted; it
@@ -447,7 +527,8 @@ async def test_poll_treats_the_signal_as_a_per_device_skip_for_now(
         {"id": "dev-sibling", "name": "Sibling Tag"},
     ]
     api = _NotAcceptedAPI(
-        LocationRequestNotAcceptedError(stage="server_error", status=503)
+        LocationRequestNotAcceptedError(stage="server_error", status=503),
+        healthy={"dev-sibling"},
     )
     coordinator = _make_coordinator(monkeypatch, loop, api, devices)
     note_error = MagicMock(return_value=None)

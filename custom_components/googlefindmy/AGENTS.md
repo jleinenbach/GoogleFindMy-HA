@@ -154,17 +154,29 @@ different RPC (`nbe_list_devices`) from the per-device location request, and `DE
 `const.py`) means most cycles reuse the cached list without calling it at all. That claim was written here once and
 was wrong.
 Read the check for exactly what it tests, and no more. It does NOT say that a cycle failing the equality had a sibling
-success: a non-rejected sibling proves nothing, because `api.async_get_device_location` returns the same empty dict for
-a healthy idle BLE tag and for a 5xx, a 429, a protobuf decode failure and a Nova logic error. So a mixed cycle -- one
-tracker refused, the others back empty from a server outage -- stays silent, and so does that same outage with no
-rejection in it at all: measured, a cycle in which EVERY device returns empty reports `success` and leaves every entity
-available with its cached position. That is pre-existing and independent of the rejection branch, and it is why the
-rejection branch must not be made stricter on its own: making the error signal depend on whether some unrelated tracker
-happens to have been deleted is a coincidence, not a contract. The empty result is what has to become distinguishable
-(`PLAN_GFMY_EMPTY_RESULT_DISTINGUISHABLE`), and until it is, both states are pinned:
-`test_known_gap_a_cycle_of_only_empty_results_reports_success` holds the reference case and
-`test_known_gap_a_mixed_cycle_of_rejection_and_empty_siblings_stays_silent` holds the mixed one. When that change lands they are
-expected to flip deliberately, not silently.
+success. It is one of TWO post-loop guards, and the other one is what closed the gap this paragraph used to describe as
+open. `cycle_unaccepted_devices` counts the devices whose locate request was never accepted, and the sum guard
+(`unaccepted + rejected == len(devices)`, with at least one unaccepted) surfaces a cycle in which no device's request
+got through. The two are kept apart so the reported message names the condition: a deleted tracker is a configuration
+change, an unreachable server is an outage.
+That difference is NOT flow position, and writing it that way would be measurably wrong. `location_request.py`
+re-raises the non-credential 4xx from the same `try` that produces the 5xx and the 429, all of them BEFORE the
+`Location request accepted` line, so neither kind reached the accept point. The difference is what the outcome says: a
+rejection is the server's answer ABOUT that device and is permanent, a non-accepted request says nothing about the
+device at all and is transient.
+What an empty sibling proves is narrower than it looks, and the guard is built so that it never has to prove much. The
+transport failures that used to flatten into `{}` -- the 5xx, the 429, the `aiohttp.ClientError`, the generic Nova
+failure -- now raise `LocationRequestNotAcceptedError`. Three pre-accept failures still arrive as an empty dict,
+because they are raised BEFORE the outer handler that would convert them: the FCM provider being unregistered or
+returning `None` (`RuntimeError`), a missing token cache (`MissingTokenCacheError`), and a failure while binding the
+lazily imported decrypt / eid-info modules (`ImportError` / `AttributeError`), whose binding sits ABOVE the outer `try`
+even though the same import inside the FCM callback is guarded. `api.py` flattens all four, and for the first it does
+so deliberately, as a documented cold-boot race that retries on the next cycle. An empty dict is therefore WEAK
+evidence of acceptance, never proof, and the sum guard is conservative for exactly that reason: an unrecognised failure
+makes it stay silent, never fire wrongly.
+Do not sharpen the rejection/non-acceptance distinction into "permanent versus transient" either. It holds for the
+common cases and breaks on the `no_fcm_token` stage, whose source returns `None` for a canonic id the receiver does not
+know -- device-specific and not transient. What the two counts share is only "this device contributed no evidence".
 This is a regression against the pre-change behaviour, named here rather than left to be discovered: before the
 status-based classification the mixed cycle DID surface, because the 4xx took the transient-auth branch and set
 `last_exception` there -- the same branch that fed the counter behind the false sign-in prompt. The signal was a
@@ -182,37 +194,40 @@ What the earlier wording got right must not be thrown out with its wrong quantif
 tracker and otherwise idle BLE tags WOULD go unavailable on every cycle under a stricter gate. That was never true of
 "every healthy BLE-only account" -- the guard is conjunctive with a rejection, so an account without one is untouched
 -- but it is exactly true of that one shape, and it is the concrete price of tightening here.
-Where the resolution belongs is measured, so the follow-up does not start by re-deriving it. `location_request.py`
-logs `Location request accepted` once the RPC is through, and the `return []` paths reachable only BEFORE that log
-(no FCM token, FCM registration failure, 429, 5xx, `aiohttp.ClientError`, the generic guard around the Nova request)
-are failures. Two qualifications, both measured, because the log line is not a clean split. The outer surfacing
-handler wraps the WHOLE body, so its own `return []` sits AFTER the log while the exceptions it catches may come from
-either side of it; a follow-up therefore needs a flag set at the log line, not a position in the file. And not every
-empty result after the log is benign either: the unexpected-device branch logs a WARNING and returns empty.
-Note also where the empty dict actually comes from. `location_request` catches the 5xx, the 429, the protobuf decode
-failure and the Nova logic error itself, so `api.py`'s handlers for those four never run on the locate path; the dict
-is produced by the no-location fallthrough instead. The outcome is as described above, the mechanism is not, and an
-intervention confined to `api.py` would be inert.
-Two constraints on the follow-up fall out of that, stated here because a plausible reading of the paragraph above
-gets the second one backwards. First, the accepted-versus-failed outcome has to be preserved ACROSS the
-`location_request.py` boundary -- a typed result, for example -- rather than reconstructed downstream once the empty
-collection has flattened it. Second, the layer that flattens it is `location_request.py` itself, NOT `api.py`: aiming
-the follow-up at the file where the empty dict is built would put the fix behind the point where the evidence is
-already gone.
+Where the resolution belongs was measured before it was built, and the measurement still governs how it may be
+changed. `location_request.py` logs `Location request accepted` once the RPC is through, and the `return []` paths
+reachable only BEFORE that log (no FCM token, FCM registration failure, 429, 5xx, `aiohttp.ClientError`, the generic
+guard around the Nova request) are failures. They now raise `LocationRequestNotAcceptedError` instead. The split is
+read off the `request_accepted` flag set AT the log line, NEVER off a position in the file, and that is not a style
+preference: the outer surfacing handler wraps the WHOLE body, so its own `return []` sits after the log while the
+exceptions it catches come from either side of it. Not every empty result after the log is benign either -- the
+unexpected-device branch logs a WARNING and returns empty -- and those were deliberately left alone, because the line
+drawn here is `accepted` against `not accepted`, not `succeeded` against `failed`.
+Note where the empty dict actually comes from, and note what is NOT in that list. `location_request` catches the 5xx
+and the 429 itself, so `api.py`'s handlers for those never run on the locate path. The protobuf decode failure and the
+Nova logic error do not belong in the same sentence, measured: `parse_device_update_protobuf` is called only from the
+FCM callback, whose own `except Exception` sets `ctx.data = []` after the accept line, and no `NovaLogicError` is
+raised anywhere in the tree. On the locate path the dict is produced by the no-location fallthrough instead, which is
+why an intervention confined to `api.py` would have been inert: the outcome had to be carried ACROSS the
+`location_request.py` boundary, not reconstructed downstream once the empty collection had flattened it.
 Note what the mixed cycle is NOT: silent everywhere. The rejection still sets `cycle_failed`, so `last_poll_result`
 reports `failed` and the diagnostic binary sensor shows it; only entity availability is left alone.
-Six tests pin this: `test_a_rejected_device_does_not_make_every_tracker_unavailable`,
+Eight tests pin this: `test_a_rejected_device_does_not_make_every_tracker_unavailable`,
 `test_a_rejected_device_still_marks_the_poll_result_failed`,
 `test_a_rejected_device_does_not_hide_a_later_credential_failure`,
 `test_a_cycle_where_every_device_is_rejected_still_reports_an_error`,
-`test_known_gap_a_cycle_of_only_empty_results_reports_success` and
-`test_known_gap_a_mixed_cycle_of_rejection_and_empty_siblings_stays_silent`.
+`test_a_cycle_of_only_empty_results_still_reports_success`,
+`test_a_mixed_cycle_of_rejection_and_empty_siblings_stays_silent`,
+`test_a_cycle_where_no_request_was_accepted_reports_an_error` and
+`test_a_mixed_cycle_of_rejection_and_unaccepted_siblings_now_surfaces`.
 What is still NOT fixed there, stated so it is not mistaken for solved: that success path still treats every empty
-result as proof of working credentials, and every 5xx, every 429 and every idle BLE tag reaches it. Deciding what an
+result as proof of working credentials. The 5xx and the 429 no longer reach it -- they raise before they can -- but
+every idle BLE tag still does, and so do the three pre-accept failures named above. Deciding what an
 empty result may prove about credentials is a behaviour change of its own with a far wider blast radius (every healthy
-idle poll takes the same path); it is tracked separately (`PLAN_GFMY_AUTH_RESET_POSITIVE_PROOF`) and must not be assumed done. Two tests pin the current state
-so it cannot drift silently: `test_an_empty_return_still_clears_the_counter` characterises the reset that stays, and
-`test_a_non_credential_4xx_location_is_passed_through` pins the seam that keeps a rejection out of it.
+idle poll takes the same path); it is tracked separately (`PLAN_GFMY_AUTH_RESET_POSITIVE_PROOF`) and must not be assumed done. Three tests pin the
+current state so it cannot drift silently: `test_an_empty_return_still_clears_the_counter` characterises the reset that
+stays, `test_an_unaccepted_request_no_longer_clears_the_counter` is its contract pair for the requests that no longer
+reach it, and `test_a_non_credential_4xx_location_is_passed_through` pins the seam that keeps a rejection out of it.
 What is NOT fixed, stated so the rule is not mistaken for a solved problem: `nova_request.py` still raises a type named
 "auth" for all of them, so a new handler that reads the type repeats the defect, and this paragraph is the only thing
 standing in its way. Giving the non-credential case its own exception class is the open follow-up; it needs an
