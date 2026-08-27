@@ -161,22 +161,28 @@ rejection in it at all: measured, a cycle in which EVERY device returns empty re
 available with its cached position. That is pre-existing and independent of the rejection branch, and it is why the
 rejection branch must not be made stricter on its own: making the error signal depend on whether some unrelated tracker
 happens to have been deleted is a coincidence, not a contract. The empty result is what has to become distinguishable
-(`PLAN_GFMY_AUTH_RESET_POSITIVE_PROOF`), and until it is, both states are pinned:
-`test_a_cycle_of_only_empty_results_reports_success` holds the reference case and
-`test_a_mixed_cycle_of_rejection_and_empty_siblings_stays_silent` holds the mixed one. When that change lands they are
+(`PLAN_GFMY_EMPTY_RESULT_DISTINGUISHABLE`), and until it is, both states are pinned:
+`test_known_gap_a_cycle_of_only_empty_results_reports_success` holds the reference case and
+`test_known_gap_a_mixed_cycle_of_rejection_and_empty_siblings_stays_silent` holds the mixed one. When that change lands they are
 expected to flip deliberately, not silently.
+This is a regression against the pre-change behaviour, named here rather than left to be discovered: before the
+status-based classification the mixed cycle DID surface, because the 4xx took the transient-auth branch and set
+`last_exception` there -- the same branch that fed the counter behind the false sign-in prompt. The signal was a
+side effect of the misclassification, not a contract, and it cannot be kept without keeping the defect. Buying it
+back by making the rejection branch stricter trades it for a worse defect: a healthy BLE-only account, whose tags
+legitimately return empty, would go unavailable on every cycle.
 Note what the mixed cycle is NOT: silent everywhere. The rejection still sets `cycle_failed`, so `last_poll_result`
 reports `failed` and the diagnostic binary sensor shows it; only entity availability is left alone.
 Six tests pin this: `test_a_rejected_device_does_not_make_every_tracker_unavailable`,
 `test_a_rejected_device_still_marks_the_poll_result_failed`,
 `test_a_rejected_device_does_not_hide_a_later_credential_failure`,
 `test_a_cycle_where_every_device_is_rejected_still_reports_an_error`,
-`test_a_cycle_of_only_empty_results_reports_success` and
-`test_a_mixed_cycle_of_rejection_and_empty_siblings_stays_silent`.
+`test_known_gap_a_cycle_of_only_empty_results_reports_success` and
+`test_known_gap_a_mixed_cycle_of_rejection_and_empty_siblings_stays_silent`.
 What is still NOT fixed there, stated so it is not mistaken for solved: that success path still treats every empty
 result as proof of working credentials, and every 5xx, every 429 and every idle BLE tag reaches it. Deciding what an
 empty result may prove about credentials is a behaviour change of its own with a far wider blast radius (every healthy
-idle poll takes the same path); it is tracked separately and must not be assumed done. Two tests pin the current state
+idle poll takes the same path); it is tracked separately (`PLAN_GFMY_AUTH_RESET_POSITIVE_PROOF`) and must not be assumed done. Two tests pin the current state
 so it cannot drift silently: `test_an_empty_return_still_clears_the_counter` characterises the reset that stays, and
 `test_a_non_credential_4xx_location_is_passed_through` pins the seam that keeps a rejection out of it.
 What is NOT fixed, stated so the rule is not mistaken for a solved problem: `nova_request.py` still raises a type named

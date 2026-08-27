@@ -1418,7 +1418,7 @@ async def test_a_cycle_where_every_device_is_rejected_still_reports_an_error() -
 
 
 @pytest.mark.asyncio
-async def test_a_cycle_of_only_empty_results_reports_success() -> None:
+async def test_known_gap_a_cycle_of_only_empty_results_reports_success() -> None:
     """The reference measurement, with NOT ONE rejection involved.
 
     ``api.async_get_device_location`` collapses four distinct outcomes into the
@@ -1433,7 +1433,7 @@ async def test_a_cycle_of_only_empty_results_reports_success() -> None:
     that the neighbouring rejection branch should surface a mixed
     rejection-plus-empty cycle has to explain why THIS cycle, in which just as
     little worked, may stay silent. Deciding what an empty result may prove is
-    tracked as its own change (`PLAN_GFMY_AUTH_RESET_POSITIVE_PROOF`); when it
+    tracked as its own change (`PLAN_GFMY_EMPTY_RESULT_DISTINGUISHABLE`); when it
     lands, this test is expected to flip deliberately, not silently.
     """
     coordinator = _polling_coordinator({}, _TrackingFilter(), {})
@@ -1454,7 +1454,9 @@ async def test_a_cycle_of_only_empty_results_reports_success() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_mixed_cycle_of_rejection_and_empty_siblings_stays_silent() -> None:
+async def test_known_gap_a_mixed_cycle_of_rejection_and_empty_siblings_stays_silent() -> (
+    None
+):
     """One rejected tracker plus siblings that came back empty: still silent.
 
     The post-loop guard fires only when EVERY device was rejected. Here one was

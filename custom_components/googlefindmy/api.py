@@ -1438,8 +1438,9 @@ class GoogleFindMyAPI:
                 #
                 # The 5xx branch below still returns {} and still reaches that
                 # reset. That is pre-existing, it is wrong on its own terms, and
-                # it is tracked as a separate finding -- not fixed here, and not
-                # made worse here either.
+                # it is tracked as a separate finding
+                # (`PLAN_GFMY_EMPTY_RESULT_DISTINGUISHABLE`) -- not fixed here,
+                # and not made worse here either.
                 #
                 # DEBUG, not WARNING: both callers already log a WARNING naming
                 # the device, so a WARNING here would print the same event twice

@@ -2303,13 +2303,26 @@ class PollingOperations(_MixinBase):
                 # sibling success. A mixed cycle -- one tracker refused, the
                 # others back empty from a 5xx -- stays silent here, and so does
                 # that same 5xx outage with no rejection in it at all
-                # (`test_a_cycle_of_only_empty_results_reports_success` pins
+                # (`test_known_gap_a_cycle_of_only_empty_results_reports_success` pins
                 # that reference case). Hanging the error signal on whether some
                 # unrelated tracker happens to be deleted would be a
                 # coincidence, not a contract; the empty result is what has to
                 # become distinguishable, and that is tracked separately
-                # (`PLAN_GFMY_AUTH_RESET_POSITIVE_PROOF`).
-                # `test_a_mixed_cycle_of_rejection_and_empty_siblings_stays_silent`
+                # (`PLAN_GFMY_EMPTY_RESULT_DISTINGUISHABLE`).
+                #
+                # Named because it is a real regression and not a neutral
+                # gap: BEFORE this change the mixed cycle did surface. The
+                # 4xx took the transient-auth branch, which set
+                # `last_exception` -- and fed the counter that produced the
+                # false sign-in prompt this whole change exists to remove.
+                # That signal was a side effect of the misclassification,
+                # not a contract: a tracker deleted from the account says
+                # nothing about whether its siblings reached the server. It
+                # cannot be kept without keeping the defect, and buying it
+                # back by making the rejection branch stricter would trade
+                # it for a worse one -- every healthy BLE-only account
+                # would go unavailable on every cycle.
+                # `test_known_gap_a_mixed_cycle_of_rejection_and_empty_siblings_stays_silent`
                 # pins the current state so it cannot drift unnoticed.
                 if (
                     cycle_rejected_devices
