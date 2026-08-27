@@ -161,9 +161,14 @@ got through. The two are kept apart so the reported message names the condition:
 change, an unreachable server is an outage.
 That difference is NOT flow position, and writing it that way would be measurably wrong. `location_request.py`
 re-raises the non-credential 4xx from the same `try` that produces the 5xx and the 429, all of them BEFORE the
-`Location request accepted` line, so neither kind reached the accept point. The difference is what the outcome says: a
-rejection is the server's answer ABOUT that device and is permanent, a non-accepted request says nothing about the
-device at all and is transient.
+`Location request accepted` line, so neither kind reached the accept point. The difference is what the outcome
+says: a rejection carries the SERVER'S answer about that device -- it was asked, and it answered -- while a non-accepted
+request carries no answer from the server at all, because the question never arrived. Say it that way and nothing more.
+Two compressions are wrong and both have been written here before. NOT "permanent versus transient": a later paragraph
+measures where that breaks (`no_fcm_token`), and an earlier revision of THIS sentence asserted the compression while
+that paragraph already forbade it. NOT "about the device versus not about the device" either: `no_fcm_token` is
+non-acceptance and IS device-specific, it is just not the server saying so. What the two share is only that this device
+contributed no evidence.
 What an empty sibling proves is narrower than it looks, and the guard is built so that it never has to prove much. The
 transport failures that used to flatten into `{}` -- the 5xx, the 429, the `aiohttp.ClientError`, the generic Nova
 failure -- now raise `LocationRequestNotAcceptedError`. FOUR pre-accept failures still arrive as an empty dict,
