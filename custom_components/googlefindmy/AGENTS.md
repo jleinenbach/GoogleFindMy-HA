@@ -193,6 +193,12 @@ Note also where the empty dict actually comes from. `location_request` catches t
 failure and the Nova logic error itself, so `api.py`'s handlers for those four never run on the locate path; the dict
 is produced by the no-location fallthrough instead. The outcome is as described above, the mechanism is not, and an
 intervention confined to `api.py` would be inert.
+Two constraints on the follow-up fall out of that, stated here because a plausible reading of the paragraph above
+gets the second one backwards. First, the accepted-versus-failed outcome has to be preserved ACROSS the
+`location_request.py` boundary -- a typed result, for example -- rather than reconstructed downstream once the empty
+collection has flattened it. Second, the layer that flattens it is `location_request.py` itself, NOT `api.py`: aiming
+the follow-up at the file where the empty dict is built would put the fix behind the point where the evidence is
+already gone.
 Note what the mixed cycle is NOT: silent everywhere. The rejection still sets `cycle_failed`, so `last_poll_result`
 reports `failed` and the diagnostic binary sensor shows it; only entity availability is left alone.
 Six tests pin this: `test_a_rejected_device_does_not_make_every_tracker_unavailable`,

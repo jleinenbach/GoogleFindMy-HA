@@ -2351,7 +2351,13 @@ class PollingOperations(_MixinBase):
                 # []` sits after the log while its exceptions come from
                 # either side, and the unexpected-device branch after the
                 # log returns empty on a WARNING. A follow-up needs a flag
-                # set at the log line. See
+                # set at the log line, and has to carry that outcome ACROSS
+                # the boundary (a typed result, for example) rather than
+                # reconstruct it here, where the empty collection has
+                # already flattened it. The layer that flattens it is
+                # `location_request.py`, not `api.py`: aiming a fix at the
+                # file where the empty dict is built would sit behind the
+                # point where the evidence is gone. See
                 # `PLAN_GFMY_EMPTY_RESULT_DISTINGUISHABLE`.
                 # `test_known_gap_a_mixed_cycle_of_rejection_and_empty_siblings_stays_silent`
                 # pins the current state so it cannot drift unnoticed.
