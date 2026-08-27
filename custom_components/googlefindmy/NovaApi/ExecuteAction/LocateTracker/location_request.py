@@ -56,6 +56,117 @@ from custom_components.googlefindmy.SpotApi.spot_request import SpotAuthPermanen
 _LOGGER = logging.getLogger(__name__)
 
 
+# Flow-position markers for ``LocationRequestNotAcceptedError``. This is a CLOSED
+# set of POSITIONS in the request flow, never a cause taxonomy. Deciding what a
+# failure MEANS is api.py's job: this module names the status in its log records
+# but "still only re-raises -- it does not classify"
+# (``custom_components/googlefindmy/AGENTS.md``, the paragraph on how this layer
+# treats a Nova auth error).
+# Six markers name a ``return []`` reachable ONLY before the accept log line. The
+# seventh, ``surfacing_before_accept``, belongs to the outer handler, whose own
+# return sits AFTER that line; telling its two sides apart therefore needs a flag
+# set AT the log line rather than a position in the file. That flag does not exist
+# yet -- AP-3 introduces it together with the raise sites, and until then nothing
+# enforces this set either: the AST test over the raise sites is xfail.
+LOCATION_REQUEST_NOT_ACCEPTED_STAGES: frozenset[str] = frozenset(
+    {
+        "no_fcm_token",
+        "fcm_registration_failed",
+        "rate_limited",
+        "server_error",
+        "network_error",
+        "nova_request_failed",
+        "surfacing_before_accept",
+    }
+)
+
+
+class LocationRequestNotAcceptedError(Exception):
+    """Raised when a locate request never reached the server's accept point.
+
+    ``get_location_data_for_device`` returned ``[]`` for two states that have
+    nothing in common: a request the server ACCEPTED that simply had nothing to
+    report (no reporter in range -- the healthy idle outcome of a BLE tag), and
+    a request that never got that far (no FCM token, a failed FCM registration,
+    a 429, a 5xx, a network error, an unclassified Nova failure, or a surfacing
+    error before the accept line). ``api.async_get_device_location`` mapped both
+    to ``{}``, so both coordinator callers read every non-raising return as
+    positive proof that the credentials work. This type carries the second state
+    across the ``location_request.py`` boundary -- the layer that flattens it --
+    instead of leaving it to be reconstructed downstream once the evidence is
+    already gone.
+
+    What it claims is a POSITION in the flow, not a CAUSE: the
+    ``Location request accepted`` log line was not reached. That position cannot
+    be read off the file layout, because the outer surfacing handler wraps the
+    whole body and its own return sits AFTER the log line; it has to be read off
+    a flag set AT the line. AP-3 introduces that flag when it arms the raise
+    sites -- as of this commit the class exists and nothing raises it yet.
+    ``stage`` is a flow-position marker from the closed set
+    ``LOCATION_REQUEST_NOT_ACCEPTED_STAGES``; growing it into a cause taxonomy
+    would break the classifier discipline this layer is held to.
+
+    Base class is ``Exception`` deliberately, mirroring
+    ``OwnerKeyLookupTransientError``, and explicitly NOT:
+
+    * NOT ``RuntimeError``: the tree carries broad ``except RuntimeError`` blocks
+      in over twenty places, ``api.py``'s locate path among them, and a base must
+      not depend on every one of them being ordered correctly against a
+      pass-through that a later edit might move or forget. (In ``api.py`` today
+      the pass-throughs DO sit ahead of it, which is why ``DecryptionError`` --
+      itself a ``RuntimeError`` -- survives there; that ordering is a property of
+      the handler, not of the type, and is exactly what must not be relied on.)
+      ``OwnerKeyLookupTransientError`` states the same reason for the same base.
+    * NOT ``DecryptionError``: the coordinator's ``except DecryptionError``
+      blocks route into the account-wide reauth verdict, but the credentials are
+      presumed valid here -- an unreachable server says nothing about them.
+    * NOT ``NovaError``/``NovaAuthError``: ten ``try`` blocks name
+      ``NovaAuthError`` in a handler (the count ``TestTheDocumentedExtentStaysTrue``
+      derives from the AST, and it is that name it counts, not the base
+      ``NovaError``, of which there are more). Eight carry a broad
+      ``except Exception`` in the same block that would swallow the signal; the
+      two sound-REQUEST handlers catch a fixed tuple with no broad fallback,
+      where it would instead propagate uncaught. Two opposite failure modes in
+      one inheritance choice (AGENTS.md, the two-opposite-failure-modes
+      paragraph).
+    * NOT ``HomeAssistantError``: ``exceptions.py`` reserves that base for
+      conditions that already ARE a finished user-facing message. Measured,
+      ``coordinator/locate.py`` carries no ``except HomeAssistantError`` at all;
+      its broad handler re-wraps whatever arrives into a new one. Inheriting it
+      would therefore buy no routing, only a false promise about the message.
+
+    Choosing the base is necessary but NOT sufficient, and reading it as
+    sufficient is exactly how this change becomes inert: every broad
+    ``except Exception`` on the path catches this type as well, because
+    ``Exception`` IS the base. Measured, three sit on the raise path (the inner
+    FCM handler and the outer surfacing handler in this module, and the handler
+    in ``api.py`` before its ``return {}``) and two more downstream
+    (the per-device handler in ``coordinator/polling.py`` and the one in
+    ``coordinator/locate.py``). Every one of them needs an explicit
+    ``except LocationRequestNotAcceptedError: raise`` -- or a dedicated branch --
+    placed BEFORE it. One more sits a level up: the cycle-level handler in
+    ``polling.py``'s update method turns anything escaping the per-device loop
+    into an ``UpdateFailed`` for the WHOLE cycle, so the per-device branch must
+    not re-raise. The base class only guarantees that no NARROW handler
+    misroutes the signal along the way.
+
+    The payload is ``stage`` plus an optional HTTP ``status`` -- carried wherever
+    the failing layer knows one, in practice the server error and the rate limit.
+    The device display name is deliberately absent: the raw name belongs at DEBUG
+    (AGENTS.md Section 5 redaction, "Name@DEBUG"), and this message reaches
+    user-facing records.
+    """
+
+    def __init__(self, *, stage: str, status: int | None = None) -> None:
+        """Record the flow position and, for a server error, its HTTP status."""
+        self.stage = stage
+        self.status = status
+        detail = (
+            f"stage={stage}" if status is None else f"stage={stage}, status={status}"
+        )
+        super().__init__(f"Location request not accepted ({detail})")
+
+
 def _format_cause_chain(exc: BaseException, *, max_depth: int = 8) -> str:
     """Render the full exception cause chain as a ``Type: msg -> Type: msg`` string.
 
