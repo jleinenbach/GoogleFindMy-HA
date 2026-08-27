@@ -11,7 +11,12 @@ backend and exposes a small, HA-oriented API surface:
 Token/Auth handling (Step 5.1-D):
 - **401/403 (auth failures)** raised by Nova helpers are mapped to
   `homeassistant.exceptions.ConfigEntryAuthFailed` so the *coordinator* can
-  trigger HA’s re-auth UX and Repairs issue workflow.
+  trigger HA’s re-auth UX and Repairs issue workflow. One documented
+  asymmetry: the per-device location path converts only a PERMANENT auth
+  failure (and an HTTP 401/403). A plain non-permanent 403 is re-raised as
+  `NovaAuthError` on purpose, because the polling coordinator counts
+  consecutive transient auth failures and escalates at its own threshold
+  rather than on the first occurrence.
   Every handler branches on the STATUS, via
   `NovaApi.nova_request.is_credential_rejection`: permanent first, then 401/403,
   an unreadable status keeps the conservative verdict. That matters because the
@@ -280,8 +285,14 @@ class GoogleFindMyAPIProtocol(Protocol):  # pylint: disable=unnecessary-ellipsis
         """Request location for a specific device (async).
 
         Returns location data on success and an empty dict on a transient
-        failure. A credential rejection raises `ConfigEntryAuthFailed`; a
-        non-credential refusal (non-retryable 4xx) raises `NovaAuthError`.
+        failure. `ConfigEntryAuthFailed` is raised only where re-auth must
+        start at once: an HTTP 401/403 (`NovaHTTPError`), or a PERMANENT Nova
+        auth failure. Every other `NovaAuthError` is re-raised unchanged --
+        including a plain, non-permanent credential rejection such as a 403,
+        which the polling coordinator counts against its own threshold instead
+        of prompting on the first occurrence. Callers must therefore classify
+        a `NovaAuthError` with `nova_request.is_credential_rejection` rather
+        than assume the type already means "credentials rejected".
         """
         ...
 
@@ -1276,17 +1287,28 @@ class GoogleFindMyAPI:
         relevant location record from the response.
 
         **Auth mapping (5.1-D):**
-            - A credential rejection raises `ConfigEntryAuthFailed` so the
-              coordinator can start re-auth. That means a `NovaHTTPError` with
-              status 401/403, or a `NovaAuthError` for which
-              `nova_request.is_credential_rejection` holds (permanent, 401, 403,
-              or no readable status).
+            - `ConfigEntryAuthFailed` is raised ONLY where re-auth must start
+              immediately, without a threshold in front of it: a `NovaHTTPError`
+              with status 401/403, or a PERMANENT Nova auth failure (the
+              `NovaAuthPermanentError` subclass, or a base `NovaAuthError`
+              flagged `is_permanent=True` after the refresh sequence).
+            - A plain, NON-permanent credential rejection -- in practice a 403,
+              since a 401 that survives the refresh arrives flagged permanent --
+              is re-raised as `NovaAuthError`, NOT converted. That is deliberate:
+              the polling coordinator counts consecutive transient auth failures
+              and escalates only at its own threshold, so converting here would
+              prompt the user on the first occurrence. This asymmetry is the one
+              difference to the device-list handler, which converts every
+              credential rejection because it has no such counter behind it.
             - Any OTHER `NovaAuthError` is the server refusing the request, not
               the credentials -- a device removed from the account, a malformed
               body -- and is re-raised unchanged. It is deliberately NOT turned
               into an empty result: a normal return is what both callers read as
               "the credentials worked", and they clear the account auth state on
               it. Only a transient/5xx failure returns `{}`.
+            - Because the previous two bullets BOTH arrive as `NovaAuthError`,
+              the type alone never tells a caller which one it holds. Every
+              caller must ask `nova_request.is_credential_rejection`.
             - Rate limit / other server issues are treated as transient and return `{}`.
 
         Args:
@@ -1300,13 +1322,18 @@ class GoogleFindMyAPI:
             were accepted; callers rely on that.
 
         Raises:
-            ConfigEntryAuthFailed: The credentials were rejected (401/403, or a
-                `NovaAuthError` for which `nova_request.is_credential_rejection`
-                holds). The coordinator starts re-authentication.
-            NovaAuthError: The server refused this request without rejecting the
-                credentials (a non-retryable 4xx such as 400/404/422). Callers
-                must classify it with `nova_request.is_credential_rejection`
-                rather than by its type.
+            ConfigEntryAuthFailed: Re-auth must start at once -- an HTTP 401/403
+                (`NovaHTTPError`), or a permanent Nova auth failure. The
+                coordinator starts re-authentication.
+            NovaAuthError: Everything else the transport raised under that name,
+                re-raised unchanged. Two distinct cases share this exit: a
+                NON-permanent credential rejection (403), which the polling
+                coordinator counts toward its own threshold, and a server-side
+                refusal of this request (a non-retryable 4xx such as 400/404/422)
+                that says nothing about the credentials. Callers MUST tell them
+                apart with `nova_request.is_credential_rejection`; the type does
+                not, and reading the type is the defect this contract exists to
+                prevent.
         """
 
         # Register cache provider for multi-entry support

@@ -1331,6 +1331,14 @@ class TestAsyncDeviceLocationErrorMapping:
         client-rejection branch and a real expired sign-in went unescalated. The
         log record is what separates them: the auth exit announces a transient
         authentication error at WARNING, the client exit does not.
+
+        This is also the guard on the documented contract of
+        ``async_get_device_location``: a plain, non-permanent credential
+        rejection is re-raised, NOT converted to ``ConfigEntryAuthFailed``.
+        ``ConfigEntryAuthFailed`` does not inherit from ``NovaAuthError``, so
+        anyone who "aligns" the code with a docstring that promises conversion
+        for every credential rejection turns this test red. The docstring said
+        exactly that until an external review caught it.
         """
 
         self._patch_request(monkeypatch, NovaAuthError(403, "denied"))

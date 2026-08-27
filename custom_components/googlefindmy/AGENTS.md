@@ -113,7 +113,12 @@ Extent today, stated so it is not mistaken for coverage: six call sites in four 
 sound handlers share the `_classify_nova_auth_error` adapter. In order: the two sound handlers via
 `_classify_nova_auth_error`; the device-list handler (`api.py`, `except NovaAuthError` before `NovaProtobufDecodeError`),
 which now raises `UpdateFailed` for a non-credential rejection; the location handler, which passes the error on to its
-callers instead of returning `{}`; `coordinator/polling.py`, whose `except NovaAuthError` branch leaves the
+callers instead of returning `{}` -- and which, unlike the device-list handler, also passes on a plain
+NON-permanent credential rejection (a 403) rather than converting it to `ConfigEntryAuthFailed`, because
+`polling.py` counts consecutive transient auth failures and escalates at its own threshold instead of
+prompting on the first one; only a PERMANENT auth failure (or an HTTP 401/403 `NovaHTTPError`) converts
+there. Both cases therefore leave that handler as `NovaAuthError`, which is precisely why a caller must ask
+the predicate and not the type; `coordinator/polling.py`, whose `except NovaAuthError` branch leaves the
 transient-auth counter alone in both directions; and `coordinator/locate.py`, whose branch does not flip the
 account-wide auth state. `location_request.py` names the status in its log records instead of calling every 4xx an
 authentication error, but still only re-raises -- it does not classify.
