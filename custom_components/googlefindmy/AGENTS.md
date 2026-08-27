@@ -169,8 +169,20 @@ This is a regression against the pre-change behaviour, named here rather than le
 status-based classification the mixed cycle DID surface, because the 4xx took the transient-auth branch and set
 `last_exception` there -- the same branch that fed the counter behind the false sign-in prompt. The signal was a
 side effect of the misclassification, not a contract, and it cannot be kept without keeping the defect. Buying it
-back by making the rejection branch stricter trades it for a worse defect: a healthy BLE-only account, whose tags
-legitimately return empty, would go unavailable on every cycle.
+back by gating the guard on positive success does not work at this layer either, and the reason is mechanical rather
+than a forecast about accounts: the only positive proof the poll loop holds is `_any_device_got_data`, which records
+that a device COMMITTED data, not that its request reached the server. Gating on it turns
+`test_a_rejected_device_does_not_make_every_tracker_unavailable` red, because the sibling in that test returns exactly
+`{}` -- so the stricter guard withdraws the very fix that test was written for. One rejection plus one empty sibling
+would have to stay silent for that test and surface for the mixed-failure one, from the same observable state. That is
+not a judgement call to be argued either way; it is an ambiguity, and only the layer that produced the empty result can
+resolve it.
+Where that resolution belongs is measured, so the follow-up does not start by re-deriving it:
+`location_request.py` logs `Location request accepted` once the RPC is through, and every `return []` BEFORE that point
+(no FCM token, FCM registration failure, 429, 5xx, `aiohttp.ClientError`, the generic guard around the Nova request,
+and the outer surfacing handler) is a failure, while every empty result AFTER it is legitimate. Note that
+`location_request` catches the 5xx itself, so the `NovaHTTPError` handler in `api.py` never sees that case: an
+intervention confined to `api.py` would be inert.
 Note what the mixed cycle is NOT: silent everywhere. The rejection still sets `cycle_failed`, so `last_poll_result`
 reports `failed` and the diagnostic binary sensor shows it; only entity availability is left alone.
 Six tests pin this: `test_a_rejected_device_does_not_make_every_tracker_unavailable`,

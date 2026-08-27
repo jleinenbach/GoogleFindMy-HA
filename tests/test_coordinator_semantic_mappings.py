@@ -1304,8 +1304,16 @@ async def test_a_rejected_device_does_not_make_every_tracker_unavailable() -> No
     coordinator's ``last_update_success``. Recording a client rejection there
     therefore marked EVERY tracker entity unavailable -- and unlike a 5xx, a
     tracker deleted from the account never recovers, so the outage would repeat
-    on every single poll until the device left the cached list. The sibling
-    device polled fine; a rejection of one device says nothing about the others.
+    on every single poll until the device left the cached list. A rejection of
+    one device says nothing about the others.
+
+    Note precisely what the sibling here does: it returns ``{}``, which at this
+    layer is indistinguishable from a 5xx. That is deliberate -- it is the
+    cheapest shape of the case, and it is also why the guard cannot be tightened
+    to require positive success. ``_any_device_got_data`` is the only positive
+    proof the loop holds, and gating on it would turn THIS test red. The two
+    demands meet in one observable state, so the ambiguity has to be resolved
+    where the empty result is produced, not here.
     """
     coordinator = _polling_coordinator({}, _TrackingFilter(), {})
     coordinator.api = _PerDeviceAPI({"dev-1": NovaAuthError(404, "gone"), "dev-2": {}})
@@ -1465,7 +1473,10 @@ async def test_known_gap_a_mixed_cycle_of_rejection_and_empty_siblings_stays_sil
     idle tag or a 5xx is not knowable at this layer, so the guard cannot lean on
     it as evidence either way -- and the neighbouring decrypt verdict shows the
     difference: it gates on ``cycle_had_successful_decrypt``, a positive proof
-    the request path has no counterpart for.
+    the request path has no counterpart for. ``_any_device_got_data`` is not
+    that counterpart: it records that a device COMMITTED data, so gating on it
+    would turn ``test_a_rejected_device_does_not_make_every_tracker_unavailable``
+    red, whose sibling returns the same ``{}`` as this one.
 
     Not silent everywhere, and that is the point: the rejection still sets
     ``cycle_failed``, so ``last_poll_result`` reports ``failed`` and the

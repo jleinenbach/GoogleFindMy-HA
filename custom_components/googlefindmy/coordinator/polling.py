@@ -2318,10 +2318,27 @@ class PollingOperations(_MixinBase):
                 # That signal was a side effect of the misclassification,
                 # not a contract: a tracker deleted from the account says
                 # nothing about whether its siblings reached the server. It
-                # cannot be kept without keeping the defect, and buying it
-                # back by making the rejection branch stricter would trade
-                # it for a worse one -- every healthy BLE-only account
-                # would go unavailable on every cycle.
+                # cannot be kept without keeping the defect. Gating this
+                # guard on positive success instead fails at this layer for
+                # a mechanical reason, not a forecast about accounts: the
+                # only positive proof the loop holds is
+                # `_any_device_got_data`, and it records that a device
+                # COMMITTED data, not that its request reached the server.
+                # Gating on it turns
+                # `test_a_rejected_device_does_not_make_every_tracker_unavailable`
+                # red, because that test's sibling returns exactly `{}` --
+                # the stricter guard would withdraw the very fix that test
+                # was written for. One rejection plus one empty sibling
+                # would have to stay silent there and surface here, from
+                # the same observable state. That is an ambiguity, not a
+                # judgement call, and only the layer that produced the
+                # empty result can resolve it: `location_request.py` logs
+                # `Location request accepted` once the RPC is through, and
+                # every `return []` before that point is a failure while
+                # every empty result after it is legitimate. It catches the
+                # 5xx itself, so `api.py`'s `NovaHTTPError` handler never
+                # sees that case and an intervention confined to `api.py`
+                # would be inert.
                 # `test_known_gap_a_mixed_cycle_of_rejection_and_empty_siblings_stays_silent`
                 # pins the current state so it cannot drift unnoticed.
                 if (
