@@ -119,8 +119,8 @@ NON-permanent credential rejection (a 403) rather than converting it to `ConfigE
 prompting on the first one; only a PERMANENT auth failure (or an HTTP 401/403 `NovaHTTPError`) converts
 there. Both cases therefore leave that handler as `NovaAuthError`, which is precisely why a caller must ask
 the predicate and not the type; `coordinator/polling.py`, whose `except NovaAuthError` branch leaves the
-transient-auth counter alone in both directions; and `coordinator/locate.py`, whose branch does not flip the
-account-wide auth state. `location_request.py` names the status in its log records instead of calling every 4xx an
+transient-auth counter alone in both directions AND does not record the rejection as the cycle's `last_exception`;
+and `coordinator/locate.py`, whose branch does not flip the account-wide auth state. `location_request.py` names the status in its log records instead of calling every 4xx an
 authentication error, but still only re-raises -- it does not classify.
 Why the location handler raises rather than returning `{}`, since the empty return looks like the gentler option: both
 callers treat ANY non-raising return as positive proof that the credentials work. `polling.py` runs "Success path:
@@ -131,6 +131,23 @@ PERMANENTLY: a 5xx clears up, a device deleted from the account does not, so one
 the counter every cycle and a genuinely expired sign-in on another tracker would never reach
 `_MAX_TRANSIENT_AUTH_FAILURES`. The user would never see the reauth prompt at all -- a worse outcome than the defect
 this change exists to fix. Raising keeps a rejected device out of that reset.
+Why the poll branch records the rejection without failing the cycle: in the cycle's `finally` block `cycle_failed`
+and `last_exception` drive two different things. `cycle_failed` only writes the `last_poll_result` diagnostic
+attribute that `binary_sensor.py` exposes; `last_exception` drives `async_set_update_error`, and
+`GoogleFindMyEntity.available` follows the coordinator's `last_update_success`. Recording a per-device client
+rejection as `last_exception` therefore marked EVERY tracker entity unavailable, and because a tracker deleted from
+the account never recovers the way a 5xx does, the outage repeated on every poll for as long as that tracker stayed
+in the cached device list -- trading a spurious re-auth prompt for a permanent availability outage. The branch keeps
+`cycle_failed` and leaves `last_exception` to the failures that are actually about the account, the same shape the
+`OwnerKeyLookupTransientError` branch below it already uses. A side effect worth naming: while the client branch held
+the `last_exception` slot, a rejected tracker polled BEFORE a genuinely expired one made the coordinator report the
+harmless 404 and hide the 401. Residual gap, stated so it is not mistaken for covered: if EVERY device is rejected
+the cycle now reports no error at all. That window is narrow, because an account-wide rejection already fails
+`async_get_basic_device_list` with `UpdateFailed` one layer up, and it is not silent (`last_poll_result` reads
+"failed", `note_error` records it, every rejected device gets its own WARNING). Three tests pin this:
+`test_a_rejected_device_does_not_make_every_tracker_unavailable`,
+`test_a_rejected_device_still_marks_the_poll_result_failed` and
+`test_a_rejected_device_does_not_hide_a_later_credential_failure`.
 What is still NOT fixed there, stated so it is not mistaken for solved: that success path still treats every empty
 result as proof of working credentials, and every 5xx, every 429 and every idle BLE tag reaches it. Deciding what an
 empty result may prove about credentials is a behaviour change of its own with a far wider blast radius (every healthy

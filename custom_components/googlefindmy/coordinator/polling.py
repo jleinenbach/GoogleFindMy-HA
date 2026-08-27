@@ -2098,6 +2098,27 @@ class PollingOperations(_MixinBase):
                                 where="poll_client_error",
                                 device=dev_name,
                             )
+                            # Recorded, but deliberately NOT account-wide.
+                            # ``cycle_failed`` and ``last_exception`` drive two
+                            # different things in the ``finally`` block:
+                            # ``cycle_failed`` only writes the
+                            # ``last_poll_result`` diagnostic attribute, while
+                            # ``last_exception`` drives
+                            # ``async_set_update_error`` -- and
+                            # ``GoogleFindMyEntity.available`` follows the
+                            # coordinator's ``last_update_success``. Setting it
+                            # here made ONE rejected tracker mark EVERY tracker
+                            # entity unavailable, and unlike a 5xx a device
+                            # deleted from the account never recovers, so the
+                            # outage repeated on every poll for as long as the
+                            # tracker stayed in the cached list. Trading a
+                            # spurious re-auth prompt for a permanent
+                            # availability outage is not a fix. So: keep
+                            # ``cycle_failed`` (the cycle really did not poll
+                            # every device) and leave ``last_exception`` to the
+                            # failures that are about the account. Same shape as
+                            # the OwnerKeyLookupTransientError branch below --
+                            # an ordinary per-device skip.
                             cycle_failed = True
                             # Deliberately NOT touched HERE: the transient-auth
                             # counter is neither raised nor reset. A client
@@ -2112,8 +2133,15 @@ class PollingOperations(_MixinBase):
                             # wrong on its own terms, and it is tracked as a
                             # finding of its own -- a client rejection is kept out
                             # of it by raising in api.py, nothing more.
-                            if last_exception is None:
-                                last_exception = transient_err
+                            # Residual gap, named so it is not mistaken for
+                            # covered: if EVERY device is rejected the cycle now
+                            # reports no error at all. That window is narrow --
+                            # an account-wide rejection already fails
+                            # ``async_get_basic_device_list`` with
+                            # ``UpdateFailed`` one layer up -- and it is not
+                            # silent: ``last_poll_result`` reads "failed",
+                            # ``note_error`` records it and every rejected device
+                            # gets its own WARNING.
                             continue
 
                         # Transient auth failure - may self-heal in subsequent poll cycles.

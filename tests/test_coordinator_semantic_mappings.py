@@ -1025,7 +1025,11 @@ async def test_a_client_error_does_not_overwrite_an_earlier_failure() -> None:
     A credential failure on one tracker must stay the reported cause even when
     a rejected tracker follows it in the same cycle; otherwise the surviving
     error names the harmless device and hides the one that needs attention.
-    Covers the false side of the ``if last_exception is None`` guard.
+    This is the easy order. The hard one -- rejection first, credential failure
+    second -- is
+    ``test_a_rejected_device_does_not_hide_a_later_credential_failure``, and it
+    is the one that used to fail: the client branch no longer claims the
+    ``last_exception`` slot at all, so the order stopped mattering.
     """
     coordinator = _polling_coordinator({}, _TrackingFilter(), {})
     coordinator.api = _PerDeviceAPI(
@@ -1275,3 +1279,90 @@ async def test_manual_locate_stale_shared_key_tags_reauth_code() -> None:
     )
     assert coordinator._reauth_reason is not None
     assert coordinator._reauth_reason.code is ReauthReasonCode.DECRYPT_STALE_KEY
+
+
+@pytest.mark.asyncio
+async def test_a_rejected_device_does_not_make_every_tracker_unavailable() -> None:
+    """A per-device rejection must not take the whole account offline.
+
+    ``last_exception`` is the sole driver of ``async_set_update_error`` in the
+    cycle's ``finally`` block, and ``GoogleFindMyEntity.available`` follows the
+    coordinator's ``last_update_success``. Recording a client rejection there
+    therefore marked EVERY tracker entity unavailable -- and unlike a 5xx, a
+    tracker deleted from the account never recovers, so the outage would repeat
+    on every single poll until the device left the cached list. The sibling
+    device polled fine; a rejection of one device says nothing about the others.
+    """
+    coordinator = _polling_coordinator({}, _TrackingFilter(), {})
+    coordinator.api = _PerDeviceAPI({"dev-1": NovaAuthError(404, "gone"), "dev-2": {}})
+    coordinator._set_auth_state = lambda **kwargs: None
+    coordinator.config_entry.async_start_reauth = MagicMock()
+    recorded: list[Exception] = []
+    coordinator.async_set_update_error = recorded.append
+
+    await coordinator._async_start_poll_cycle(
+        [{"id": "dev-1", "name": "Gone"}, {"id": "dev-2", "name": "Hub"}]
+    )
+
+    assert not recorded, (
+        "a rejected device failed the coordinator update, which makes every "
+        f"tracker entity unavailable: {recorded}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_rejected_device_still_marks_the_poll_result_failed() -> None:
+    """The rejection is recorded, it is only not made account-wide.
+
+    ``cycle_failed`` and ``last_exception`` drive two different things:
+    ``cycle_failed`` only writes the ``last_poll_result`` diagnostic attribute
+    (``binary_sensor.py`` reads it), while ``last_exception`` drives
+    ``async_set_update_error`` and with it entity availability. The branch keeps
+    the former so the cycle stays honest about not having polled every device,
+    and drops the latter so one device cannot take the account offline.
+    """
+    coordinator = _polling_coordinator({}, _TrackingFilter(), {})
+    coordinator.api = _PerDeviceAPI({"dev-1": NovaAuthError(404, "gone"), "dev-2": {}})
+    coordinator._set_auth_state = lambda **kwargs: None
+    coordinator.config_entry.async_start_reauth = MagicMock()
+    coordinator.async_set_update_error = lambda _exc: None
+
+    await coordinator._async_start_poll_cycle(
+        [{"id": "dev-1", "name": "Gone"}, {"id": "dev-2", "name": "Hub"}]
+    )
+
+    assert coordinator.last_poll_result == "failed"
+
+
+@pytest.mark.asyncio
+async def test_a_rejected_device_does_not_hide_a_later_credential_failure() -> None:
+    """Order matters: the reported cause must name the device that needs help.
+
+    ``last_exception`` keeps the FIRST failure of a cycle. While the client
+    rejection claimed that slot, a rejected tracker polled before a genuinely
+    expired one made the coordinator report "HTTP 404 gone" and hid the 401
+    entirely. This is the mirror image of
+    ``test_a_client_error_does_not_overwrite_an_earlier_failure``, which pins
+    the same guard from the other side.
+    """
+    coordinator = _polling_coordinator({}, _TrackingFilter(), {})
+    coordinator.api = _PerDeviceAPI(
+        {
+            "dev-1": NovaAuthError(404, "gone"),
+            "dev-2": NovaAuthError(401, "expired"),
+        }
+    )
+    coordinator._set_auth_state = lambda **kwargs: None
+    coordinator.config_entry.async_start_reauth = MagicMock()
+    recorded: list[Exception] = []
+    coordinator.async_set_update_error = recorded.append
+
+    await coordinator._async_start_poll_cycle(
+        [{"id": "dev-1", "name": "Gone"}, {"id": "dev-2", "name": "Hub"}]
+    )
+
+    assert recorded, "the cycle hid the credential failure entirely"
+    assert getattr(recorded[-1], "status", None) == 401, (
+        "the reported cause names the harmless rejected device instead of the "
+        f"tracker whose sign-in expired: {recorded[-1]!r}"
+    )
