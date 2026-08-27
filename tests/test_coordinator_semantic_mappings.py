@@ -1451,11 +1451,15 @@ async def test_a_cycle_of_only_empty_results_still_reports_success() -> None:
     the 429, the network error and the failed FCM registration now raise
     ``LocationRequestNotAcceptedError`` instead of flattening into ``{}``.
 
-    Largely, not entirely, and the difference is worth keeping straight. Three
+    Largely, not entirely, and the difference is worth keeping straight. Four
     pre-accept failures still arrive here as an empty dict, because they are
-    raised before the handler that would convert them: the FCM provider being
-    unregistered or returning ``None``, and a missing token cache. So an empty
-    dict is now WEAK evidence that the request was accepted, not proof of it.
+    raised before the handler that would convert them: an unregistered FCM
+    receiver provider, a provider that returns ``None``, a missing token cache,
+    and a failure while binding the lazily imported decrypt / eid-info modules.
+    Count the failure modes, not the clauses: an earlier revision of this
+    docstring grouped the two provider guards into one and wrote "three", which
+    contradicted the "four" at the head of this file. So an empty dict is now
+    WEAK evidence that the request was accepted, not proof of it.
 
     Its name and its meaning changed with that; its expectation deliberately did
     not. An account of BLE tags with no reporter nearby is the ordinary healthy

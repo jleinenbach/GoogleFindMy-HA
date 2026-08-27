@@ -656,13 +656,29 @@ async def test_locate_returns_empty_on_the_signal_without_raising(
     an unexpected error, and the user already sees the honest outcome -- the locate
     found nothing -- so the visible behaviour is deliberately unchanged from today.
     What changes is invisible and sits in the next test.
+
+    Its COVERAGE is subsumed: measured, there is no change to the branch under which
+    this test goes red while the WARNING test below stays green. It is kept for the
+    named failure mode rather than for the assertion -- and it is the one test here
+    that a do-nothing ``async_locate_device`` would satisfy, which is why the control
+    at the end of this group exists.
     """
     coord = locate_coord
     coord.api.async_get_device_location = AsyncMock(
         side_effect=LocationRequestNotAcceptedError(stage="network_error")
     )
 
-    result = await coord.async_locate_device("dev-1")
+    # Caught rather than left to propagate, and the difference is legibility, not
+    # coverage: ``Exception`` is the signal's base class, so the branch below this
+    # one claims it the moment the two swap places and re-wraps it into exactly this
+    # error. An unguarded await would report that as an unhandled exception in a
+    # test about an empty dict; naming it says which branch ran.
+    try:
+        result = await coord.async_locate_device("dev-1")
+    except HomeAssistantError as err:  # pragma: no cover - failure path
+        pytest.fail(
+            f"the broad handler claimed the signal and raised a red toast: {err}"
+        )
 
     assert result == {}
 
@@ -693,6 +709,78 @@ async def test_locate_does_not_clear_the_auth_state_on_the_signal(
     coord._set_auth_state.assert_not_called()
     coord.config_entry.async_start_reauth.assert_not_called()
     coord.note_error.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_locate_warns_and_returns_empty_on_an_unaccepted_request(
+    locate_coord: LocateStub,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The level is the branch's only visible output, so it is asserted, not assumed.
+
+    This path runs because someone asked for it -- a button, an automation, or the
+    ``locate_device`` service. DEBUG would mean asking, getting nothing, and finding
+    nothing in the log at the default level: the exact silence this plan exists to
+    remove, reintroduced one layer higher. The poll loop logs the same condition at
+    DEBUG on purpose, which is not an inconsistency but the same rule applied to an
+    unattended, repeating caller.
+
+    Deliberately NOT justified by the ``NovaRateLimitError`` / ``NovaHTTPError``
+    handlers a few branches up, which log at WARNING but are dead on this path --
+    ``api.py`` answers both with an empty dict of its own. The reasoning that does
+    hold is in the branch's own comment; the assertion here only pins the outcome.
+    """
+    coord = locate_coord
+    coord.api.async_get_device_location = AsyncMock(
+        side_effect=LocationRequestNotAcceptedError(stage="server_error")
+    )
+
+    with caplog.at_level(
+        logging.DEBUG, logger="custom_components.googlefindmy.coordinator.locate"
+    ):
+        result = await coord.async_locate_device("dev-1")
+
+    assert result == {}
+    records = [
+        record
+        for record in caplog.records
+        if "request not accepted" in record.getMessage()
+    ]
+    assert len(records) == 1, [record.getMessage() for record in caplog.records]
+    # Captured at DEBUG so a demotion is visible as a WRONG level rather than as an
+    # absent record: an assertion that only ran at WARNING could not tell "logged at
+    # DEBUG" from "not logged at all", and those call for different fixes.
+    assert records[0].levelno == logging.WARNING
+    assert "server_error" in records[0].getMessage()
+
+
+@pytest.mark.asyncio
+async def test_locate_on_a_healthy_idle_tag_still_returns_empty_and_clears_auth_state(
+    locate_coord: LocateStub,
+) -> None:
+    """Drives the positive half of the rule, which no other test in the tree does.
+
+    Every other test here injects the signal, so all of them observe the branch that
+    SKIPS the auth reset. Measured, a stubbed-out ``async_locate_device`` that did
+    nothing at all would still satisfy ``test_locate_returns_empty_on_the_signal_without_raising``
+    -- an empty dict is what doing nothing returns. The other two are not vacuous
+    that way (one asserts a log record, one asserts ``note_error``), but none of the
+    three shows that the reset still HAPPENS when it should.
+
+    So this is the same seam driven with the outcome the plan protects: a BLE tag
+    whose request WAS accepted and had nothing to report. There the empty result
+    still means the credentials worked, and ``_set_auth_state(failed=False)`` must
+    run. Identical return value, opposite side effect -- that difference is the
+    whole change, and this is the only place it is pinned from the positive side.
+    """
+    coord = locate_coord
+    coord.api.async_get_device_location = AsyncMock(return_value={})
+
+    result = await coord.async_locate_device("dev-1")
+
+    assert result == {}
+    coord._set_auth_state.assert_called_once_with(failed=False)
+    coord.note_error.assert_not_called()
 
 
 def test_the_sync_wrapper_still_flattens_the_signal_to_an_empty_dict(

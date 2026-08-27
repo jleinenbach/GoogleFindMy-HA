@@ -166,12 +166,23 @@ rejection is the server's answer ABOUT that device and is permanent, a non-accep
 device at all and is transient.
 What an empty sibling proves is narrower than it looks, and the guard is built so that it never has to prove much. The
 transport failures that used to flatten into `{}` -- the 5xx, the 429, the `aiohttp.ClientError`, the generic Nova
-failure -- now raise `LocationRequestNotAcceptedError`. Three pre-accept failures still arrive as an empty dict,
-because they are raised BEFORE the outer handler that would convert them: the FCM provider being unregistered or
-returning `None` (`RuntimeError`), a missing token cache (`MissingTokenCacheError`), and a failure while binding the
-lazily imported decrypt / eid-info modules (`ImportError` / `AttributeError`), whose binding sits ABOVE the outer `try`
-even though the same import inside the FCM callback is guarded. `api.py` flattens all four, and for the first it does
-so deliberately, as a documented cold-boot race that retries on the next cycle. An empty dict is therefore WEAK
+failure -- now raise `LocationRequestNotAcceptedError`. FOUR pre-accept failures still arrive as an empty dict,
+because they are raised BEFORE the outer handler that would convert them: an unregistered FCM receiver provider
+(`RuntimeError`), a provider that returns `None` (`RuntimeError`), a missing token cache
+(`MissingTokenCacheError`), and a failure while binding the lazily imported decrypt / eid-info modules (`ImportError` /
+`AttributeError`), whose binding sits ABOVE the outer `try` even though the same import inside the FCM callback is
+guarded. Count the FAILURE MODES above that `try`, not the clauses of this sentence and not the `raise` statements
+either: an earlier revision grouped the two provider failures into one clause, wrote "three", and then said "all four"
+two lines later. Three of the four are an explicit `raise` (the two provider guards and the token cache); the fourth is
+implicit, raised by the module bindings themselves. A fourth explicit `raise` does sit above that `try` -- the `Cache
+accessors could not be initialized` guard -- and is deliberately NOT one of the four: both branches preceding it
+assign the accessors when they are unset, so it is defensive and constructively unreachable. Counting `raise`
+statements therefore yields four with the WRONG membership, which is why the unit of the count is named here. This
+number is prose only: unlike the extent counts guarded by
+`tests/test_nova_request.py::TestTheDocumentedExtentStaysTrue`, no AST test derives it, so it is on whoever adds a
+pre-accept failure to come back here and to the enumeration at the post-loop guard in `coordinator/polling.py` that
+this paragraph restates. `api.py` flattens all four, and for the first it does so deliberately, as a
+documented cold-boot race that retries on the next cycle. An empty dict is therefore WEAK
 evidence of acceptance, never proof, and the sum guard is conservative for exactly that reason: an unrecognised failure
 makes it stay silent, never fire wrongly.
 Do not sharpen the rejection/non-acceptance distinction into "permanent versus transient" either. It holds for the
@@ -222,7 +233,7 @@ Eight tests pin this: `test_a_rejected_device_does_not_make_every_tracker_unavai
 `test_a_mixed_cycle_of_rejection_and_unaccepted_siblings_now_surfaces`.
 What is still NOT fixed there, stated so it is not mistaken for solved: that success path still treats every empty
 result as proof of working credentials. The 5xx and the 429 no longer reach it -- they raise before they can -- but
-every idle BLE tag still does, and so do the three pre-accept failures named above. Deciding what an
+every idle BLE tag still does, and so do the four pre-accept failures named above. Deciding what an
 empty result may prove about credentials is a behaviour change of its own with a far wider blast radius (every healthy
 idle poll takes the same path); it is tracked separately (`PLAN_GFMY_AUTH_RESET_POSITIVE_PROOF`) and must not be assumed done. Three tests pin the
 current state so it cannot drift silently: `test_an_empty_return_still_clears_the_counter` characterises the reset that

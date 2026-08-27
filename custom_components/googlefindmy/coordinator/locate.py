@@ -734,8 +734,53 @@ class LocateOperations(_MixinBase):
                 # be a behaviour change this step does not intend. It must still
                 # sit BEFORE that handler, though -- `Exception` is the base, so
                 # the broad branch would otherwise claim it first.
-                _LOGGER.debug(
-                    "Manual locate for %s skipped (request not accepted): %s",
+                #
+                # WARNING, not DEBUG. This path runs because someone asked for
+                # it -- a button press, an automation, or the `locate_device` /
+                # `locate_external` service -- so the failure has an audience and
+                # a moment. The poll loop logs the SAME condition at DEBUG, and
+                # that is the same rule rather than an inconsistency: it runs
+                # unattended and repeatedly. Leaving it at DEBUG here would have
+                # made a user ask for a locate, get nothing, and find nothing in
+                # the log at the default level.
+                #
+                # Two neighbours could be read as precedent, and exactly one of
+                # them is. NOT the `NovaRateLimitError` / `NovaHTTPError` handlers
+                # a few branches up, however tempting the symmetry: `api.py`
+                # answers both with `return {}` of its own (api.py:1535 for the
+                # 429, api.py:1526 for the non-401/403 5xx), so neither type ever
+                # reaches this method and those two branches are dead on this
+                # path. Nor did this branch inherit their traffic -- before the
+                # request layer started raising, a 5xx returned `[]` from
+                # `location_request` and arrived here on the SUCCESS path, which
+                # is precisely the defect this catch exists to end. The live
+                # neighbour is `OwnerKeyLookupTransientError` a few branches up,
+                # which api.py does re-raise and which logs at DEBUG; the line
+                # between them is subject, not severity. That one is a miss on one
+                # tracker's owner key while the account is otherwise fine. This
+                # one is a request that never reached the server at all, which is
+                # what the same operation already treats as WARNING when it
+                # refuses to start (the in-flight/cooldown and push-recovery
+                # guards near the top of this method).
+                #
+                # Two costs of the promotion, both weighed rather than discovered
+                # later. First, this is the SECOND warning for the same incident:
+                # `location_request` already logs one for the 429, the 5xx and the
+                # network error before it raises. That one is deliberately
+                # redacted and says only that A location request failed; it names
+                # neither the device nor the operation, so it cannot tell the user
+                # who just pressed a button that THEIR request is the one that
+                # failed. The duplicate is one line per user-initiated action, and
+                # the poll path stays at DEBUG, so nothing repeats unattended.
+                # Second, `name` falls back to the raw canonical id when no
+                # display name is cached, which the transport layer avoids by
+                # keeping the identified sentence at DEBUG (AGENTS.md section 5).
+                # It is logged here anyway because every sibling branch of this
+                # method and both guards above it already do -- singling out this
+                # one branch would buy inconsistency, not privacy. Changing that
+                # is a decision about the whole method, not about this catch.
+                _LOGGER.warning(
+                    "Manual locate for %s failed (request not accepted): %s",
                     name,
                     not_accepted_err,
                 )

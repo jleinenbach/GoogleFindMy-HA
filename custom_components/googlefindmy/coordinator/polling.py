@@ -2440,13 +2440,16 @@ class PollingOperations(_MixinBase):
                 # It does NOT prove that the request was accepted, and the guard
                 # must not be read as if it did. Measured, four failures still
                 # reach this loop as `{}`, because they are raised BEFORE the
-                # outer handler that would convert them: the FCM provider being
-                # unregistered or returning None (`RuntimeError`), a missing
-                # token cache (`MissingTokenCacheError`), and a failure while
-                # binding the lazily imported decrypt / eid-info modules
-                # (`ImportError` / `AttributeError`) -- that binding sits above
-                # the `try`, unlike the same import inside the FCM callback, which
-                # IS guarded. All of them are flattened by `api.py`'s
+                # outer handler that would convert them: an unregistered FCM
+                # receiver provider (`RuntimeError`), a provider that returns
+                # None (`RuntimeError`), a missing token cache
+                # (`MissingTokenCacheError`), and a failure while binding the
+                # lazily imported decrypt / eid-info modules (`ImportError` /
+                # `AttributeError`) -- that binding sits above the `try`, unlike
+                # the same import inside the FCM callback, which IS guarded. Four
+                # modes in four clauses on purpose: grouping the two provider
+                # guards into one is how a reader of this list, and then a
+                # docstring quoting it, arrived at "three". All of them are flattened by `api.py`'s
                 # `except RuntimeError` / `except Exception` arms. The first is
                 # deliberate and documented there as a cold-boot race that retries
                 # on the next cycle; turning it into an outage would report every
