@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import math
@@ -309,11 +310,34 @@ def _resolve_parse_last_seen_timestamp() -> Any:
 
 
 _LEAFLET_DIR = Path(__file__).parent / "vendor" / "leaflet"
+
+# Every asset the rendered page embeds. Both are read in one executor hop, so a
+# map request never pays two round trips and never reads a second file later on
+# (`leaflet.js` used to be read only once the CSS was already cached). Keep in
+# sync with `ASSETS` in `script/vendor_leaflet.py`, which vendors these files
+# and whose list the CI gate checks.
+_LEAFLET_ASSETS: tuple[str, ...] = ("leaflet.css", "leaflet.js")
+
+# Process-wide because the files are read-only build artifacts of the release:
+# they cannot change while Home Assistant runs, and a second config entry would
+# otherwise re-read the same 160 KiB.
 _LEAFLET_CACHE: dict[str, str] = {}
 
 
-def _leaflet_asset(name: str) -> str:
-    """Return the vendored Leaflet asset, read once per process.
+def _read_leaflet_assets() -> dict[str, str]:
+    """Read the vendored Leaflet assets from disk.
+
+    Blocking disk I/O: call this in an executor only, never in the event loop.
+    """
+
+    return {
+        name: (_LEAFLET_DIR / name).read_text(encoding="utf-8")
+        for name in _LEAFLET_ASSETS
+    }
+
+
+async def _async_prime_leaflet_cache(hass: HomeAssistant) -> None:
+    """Fill the Leaflet cache off the event loop.
 
     The map page embeds Leaflet instead of pulling it from a CDN. A CDN copy
     executes third-party JavaScript on the Home Assistant origin, and the tags
@@ -327,13 +351,51 @@ def _leaflet_asset(name: str) -> str:
     draws with `L.circleMarker` and uses no layers control, so the image assets
     Leaflet's CSS references are never requested and nothing else has to be
     served.
+
+    What embedding does NOT license is reading the files where the read lands:
+    the first map request per process filled the cache from inside the request
+    handler, which runs in the event loop, and Home Assistant reported it as
+    `Detected blocking call to read_text` (`homeassistant/util/loop.py`). The
+    read therefore happens here, in the executor, before rendering starts.
     """
 
-    cached = _LEAFLET_CACHE.get(name)
-    if cached is None:
-        cached = (_LEAFLET_DIR / name).read_text(encoding="utf-8")
-        _LEAFLET_CACHE[name] = cached
-    return cached
+    if all(name in _LEAFLET_CACHE for name in _LEAFLET_ASSETS):
+        return
+
+    # `hass` is a stand-in in several unit tests; fall back to the running loop's
+    # default executor so the assets still leave the event loop there. Note the
+    # limit of that safety net: the history read above dereferences
+    # `self.hass.async_add_executor_job` unconditionally, so a stand-in without
+    # the method only reaches this branch when no entity id resolved. The
+    # `getattr` probe follows `config_flow._async_import_api`, the fallback
+    # deliberately does not: that one runs the blocking import inline, which is
+    # the very shape this function exists to avoid.
+    executor = getattr(hass, "async_add_executor_job", None)
+    if callable(executor):
+        assets = await executor(_read_leaflet_assets)
+    else:  # pragma: no cover - stand-in without an executor AND no history read
+        loop = asyncio.get_running_loop()
+        assets = await loop.run_in_executor(None, _read_leaflet_assets)
+
+    _LEAFLET_CACHE.update(assets)
+
+
+def _leaflet_asset(name: str) -> str:
+    """Return an asset that `_async_prime_leaflet_cache` has already read.
+
+    Deliberately no read-through fallback. Reading here on a cache miss is
+    exactly the blocking call this indirection exists to prevent, and it would
+    hide the defect instead of removing it: the miss only happens once per
+    process, so the warning would come back rarely enough to look fixed.
+    """
+
+    try:
+        return _LEAFLET_CACHE[name]
+    except KeyError:
+        raise RuntimeError(
+            f"Leaflet asset {name!r} is not cached; "
+            "await _async_prime_leaflet_cache(hass) before rendering the map"
+        ) from None
 
 
 # The map URL carries its access token in the query string, so every response of
@@ -717,6 +779,27 @@ class GoogleFindMyMapView(HomeAssistantView):
         locations.sort(key=lambda location: location.get("last_seen", 0))
 
         # 6. Render
+        # The page embeds the vendored Leaflet assets, so they have to be on
+        # hand before the HTML is built. Reading them here keeps the disk I/O in
+        # the executor and out of the event loop; after the first map request of
+        # the process this is a dict lookup and returns without a hop.
+        try:
+            await _async_prime_leaflet_cache(self.hass)
+        except (OSError, UnicodeDecodeError) as err:
+            # A half-written update or a stripped install can leave the vendor
+            # directory incomplete. Say so with a page instead of a traceback.
+            # `UnicodeDecodeError` is a `ValueError`, not an `OSError`: a file
+            # that exists but carries corrupted bytes fails on decoding, and
+            # catching only `OSError` would let that case through as a 500 with
+            # a traceback.
+            _LOGGER.error("Failed to read the vendored Leaflet assets: %s", err)
+            return _html_response(
+                "Map unavailable",
+                "The map assets shipped with this integration could not be read. "
+                "Reinstall the integration and reload Home Assistant.",
+                status=500,
+            )
+
         html = self._generate_map_html(
             device_name, locations, device_id, start_time, end_time, accuracy_filter
         )

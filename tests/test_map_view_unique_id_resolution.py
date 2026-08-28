@@ -200,6 +200,23 @@ def _load_real_parse_last_seen_timestamp() -> Any:
     return subentry.parse_last_seen_timestamp
 
 
+#: Read once per test session. Several callers of ``_load_map_view_module`` run
+#: inside an ``async def`` test, so re-reading the 160 KiB of vendored assets on
+#: every module load would put exactly the blocking read this change removes
+#: back into a running event loop, just in the test tree. Stated plainly: this
+#: leaves at most one such read per session (whichever caller comes first)
+#: instead of one per module load.
+_LEAFLET_ASSETS_CACHE: dict[str, str] = {}
+
+
+def _leaflet_assets_once(map_view_module: ModuleType) -> dict[str, str]:
+    """Return the vendored Leaflet assets, reading them at most once."""
+
+    if not _LEAFLET_ASSETS_CACHE:
+        _LEAFLET_ASSETS_CACHE.update(map_view_module._read_leaflet_assets())
+    return _LEAFLET_ASSETS_CACHE
+
+
 def _load_map_view_module(monkeypatch: pytest.MonkeyPatch) -> ModuleType:
     """Load the map_view module with stubbed Home Assistant dependencies."""
 
@@ -331,6 +348,13 @@ def _load_map_view_module(monkeypatch: pytest.MonkeyPatch) -> ModuleType:
     map_view = importlib.util.module_from_spec(spec)
     monkeypatch.setitem(sys.modules, module_name, map_view)
     spec.loader.exec_module(map_view)
+    # A freshly executed module starts with an empty Leaflet cache, and
+    # ``_leaflet_asset`` deliberately refuses to read through on a miss (that
+    # read is the blocking event-loop call the cache exists to avoid). In
+    # production the request handler fills it via
+    # ``_async_prime_leaflet_cache``; the loader stands in for that step so the
+    # direct ``_generate_map_html`` callers below keep working.
+    map_view._LEAFLET_CACHE.update(_leaflet_assets_once(map_view))
     return map_view
 
 
