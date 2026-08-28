@@ -26,6 +26,9 @@ from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker.decrypt_
     SharedKeyMismatchError,
     StaleOwnerKeyError,
 )
+from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker.location_request import (
+    LocationRequestNotAcceptedError,
+)
 from custom_components.googlefindmy.NovaApi.nova_request import (
     NovaAuthError,
     NovaAuthPermanentError,
@@ -1002,12 +1005,21 @@ async def test_a_rejected_device_never_clears_the_auth_state() -> None:
 async def test_an_empty_return_still_clears_the_counter() -> None:
     """Characterisation of the reset this change deliberately leaves alone.
 
-    An empty result still counts as success: the counter goes back to zero and
-    the auth state is cleared. That is true today for every 5xx and every 429,
-    it predates this work, and it is wrong on its own terms -- an empty result
-    proves only that nothing raised, not that the credentials work. It is
-    tracked as a finding of its own with its own approval gate. This test is
-    here so the day it changes, it changes on purpose.
+    An empty result USUALLY MEANS an accepted request that came back without a
+    report, and it still counts as success: the counter goes back to zero and
+    the auth state is cleared. The precision matters, because the sentence that
+    used to stand here -- "that is true today for every 5xx and every 429" -- is
+    no longer true. Those raise before they can reach this path, which is
+    exactly what the change did; the pair to this test is
+    ``test_an_unaccepted_request_no_longer_clears_the_counter``. "Usually" and
+    not "always", because four pre-accept faults still arrive as an empty dict;
+    they are enumerated at the post-loop guard in ``polling.py``.
+
+    What remains wrong on its own terms is the reset itself: an accepted request
+    that returned nothing proves only that nothing raised, not that the
+    credentials work. That is tracked as a finding of its own with its own
+    approval gate (`PLAN_GFMY_AUTH_RESET_POSITIVE_PROOF`). This test is here so
+    the day it changes, it changes on purpose.
     """
     coordinator = _polling_coordinator({}, _TrackingFilter(), {})
     coordinator.api = _PerDeviceAPI({"dev-1": {}})
@@ -1307,20 +1319,17 @@ async def test_a_rejected_device_does_not_make_every_tracker_unavailable() -> No
     on every single poll until the device left the cached list. A rejection of
     one device says nothing about the others.
 
-    Note precisely what the sibling here does: it returns ``{}``, which at this
-    layer is indistinguishable from a 5xx. That is deliberate -- it is the
-    cheapest shape of the case, and it is also why the guard cannot be tightened
-    to require positive success. ``_any_device_got_data`` is the only positive
-    marker on the REQUEST path (``cycle_had_successful_decrypt`` is a positive
-    proof too, but about the shared key), and gating on it would turn THIS test
-    red. The two demands meet in one observable state, so the ambiguity has to
-    be resolved where the empty result is produced, not here.
+    Note precisely what the sibling here does: it returns ``{}``. When this test
+    was written that was indistinguishable from a 5xx, and the pair
+    ``test_a_mixed_cycle_of_rejection_and_empty_siblings_stays_silent`` recorded
+    the same observable state read with the opposite expectation -- an ambiguity
+    that could only be resolved where the empty result is produced.
 
-    This test and ``test_known_gap_a_mixed_cycle_of_rejection_and_empty_siblings_stays_silent``
-    use the same stub and the same three assertions; only the display name
-    differs. That is not sloppiness left unnoticed but the very point: they are
-    the SAME observable state, read once as "must stay silent" and once as
-    "should have surfaced". Whoever resolves the ambiguity should merge them.
+    It has been, and the twin now reads the state the same way this one does: a
+    5xx raises ``LocationRequestNotAcceptedError`` instead of returning ``{}``,
+    so the two are no longer one state under two names. What this test still
+    holds is unchanged and unaffected by that: a rejected tracker must not take
+    the account offline while a sibling is answering.
     """
     coordinator = _polling_coordinator({}, _TrackingFilter(), {})
     coordinator.api = _PerDeviceAPI({"dev-1": NovaAuthError(404, "gone"), "dev-2": {}})
@@ -1433,23 +1442,32 @@ async def test_a_cycle_where_every_device_is_rejected_still_reports_an_error() -
 
 
 @pytest.mark.asyncio
-async def test_known_gap_a_cycle_of_only_empty_results_reports_success() -> None:
-    """The reference measurement, with NOT ONE rejection involved.
+async def test_a_cycle_of_only_empty_results_still_reports_success() -> None:
+    """The reference case that must NOT flip: healthy idle tags stay successful.
 
-    ``api.async_get_device_location`` collapses four distinct outcomes into the
-    same empty dict: a 5xx, a 429, a protobuf decode failure and a Nova logic
-    error all ``return {}``, and so does the healthy idle BLE tag whose inner
-    FCM wait simply found no reporter nearby. The poll loop cannot tell them
-    apart, so a cycle in which every single request failed server-side reports
-    ``success`` and leaves every entity available with its cached position.
+    This test was the pinned known gap. It kept a cycle in which every request
+    had failed server-side at ``success``, because the empty dict could not be
+    told from a healthy idle BLE tag. The ambiguity is largely gone: the 5xx,
+    the 429, the network error and the failed FCM registration now raise
+    ``LocationRequestNotAcceptedError`` instead of flattening into ``{}``.
 
-    This is pre-existing and has nothing to do with the client-rejection branch
-    -- it is pinned here precisely so that claim stays checkable: any argument
-    that the neighbouring rejection branch should surface a mixed
-    rejection-plus-empty cycle has to explain why THIS cycle, in which just as
-    little worked, may stay silent. Deciding what an empty result may prove is
-    tracked as its own change (`PLAN_GFMY_EMPTY_RESULT_DISTINGUISHABLE`); when it
-    lands, this test is expected to flip deliberately, not silently.
+    Largely, not entirely, and the difference is worth keeping straight. Four
+    pre-accept failures still arrive here as an empty dict, because they are
+    raised before the handler that would convert them: an unregistered FCM
+    receiver provider, a provider that returns ``None``, a missing token cache,
+    and a failure while binding the lazily imported decrypt / eid-info modules.
+    Count the failure modes, not the clauses: an earlier revision of this
+    docstring grouped the two provider guards into one and wrote "three", which
+    contradicted the "four" at the head of this file. So an empty dict is now
+    WEAK evidence that the request was accepted, not proof of it.
+
+    Its name and its meaning changed with that; its expectation deliberately did
+    not. An account of BLE tags with no reporter nearby is the ordinary healthy
+    state, it produces exactly this cycle, and it must never be reported as a
+    failure. This is therefore the counter-weight to
+    ``test_a_cycle_where_no_request_was_accepted_reports_an_error``: the two
+    together are the claim that the outcomes became DISTINGUISHABLE, rather than
+    that everything was declared broken.
     """
     coordinator = _polling_coordinator({}, _TrackingFilter(), {})
     coordinator.api = _PerDeviceAPI({"dev-1": {}, "dev-2": {}})
@@ -1469,22 +1487,23 @@ async def test_known_gap_a_cycle_of_only_empty_results_reports_success() -> None
 
 
 @pytest.mark.asyncio
-async def test_known_gap_a_mixed_cycle_of_rejection_and_empty_siblings_stays_silent() -> (
-    None
-):
-    """One rejected tracker plus siblings that came back empty: still silent.
+async def test_a_mixed_cycle_of_rejection_and_empty_siblings_stays_silent() -> None:
+    """One rejected tracker plus a sibling that came back empty: still silent.
 
-    The post-loop guard fires only when EVERY device was rejected. Here one was
-    and the other returned empty, so ``cycle_rejected_devices != len(devices)``
-    and the cycle surfaces nothing. Whether that empty sibling was a healthy
-    idle tag or a 5xx is not knowable at this layer, so the guard cannot lean on
-    it as evidence either way -- and the neighbouring decrypt verdict shows the
-    difference: it gates on ``cycle_had_successful_decrypt``, a positive proof
-    the request path has no counterpart for. ``_any_device_got_data`` is not
-    that counterpart: it records that a device COMMITTED data, so gating on it
-    would turn ``test_a_rejected_device_does_not_make_every_tracker_unavailable``
-    red -- which uses the same stub and the same assertions as this test, only
-    read with the opposite expectation. Two names, one observable state.
+    This too was a pinned known gap, and it too keeps its expectation while
+    losing its doubt. The old reasoning was that an empty sibling proves
+    nothing, so the guard could not lean on it either way. It leans on it only
+    in the safe direction, which is the only direction it may lean: an empty
+    sibling makes the guard STAY SILENT, and the guard is deliberately built so
+    that anything it fails to recognise has that effect. It is emphatically not
+    read as proof that the sibling's request was accepted. One deleted tracker plus one sibling that came back empty is not
+    grounds for taking the whole account offline.
+
+    The mirror case is
+    ``test_a_mixed_cycle_of_rejection_and_unaccepted_siblings_now_surfaces``:
+    same rejection, but the sibling never got through, and there the cycle
+    surfaces. The pair is what makes the two states distinguishable at this
+    layer instead of collapsed into one.
 
     Not silent everywhere, and that is the point: the rejection still sets
     ``cycle_failed``, so ``last_poll_result`` reports ``failed`` and the
@@ -1509,6 +1528,321 @@ async def test_known_gap_a_mixed_cycle_of_rejection_and_empty_siblings_stays_sil
     assert coordinator.api.calls == 2
 
 
+@pytest.mark.asyncio
+async def test_a_cycle_where_no_request_was_accepted_reports_an_error() -> None:
+    """The defect this whole change exists to remove, at the cycle level.
+
+    Every tracker hit a 5xx, so not one request was accepted. Before the
+    signal existed each of those collapsed into an empty dict, the loop read
+    that as an ordinary idle poll, and the coordinator reported ``success``
+    while it had delivered nothing at all -- every entity stayed available with
+    a cached position that could be hours old, and nothing anywhere said so.
+
+    The counter-weight is
+    ``test_a_cycle_of_only_empty_results_still_reports_success``: identical
+    shape, empty results instead of refusals, and it must stay green. Without
+    that pair this test could be satisfied by declaring every quiet cycle
+    broken, which is not a fix but a different defect.
+    """
+    coordinator = _polling_coordinator({}, _TrackingFilter(), {})
+    coordinator.api = _PerDeviceAPI(
+        {
+            "dev-1": LocationRequestNotAcceptedError(stage="server_error", status=503),
+            "dev-2": LocationRequestNotAcceptedError(stage="server_error", status=503),
+        }
+    )
+    coordinator._set_auth_state = lambda **kwargs: None
+    coordinator.config_entry.async_start_reauth = MagicMock()
+    recorded: list[Exception] = []
+    coordinator.async_set_update_error = recorded.append
+
+    await coordinator._async_start_poll_cycle(
+        [{"id": "dev-1", "name": "A"}, {"id": "dev-2", "name": "B"}]
+    )
+
+    assert recorded, "no request was accepted and the cycle still reported success"
+    assert coordinator.last_poll_result == "failed"
+    # Reachability, so neither assertion can pass vacuously.
+    assert coordinator.api.calls == 2
+
+
+@pytest.mark.asyncio
+async def test_the_surfaced_error_names_which_counter_fired() -> None:
+    """Two ways to reach the same verdict must not read as the same event.
+
+    A deleted tracker (the server's answer ABOUT that device) and a request that
+    was never accepted (no answer about the device at all) both leave the cycle
+    with nothing, but they need different answers from whoever reads the log:
+    one is a configuration change, the other is an outage. The two guards are
+    kept apart for exactly that, so this pins that the message says which one
+    fired instead of a single generic sentence.
+    """
+    coordinator = _polling_coordinator({}, _TrackingFilter(), {})
+    coordinator.api = _PerDeviceAPI(
+        {"dev-1": LocationRequestNotAcceptedError(stage="rate_limited", status=429)}
+    )
+    coordinator._set_auth_state = lambda **kwargs: None
+    coordinator.config_entry.async_start_reauth = MagicMock()
+    recorded: list[Exception] = []
+    coordinator.async_set_update_error = recorded.append
+
+    await coordinator._async_start_poll_cycle([{"id": "dev-1", "name": "A"}])
+
+    assert recorded
+    message = str(recorded[-1])
+    assert "was accepted this cycle" in message, message
+    assert "1 not accepted" in message, message
+    # Not the rejection wording: that guard must not have claimed this cycle.
+    assert "was rejected by" not in message, message
+
+
+@pytest.mark.asyncio
+async def test_a_single_unaccepted_device_does_not_make_every_tracker_unavailable() -> (
+    None
+):
+    """One refused tracker with a sibling that got through stays a skip.
+
+    This is the guard rail against over-correcting. ``last_exception`` drives
+    ``async_set_update_error`` and with it entity availability, so recording it
+    per device would take the whole account offline whenever a single tracker
+    hit a transient 5xx. The sibling's empty dict is what refutes the
+    account-wide reading -- not because an empty dict proves the sibling's
+    request was accepted (it does not, see
+    ``test_a_cycle_of_only_empty_results_still_reports_success``), but because
+    the guard demands that EVERY device missed and this cycle does not meet
+    that.
+    """
+    coordinator = _polling_coordinator({}, _TrackingFilter(), {})
+    coordinator.api = _PerDeviceAPI(
+        {
+            "dev-1": LocationRequestNotAcceptedError(stage="server_error", status=503),
+            "dev-2": {},
+        }
+    )
+    coordinator._set_auth_state = lambda **kwargs: None
+    coordinator.config_entry.async_start_reauth = MagicMock()
+    recorded: list[Exception] = []
+    coordinator.async_set_update_error = recorded.append
+
+    await coordinator._async_start_poll_cycle(
+        [{"id": "dev-1", "name": "Refused"}, {"id": "dev-2", "name": "Idle"}]
+    )
+
+    assert not recorded, (
+        "one refused tracker failed the coordinator update, which makes every "
+        f"tracker entity unavailable: {recorded}"
+    )
+    # Reachability: both devices were requested and the cycle really did enter
+    # the not-accepted branch -- the empty success path of dev-2 leaves
+    # `cycle_failed` alone, so `failed` here can only come from dev-1.
+    assert coordinator.api.calls == 2
+    assert coordinator.last_poll_result == "failed"
+
+
+@pytest.mark.asyncio
+async def test_a_single_unaccepted_device_still_marks_the_poll_result_failed() -> None:
+    """The miss is recorded, it is only not made account-wide.
+
+    Same split as the rejection branch: ``cycle_failed`` writes the
+    ``last_poll_result`` diagnostic attribute that ``binary_sensor.py`` reads,
+    while ``last_exception`` drives availability. Keeping the former is what
+    stops the cycle from claiming it polled every device.
+    """
+    coordinator = _polling_coordinator({}, _TrackingFilter(), {})
+    coordinator.api = _PerDeviceAPI(
+        {
+            "dev-1": LocationRequestNotAcceptedError(stage="network_error"),
+            "dev-2": {},
+        }
+    )
+    coordinator._set_auth_state = lambda **kwargs: None
+    coordinator.config_entry.async_start_reauth = MagicMock()
+    coordinator.async_set_update_error = lambda _exc: None
+
+    await coordinator._async_start_poll_cycle(
+        [{"id": "dev-1", "name": "Refused"}, {"id": "dev-2", "name": "Idle"}]
+    )
+
+    assert coordinator.last_poll_result == "failed"
+
+
+@pytest.mark.asyncio
+async def test_a_mixed_cycle_of_rejection_and_unaccepted_siblings_now_surfaces() -> (
+    None
+):
+    """A deleted tracker plus a request never accepted: nothing got through.
+
+    The mirror of
+    ``test_a_mixed_cycle_of_rejection_and_empty_siblings_stays_silent``, and the
+    reason the guard sums the two counters instead of testing either alone.
+    Neither count reaches ``len(devices)`` here, so a guard on one of them would
+    stay silent through a cycle in which no device produced any evidence at all.
+    """
+    coordinator = _polling_coordinator({}, _TrackingFilter(), {})
+    coordinator.api = _PerDeviceAPI(
+        {
+            "dev-1": NovaAuthError(404, "gone"),
+            "dev-2": LocationRequestNotAcceptedError(stage="server_error", status=503),
+        }
+    )
+    coordinator._set_auth_state = lambda **kwargs: None
+    coordinator.config_entry.async_start_reauth = MagicMock()
+    recorded: list[Exception] = []
+    coordinator.async_set_update_error = recorded.append
+
+    await coordinator._async_start_poll_cycle(
+        [{"id": "dev-1", "name": "Gone"}, {"id": "dev-2", "name": "Refused"}]
+    )
+
+    assert recorded, "no request was accepted and the cycle still reported success"
+    message = str(recorded[-1])
+    assert "1 not accepted" in message and "1 rejected" in message, message
+    assert coordinator.api.calls == 2
+
+
+@pytest.mark.asyncio
+async def test_an_unaccepted_device_does_not_touch_the_transient_auth_counter() -> None:
+    """Neither cleared nor raised: a refused request says nothing about credentials.
+
+    Two claims in one, and both matter. NOT CLEARED is the defect being fixed --
+    the success path runs ``_set_auth_state(failed=False)`` and zeroes the
+    counter before it looks at the result, so every 5xx used to wipe the
+    escalation budget on its way through. Raising skips that path entirely; the
+    branch does not undo the reset, it never happens.
+
+    NOT RAISED is the other half, and it is what a well-meant "treat it like the
+    transient-auth branch" edit would break. A server that is down is not a
+    credential that expired, and counting it towards the re-auth budget would
+    put a sign-in prompt in front of the user for an outage they cannot fix.
+    """
+    coordinator = _polling_coordinator({}, _TrackingFilter(), {})
+    coordinator.api = _PerDeviceAPI(
+        {"dev-1": LocationRequestNotAcceptedError(stage="server_error", status=503)}
+    )
+    auth_calls: list[dict[str, Any]] = []
+    coordinator._set_auth_state = lambda **kwargs: auth_calls.append(kwargs)
+    coordinator.config_entry.async_start_reauth = MagicMock()
+    recorded: list[Exception] = []
+    coordinator.async_set_update_error = recorded.append
+    coordinator._consecutive_transient_auth_failures = 2
+
+    await coordinator._async_start_poll_cycle([{"id": "dev-1", "name": "Refused"}])
+
+    assert not auth_calls, f"the refused request touched the auth state: {auth_calls}"
+    assert coordinator._consecutive_transient_auth_failures == 2
+    # Reachability, and specifically that the NOT-ACCEPTED branch is what ran.
+    # `api.calls == 1` alone would not show that: the broad neighbour also leaves
+    # the auth state alone, so both assertions above would survive deleting the
+    # branch outright. The guard's own wording is the one observable that only
+    # this path produces.
+    assert coordinator.api.calls == 1
+    assert recorded and "was accepted this cycle" in str(recorded[-1]), recorded
+
+
+@pytest.mark.asyncio
+async def test_an_unaccepted_request_no_longer_clears_the_counter() -> None:
+    """The contract pair to ``test_an_empty_return_still_clears_the_counter``.
+
+    The two are deliberately adjacent claims about the same success path, read
+    from opposite sides. An ACCEPTED request that came back empty still clears
+    the counter -- that reset is wrong on its own terms and is tracked
+    separately (`PLAN_GFMY_AUTH_RESET_POSITIVE_PROOF`), so it is characterised,
+    not changed here. A request that was never accepted no longer reaches that
+    path at all. Splitting them is what makes the difference between the two
+    outcomes checkable instead of a matter of reading the branch.
+    """
+    coordinator = _polling_coordinator({}, _TrackingFilter(), {})
+    coordinator.api = _PerDeviceAPI(
+        {"dev-1": LocationRequestNotAcceptedError(stage="fcm_registration_failed")}
+    )
+    auth_calls: list[dict[str, Any]] = []
+    coordinator._set_auth_state = lambda **kwargs: auth_calls.append(kwargs)
+    coordinator.config_entry.async_start_reauth = MagicMock()
+    recorded: list[Exception] = []
+    coordinator.async_set_update_error = recorded.append
+    coordinator._consecutive_transient_auth_failures = 2
+
+    await coordinator._async_start_poll_cycle([{"id": "dev-1", "name": "Refused"}])
+
+    assert not [kw for kw in auth_calls if kw.get("failed") is False]
+    assert coordinator._consecutive_transient_auth_failures == 2
+    # See the sibling above: without this the broad neighbour satisfies the test.
+    assert recorded and "was accepted this cycle" in str(recorded[-1]), recorded
+
+
+@pytest.mark.asyncio
+async def test_an_all_rejected_cycle_still_uses_the_rejection_wording() -> None:
+    """The new guard must not quietly take over the old one's cases.
+
+    Both guards end in ``last_exception is not None``, so a test that only asks
+    "did the cycle surface" cannot tell which one fired -- and dropping the
+    ``cycle_unaccepted_devices`` term from the new condition would let it claim
+    every all-rejected cycle and report an outage where a tracker was deleted.
+    Reading the message is the only observable difference, so it is what is
+    pinned. The mirror is
+    ``test_the_surfaced_error_names_which_counter_fired``.
+    """
+    coordinator = _polling_coordinator({}, _TrackingFilter(), {})
+    coordinator.api = _PerDeviceAPI(
+        {"dev-1": NovaAuthError(404, "gone"), "dev-2": NovaAuthError(400, "bad")}
+    )
+    coordinator._set_auth_state = lambda **kwargs: None
+    coordinator.config_entry.async_start_reauth = MagicMock()
+    recorded: list[Exception] = []
+    coordinator.async_set_update_error = recorded.append
+
+    await coordinator._async_start_poll_cycle(
+        [{"id": "dev-1", "name": "Gone"}, {"id": "dev-2", "name": "Bad"}]
+    )
+
+    assert recorded
+    message = str(recorded[-1])
+    assert "Every device (2) was rejected by" in message, message
+    assert "not accepted" not in message, message
+
+
+@pytest.mark.asyncio
+async def test_an_unaccepted_device_does_not_hide_a_credential_failure() -> None:
+    """A cycle with an expired sign-in must report THAT, not the outage beside it.
+
+    What actually protects this is the SUM, not the guard's
+    ``last_exception is None`` term, and the distinction is worth stating
+    because the obvious reading gets it backwards. A credential failure
+    increments neither counter, so it breaks the equality and the guard never
+    runs at all. Measured: deleting the ``last_exception is None`` term leaves
+    this test green, because it is unreachable today -- every branch that sets
+    ``last_exception`` also keeps its device out of both counts.
+
+    So this pins the outcome the user sees ("your sign-in expired", and with it
+    the re-auth flow), and deliberately not the mechanism. If a future branch
+    both counts a device and reports an error, THAT is when the term starts
+    carrying weight, and a test for it can be written against a state that
+    exists.
+    """
+    coordinator = _polling_coordinator({}, _TrackingFilter(), {})
+    coordinator.api = _PerDeviceAPI(
+        {
+            "dev-1": NovaAuthError(401, "expired"),
+            "dev-2": LocationRequestNotAcceptedError(stage="server_error", status=503),
+        }
+    )
+    coordinator._set_auth_state = lambda **kwargs: None
+    coordinator.config_entry.async_start_reauth = MagicMock()
+    coordinator.note_error = MagicMock()
+    recorded: list[Exception] = []
+    coordinator.async_set_update_error = recorded.append
+
+    await coordinator._async_start_poll_cycle(
+        [{"id": "dev-1", "name": "Hub"}, {"id": "dev-2", "name": "Refused"}]
+    )
+
+    assert recorded, "the cycle hid the credential failure entirely"
+    assert getattr(recorded[-1], "status", None) == 401, (
+        "the cycle reported the unaccepted request instead of the tracker whose "
+        f"sign-in expired: {recorded[-1]!r}"
+    )
+
+
 class TestTheDocumentedRejectionGuardStaysTrue:
     """The AGENTS.md paragraph on the rejection guard names its tests and counts them.
 
@@ -1525,6 +1859,15 @@ class TestTheDocumentedRejectionGuardStaysTrue:
     When the set legitimately changes, update BOTH the paragraph and nothing
     else -- this row reads the number out of the prose itself, so the prose
     stays the single source.
+
+    A second, wider row exists and is not a replacement:
+    `TestTheDocumentedExtentStaysTrue::test_every_test_name_the_component_contracts_cite_exists`
+    in `tests/test_nova_request.py` checks that EVERY name cited in any of the
+    component's contracts resolves, including class names and the lists this
+    sentence pattern does not match. It cannot read a stated number out of
+    prose, which is what this class does, so the two are kept apart on purpose.
+    Whoever widens one should look at the other first; a copy built without
+    knowing about its sibling is how this pair nearly became one.
     """
 
     _AGENTS = (

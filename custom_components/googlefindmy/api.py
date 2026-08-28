@@ -73,6 +73,7 @@ from .NovaApi.ExecuteAction.LocateTracker.decrypt_locations import (
     any_real_location_record,
 )
 from .NovaApi.ExecuteAction.LocateTracker.location_request import (
+    LocationRequestNotAcceptedError,
     get_location_data_for_device,
 )
 from .NovaApi.ExecuteAction.PlaySound.start_sound_request import (
@@ -1321,6 +1322,24 @@ class GoogleFindMyAPI:
             limit, timeout). A normal return therefore means the credentials
             were accepted; callers rely on that.
 
+            That reliance is only as sound as the layer below. It holds exactly
+            to the extent that a request which never got past this integration's
+            ACCEPT POINT raises rather than returning empty -- see
+            `LocationRequestNotAcceptedError`
+            below. Those raise sites now exist: a 5xx, a 429, a network error and
+            a failed FCM registration leave `location_request.py` as that
+            exception, not through this exit. What still arrives here as an empty
+            list is what the layer below vouches for as ACCEPTED, which is not
+            the same as healthy, and is deliberately NOT a closed list: the idle
+            BLE tag; the post-accept branches of the locate flow (the
+            unexpected-device mismatch, and any error the outer surfacing handler
+            catches once the accept line has been passed); and every failure the
+            FCM callback absorbs on its own, which is a fully-catching layer of
+            its own after that line -- an unreadable push, a decode failure, a
+            push for another device. Reading an empty result as "healthy" was the
+            defect; reading it as "one of exactly three things" would be the next
+            one.
+
         Raises:
             ConfigEntryAuthFailed: Re-auth must start at once -- an HTTP 401/403
                 (`NovaHTTPError`), or a permanent Nova auth failure. The
@@ -1334,6 +1353,16 @@ class GoogleFindMyAPI:
                 apart with `nova_request.is_credential_rejection`; the type does
                 not, and reading the type is the defect this contract exists to
                 prevent.
+            LocationRequestNotAcceptedError: The locate request never got past this
+                integration's accept point (which a 429 and a 5xx also miss, having
+                reached the server and been answered). Re-raised unchanged so the
+                accepted-versus-
+                failed outcome survives this boundary instead of being flattened
+                into `{}` and reconstructed downstream once the evidence is gone.
+                It claims a POSITION in the request flow, never a cause, so it is
+                NOT an auth verdict: a request that was not accepted says nothing
+                about the credentials, and this exit must not be folded into the
+                auth mapping above.
         """
 
         # Register cache provider for multi-entry support
@@ -1554,6 +1583,37 @@ class GoogleFindMyAPI:
             # `except Exception` below would otherwise turn it into an empty result,
             # hiding the transient from the coordinator. Analog to the A1
             # `except DecryptionError: raise` guard above.
+            raise
+
+        except LocationRequestNotAcceptedError:
+            # The locate request never got past this integration's accept point (no FCM
+            # token, a failed FCM registration, a 429, a 5xx, a network error, an
+            # unclassified Nova failure, or a surfacing error before the accept
+            # line). This layer must stay transparent for it, exactly like the two
+            # guards above: the broad `except Exception` below would turn it back
+            # into `return {}`, and an empty dict is precisely the evidence loss
+            # the signal exists to prevent. That one handler is the whole reason
+            # this branch exists -- `except RuntimeError` in between never sees the
+            # type, whose base is `Exception` and deliberately NOT `RuntimeError`
+            # (see the class docstring). Placement is therefore load-bearing
+            # against the broad handler specifically: being LAST would make this
+            # branch unreachable, while sitting anywhere ahead of it suffices.
+            #
+            # Note what this pass-through does NOT do: it does not classify. The
+            # signal names a POSITION in the request flow, never a cause, so the
+            # auth mapping documented above is untouched by it -- an unreachable
+            # server says nothing about the credentials.
+            #
+            # This receiver was installed one step BEFORE the seven raise sites in
+            # `location_request.py` existed. The order is deliberate, though not
+            # for the reason it is tempting to state: with NO receiver anywhere,
+            # a sender-first step would have been INERT rather than dangerous,
+            # because the broad `except Exception` below flattens the signal to
+            # `{}` before any coordinator sees it. The danger is the half-wired
+            # state -- this pass-through present and the coordinator's not: the
+            # signal then reaches the poll loop's broad per-device handler, which
+            # sets both `cycle_failed` and `last_exception`, and a single 5xx on a
+            # single tracker would mark every entity of the account unavailable.
             raise
 
         except RuntimeError as err:

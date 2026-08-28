@@ -35,6 +35,9 @@ from ..NovaApi.ExecuteAction.LocateTracker.decrypt_locations import (
     OwnerKeyLookupTransientError,
     StaleOwnerKeyError,
 )
+from ..NovaApi.ExecuteAction.LocateTracker.location_request import (
+    LocationRequestNotAcceptedError,
+)
 from ..NovaApi.nova_request import (
     NovaAuthError,
     NovaHTTPError,
@@ -715,6 +718,97 @@ class LocateOperations(_MixinBase):
                     "(the shared key is stale); please re-authenticate."
                 )
                 raise HomeAssistantError(message) from dec_err
+            except LocationRequestNotAcceptedError as not_accepted_err:
+                # The request never got past this integration's accept point. For the
+                # manual path that is an ordinary empty result, exactly as it
+                # looks to the user today -- a locate that found nothing. What
+                # changes is what does NOT happen on the way there: the
+                # `_set_auth_state(failed=False)` on the success path above is
+                # skipped by construction, so a 5xx can no longer clear the
+                # account's auth-failure state on its way through. That skip is
+                # the whole point of catching this here.
+                #
+                # Returns rather than raises, unlike the broad handler below: a
+                # failed request is not an "unexpected error" worth a red toast
+                # in the UI, and re-wrapping it into a `HomeAssistantError` would
+                # be a behaviour change this step does not intend. It must still
+                # sit BEFORE that handler, though -- `Exception` is the base, so
+                # the broad branch would otherwise claim it first.
+                #
+                # WARNING, not DEBUG. This path runs because someone asked for
+                # it -- a button press, an automation, or the `locate_device` /
+                # `locate_external` service -- so the failure has an audience and
+                # a moment. The poll loop logs the SAME condition at DEBUG, and
+                # that is the same rule rather than an inconsistency: it runs
+                # unattended and repeatedly. Leaving it at DEBUG here would have
+                # made a user ask for a locate, get nothing, and find nothing in
+                # the log at the default level.
+                #
+                # Two neighbours could be read as precedent, and exactly one of
+                # them is. NOT the `NovaRateLimitError` / `NovaHTTPError` handlers
+                # a few branches up, however tempting the symmetry: `api.py`
+                # answers both with `return {}` of its own (api.py:1535 for the
+                # 429, api.py:1526 for the non-401/403 5xx), so neither type ever
+                # reaches this method and those two branches are dead on this
+                # path. Nor did this branch inherit their traffic -- before the
+                # request layer started raising, a 5xx returned `[]` from
+                # `location_request` and arrived here on the SUCCESS path, which
+                # is precisely the defect this catch exists to end. The live
+                # neighbour is `OwnerKeyLookupTransientError` a few branches up,
+                # which api.py does re-raise and which logs at DEBUG; the line
+                # between them is subject, not severity. That one is a miss on one
+                # tracker's owner key while the account is otherwise fine. This
+                # one is a request that never got past the accept point, which is
+                # what the same operation already treats as WARNING when it
+                # refuses to start (the in-flight/cooldown and push-recovery
+                # guards near the top of this method).
+                #
+                # Two costs of the promotion, both weighed rather than discovered
+                # later. First, this is not the first record for the incident:
+                # `location_request` writes one before every raise of this type --
+                # measured six, four WARNING and two ERROR, not just the three
+                # transport rungs. Those records are PATH-AGNOSTIC: the identical
+                # sentence appears for an unattended poll. What this line adds is
+                # that the failed request was a USER-INITIATED one, plus the stage
+                # that says where it stopped. That is the whole of its value, and
+                # it is thin for `no_fcm_token`, whose transport record already
+                # names the operation. It does NOT tell the user WHICH device --
+                # that half is at DEBUG, see below -- so do not defend this line
+                # with an identification it no longer performs. It is one line per
+                # user action, and the poll path stays at DEBUG, so nothing
+                # repeats unattended.
+                # Second, `name` falls back to the raw canonical id when no
+                # display name is cached (see where it is bound above). The rule
+                # is AGENTS.md section 5 (never log device ids, redact derived
+                # identifying information); the LEVEL split is the tree's own
+                # reading of it, the "R6 / Count@WARNING, Name@DEBUG" pattern that
+                # `test_location_request_r6_name_sweep.py` states and that the
+                # signal class itself cites in its docstring. Section 5 alone
+                # carries no level caveat, so citing only it would overstate the
+                # licence. That is why the sentence is split the way the transport
+                # layer splits its own:
+                # the WARNING carries the operation and the reason, the identified
+                # half stays at DEBUG. An earlier revision of this step logged
+                # `name` in the WARNING and defended it as consistent with the
+                # sibling branches of this method, which do the same. The defence
+                # does not hold, and the reason is worth keeping: it was THIS step
+                # that raised the line from DEBUG to WARNING, so it was this step
+                # that put a possible device id into the default log. Matching
+                # neighbours is not a licence to promote a leak; what a branch
+                # does at DEBUG and what it may do at WARNING are two different
+                # questions. The neighbours stay as they are -- lowering them is a
+                # decision about the whole method -- but this branch does not add
+                # to them.
+                _LOGGER.warning("Manual locate failed: %s", not_accepted_err)
+                _LOGGER.debug(
+                    "Manual locate for %s failed (request not accepted): %s",
+                    name,
+                    not_accepted_err,
+                )
+                self.note_error(
+                    not_accepted_err, where="async_locate_device", device=name
+                )
+                return {}
             except Exception as err:
                 short_err = self._short_error_message(err)
                 _LOGGER.error("Manual locate for %s failed: %s", name, short_err)

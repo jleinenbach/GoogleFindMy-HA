@@ -60,6 +60,9 @@ from ..NovaApi.ExecuteAction.LocateTracker.decrypt_locations import (
     StaleOwnerKeyError,
     is_real_location_record,
 )
+from ..NovaApi.ExecuteAction.LocateTracker.location_request import (
+    LocationRequestNotAcceptedError,
+)
 from ..NovaApi.nova_request import (
     NovaAuthError,
     NovaAuthPermanentError,
@@ -283,7 +286,17 @@ class PollingOperations(_MixinBase):
 
         Only rendered at DEBUG level, so this stays silent during normal
         operation and adds no WARNING/INFO noise. ``source`` distinguishes the
-        inner empty result from the outer poll-guard timeout.
+        inner empty result (``empty-result``) from the outer poll-guard timeout
+        (``outer-timeout``) and from a request that was never accepted
+        (``not-accepted``).
+
+        The rendered line still opens with "Idle poll", which for the third
+        source is the very conflation this diagnostic is meant to help take
+        apart. Left as it is on purpose: four assertions in
+        ``tests/test_poll_timeout_hardening.py`` match on that exact prefix, so
+        renaming it is a change with its own blast radius and does not belong to
+        the step that merely adds the source. ``source`` disambiguates it in the
+        meantime.
         """
         if not _LOGGER.isEnabledFor(logging.DEBUG):
             return
@@ -1702,13 +1715,56 @@ class PollingOperations(_MixinBase):
                 # refused is account-wide on the rejections' own terms.
                 # Deliberately NOT the same shape as the decrypt verdict above:
                 # that one gates on `cycle_had_successful_decrypt`, a positive
-                # proof. The request path has no such proof to gate on, because
-                # `api.async_get_device_location` returns the same empty dict
-                # for a healthy idle BLE tag and for a 5xx, a 429, a protobuf
-                # decode failure or a Nova logic error. So a non-rejected
-                # sibling is NOT evidence that anything worked, and this counter
-                # must not be read as if it were.
+                # proof. The request path has no such proof to gate on. It used
+                # to have none at all, because `api.async_get_device_location`
+                # returned the same empty dict for a healthy idle BLE tag as for
+                # a 5xx, a 429, a protobuf decode failure or a Nova logic error.
+                # PLAN_GFMY_EMPTY_RESULT_DISTINGUISHABLE narrowed that, and
+                # measured, it narrowed LESS than the old list suggests: what now
+                # arrives as `LocationRequestNotAcceptedError` on the branch below
+                # is what `async_nova_request` raises -- the 5xx and the 429 on
+                # their own rungs, anything else through the generic guard. The
+                # protobuf decode failure does NOT: on this path it is raised
+                # inside the FCM callback, i.e. AFTER the accept line, and the
+                # callback catches it itself and hands back an empty result. The
+                # Nova logic error is not raised anywhere in the tree at all,
+                # so it never told us anything either way. Measured with a
+                # pattern this comment does not itself match, because the naive
+                # grep for the raise statement now finds this very line:
+                # `grep -rn 'raise NovaLogic''Error' custom_components/`.
+                # So an empty result is narrower evidence than it was, and still
+                # not proof that anything worked. It remains the outcome of the
+                # idle tag, of every failure the FCM callback absorbs, and of the
+                # post-accept branches of the locate flow -- not a closed list,
+                # which is the point: this counter must not be read as evidence.
                 cycle_rejected_devices = 0
+                # Counted separately from `cycle_rejected_devices` rather than
+                # folded into it, because the two say different things and only
+                # their SUM answers the cycle-level question.
+                #
+                # The difference is NOT flow position, and saying so would be
+                # measurably wrong: `location_request.py` re-raises the
+                # non-credential 4xx from the same `try` that produces the 5xx
+                # and the 429, all of them BEFORE the `Location request accepted`
+                # line. Neither kind reached the accept point.
+                #
+                # The difference is what the outcome says. A REJECTION is the
+                # server's answer ABOUT THIS DEVICE -- "not this one", typically
+                # a tracker deleted from the account. A NON-ACCEPTED request is
+                # the absence of such an answer: the request did not leave this
+                # integration as accepted, usually for a reason on the way to the
+                # server (a 5xx, a 429, a network error, a failed FCM
+                # registration).
+                #
+                # Resist sharpening that into "permanent versus transient". It
+                # holds for the common cases and breaks on `no_fcm_token`, whose
+                # source returns None for a canonic id that is not present in the
+                # receiver's device set -- device-specific and not transient at
+                # all. Both counts mean only "this device contributed no
+                # evidence", which is what the post-loop guard needs; they are
+                # kept apart so whoever reads the log can tell a configuration
+                # change from an outage.
+                cycle_unaccepted_devices = 0
                 for idx, dev in enumerate(devices):
                     dev_id = dev["id"]
                     dev_name = dev.get("name", dev_id)
@@ -2276,6 +2332,69 @@ class PollingOperations(_MixinBase):
                             cycle_decrypt_error, dec_err
                         )
                         continue
+                    except LocationRequestNotAcceptedError as not_accepted_err:
+                        # The request never got past this integration's accept point, so
+                        # this device produced no evidence in either direction --
+                        # neither that the account is healthy nor that it is
+                        # broken. It stays a PER-DEVICE skip: keep polling the
+                        # siblings, record the miss, and leave the account-wide
+                        # verdict to the post-loop guard. Recording
+                        # `last_exception` here instead would make a single 5xx on
+                        # a single tracker mark every entity of the account
+                        # unavailable.
+                        #
+                        # The shape below is taken from the client-rejection
+                        # branch above, deliberately and for the same reason:
+                        # `cycle_failed` and `last_exception` drive two different
+                        # things. `cycle_failed` only writes the
+                        # `last_poll_result` diagnostic attribute, so the cycle
+                        # stays honest about not having polled every device.
+                        # `last_exception` drives `async_set_update_error` and
+                        # with it entity availability, which is an account-wide
+                        # claim this branch has no evidence for.
+                        #
+                        # Deliberately absent, each for its own measured reason:
+                        #
+                        # * NO `last_exception`. See above. The count feeds the
+                        #   post-loop guard instead, which is the only place that
+                        #   can see whether ANY device got through.
+                        # * NO `_set_auth_state(failed=False)` and NO reset of
+                        #   `_consecutive_transient_auth_failures`. Those sit on
+                        #   the success path above and are skipped by construction
+                        #   now that the raise sites exist. That skip IS the fix for
+                        #   the counter being wiped by a 5xx on its way through;
+                        #   re-doing the reset here would hand it straight back.
+                        # * NO reset of `_consecutive_timeouts`. Measured before
+                        #   the raise sites were armed: a failed request reached
+                        #   the `if not location:` branch, which does NOT reset
+                        #   that counter -- so leaving it alone here is what
+                        #   preserves the behaviour, not what changes it. Resetting
+                        #   it here would therefore not preserve current
+                        #   behaviour but invent a health signal the request
+                        #   never earned -- the same false-success reasoning this
+                        #   change exists to remove. Nor is the counter a general
+                        #   liveness mark to be refreshed by anything that ran:
+                        #   it is incremented in exactly one place, the outer
+                        #   timeout branch, and a refused request is not a
+                        #   timeout. Its only consumer is the connectivity binary
+                        #   sensor's attribute dict, so it feeds no verdict.
+                        #   The sibling handlers here are NOT unanimous, which is
+                        #   why their shape is a weak argument either way: eight
+                        #   of the ten clear it unconditionally, `TimeoutError`
+                        #   never does (it increments), and `NovaAuthError`
+                        #   clears it on only one of its three exits.
+                        _LOGGER.debug(
+                            "Location request for %s was not accepted (%s); "
+                            "skipping this device for this cycle",
+                            dev_name,
+                            not_accepted_err,
+                        )
+                        self._log_idle_poll_diagnostics(
+                            dev_id, dev_name, source="not-accepted"
+                        )
+                        cycle_failed = True
+                        cycle_unaccepted_devices += 1
+                        continue
                     except Exception as err:
                         _LOGGER.error(
                             "Failed to get location for %s: %s", dev_name, err
@@ -2291,76 +2410,107 @@ class PollingOperations(_MixinBase):
                         await asyncio.sleep(self.device_poll_delay)
 
                 _LOGGER.debug("Completed polling cycle for %d devices", len(devices))
-                # Every device was refused: on the rejections' own terms
-                # that is account-wide, so the cycle must surface. Do NOT lean
-                # on the device list to catch this one layer up -- it is a
-                # different RPC (`nbe_list_devices`), and
+                # No device's request was accepted: the cycle must surface.
+                # Two counters, one verdict -- see their declaration above for
+                # why they are not the same thing. Either way the device produced
+                # no evidence, and when no device produced any, the coordinator
+                # has nothing to report success about.
+                #
+                # Do NOT lean on the device list to catch this one layer up -- it
+                # is a different RPC (`nbe_list_devices`), and
                 # DEVICE_LIST_POLL_INTERVAL means most cycles reuse the cached
                 # list without calling it at all.
                 #
-                # What this guard does NOT claim, stated so the next reader does
-                # not infer it: that a cycle which fails the check had a
-                # sibling success. A mixed cycle -- one tracker refused, the
-                # others back empty from a 5xx -- stays silent here, and so does
-                # that same 5xx outage with no rejection in it at all
-                # (`test_known_gap_a_cycle_of_only_empty_results_reports_success` pins
-                # that reference case). Hanging the error signal on whether some
-                # unrelated tracker happens to be deleted would be a
-                # coincidence, not a contract; the empty result is what has to
-                # become distinguishable, and that is tracked separately
-                # (`PLAN_GFMY_EMPTY_RESULT_DISTINGUISHABLE`).
+                # Read the check for exactly what it tests. The equality is over
+                # the SUM, so a cycle in which one tracker was rejected and every
+                # other one was refused by the server surfaces, while a cycle with
+                # a single surviving sibling stays silent.
                 #
-                # Named because it is a real regression and not a neutral
-                # gap: BEFORE this change the mixed cycle did surface. The
-                # 4xx took the transient-auth branch, which set
-                # `last_exception` -- and fed the counter that produced the
-                # false sign-in prompt this whole change exists to remove.
-                # That signal was a side effect of the misclassification,
-                # not a contract: a tracker deleted from the account says
-                # nothing about whether its siblings reached the server. It
-                # cannot be kept without keeping the defect. Gating this
-                # guard on positive success instead fails at this layer for
-                # a mechanical reason, not a forecast about accounts: the
-                # only positive marker on the REQUEST path is
-                # `_any_device_got_data` (`cycle_had_successful_decrypt`
-                # above is a positive proof too, but about the shared key,
-                # and both are False for either empty result), and it
-                # records that a device COMMITTED data, not that its
-                # request reached the server. Gating on it turns
-                # `test_a_rejected_device_does_not_make_every_tracker_unavailable`
-                # red, because that test's sibling returns exactly `{}` --
-                # the stricter guard would withdraw the very fix that test
-                # was written for. One rejection plus one empty sibling
-                # would have to stay silent there and surface here, from
-                # the same observable state. That is an ambiguity, not a
-                # judgement call.
+                # What an empty sibling proves is NARROWER than it was, and
+                # narrower than it is tempting to write. The transport failures
+                # that used to flatten into `{}` now raise:
+                # `location_request.py` turns the 5xx, the 429, the
+                # `aiohttp.ClientError` and the generic Nova failure into
+                # `LocationRequestNotAcceptedError` itself, so the `api.py`
+                # handlers that return `{}` for those four no longer stand
+                # between the failure and this loop, and the empty dict comes
+                # from the no-location fallthrough (`api.py:1427`), which sits
+                # after the request.
                 #
-                # The concrete price of tightening anyway, stated so it is
-                # not lost: an account with one deleted tracker and
-                # otherwise idle BLE tags would go unavailable on EVERY
-                # cycle. Not "every healthy BLE-only account" (this guard
-                # is conjunctive with a rejection, so an account without
-                # one is untouched), but exactly that one shape.
+                # It does NOT prove that the request was accepted, and the guard
+                # must not be read as if it did. Measured, four failures still
+                # reach this loop as `{}`, because they are raised BEFORE the
+                # outer handler that would convert them: an unregistered FCM
+                # receiver provider (`RuntimeError`), a provider that returns
+                # None (`RuntimeError`), a missing token cache
+                # (`MissingTokenCacheError`), and a failure while binding the
+                # lazily imported decrypt / eid-info modules (`ImportError` /
+                # `AttributeError`) -- that binding sits above the `try`, unlike
+                # the same import inside the FCM callback, which IS guarded. Four
+                # modes in four clauses on purpose: grouping the two provider
+                # guards into one is how a reader of this list, and then a
+                # docstring quoting it, arrived at "three". All of them are flattened by `api.py`'s
+                # `except RuntimeError` / `except Exception` arms. The first is
+                # deliberate and documented there as a cold-boot race that retries
+                # on the next cycle; turning it into an outage would report every
+                # restart as one. The others are programming or packaging faults
+                # rather than operating states. They are named here so the next
+                # reader does not mistake this guard for exhaustive.
                 #
-                # Only the layer that produced the empty result can resolve
-                # this. Where, is measured: `location_request.py` logs
-                # `Location request accepted` once the RPC is through, and
-                # the `return []` paths reachable only before that log are
-                # failures. The split is not positional -- the outer
-                # surfacing handler wraps the whole body, so its `return
-                # []` sits after the log while its exceptions come from
-                # either side, and the unexpected-device branch after the
-                # log returns empty on a WARNING. A follow-up needs a flag
-                # set at the log line, and has to carry that outcome ACROSS
-                # the boundary (a typed result, for example) rather than
-                # reconstruct it here, where the empty collection has
-                # already flattened it. The layer that flattens it is
-                # `location_request.py`, not `api.py`: aiming a fix at the
-                # file where the empty dict is built would sit behind the
-                # point where the evidence is gone. See
+                # That is also why the guard does NOT count empty siblings, and
+                # why it does not need to. It is deliberately conservative: it
+                # demands that EVERY device missed, so one surviving tracker is
+                # enough to keep the account available -- and an unrecognised
+                # failure makes it stay silent, never fire wrongly.
+                #
+                # Named because it is a real behaviour change and not a neutral
+                # gap: BEFORE the raise sites existed, a cycle in which every
+                # single request failed server-side reported `success` and left
+                # every entity available with its cached position. The reference
+                # case that must NOT flip with it is the healthy one --
+                # `test_a_cycle_of_only_empty_results_still_reports_success` holds
+                # idle BLE tags at `success`. The price of closing the gap is
+                # accepted in the plan: on a single-device account one failed
+                # request now takes that account's tracker unavailable for the
+                # cycle. It is not only single-device accounts, and that is worth
+                # stating rather than discovering: a forced cycle runs even
+                # without a ready push transport, so an account whose FCM
+                # registration fails for every device meets this guard at any
+                # device count. No consecutive-cycle threshold is applied, because a
+                # threshold without a field measurement would be a guessed
+                # number; `_finalize_cycle_decrypt_state` is the pattern to copy
+                # if flapping is ever observed. See
                 # `PLAN_GFMY_EMPTY_RESULT_DISTINGUISHABLE`.
-                # `test_known_gap_a_mixed_cycle_of_rejection_and_empty_siblings_stays_silent`
-                # pins the current state so it cannot drift unnoticed.
+                #
+                # `last_exception is None` is defence in depth here, and is
+                # marked as such rather than left to look load-bearing: measured,
+                # it cannot currently be False when the equality holds. Every
+                # branch that sets `last_exception` (timeout, transient auth,
+                # stale key, the broad handler) increments NEITHER counter, so
+                # one of those devices already breaks the sum. A mutation that
+                # deletes the term therefore turns no test red -- deliberately,
+                # because writing a test for an unreachable state would only pin
+                # the reasoning, not the behaviour. The term stays because the
+                # obvious next edit is a branch that both counts and reports, and
+                # then it is the difference between reporting the expired
+                # credential and reporting the outage that hid it.
+                if (
+                    cycle_unaccepted_devices
+                    and (cycle_unaccepted_devices + cycle_rejected_devices)
+                    == len(devices)
+                    and last_exception is None
+                ):
+                    last_exception = UpdateFailed(
+                        f"No device's locate request was accepted this cycle "
+                        f"({cycle_unaccepted_devices} not accepted, "
+                        f"{cycle_rejected_devices} rejected)"
+                    )
+                # Every device was refused by name: on the rejections' own
+                # terms that is account-wide, so the cycle must surface. Kept as
+                # its own guard rather than folded into the sum above so the
+                # reported message names the condition; the two are mutually
+                # exclusive by construction, because this one requires the
+                # unaccepted count to be zero for the equality to hold.
                 if (
                     cycle_rejected_devices
                     and cycle_rejected_devices == len(devices)

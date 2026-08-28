@@ -1146,7 +1146,48 @@ class TestAsyncBasicDeviceListErrorMapping:
 
 
 class TestAsyncDeviceLocationErrorMapping:
-    """Each documented exception class for the location request branch."""
+    """Each documented exception class for the location request branch.
+
+    Most of these classes can no longer arrive here from the production locate
+    path. ``location_request`` converts what its Nova ladder around the request
+    call catches into ``LocationRequestNotAcceptedError`` before this seam sees
+    it, and re-raises the rest. WHICH failure ends up on which side is not
+    restated here on purpose: it is maintained in
+    ``custom_components/googlefindmy/AGENTS.md`` (the sentence starting with
+    ``FOUR pre-accept failures``, today at line 174, plus the paragraph after it)
+    and pinned in ``tests/test_location_request_not_accepted.py``. A second copy in
+    a test docstring is a copy nobody comes back to, which is how the enumeration
+    it would copy was already miscounted once.
+
+    What the class is FOR, after that change, is the other direction. The branches
+    behind the converted classes are a REGRESSION GUARD, not coverage for a second
+    caller: ``grep -rnE "get_location_data_for_device|async_get_device_location"
+    custom_components/`` shows who produces and consumes this seam. Deleting a
+    handler here would stay invisible until someone narrows a conversion one layer
+    down, and would then restore precisely the defect this change set removed: a
+    request that never got past the accept point arriving as a healthy empty dict.
+
+    Two of the mapped classes are guarded here and by no other test ON THIS SEAM
+    (both have branches elsewhere in the tree that other tests do cover):
+    ``NovaLogicError``, which nothing in the tree raises, and
+    ``NovaProtobufDecodeError``, which nothing on the locate path raises outside
+    the FCM callback, where the callback's own handler flattens it to an empty
+    result before it could reach here. (Both classes have HANDLER branches
+    elsewhere in the tree, with their own tests; it is only the two branches on
+    THIS seam that hang on this test class.)
+
+    ``OwnerKeyLookupTransientError`` is a rung of the seam's own ladder but has no
+    case below; its pin is ``tests/test_api_transient_owner_key.py``.
+
+    The signal itself is not pinned here either. That lives in
+    ``tests/test_location_request_not_accepted.py``:
+    ``test_api_passes_the_signal_through_untouched`` for the pass-through
+    (asserted by identity, not merely by type) and
+    ``test_the_sync_wrapper_still_flattens_the_signal_to_an_empty_dict`` for the
+    sync-wrapper edge that is deliberately left open. Those two names, the file
+    names above and the AGENTS.md line number are prose references that no test
+    derives; a rename or an edit there makes them silently wrong.
+    """
 
     def _patch_request(
         self,
