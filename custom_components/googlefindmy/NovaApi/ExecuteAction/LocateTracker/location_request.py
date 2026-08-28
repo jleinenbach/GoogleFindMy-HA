@@ -1028,7 +1028,9 @@ async def get_location_data_for_device(  # noqa: PLR0912, PLR0913, PLR0915
             # Deliberately still an empty return: the server ACCEPTED this request,
             # no reporter was in range within the window. This is the very outcome
             # LocationRequestNotAcceptedError exists to keep distinguishable from a
-            # request that never arrived -- raising here would re-merge them.
+            # request that never got PAST THIS LINE -- raising here would re-merge
+            # them. (Past this line, not "never arrived": a 429 and a 5xx did
+            # arrive and were answered.)
             return []
 
         if ctx.error:

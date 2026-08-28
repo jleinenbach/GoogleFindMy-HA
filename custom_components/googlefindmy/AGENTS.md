@@ -162,11 +162,18 @@ change, an unreachable server is an outage.
 That difference is NOT flow position, and writing it that way would be measurably wrong. `location_request.py`
 re-raises the non-credential 4xx from the same `try` that produces the 5xx and the 429, all of them BEFORE the
 `Location request accepted` line, so neither kind reached the accept point. The difference is what the outcome
-says: a rejection carries the SERVER'S answer about that device -- it was asked, and it answered -- while a non-accepted
-request carries no answer from the server at all, because the question never arrived. Say it that way and nothing more.
-Two compressions are wrong and both have been written here before. NOT "permanent versus transient": a later paragraph
-measures where that breaks (`no_fcm_token`), and an earlier revision of THIS sentence asserted the compression while
-that paragraph already forbade it. NOT "about the device versus not about the device" either: `no_fcm_token` is
+says: a rejection carries the SERVER'S answer ABOUT THAT DEVICE -- it was asked, and it answered -- while a
+non-accepted request carries no answer FROM THE SERVER about that device. (That is not the forbidden "about the
+device versus not about the device" compression below: it is about who spoke, not about whom the failure concerns.)
+Say it that way and nothing more.
+Three compressions are wrong and all three have been written here before. NOT "the question never arrived": for the
+429 and the 5xx it did arrive and the server did answer, only about ITSELF -- one refusing to serve, the other
+reporting its own failure -- while `no_fcm_token` and the failed registration never left this integration. What the
+seven stages share is the ACCEPT POINT, not the wire: none of them got past `Location request accepted`, which is why
+the class is named for acceptance and not for delivery. Writing it as "never reached the server" invites a later
+handler to assume pre-dispatch semantics that two of the stages do not have.
+NOT "permanent versus transient": a later paragraph measures where that breaks (`no_fcm_token`), and an earlier
+revision of THIS sentence asserted the compression while that paragraph already forbade it. NOT "about the device versus not about the device" either: `no_fcm_token` is
 non-acceptance and IS device-specific, it is just not the server saying so. What the two share is only that this device
 contributed no evidence.
 What an empty sibling proves is narrower than it looks, and the guard is built so that it never has to prove much. The

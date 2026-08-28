@@ -1165,7 +1165,7 @@ class TestAsyncDeviceLocationErrorMapping:
     custom_components/`` shows who produces and consumes this seam. Deleting a
     handler here would stay invisible until someone narrows a conversion one layer
     down, and would then restore precisely the defect this change set removed: a
-    request that never reached the server arriving as a healthy empty dict.
+    request that never got past the accept point arriving as a healthy empty dict.
 
     Two of the mapped classes are guarded here and by no other test ON THIS SEAM
     (both have branches elsewhere in the tree that other tests do cover):

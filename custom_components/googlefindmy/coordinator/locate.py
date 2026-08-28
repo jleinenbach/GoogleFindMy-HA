@@ -758,7 +758,7 @@ class LocateOperations(_MixinBase):
                 # which api.py does re-raise and which logs at DEBUG; the line
                 # between them is subject, not severity. That one is a miss on one
                 # tracker's owner key while the account is otherwise fine. This
-                # one is a request that never reached the server at all, which is
+                # one is a request that never got past the accept point, which is
                 # what the same operation already treats as WARNING when it
                 # refuses to start (the in-flight/cooldown and push-recovery
                 # guards near the top of this method).

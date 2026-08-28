@@ -1323,8 +1323,9 @@ class GoogleFindMyAPI:
             were accepted; callers rely on that.
 
             That reliance is only as sound as the layer below. It holds exactly
-            to the extent that a request which never reached the server raises
-            rather than returning empty -- see `LocationRequestNotAcceptedError`
+            to the extent that a request which never reached the server's ACCEPT
+            POINT raises rather than returning empty -- see
+            `LocationRequestNotAcceptedError`
             below. Those raise sites now exist: a 5xx, a 429, a network error and
             a failed FCM registration leave `location_request.py` as that
             exception, not through this exit. What still arrives here as an empty

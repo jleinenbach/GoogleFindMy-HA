@@ -421,7 +421,8 @@ async def test_locate_request_requires_namespace(
 
     That downstream failure now surfaces as ``LocationRequestNotAcceptedError``
     rather than as an empty list (PLAN_GFMY_EMPTY_RESULT_DISTINGUISHABLE): the
-    request never reached the server. The assertion this test exists for is the
+    request never reached the accept point. The assertion this test exists for is
+    the
     NEGATIVE one -- no ``MissingNamespaceError``. ``pytest.raises`` carries it:
     the two classes are disjoint, so a regression to the namespace error fails
     the block rather than any assertion inside it. Spelling it out as a second
