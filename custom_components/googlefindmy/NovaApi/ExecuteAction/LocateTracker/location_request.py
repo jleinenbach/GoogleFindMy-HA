@@ -163,7 +163,13 @@ class LocationRequestNotAcceptedError(Exception):
     placed BEFORE it, and all five carry one. Deleting any of them, or moving it
     behind its broad neighbour, silently restores the empty result this type was
     introduced to replace; that is what the seam tests in
-    ``tests/test_location_request_not_accepted.py`` exist to catch.
+    ``tests/test_location_request_not_accepted.py`` exist to catch. The count and
+    the ordering are not prose alone: ``TestTheDocumentedExtentStaysTrue`` in
+    ``tests/test_nova_request.py`` derives both from the AST, so change the
+    extent and this paragraph in the same commit. What it derives is the set of
+    blocks that CARRY a guard -- a broad handler newly added on this path
+    WITHOUT one never enters that set and leaves "all five carry one" quietly
+    wrong, which is the direction the seam tests above cover instead.
 
     A SIXTH broad handler exists and deliberately has no guard:
     ``api._run_sync_helper`` flattens every exception to the caller's default, so
@@ -172,7 +178,11 @@ class LocationRequestNotAcceptedError(Exception):
     than an oversight, and it is pinned as such by
     ``test_the_sync_wrapper_still_flattens_the_signal_to_an_empty_dict``. Counting
     it among the five would be wrong; leaving it out of the count without saying
-    so would read as a completeness claim the path does not support.
+    so would read as a completeness claim the path does not support. Its
+    guardlessness is pinned too, and by the same AST rows in
+    ``TestTheDocumentedExtentStaysTrue``: adding a guard there is a behaviour
+    change at a public sync entry point, and it must not happen while this
+    paragraph still says otherwise.
 
     One more handler sits a level UP rather than on the path: the cycle-level one
     in ``polling.py``'s update method turns anything escaping the per-device loop

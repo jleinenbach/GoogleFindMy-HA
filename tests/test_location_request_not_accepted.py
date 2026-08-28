@@ -236,7 +236,7 @@ def test_the_stage_markers_are_a_closed_set() -> None:
 
 
 # ===========================================================================
-# AP-2: the receivers. Installed BEFORE anything raises, on purpose.
+# The receivers. Installed BEFORE anything raises, on purpose.
 #
 # The tests above are static: they pin what the choice of base class can decide.
 # The tests below are the opposite kind -- they drive the real seams with the
@@ -860,7 +860,7 @@ def test_the_sync_wrapper_still_flattens_the_signal_to_an_empty_dict(
 
 
 # ===========================================================================
-# AP-3: the sender. Seven raise sites, two swallow guards, three empty returns
+# The sender. Seven raise sites, two swallow guards, three empty returns
 # that must STAY empty.
 #
 # The two sections above pin the type and the receivers. This one pins the only

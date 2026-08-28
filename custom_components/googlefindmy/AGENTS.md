@@ -267,6 +267,14 @@ handler) is enforced by `tests/test_nova_request.py::TestTheDocumentedExtentStay
 rather than from grep, following the rule `tests/AGENTS.md` states for shared tuples. Prose that carries a number and
 calls itself "the only thing standing in its way" must not be the only copy of that number: change the extent and this
 paragraph in the same commit, and let the test tell you when one of them went stale.
+That class has since been given two further duties, because the same shape kept recurring. It derives the guard count
+stated in `LocationRequestNotAcceptedError`'s docstring, and it resolves the test names cited in every `AGENTS.md`
+under this component against the test tree, class names included. The name half is only PART new, and saying otherwise
+would repeat the defect: `TestTheDocumentedRejectionGuardStaysTrue` has always read the "Eight tests pin this:"
+sentence above and checked both its number and its names. What was loose until now is the rest -- the second list
+("Three tests pin the current state"), one-off citations outside any list, the class names this file leans on, and the
+other contracts under this component. A name may therefore not be written into any of them before the test exists.
+Citations of a FILE (`tests/foo.py`) stay unchecked by design, so renaming a test module still dangles silently.
 
 ### Import deferral reminder
 

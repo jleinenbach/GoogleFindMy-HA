@@ -1859,6 +1859,15 @@ class TestTheDocumentedRejectionGuardStaysTrue:
     When the set legitimately changes, update BOTH the paragraph and nothing
     else -- this row reads the number out of the prose itself, so the prose
     stays the single source.
+
+    A second, wider row exists and is not a replacement:
+    `TestTheDocumentedExtentStaysTrue::test_every_test_name_the_component_contracts_cite_exists`
+    in `tests/test_nova_request.py` checks that EVERY name cited in any of the
+    component's contracts resolves, including class names and the lists this
+    sentence pattern does not match. It cannot read a stated number out of
+    prose, which is what this class does, so the two are kept apart on purpose.
+    Whoever widens one should look at the other first; a copy built without
+    knowing about its sibling is how this pair nearly became one.
     """
 
     _AGENTS = (
