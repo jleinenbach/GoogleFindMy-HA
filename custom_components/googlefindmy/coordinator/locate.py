@@ -719,7 +719,7 @@ class LocateOperations(_MixinBase):
                 )
                 raise HomeAssistantError(message) from dec_err
             except LocationRequestNotAcceptedError as not_accepted_err:
-                # The request never reached the server's accept point. For the
+                # The request never got past this integration's accept point. For the
                 # manual path that is an ordinary empty result, exactly as it
                 # looks to the user today -- a locate that found nothing. What
                 # changes is what does NOT happen on the way there: the

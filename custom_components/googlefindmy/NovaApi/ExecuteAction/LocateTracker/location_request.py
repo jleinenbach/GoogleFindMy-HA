@@ -85,7 +85,16 @@ LOCATION_REQUEST_NOT_ACCEPTED_STAGES: frozenset[str] = frozenset(
 
 
 class LocationRequestNotAcceptedError(Exception):
-    """Raised when a locate request never reached the server's accept point.
+    """Raised when a locate request never got past this integration's accept point.
+
+    "Accept point", not "the server": the marker is the ``Location request
+    accepted`` line below, which this module writes once ``async_nova_request``
+    returns without raising. It is an application-level judgement of this
+    integration, not a place on the wire. Two of the seven stages prove the
+    difference: ``rate_limited`` and ``server_error`` are raised FROM an HTTP 429
+    and an HTTP 5xx, so the request did reach the server and the server did
+    answer. Reading the class as "never dispatched" would give a future consumer
+    pre-dispatch semantics that those two stages do not have.
 
     ``get_location_data_for_device`` returned ``[]`` for two states that have
     nothing in common: a request the server ACCEPTED that simply had nothing to
@@ -701,8 +710,9 @@ async def get_location_data_for_device(  # noqa: PLR0912, PLR0913, PLR0915
         that is the whole of the distinction this function draws.
 
     Raises:
-        LocationRequestNotAcceptedError: The request never reached the server's
-            accept point (no FCM token, failed FCM registration, 429, 5xx, network
+        LocationRequestNotAcceptedError: The request never got past this
+            integration's accept point (no FCM token, failed FCM registration, 429,
+            5xx, network
             error, an unclassified Nova failure, or a surfacing error before the
             accept line). Callers that only need a location may treat it as an
             empty result, but must not read it as proof that the credentials work.

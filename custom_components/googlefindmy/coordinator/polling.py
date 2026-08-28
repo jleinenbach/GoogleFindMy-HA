@@ -2333,7 +2333,7 @@ class PollingOperations(_MixinBase):
                         )
                         continue
                     except LocationRequestNotAcceptedError as not_accepted_err:
-                        # The request never reached the server's accept point, so
+                        # The request never got past this integration's accept point, so
                         # this device produced no evidence in either direction --
                         # neither that the account is healthy nor that it is
                         # broken. It stays a PER-DEVICE skip: keep polling the

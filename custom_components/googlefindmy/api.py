@@ -1323,8 +1323,8 @@ class GoogleFindMyAPI:
             were accepted; callers rely on that.
 
             That reliance is only as sound as the layer below. It holds exactly
-            to the extent that a request which never reached the server's ACCEPT
-            POINT raises rather than returning empty -- see
+            to the extent that a request which never got past this integration's
+            ACCEPT POINT raises rather than returning empty -- see
             `LocationRequestNotAcceptedError`
             below. Those raise sites now exist: a 5xx, a 429, a network error and
             a failed FCM registration leave `location_request.py` as that
@@ -1353,8 +1353,10 @@ class GoogleFindMyAPI:
                 apart with `nova_request.is_credential_rejection`; the type does
                 not, and reading the type is the defect this contract exists to
                 prevent.
-            LocationRequestNotAcceptedError: The locate request never reached the
-                server's accept point. Re-raised unchanged so the accepted-versus-
+            LocationRequestNotAcceptedError: The locate request never got past this
+                integration's accept point (which a 429 and a 5xx also miss, having
+                reached the server and been answered). Re-raised unchanged so the
+                accepted-versus-
                 failed outcome survives this boundary instead of being flattened
                 into `{}` and reconstructed downstream once the evidence is gone.
                 It claims a POSITION in the request flow, never a cause, so it is
@@ -1584,7 +1586,7 @@ class GoogleFindMyAPI:
             raise
 
         except LocationRequestNotAcceptedError:
-            # The locate request never reached the server's accept point (no FCM
+            # The locate request never got past this integration's accept point (no FCM
             # token, a failed FCM registration, a 429, a 5xx, a network error, an
             # unclassified Nova failure, or a surfacing error before the accept
             # line). This layer must stay transparent for it, exactly like the two
