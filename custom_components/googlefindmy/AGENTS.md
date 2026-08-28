@@ -221,11 +221,14 @@ unexpected-device branch logs a WARNING and returns empty -- and those were deli
 drawn here is `accepted` against `not accepted`, not `succeeded` against `failed`.
 Note where the empty dict actually comes from, and note what is NOT in that list. `location_request` catches the 5xx
 and the 429 itself, so `api.py`'s handlers for those never run on the locate path. The protobuf decode failure and the
-Nova logic error do not belong in the same sentence, measured: `parse_device_update_protobuf` is called only from the
-FCM callback, whose own `except Exception` sets `ctx.data = []` after the accept line, and no `NovaLogicError` is
-raised anywhere in the tree. On the locate path the dict is produced by the no-location fallthrough instead, which is
-why an intervention confined to `api.py` would have been inert: the outcome had to be carried ACROSS the
-`location_request.py` boundary, not reconstructed downstream once the empty collection had flattened it.
+Nova logic error do not belong in the same sentence, measured: WITHIN `location_request.py`, the only call of
+`parse_device_update_protobuf` sits in the FCM callback, whose own `except Exception` sets `ctx.data = []` after the
+accept line, and no `NovaLogicError` is raised anywhere in the tree. The scope matters and was wrong here once: that
+decoder has further callers in `Auth/fcm_receiver_ha.py` and a `__main__` self-check in `decrypt_locations.py`, none
+of them on the locate request, so the unscoped claim reads as a tree-wide statement and is false as one. On the
+locate path the dict is produced by the no-location fallthrough instead, which is why an intervention confined to
+`api.py` would have been inert: the outcome had to be carried ACROSS the `location_request.py` boundary, not
+reconstructed downstream once the empty collection had flattened it.
 Note what the mixed cycle is NOT: silent everywhere. The rejection still sets `cycle_failed`, so `last_poll_result`
 reports `failed` and the diagnostic binary sensor shows it; only entity availability is left alone.
 Eight tests pin this: `test_a_rejected_device_does_not_make_every_tracker_unavailable`,
