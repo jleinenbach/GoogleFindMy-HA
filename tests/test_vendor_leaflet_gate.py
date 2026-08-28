@@ -129,3 +129,19 @@ def test_update_refuses_a_package_without_a_licence(tree: Path) -> None:
     )
 
     assert _load(tree).update() == 2
+
+
+def test_map_view_embeds_exactly_the_vendored_assets(tmp_path: Path) -> None:
+    """The two asset lists are one fact stored twice; pin them together.
+
+    ``script/vendor_leaflet.py`` decides which files are vendored and checked
+    for freshness, ``map_view`` decides which files the page embeds and primes
+    in the executor. Nothing else compares them, so a file added on one side
+    would silently be unvendored (stale, unchecked) or unembedded.
+    """
+
+    from custom_components.googlefindmy import map_view
+
+    module = _load(tmp_path)
+
+    assert set(map_view._LEAFLET_ASSETS) == set(module.ASSETS)

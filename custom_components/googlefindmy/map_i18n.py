@@ -22,7 +22,11 @@ Catalog invariants (enforced by ``tests/test_map_i18n.py``):
 Attribute-safety note: the copy-tooltip values are injected into single-quoted
 HTML attributes in the client JS (mirroring the pre-existing English literals),
 so no catalog value may contain a single quote ``'``. Keep translations quote
-free; the ``en`` reference values already are.
+free; the ``en`` reference values already are. Values are also interpolated into
+HTML text nodes, so ``<``, ``>``, ``&`` and ``"`` are out as well; both rules are
+pinned by ``tests/test_map_i18n.py``. French and Italian wordings are phrased
+around the apostrophe on purpose (``cette integration`` rather than
+``l'integration``).
 """
 
 from __future__ import annotations
@@ -32,12 +36,17 @@ RTL_LANGUAGES: frozenset[str] = frozenset({"he"})
 
 # Full label catalog: locale code -> {label key -> translated string}.
 #
-# The 15 inventoried source strings map to 18 catalog keys, because the plural
+# The 18 inventoried source strings map to 21 catalog keys, because the plural
 # string ``Showing N points`` splits into ``showing_points_one`` /
 # ``showing_points_other`` and the two dual-value strings (own/crowdsourced,
 # copy plus-code/coordinates) carry two keys each. ``{n}`` in the plural forms
 # is substituted by ``format_showing`` via ``str.replace`` (never ``.format``),
 # so literal braces need no escaping.
+#
+# ``assets_unavailable_title`` / ``assets_unavailable_body`` belong to the
+# vendored-asset failure page (``map_view._html_response``), not to the map
+# itself: without them a non-English install would drop to an English page
+# exactly when something is already wrong.
 MAP_LABELS: dict[str, dict[str, str]] = {
     "en": {
         "unknown_device": "Unknown Device",
@@ -59,6 +68,11 @@ MAP_LABELS: dict[str, dict[str, str]] = {
         "copy_to_clipboard": "Copy to clipboard",
         "copy_plus_code": "Copy Plus Code to clipboard",
         "copy_coordinates": "Copy coordinates to clipboard",
+        "assets_unavailable_title": "Map unavailable",
+        "assets_unavailable_body": (
+            "The map assets shipped with this integration could not be read. "
+            "Reinstall the integration and reload Home Assistant."
+        ),
     },
     "de": {
         "unknown_device": "Unbekanntes Gerät",
@@ -80,6 +94,11 @@ MAP_LABELS: dict[str, dict[str, str]] = {
         "copy_to_clipboard": "In die Zwischenablage kopieren",
         "copy_plus_code": "Plus Code in die Zwischenablage kopieren",
         "copy_coordinates": "Koordinaten in die Zwischenablage kopieren",
+        "assets_unavailable_title": "Karte nicht verfügbar",
+        "assets_unavailable_body": (
+            "Die mit dieser Integration ausgelieferten Kartendateien konnten nicht "
+            "gelesen werden. Installiere die Integration neu und lade Home Assistant neu."
+        ),
     },
     "es": {
         "unknown_device": "Dispositivo desconocido",
@@ -101,6 +120,11 @@ MAP_LABELS: dict[str, dict[str, str]] = {
         "copy_to_clipboard": "Copiar al portapapeles",
         "copy_plus_code": "Copiar Plus Code al portapapeles",
         "copy_coordinates": "Copiar coordenadas al portapapeles",
+        "assets_unavailable_title": "Mapa no disponible",
+        "assets_unavailable_body": (
+            "No se pudieron leer los archivos del mapa incluidos en esta integración. "
+            "Reinstala esta integración y recarga Home Assistant."
+        ),
     },
     "fr": {
         "unknown_device": "Appareil inconnu",
@@ -122,6 +146,11 @@ MAP_LABELS: dict[str, dict[str, str]] = {
         "copy_to_clipboard": "Copier dans le presse-papiers",
         "copy_plus_code": "Copier le Plus Code dans le presse-papiers",
         "copy_coordinates": "Copier les coordonnées dans le presse-papiers",
+        "assets_unavailable_title": "Carte indisponible",
+        "assets_unavailable_body": (
+            "Impossible de lire les fichiers de carte fournis avec cette intégration. "
+            "Réinstallez cette intégration puis rechargez Home Assistant."
+        ),
     },
     "he": {
         "unknown_device": "מכשיר לא ידוע",
@@ -143,6 +172,11 @@ MAP_LABELS: dict[str, dict[str, str]] = {
         "copy_to_clipboard": "העתק ללוח",
         "copy_plus_code": "העתק Plus Code ללוח",
         "copy_coordinates": "העתק קואורדינטות ללוח",
+        "assets_unavailable_title": "המפה אינה זמינה",
+        "assets_unavailable_body": (
+            "לא ניתן לקרוא את קובצי המפה המצורפים לשילוב הזה. "
+            "התקן מחדש את השילוב וטען מחדש את Home Assistant."
+        ),
     },
     "it": {
         "unknown_device": "Dispositivo sconosciuto",
@@ -164,6 +198,11 @@ MAP_LABELS: dict[str, dict[str, str]] = {
         "copy_to_clipboard": "Copia negli appunti",
         "copy_plus_code": "Copia il Plus Code negli appunti",
         "copy_coordinates": "Copia le coordinate negli appunti",
+        "assets_unavailable_title": "Mappa non disponibile",
+        "assets_unavailable_body": (
+            "I file della mappa forniti con questa integrazione non sono "
+            "leggibili. Reinstalla questa integrazione e ricarica Home Assistant."
+        ),
     },
     "nl": {
         "unknown_device": "Onbekend apparaat",
@@ -185,6 +224,11 @@ MAP_LABELS: dict[str, dict[str, str]] = {
         "copy_to_clipboard": "Naar klembord kopiëren",
         "copy_plus_code": "Plus Code naar klembord kopiëren",
         "copy_coordinates": "Coördinaten naar klembord kopiëren",
+        "assets_unavailable_title": "Kaart niet beschikbaar",
+        "assets_unavailable_body": (
+            "De kaartbestanden die bij deze integratie worden meegeleverd, konden niet "
+            "worden gelezen. Installeer deze integratie opnieuw en herlaad Home Assistant."
+        ),
     },
     "pl": {
         "unknown_device": "Nieznane urządzenie",
@@ -206,6 +250,11 @@ MAP_LABELS: dict[str, dict[str, str]] = {
         "copy_to_clipboard": "Kopiuj do schowka",
         "copy_plus_code": "Kopiuj Plus Code do schowka",
         "copy_coordinates": "Kopiuj współrzędne do schowka",
+        "assets_unavailable_title": "Mapa niedostępna",
+        "assets_unavailable_body": (
+            "Nie można odczytać plików mapy dostarczonych z tą integracją. "
+            "Zainstaluj ponownie tę integrację i przeładuj Home Assistant."
+        ),
     },
     "pt-BR": {
         "unknown_device": "Dispositivo desconhecido",
@@ -227,6 +276,11 @@ MAP_LABELS: dict[str, dict[str, str]] = {
         "copy_to_clipboard": "Copiar para a área de transferência",
         "copy_plus_code": "Copiar Plus Code para a área de transferência",
         "copy_coordinates": "Copiar coordenadas para a área de transferência",
+        "assets_unavailable_title": "Mapa indisponível",
+        "assets_unavailable_body": (
+            "Não foi possível ler os arquivos do mapa incluídos nesta integração. "
+            "Reinstale esta integração e recarregue o Home Assistant."
+        ),
     },
     "pt": {
         "unknown_device": "Dispositivo desconhecido",
@@ -248,6 +302,11 @@ MAP_LABELS: dict[str, dict[str, str]] = {
         "copy_to_clipboard": "Copiar para a área de transferência",
         "copy_plus_code": "Copiar Plus Code para a área de transferência",
         "copy_coordinates": "Copiar coordenadas para a área de transferência",
+        "assets_unavailable_title": "Mapa indisponível",
+        "assets_unavailable_body": (
+            "Não foi possível ler os ficheiros do mapa incluídos nesta integração. "
+            "Reinstale esta integração e recarregue o Home Assistant."
+        ),
     },
 }
 

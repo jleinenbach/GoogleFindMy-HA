@@ -821,7 +821,7 @@ artifacts remain exempt when explicitly flagged by repo configuration).
 
 ### 11.3 Async, concurrency & cancellation
 
-* **Async-first**: no event-loop blocking; for blocking work use `asyncio.to_thread`.
+* **Async-first**: no event-loop blocking. In new code that has a `hass` in reach, prefer `await hass.async_add_executor_job(...)`: it registers the job in `hass._tasks`, so shutdown waits for it. The thread pool is the same either way (Home Assistant installs it as the loop's default executor), so `asyncio.to_thread` stays correct where no `hass` is available, which is the case for the crypto and token paths that use it today. This mirrors the remediation in [`docs/AI_MAINTENANCE_TASKLIST.md`](docs/AI_MAINTENANCE_TASKLIST.md) § 4.
 * Use **`asyncio.TaskGroup`** for structured concurrency where suitable.
 * Cancel correctly (`task.cancel(); await task`) and handle `CancelledError`. Use `asyncio.shield` only for small critical sections.
 

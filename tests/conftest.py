@@ -178,6 +178,41 @@ def enable_real_sockets() -> Iterable[None]:
 
 
 @pytest.fixture(scope="session", autouse=True)
+def _prime_leaflet_asset_cache() -> Iterable[None]:
+    """Fill ``map_view``'s Leaflet cache once per session.
+
+    In production the cache is filled by ``_async_prime_leaflet_cache`` in the
+    executor, and ``_leaflet_asset`` raises on a miss instead of reading through
+    (a read-through is the blocking call in the event loop that the indirection
+    removes). Tests that call ``_generate_map_html`` directly bypass the request
+    handler and would therefore hit that ``RuntimeError``; this fixture stands in
+    for the handler. Reading here is safe because this is a *synchronous*
+    fixture: no event loop is running while it executes. Keep it synchronous.
+
+    Tests that need a cold cache clear it locally (``monkeypatch.setattr`` on a
+    fresh dict), never by mutating this one.
+
+    Because this fixture warms the cache for the whole session, the end-to-end
+    map tests can no longer witness a return of the blocking read. The
+    compensating watchdog is ``tests/test_map_view_blocking_io.py``, which
+    clears the cache per test and asserts the reading thread. Do not delete that
+    file without replacing that measurement, or this fixture turns into a
+    cover-up.
+    """
+
+    from custom_components.googlefindmy import map_view
+
+    try:
+        map_view._LEAFLET_CACHE.update(map_view._read_leaflet_assets())
+    except (OSError, UnicodeDecodeError):
+        # An incomplete checkout must not error out every test in the session
+        # during setup. Let the map tests fail on their own, where the message
+        # points at the cause.
+        pass
+    yield
+
+
+@pytest.fixture(scope="session", autouse=True)
 def _redirect_ha_test_storage(
     tmp_path_factory: pytest.TempPathFactory,
 ) -> Iterable[None]:
