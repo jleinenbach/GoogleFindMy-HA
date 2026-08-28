@@ -158,7 +158,7 @@ success. It is one of TWO post-loop guards, and the other one is what closed the
 open. `cycle_unaccepted_devices` counts the devices whose locate request was never accepted, and the sum guard
 (`unaccepted + rejected == len(devices)`, with at least one unaccepted) surfaces a cycle in which no device's request
 got through. The two are kept apart so the reported message names the condition: a deleted tracker is a configuration
-change, an unreachable server is an outage.
+change, a cycle in which no request was accepted is an outage.
 That difference is NOT flow position, and writing it that way would be measurably wrong. `location_request.py`
 re-raises the non-credential 4xx from the same `try` that produces the 5xx and the 429, all of them BEFORE the
 `Location request accepted` line, so neither kind reached the accept point. The difference is what the outcome
@@ -208,7 +208,7 @@ back by gating the guard on positive success does not work at this layer either,
 than a forecast about accounts. The only positive marker on the REQUEST path is `_any_device_got_data`; the
 neighbouring `cycle_had_successful_decrypt` is a positive proof as well, but about the shared key, and both are False
 for either kind of empty result. `_any_device_got_data` records that a device COMMITTED data, not that its request
-reached the server. Gating on it turns `test_a_rejected_device_does_not_make_every_tracker_unavailable` red, because
+was accepted. Gating on it turns `test_a_rejected_device_does_not_make_every_tracker_unavailable` red, because
 the sibling in that test returns exactly `{}` -- the stricter guard withdraws the very fix that test was written for.
 One rejection plus one empty sibling would have to stay silent for that test and surface for the mixed-failure one,
 from the same observable state. That is not a judgement call to be argued either way; it is an ambiguity, and only the

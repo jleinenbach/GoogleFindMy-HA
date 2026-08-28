@@ -1360,9 +1360,9 @@ class GoogleFindMyAPI:
                 failed outcome survives this boundary instead of being flattened
                 into `{}` and reconstructed downstream once the evidence is gone.
                 It claims a POSITION in the request flow, never a cause, so it is
-                NOT an auth verdict: an unreachable server says nothing about the
-                credentials, and this exit must not be folded into the auth
-                mapping above.
+                NOT an auth verdict: a request that was not accepted says nothing
+                about the credentials, and this exit must not be folded into the
+                auth mapping above.
         """
 
         # Register cache provider for multi-entry support

@@ -416,8 +416,8 @@ def test_the_module_cli_reports_the_signal_and_exits_non_zero(
     It is the second of the two CLI edges. The first (the interactive selection
     loop in ``nbe_list_devices``) prints and continues, because there is a next
     prompt to return to. This one has none, so it prints and exits non-zero: a
-    script wrapping it has to be able to tell "no location" from "the request
-    never got out", and an exit code is the only channel it has.
+    script wrapping it has to be able to tell "no location" from "the request was
+    not accepted", and an exit code is the only channel it has.
 
     Driven through ``runpy`` because a guarded ``__main__`` block is otherwise
     unreachable from a test and is excluded from coverage
@@ -557,9 +557,9 @@ async def test_poll_treats_the_signal_as_a_per_device_skip_when_a_sibling_gets_t
     only ever a per-device skip, this test could let both devices raise and
     still expect ``last_update_success is True``. Once the cycle-level guard
     landed, that same input became an account-wide outage by definition -- no
-    device reached the server -- and the expectation flipped. It is pinned in
-    ``test_a_cycle_where_no_request_was_accepted_reports_an_error``, deliberately
-    and in the file that owns cycle semantics.
+    device's request was accepted -- and the expectation flipped. It is
+    pinned in ``test_a_cycle_where_no_request_was_accepted_reports_an_error``,
+    deliberately and in the file that owns cycle semantics.
 
     What is left here is the narrower claim this file is for: one refused
     tracker next to one that got through must not take the account offline. The

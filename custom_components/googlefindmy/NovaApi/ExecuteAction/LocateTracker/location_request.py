@@ -92,9 +92,11 @@ class LocationRequestNotAcceptedError(Exception):
     returns without raising. It is an application-level judgement of this
     integration, not a place on the wire. Two of the seven stages prove the
     difference: ``rate_limited`` and ``server_error`` are raised FROM an HTTP 429
-    and an HTTP 5xx, so the request did reach the server and the server did
-    answer. Reading the class as "never dispatched" would give a future consumer
-    pre-dispatch semantics that those two stages do not have.
+    and from an error status the server itself returned (a 5xx, or a 408 once
+    retries are exhausted -- ``server_error`` carries ``e.status``), so the
+    request did reach the server and the server did answer. Reading the class
+    as "never dispatched" would give a future consumer pre-dispatch semantics
+    that those two stages do not have.
 
     ``get_location_data_for_device`` returned ``[]`` for two states that have
     nothing in common: a request the server ACCEPTED that simply had nothing to
@@ -132,7 +134,8 @@ class LocationRequestNotAcceptedError(Exception):
       ``OwnerKeyLookupTransientError`` states the same reason for the same base.
     * NOT ``DecryptionError``: the coordinator's ``except DecryptionError``
       blocks route into the account-wide reauth verdict, but the credentials are
-      presumed valid here -- an unreachable server says nothing about them.
+      presumed valid here -- a request that was not accepted says nothing about
+      them.
     * NOT ``NovaError``/``NovaAuthError``: ten ``try`` blocks name
       ``NovaAuthError`` in a handler (the count ``TestTheDocumentedExtentStaysTrue``
       derives from the AST, and it is that name it counts, not the base
@@ -745,8 +748,8 @@ async def get_location_data_for_device(  # noqa: PLR0912, PLR0913, PLR0915
         raise RuntimeError("FCM receiver provider returned None.")
 
     registered = False
-    # The accept line below is the only thing that tells a request the server took
-    # from one it never got. The outer handler wraps the WHOLE body, so its own
+    # The accept line below is the only thing that tells an ACCEPTED request from
+    # one that never got past it. The outer handler wraps the WHOLE body, so its own
     # return sits AFTER that line while the exceptions it catches come from both
     # sides of it -- the split has to be read off a flag set AT the line, never off
     # a position in the file (``custom_components/googlefindmy/AGENTS.md``, the
@@ -1145,7 +1148,10 @@ async def get_location_data_for_device(  # noqa: PLR0912, PLR0913, PLR0915
         if not request_accepted:
             # This handler wraps the whole body, so its position in the file cannot
             # tell the two sides apart -- only the flag can. Anything reaching here
-            # before the accept line means the request never got to the server.
+            # before the accept line failed with that flag unset, and it is the flag
+            # alone that decides non-acceptance versus an empty result. What the
+            # signal then claims is a position at THIS integration's accept point,
+            # never one on the wire (see the class docstring).
             raise LocationRequestNotAcceptedError(
                 stage="surfacing_before_accept"
             ) from e
@@ -1179,12 +1185,12 @@ if __name__ == "__main__":
         async def async_set_cached_value(self, key: str, value: Any) -> None:
             self._values[key] = value
 
-    # Same reason as the interactive CLI in `nbe_list_devices.py`: a request the
-    # server never accepted raises, and an uncaught raise here would end this
-    # experiment on a traceback whose top frame is an implementation detail. The
-    # exit code is deliberately non-zero -- unlike the interactive loop there is
-    # no next prompt to return to, and a script wrapping this must be able to
-    # tell "no location" from "the request never got out".
+    # Same reason as the interactive CLI in `nbe_list_devices.py`: a request that
+    # never got past this integration's accept point raises, and an uncaught raise
+    # here would end this experiment on a traceback whose top frame is an
+    # implementation detail. The exit code is deliberately non-zero -- unlike the
+    # interactive loop there is no next prompt to return to, and a script wrapping
+    # this must be able to tell "no location" from "the request was not accepted".
     try:
         asyncio.run(
             get_location_data_for_device(

@@ -1570,8 +1570,8 @@ async def test_a_cycle_where_no_request_was_accepted_reports_an_error() -> None:
 async def test_the_surfaced_error_names_which_counter_fired() -> None:
     """Two ways to reach the same verdict must not read as the same event.
 
-    A deleted tracker (the server's answer ABOUT that device) and an
-    unreachable server (no answer about the device at all) both leave the cycle
+    A deleted tracker (the server's answer ABOUT that device) and a request that
+    was never accepted (no answer about the device at all) both leave the cycle
     with nothing, but they need different answers from whoever reads the log:
     one is a configuration change, the other is an outage. The two guards are
     kept apart for exactly that, so this pins that the message says which one
@@ -1670,7 +1670,7 @@ async def test_a_single_unaccepted_device_still_marks_the_poll_result_failed() -
 async def test_a_mixed_cycle_of_rejection_and_unaccepted_siblings_now_surfaces() -> (
     None
 ):
-    """A deleted tracker plus an unreachable server: nothing got through.
+    """A deleted tracker plus a request never accepted: nothing got through.
 
     The mirror of
     ``test_a_mixed_cycle_of_rejection_and_empty_siblings_stays_silent``, and the
@@ -1838,7 +1838,7 @@ async def test_an_unaccepted_device_does_not_hide_a_credential_failure() -> None
 
     assert recorded, "the cycle hid the credential failure entirely"
     assert getattr(recorded[-1], "status", None) == 401, (
-        "the cycle reported the unreachable server instead of the tracker whose "
+        "the cycle reported the unaccepted request instead of the tracker whose "
         f"sign-in expired: {recorded[-1]!r}"
     )
 

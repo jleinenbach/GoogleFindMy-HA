@@ -287,7 +287,7 @@ class PollingOperations(_MixinBase):
         Only rendered at DEBUG level, so this stays silent during normal
         operation and adds no WARNING/INFO noise. ``source`` distinguishes the
         inner empty result (``empty-result``) from the outer poll-guard timeout
-        (``outer-timeout``) and from a request the server never accepted
+        (``outer-timeout``) and from a request that was never accepted
         (``not-accepted``).
 
         The rendered line still opens with "Idle poll", which for the third

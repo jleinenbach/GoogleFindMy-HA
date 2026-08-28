@@ -368,9 +368,11 @@ async def _async_cli_main(
             )
 
             # `get_location_data_for_device` raises
-            # `LocationRequestNotAcceptedError` for a request the server never
-            # accepted (a 5xx, a 429, a network error, a failed FCM
-            # registration) where it used to return an empty list. Caught here
+            # `LocationRequestNotAcceptedError` for a request that never got past
+            # this integration's accept point (no FCM token, a failed FCM
+            # registration, a 429, a server error status, a network error, an
+            # unclassified Nova failure, or a surfacing error before the accept
+            # line) where it used to return an empty list. Caught here
             # rather than left to escape: this is an interactive loop, a routine
             # service failure must not end the whole session on a traceback, and
             # the user is meant to be able to pick another device and try again.
