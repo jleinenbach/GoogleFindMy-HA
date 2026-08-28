@@ -764,22 +764,43 @@ class LocateOperations(_MixinBase):
                 # guards near the top of this method).
                 #
                 # Two costs of the promotion, both weighed rather than discovered
-                # later. First, this is the SECOND warning for the same incident:
-                # `location_request` already logs one for the 429, the 5xx and the
-                # network error before it raises. That one is deliberately
-                # redacted and says only that A location request failed; it names
-                # neither the device nor the operation, so it cannot tell the user
-                # who just pressed a button that THEIR request is the one that
-                # failed. The duplicate is one line per user-initiated action, and
-                # the poll path stays at DEBUG, so nothing repeats unattended.
+                # later. First, this is not the first record for the incident:
+                # `location_request` writes one before every raise of this type --
+                # measured six, four WARNING and two ERROR, not just the three
+                # transport rungs. Those records are PATH-AGNOSTIC: the identical
+                # sentence appears for an unattended poll. What this line adds is
+                # that the failed request was a USER-INITIATED one, plus the stage
+                # that says where it stopped. That is the whole of its value, and
+                # it is thin for `no_fcm_token`, whose transport record already
+                # names the operation. It does NOT tell the user WHICH device --
+                # that half is at DEBUG, see below -- so do not defend this line
+                # with an identification it no longer performs. It is one line per
+                # user action, and the poll path stays at DEBUG, so nothing
+                # repeats unattended.
                 # Second, `name` falls back to the raw canonical id when no
-                # display name is cached, which the transport layer avoids by
-                # keeping the identified sentence at DEBUG (AGENTS.md section 5).
-                # It is logged here anyway because every sibling branch of this
-                # method and both guards above it already do -- singling out this
-                # one branch would buy inconsistency, not privacy. Changing that
-                # is a decision about the whole method, not about this catch.
-                _LOGGER.warning(
+                # display name is cached (see where it is bound above). The rule
+                # is AGENTS.md section 5 (never log device ids, redact derived
+                # identifying information); the LEVEL split is the tree's own
+                # reading of it, the "R6 / Count@WARNING, Name@DEBUG" pattern that
+                # `test_location_request_r6_name_sweep.py` states and that the
+                # signal class itself cites in its docstring. Section 5 alone
+                # carries no level caveat, so citing only it would overstate the
+                # licence. That is why the sentence is split the way the transport
+                # layer splits its own:
+                # the WARNING carries the operation and the reason, the identified
+                # half stays at DEBUG. An earlier revision of this step logged
+                # `name` in the WARNING and defended it as consistent with the
+                # sibling branches of this method, which do the same. The defence
+                # does not hold, and the reason is worth keeping: it was THIS step
+                # that raised the line from DEBUG to WARNING, so it was this step
+                # that put a possible device id into the default log. Matching
+                # neighbours is not a licence to promote a leak; what a branch
+                # does at DEBUG and what it may do at WARNING are two different
+                # questions. The neighbours stay as they are -- lowering them is a
+                # decision about the whole method -- but this branch does not add
+                # to them.
+                _LOGGER.warning("Manual locate failed: %s", not_accepted_err)
+                _LOGGER.debug(
                     "Manual locate for %s failed (request not accepted): %s",
                     name,
                     not_accepted_err,

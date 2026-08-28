@@ -729,6 +729,18 @@ async def test_locate_warns_and_returns_empty_on_an_unaccepted_request(
     handlers a few branches up, which log at WARNING but are dead on this path --
     ``api.py`` answers both with an empty dict of its own. The reasoning that does
     hold is in the branch's own comment; the assertion here only pins the outcome.
+
+    The outcome has TWO halves, and asserting only the first is what let the first
+    revision of this step ship a leak. ``name`` falls back to the raw canonical
+    device id, which AGENTS.md section 5 keeps out of logs and the tree's "R6 /
+    Count@WARNING, Name@DEBUG" pattern keeps out of user-facing records in
+    particular. So the branch may raise the LEVEL without raising the IDENTIFIED
+    sentence with it: the WARNING carries the operation and the reason, the DEBUG
+    record carries the device. A test that pinned only "one record, at WARNING"
+    stayed green while the id sat in it, which is why the absence in that record
+    is asserted here as explicitly as the presence -- absence in the record, not
+    absence from the default channel, which the neighbouring branches still write
+    to and which this test does not claim to cover.
     """
     coord = locate_coord
     coord.api.async_get_device_location = AsyncMock(
@@ -746,12 +758,25 @@ async def test_locate_warns_and_returns_empty_on_an_unaccepted_request(
         for record in caplog.records
         if "request not accepted" in record.getMessage()
     ]
-    assert len(records) == 1, [record.getMessage() for record in caplog.records]
     # Captured at DEBUG so a demotion is visible as a WRONG level rather than as an
     # absent record: an assertion that only ran at WARNING could not tell "logged at
     # DEBUG" from "not logged at all", and those call for different fixes.
-    assert records[0].levelno == logging.WARNING
-    assert "server_error" in records[0].getMessage()
+    by_level = {record.levelno: record.getMessage() for record in records}
+    assert sorted(by_level) == [logging.DEBUG, logging.WARNING], [
+        record.getMessage() for record in caplog.records
+    ]
+    assert len(records) == 2, [record.getMessage() for record in caplog.records]
+
+    warning = by_level[logging.WARNING]
+    assert "server_error" in warning
+    assert "dev-1" not in warning
+    # The operation is the ONLY thing this record adds over the transport's own
+    # WARNING, which is written for the poll path in the same words. Without this
+    # assertion a later generalisation to "A location request failed (%s)" would
+    # stay green and leave the branch contributing nothing at all.
+    assert "Manual locate" in warning
+
+    assert "dev-1" in by_level[logging.DEBUG]
 
 
 @pytest.mark.asyncio
