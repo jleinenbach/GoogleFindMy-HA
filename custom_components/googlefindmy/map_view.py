@@ -409,15 +409,40 @@ NO_STORE_HEADERS = {
 }
 
 
-def _html_response(title: str, body: str, status: int = 200) -> web.Response:
-    """Return a minimal HTML response (no secrets, no stacktraces)."""
+def _html_response(
+    title: str, body: str, status: int = 200, language: str | None = None
+) -> web.Response:
+    """Return a minimal HTML response (no secrets, no stacktraces).
+
+    ``language`` carries the resolved Home Assistant UI language for pages whose
+    text comes from ``map_i18n``. It lands in ``<html lang=...>`` and adds
+    ``dir="rtl"`` for right-to-left locales, so a Hebrew message is announced and
+    laid out in Hebrew instead of being only half translated. Localized callers
+    always pass a language (``"en"`` for the English fallback, mirroring
+    ``_generate_map_html``); callers that pass plain English literals omit it and
+    keep the previous markup byte for byte.
+
+    ``title`` and ``body`` are escaped. Every caller passes either a literal or a
+    catalog value today, so this changes no current output; it keeps a future
+    caller from turning a message into markup.
+
+    Like ``_generate_map_html``, ``lang`` carries the raw requested language
+    rather than the locale the catalog resolved to (pinned by
+    ``tests/test_map_view_i18n.py``: ``lang="xx"`` on an English fallback page).
+    Two different rules inside one module would be worse than this one.
+    """
+    html_attrs = f' lang="{escape(language)}"' if language else ""
+    if language and is_rtl(language):
+        html_attrs += ' dir="rtl"'
+    safe_title = escape(title)
+    safe_body = escape(body)
     return web.Response(
         text=f"""<!DOCTYPE html>
-<html>
-<head><meta charset=\"utf-8\"><title>{title}</title></head>
+<html{html_attrs}>
+<head><meta charset=\"utf-8\"><title>{safe_title}</title></head>
 <body>
-  <h1>{title}</h1>
-  <p>{body}</p>
+  <h1>{safe_title}</h1>
+  <p>{safe_body}</p>
 </body>
 </html>""",
         content_type="text/html",
@@ -793,11 +818,19 @@ class GoogleFindMyMapView(HomeAssistantView):
             # catching only `OSError` would let that case through as a 500 with
             # a traceback.
             _LOGGER.error("Failed to read the vendored Leaflet assets: %s", err)
+            # Resolved through the map catalog, not written out in English: this
+            # page appears when the install is already broken, which is the worst
+            # moment to hand a non-English user a language they may not read.
+            language = _resolve_language(self.hass)
+            labels = resolve_map_labels(language)
             return _html_response(
-                "Map unavailable",
-                "The map assets shipped with this integration could not be read. "
-                "Reinstall the integration and reload Home Assistant.",
+                labels["assets_unavailable_title"],
+                labels["assets_unavailable_body"],
                 status=500,
+                # ``or "en"``: a degraded hass without ``config`` yields an
+                # English page, and that page should say so. Same rule as
+                # ``_generate_map_html``.
+                language=language or "en",
             )
 
         html = self._generate_map_html(

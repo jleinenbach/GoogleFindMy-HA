@@ -157,3 +157,63 @@ def test_filters_summary_resolves_via_language_lookup() -> None:
     assert resolve_map_labels("de")["filters_summary"] == "Filter"
     assert resolve_map_labels("de-DE")["filters_summary"] == "Filter"
     assert resolve_map_labels("xx")["filters_summary"] == "Filters"
+
+
+def test_no_catalog_value_contains_html_metacharacters() -> None:
+    """No value may carry markup characters.
+
+    Catalog values reach the browser through two paths: interpolated into HTML
+    text nodes (map panel, asset-failure page) and serialized into the client
+    JSON. Escaping happens at the interpolation site, so this guard is about the
+    catalog staying plain text: a stray ``<`` or ``&`` in a translation would
+    either show up escaped to the user or, in a future unescaped call site,
+    become markup.
+    """
+    for locale, labels in MAP_LABELS.items():
+        for key, value in labels.items():
+            for character in ("<", ">", "&", '"'):
+                assert character not in value, (
+                    f"locale {locale!r} key {key!r} contains {character!r}; "
+                    "keep catalog values plain text"
+                )
+
+
+def test_assets_unavailable_keys_present_and_really_translated() -> None:
+    """The asset-failure page has its own localized title and message.
+
+    The completeness guard only forces the *keys* into every locale: a verbatim
+    copy of the English text would satisfy it and ship an English error page to
+    a German user. This pins that every non-English locale carries its own
+    wording.
+    """
+    english = MAP_LABELS["en"]
+    assert english["assets_unavailable_title"] == "Map unavailable"
+    assert english["assets_unavailable_body"] == (
+        "The map assets shipped with this integration could not be read. "
+        "Reinstall the integration and reload Home Assistant."
+    )
+
+    for locale in _EXPECTED_LOCALES - {"en"}:
+        labels = MAP_LABELS[locale]
+        for key in ("assets_unavailable_title", "assets_unavailable_body"):
+            assert labels[key] != english[key], (
+                f"locale {locale!r} still carries the English {key!r}"
+            )
+
+    assert MAP_LABELS["de"]["assets_unavailable_title"] == "Karte nicht verfügbar"
+
+
+def test_assets_unavailable_resolves_via_language_lookup() -> None:
+    """The failure-page keys flow through the standard three-stage resolver."""
+    assert (
+        resolve_map_labels("de")["assets_unavailable_title"] == "Karte nicht verfügbar"
+    )
+    assert (
+        resolve_map_labels("de-DE")["assets_unavailable_title"]
+        == "Karte nicht verfügbar"
+    )
+    assert (
+        resolve_map_labels("pt-BR")["assets_unavailable_body"]
+        == MAP_LABELS["pt-BR"]["assets_unavailable_body"]
+    )
+    assert resolve_map_labels("xx")["assets_unavailable_title"] == "Map unavailable"

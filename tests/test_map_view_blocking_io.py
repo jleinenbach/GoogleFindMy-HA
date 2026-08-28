@@ -84,12 +84,21 @@ class _ThreadingHass:
 
 def _make_request_context(
     monkeypatch: pytest.MonkeyPatch,
+    language: str | None = None,
 ) -> tuple[_ThreadingHass, SimpleNamespace]:
-    """Return a hass stand-in and an authorized request for the map view."""
+    """Return a hass stand-in and an authorized request for the map view.
+
+    ``language`` attaches a ``hass.config`` carrying that UI language. Left at
+    ``None`` the stand-in has no ``config`` at all, which is the degraded shape
+    ``_resolve_language`` has to survive, so the existing cases keep exercising
+    the English fallback.
+    """
 
     coordinator = SimpleNamespace(data=[{"id": DEVICE_ID, "name": "Test Device"}])
     entry = make_config_entry(entry_id="entry-id", runtime_data=coordinator)
     hass = _ThreadingHass([entry])
+    if language is not None:
+        hass.config = SimpleNamespace(language=language)
 
     monkeypatch.setattr(map_view, "_resolve_coordinator_class", lambda: SimpleNamespace)
 
@@ -282,3 +291,135 @@ async def test_unreadable_assets_answer_with_a_page_not_a_traceback(
 
     assert response.status == 500
     assert "Map unavailable" in response.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("language", "expected_title", "expected_body_fragment", "expected_html_tag"),
+    [
+        # Plain locale: German text, German lang attribute, no direction flip.
+        (
+            "de",
+            "Karte nicht verfügbar",
+            "Installiere die Integration neu",
+            '<html lang="de">',
+        ),
+        # Region-qualified: resolves to the base locale, attribute keeps the raw
+        # request (same rule as ``_generate_map_html``).
+        (
+            "de-DE",
+            "Karte nicht verfügbar",
+            "Installiere die Integration neu",
+            '<html lang="de-DE">',
+        ),
+        # RTL locale: the page must also be laid out right-to-left.
+        (
+            "he",
+            "המפה אינה זמינה",
+            "התקן מחדש את השילוב",
+            '<html lang="he" dir="rtl">',
+        ),
+        # Unknown locale: English text, attribute still mirrors the request.
+        (
+            "xx",
+            "Map unavailable",
+            "Reinstall the integration",
+            '<html lang="xx">',
+        ),
+    ],
+    ids=["german", "german-region", "hebrew-rtl", "unknown-falls-back"],
+)
+async def test_the_asset_failure_page_is_localized(
+    monkeypatch: pytest.MonkeyPatch,
+    language: str,
+    expected_title: str,
+    expected_body_fragment: str,
+    expected_html_tag: str,
+) -> None:
+    """The failure page speaks the configured UI language, not English.
+
+    This page shows up precisely when the install is already broken, so an
+    English-only wording would hit non-English users at their worst moment. The
+    assertion is deliberately on the rendered text and the ``<html>`` tag rather
+    than on a call to ``resolve_map_labels``: a mock would stay green even if the
+    handler dropped the resolved labels on the floor again.
+    """
+
+    hass, request = _make_request_context(monkeypatch, language=language)
+    monkeypatch.setattr(map_view, "_LEAFLET_CACHE", {})
+
+    def _raise() -> dict[str, str]:
+        raise FileNotFoundError("vendor/leaflet/leaflet.css")
+
+    monkeypatch.setattr(map_view, "_read_leaflet_assets", _raise)
+
+    response = await map_view.GoogleFindMyMapView(hass).get(
+        request, device_id=DEVICE_ID
+    )
+
+    assert response.status == 500
+    assert expected_title in response.text
+    # The message, not just the heading: pinning the title alone would stay
+    # green if the body fell back to the English literal.
+    assert expected_body_fragment in response.text
+    assert expected_html_tag in response.text
+
+
+@pytest.mark.asyncio
+async def test_a_hass_without_config_still_answers_in_english(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A degraded hass keeps the page English and says so in the markup.
+
+    ``_resolve_language`` returns ``None`` when ``hass.config`` is missing. The
+    wording then falls back to English, and the page declares that language the
+    same way ``_generate_map_html`` does, rather than shipping an empty
+    ``lang=""`` or no language at all.
+    """
+
+    hass, request = _make_request_context(monkeypatch)
+    assert not hasattr(hass, "config")
+    monkeypatch.setattr(map_view, "_LEAFLET_CACHE", {})
+
+    def _raise() -> dict[str, str]:
+        raise FileNotFoundError("vendor/leaflet/leaflet.css")
+
+    monkeypatch.setattr(map_view, "_read_leaflet_assets", _raise)
+
+    response = await map_view.GoogleFindMyMapView(hass).get(
+        request, device_id=DEVICE_ID
+    )
+
+    assert response.status == 500
+    assert '<html lang="en">' in response.text
+    assert 'lang=""' not in response.text
+    assert "Map unavailable" in response.text
+    assert "Reinstall the integration" in response.text
+
+
+@pytest.mark.parametrize(
+    ("title", "body", "language", "must_not_appear"),
+    [
+        # Markup in the message must not become markup in the page.
+        ("<b>t</b>", "x", None, "<b>t</b>"),
+        ("t", "<script>alert(1)</script>", None, "<script>"),
+        # ``hass.config.language`` is a configuration value that lands inside a
+        # double-quoted attribute; a quote in it must not open a new one.
+        ("t", "b", 'de" onload="alert(1)', 'onload="alert(1)"'),
+    ],
+    ids=["title-markup", "body-markup", "language-attribute-break-out"],
+)
+def test_html_response_escapes_everything_it_interpolates(
+    title: str, body: str, language: str | None, must_not_appear: str
+) -> None:
+    """Nothing handed to ``_html_response`` may reach the page as markup.
+
+    Today every caller passes a literal or a catalog value, so this test guards
+    a property rather than a live bug: without it, dropping ``escape()`` again
+    would leave the whole suite green.
+    """
+
+    response = map_view._html_response(title, body, status=500, language=language)
+
+    assert must_not_appear not in response.text
+    assert response.status == 500
