@@ -147,7 +147,17 @@ class TokenCache:
     # ------------------------------ Migration --------------------------------
 
     async def _migrate_legacy_file(self, legacy_path: str) -> None:
-        """Migrate an old JSON file to the Store (merge) and remove it once, process-wide."""
+        """Migrate an old JSON file to the Store (merge) and remove it once, process-wide.
+
+        Removing the legacy file is irreversible, and until it happens the file is
+        the only copy of the credentials that survives a restart. It is therefore
+        gated on a positive proof that the merged data is on disk: neither a
+        returning ``async_save`` nor a scheduled ``async_delay_save`` is one.
+        Home Assistant logs and swallows write errors instead of raising
+        (``helpers/storage.py``, ``_async_handle_write_data``), and the delayed
+        write happens later, outside this call. Every path that cannot prove the
+        write leaves the legacy file untouched and lets the migration run again.
+        """
         if _STATE["legacy_migration_done"] != _LEGACY_MIGRATION_DONE:
             _set_legacy_migration_flag(_LEGACY_MIGRATION_DONE)
         if _legacy_migration_done():
@@ -181,11 +191,24 @@ class TokenCache:
                     merged["fcm_credentials"]
                 )
 
-            if merged != self._data:
+            needs_save = merged != self._data
+            if needs_save:
                 self._data = merged
-                if self._is_valid_snapshot():
-                    self._store.async_delay_save(self._snapshot, 1.0)
                 _LOGGER.info("googlefindmy: Merged legacy cache into the Store.")
+
+        # Outside the lock: the Store holds its own write lock.
+        if needs_save:
+            await self._async_save_migrated_snapshot()
+
+        if not await self._async_store_contains_keys(frozenset(normalized_legacy)):
+            _LOGGER.warning(
+                "googlefindmy: Keeping the legacy cache file %s because the merged "
+                "credentials are not on disk yet; the migration will run again.",
+                legacy_path,
+            )
+            # Allow another attempt in this process instead of stranding the file.
+            _set_legacy_migration_flag(False)
+            return
 
         def _remove_legacy() -> None:
             try:
@@ -197,6 +220,66 @@ class TokenCache:
                 )
 
         await self._hass.async_add_executor_job(_remove_legacy)
+
+    async def _async_save_migrated_snapshot(self) -> None:
+        """Write the merged snapshot immediately, without trusting the outcome.
+
+        ``async_save`` is used rather than ``async_delay_save`` because only the
+        former can be awaited. It is deliberately not gated on ``CoreState``: while
+        Home Assistant is stopping, ``async_save`` registers the final-write
+        listener that still persists the data, and skipping the call would drop it.
+        The caller verifies the result on disk either way.
+        """
+
+        if not self._is_valid_snapshot():
+            return
+        try:
+            await self._store.async_save(self._snapshot())
+        except Exception:
+            _LOGGER.exception(
+                "googlefindmy: Failed to persist the migrated cache for entry '%s'",
+                self.entry_id,
+            )
+
+    async def _async_store_contains_keys(self, expected: frozenset[str]) -> bool:
+        """Return whether the Store file on disk holds every expected key.
+
+        The file is the only evidence that survives a restart, so it is read back
+        rather than inferred from a return value. Anything that leaves the answer
+        open (no path, no file, unreadable content, unexpected envelope) counts as
+        "not proven" and keeps the legacy file.
+        """
+
+        if not expected:
+            return True
+
+        raw_path = getattr(self._store, "path", None)
+        if not isinstance(raw_path, str) or not raw_path:
+            _LOGGER.debug(
+                "googlefindmy: Store exposes no path; migration cannot be verified."
+            )
+            return False
+        store_path: str = raw_path
+
+        def _read_persisted_keys() -> set[str]:
+            with open(store_path, encoding="utf-8") as handle:
+                payload = json.load(handle)
+            data = payload["data"]
+            if not isinstance(data, dict):
+                raise TypeError("Store envelope carries no data mapping")
+            return {key for key in data if isinstance(key, str)}
+
+        try:
+            persisted = await self._hass.async_add_executor_job(_read_persisted_keys)
+        except (OSError, ValueError, TypeError, KeyError):
+            _LOGGER.debug(
+                "googlefindmy: Could not read back the Store file at %s",
+                store_path,
+                exc_info=True,
+            )
+            return False
+
+        return bool(expected.issubset(persisted))
 
     # ------------------------------- Get/Set ---------------------------------
 
