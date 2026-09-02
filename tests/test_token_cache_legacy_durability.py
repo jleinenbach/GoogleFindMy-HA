@@ -315,3 +315,78 @@ async def test_failed_verification_does_not_migrate_into_a_second_entry(
     assert legacy_path.exists(), "Second entry deleted the first entry's legacy file"
     assert second_store.save_calls == 0
     assert second_store.stored_keys() == set()
+
+
+def _write_envelope(
+    path: Path,
+    data: dict[str, Any],
+    *,
+    key: str = "googlefindmy_cache",
+    version: int = 1,
+) -> None:
+    """Write a store envelope directly, bypassing the double's own save path."""
+
+    path.write_text(
+        json.dumps({"version": version, "minor_version": 1, "key": key, "data": data}),
+        encoding="utf-8",
+    )
+
+
+@pytest.mark.asyncio
+async def test_stale_values_under_the_same_keys_keep_legacy_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Isolated condition: the file carries the right key names but older values.
+
+    Key names alone are not a proof. A store file left over from an earlier run
+    can name every migrated key while the current values never reached the disk.
+    """
+
+    legacy_path = _write_legacy(tmp_path)
+    store_file = tmp_path / "store.json"
+    _write_envelope(
+        store_file, {"oauth_token": "stale-token", "username": "stale@example.com"}
+    )
+    store = _DiskStore(store_file, persists=False)
+    _install_store(monkeypatch, store)
+
+    await TokenCache.create(_StubHass(), "entry-stale-values", str(legacy_path))
+
+    assert legacy_path.exists(), "Legacy file deleted on stale values"
+
+
+@pytest.mark.asyncio
+async def test_foreign_store_envelope_keeps_legacy_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Isolated condition: the envelope on disk belongs to a different store key."""
+
+    legacy_path = _write_legacy(tmp_path)
+    store_file = tmp_path / "store.json"
+    _write_envelope(store_file, dict(_LEGACY_PAYLOAD), key="some_other_store")
+    store = _DiskStore(store_file, persists=False)
+    _install_store(monkeypatch, store)
+
+    await TokenCache.create(_StubHass(), "entry-foreign-key", str(legacy_path))
+
+    assert legacy_path.exists(), "Legacy file deleted on a foreign envelope"
+
+
+@pytest.mark.asyncio
+async def test_unloadable_storage_version_keeps_legacy_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Isolated condition: the envelope carries a version this build cannot load.
+
+    Data that Home Assistant refuses on the next start is not persisted data.
+    """
+
+    legacy_path = _write_legacy(tmp_path)
+    store_file = tmp_path / "store.json"
+    _write_envelope(store_file, dict(_LEGACY_PAYLOAD), version=99)
+    store = _DiskStore(store_file, persists=False)
+    _install_store(monkeypatch, store)
+
+    await TokenCache.create(_StubHass(), "entry-bad-version", str(legacy_path))
+
+    assert legacy_path.exists(), "Legacy file deleted on an unloadable envelope"

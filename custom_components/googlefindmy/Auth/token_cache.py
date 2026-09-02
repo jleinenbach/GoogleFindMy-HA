@@ -246,12 +246,19 @@ class TokenCache:
             )
 
     async def _async_store_contains_keys(self, expected: frozenset[str]) -> bool:
-        """Return whether the Store file on disk holds every expected key.
+        """Return whether the migrated values are readable in the Store file on disk.
 
         The file is the only evidence that survives a restart, so it is read back
-        rather than inferred from a return value. Anything that leaves the answer
-        open (no path, no file, unreadable content, unexpected envelope) counts as
-        "not proven" and keeps the legacy file.
+        rather than inferred from a return value. The proof is deliberately not
+        "the key names are somewhere in that file": a stale or foreign envelope
+        can carry the same names while the current values never reached the disk,
+        and an envelope Home Assistant cannot load on restart is worth nothing
+        either. Checked are therefore the envelope identity (``key``), the schema
+        version, and the value behind every expected key.
+
+        Anything that leaves the answer open (no path, no file, unreadable
+        content, unexpected envelope, mismatching value) counts as "not proven"
+        and keeps the legacy file.
         """
 
         if not expected:
@@ -264,17 +271,43 @@ class TokenCache:
             )
             return False
         store_path: str = raw_path
+        store_key = getattr(self._store, "key", None)
 
-        def _read_persisted_keys() -> set[str]:
+        # Compare against the JSON round trip of our own values, not against the
+        # in-memory objects: a tuple is written as a list, and comparing the two
+        # would fail a migration that in fact persisted correctly.
+        wanted = json.loads(json.dumps({key: self._data[key] for key in expected}))
+
+        def _envelope_holds_values() -> bool:
             with open(store_path, encoding="utf-8") as handle:
                 payload = json.load(handle)
+            if not isinstance(payload, dict):
+                raise TypeError("Store file carries no envelope")
+            if payload.get("version") != STORAGE_VERSION:
+                _LOGGER.debug(
+                    "googlefindmy: Store file %s carries version %r, expected %r",
+                    store_path,
+                    payload.get("version"),
+                    STORAGE_VERSION,
+                )
+                return False
+            if isinstance(store_key, str) and payload.get("key") != store_key:
+                _LOGGER.debug(
+                    "googlefindmy: Store file %s belongs to key %r, expected %r",
+                    store_path,
+                    payload.get("key"),
+                    store_key,
+                )
+                return False
             data = payload["data"]
             if not isinstance(data, dict):
                 raise TypeError("Store envelope carries no data mapping")
-            return {key for key in data if isinstance(key, str)}
+            return all(
+                key in data and data[key] == value for key, value in wanted.items()
+            )
 
         try:
-            persisted = await self._hass.async_add_executor_job(_read_persisted_keys)
+            proven = await self._hass.async_add_executor_job(_envelope_holds_values)
         except (OSError, ValueError, TypeError, KeyError):
             _LOGGER.debug(
                 "googlefindmy: Could not read back the Store file at %s",
@@ -283,7 +316,8 @@ class TokenCache:
             )
             return False
 
-        return expected.issubset(persisted)
+        # Cast: hass.async_add_executor_job widens the callable's return to Any.
+        return bool(proven)
 
     # ------------------------------- Get/Set ---------------------------------
 
