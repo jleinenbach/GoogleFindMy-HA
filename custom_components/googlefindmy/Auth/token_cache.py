@@ -22,6 +22,7 @@ Key properties:
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -147,29 +148,46 @@ class TokenCache:
     # ------------------------------ Migration --------------------------------
 
     async def _migrate_legacy_file(self, legacy_path: str) -> None:
-        """Migrate an old JSON file to the Store (merge) and remove it once, process-wide."""
+        """Migrate an old JSON file to the Store (merge) and remove it once, process-wide.
+
+        Removing the legacy file is irreversible, and until it happens the file is
+        the only copy of the credentials that survives a restart. It is therefore
+        gated on a positive proof that the merged data is on disk: neither a
+        returning ``async_save`` nor a scheduled ``async_delay_save`` is one.
+        Home Assistant logs and swallows write errors instead of raising
+        (``helpers/storage.py``, ``_async_handle_write_data``), and the delayed
+        write happens later, outside this call. Every path that cannot prove the
+        write leaves the legacy file untouched, to be retried after a restart.
+        """
         if _STATE["legacy_migration_done"] != _LEGACY_MIGRATION_DONE:
             _set_legacy_migration_flag(_LEGACY_MIGRATION_DONE)
         if _legacy_migration_done():
             return
         _set_legacy_migration_flag(True)
 
-        def _read_legacy() -> Mapping[str, Any] | None:
+        def _read_legacy() -> tuple[Mapping[str, Any], str] | None:
             if not os.path.exists(legacy_path):
                 return None
             try:
-                with open(legacy_path, encoding="utf-8") as f:
-                    data = json.load(f)
+                with open(legacy_path, "rb") as f:
+                    raw = f.read()
+                data = json.loads(raw.decode("utf-8"))
                 if isinstance(data, dict):
-                    return cast(Mapping[str, Any], data)
+                    # The digest identifies the exact bytes this migration is
+                    # about, so the removal further down can tell them apart from
+                    # a bundle the login container wrote in the meantime.
+                    return cast(Mapping[str, Any], data), hashlib.sha256(
+                        raw
+                    ).hexdigest()
                 return None
             except Exception:
                 _LOGGER.exception("Failed to read legacy cache file at %s", legacy_path)
                 return None
 
-        legacy_data = await self._hass.async_add_executor_job(_read_legacy)
-        if legacy_data is None:
+        legacy_read = await self._hass.async_add_executor_job(_read_legacy)
+        if legacy_read is None:
             return
+        legacy_data, legacy_digest = legacy_read
 
         normalized_legacy = self._coerce_cache_state(legacy_data)
 
@@ -181,13 +199,58 @@ class TokenCache:
                     merged["fcm_credentials"]
                 )
 
-            if merged != self._data:
+            needs_save = merged != self._data
+            if needs_save:
                 self._data = merged
-                if self._is_valid_snapshot():
-                    self._store.async_delay_save(self._snapshot, 1.0)
                 _LOGGER.info("googlefindmy: Merged legacy cache into the Store.")
 
+        # The Store brings its own write lock, so the save runs outside ours.
+        if needs_save:
+            await self._async_save_migrated_snapshot()
+
+        if not await self._async_store_contains_keys(frozenset(normalized_legacy)):
+            _LOGGER.warning(
+                "googlefindmy: Keeping the legacy cache file %s because the merged "
+                "credentials for entry '%s' are not on disk; a restart will retry "
+                "the migration.",
+                legacy_path,
+                self.entry_id,
+            )
+            # The migration sentinel deliberately stays set. It is also the only
+            # guard against migrating this shared file into a second config entry,
+            # and that entry would then own another account's credentials while the
+            # first entry still has none. A restart clears the sentinel anyway.
+            return
+
         def _remove_legacy() -> None:
+            # Re-read inside the same executor job and unlink only while the file
+            # still holds the bytes this migration proved. The standalone login
+            # replaces this file atomically, and the awaits above leave it a
+            # window; deleting a bundle that was never migrated would cost the
+            # user the full Google login. The same re-read guard is used before
+            # `os.remove` in `config_flow._async_delete_watched_secrets`.
+            try:
+                with open(legacy_path, "rb") as handle:
+                    current = handle.read()
+            except FileNotFoundError:
+                return
+            except OSError:
+                _LOGGER.warning(
+                    "Failed to re-read legacy cache file before removal: %s",
+                    legacy_path,
+                )
+                return
+
+            if hashlib.sha256(current).hexdigest() != legacy_digest:
+                # Not ours to delete. The discovery watcher polls this path and
+                # picks the new bundle up on its next scan.
+                _LOGGER.info(
+                    "googlefindmy: Legacy cache file %s changed while it was being "
+                    "migrated; keeping the newer bundle.",
+                    legacy_path,
+                )
+                return
+
             try:
                 os.remove(legacy_path)
             except OSError:
@@ -197,6 +260,104 @@ class TokenCache:
                 )
 
         await self._hass.async_add_executor_job(_remove_legacy)
+
+    async def _async_save_migrated_snapshot(self) -> None:
+        """Write the merged snapshot immediately, without trusting the outcome.
+
+        ``async_save`` is used rather than ``async_delay_save`` because only the
+        former can be awaited. It is deliberately not gated on ``CoreState``: while
+        Home Assistant is stopping, ``async_save`` registers the final-write
+        listener that still persists the data, and skipping the call would drop it.
+        The caller verifies the result on disk either way.
+        """
+
+        if not self._is_valid_snapshot():
+            return
+        try:
+            await self._store.async_save(self._snapshot())
+        except Exception:
+            _LOGGER.exception(
+                "googlefindmy: Failed to persist the migrated cache for entry '%s'",
+                self.entry_id,
+            )
+
+    async def _async_store_contains_keys(self, expected: frozenset[str]) -> bool:
+        """Return whether the migrated values are readable in the Store file on disk.
+
+        The file is the only evidence that survives a restart, so it is read back
+        rather than inferred from a return value. The proof is deliberately not
+        "the key names are somewhere in that file": a stale or foreign envelope
+        can carry the same names while the current values never reached the disk,
+        and an envelope Home Assistant cannot load on restart is worth nothing
+        either. Checked are therefore the envelope identity (``key``), the schema
+        version, and the value behind every expected key.
+
+        Anything that leaves the answer open (no path, no file, unreadable
+        content, unexpected envelope, mismatching value) counts as "not proven"
+        and keeps the legacy file.
+        """
+
+        if not expected:
+            return True
+
+        raw_path = getattr(self._store, "path", None)
+        if not isinstance(raw_path, str) or not raw_path:
+            _LOGGER.debug(
+                "googlefindmy: Store exposes no path; migration cannot be verified."
+            )
+            return False
+        store_path: str = raw_path
+        store_key = getattr(self._store, "key", None)
+        # Both envelope fields come from the store itself, so a later migration
+        # that moves the store to another version cannot make the two disagree.
+        store_version = getattr(self._store, "version", STORAGE_VERSION)
+
+        def _envelope_holds_values() -> bool:
+            # Inside the guarded call on purpose: building this can raise, and the
+            # promise of this method is that an open question keeps the file.
+            # Compare against the JSON round trip of our own values rather than the
+            # in-memory objects: a tuple is written as a list, and comparing the two
+            # would fail a migration that in fact persisted correctly.
+            wanted = json.loads(json.dumps({key: self._data[key] for key in expected}))
+            with open(store_path, encoding="utf-8") as handle:
+                payload = json.load(handle)
+            if not isinstance(payload, dict):
+                raise TypeError("Store file carries no envelope")
+            if payload.get("version") != store_version:
+                _LOGGER.debug(
+                    "googlefindmy: Store file %s carries version %r, expected %r",
+                    store_path,
+                    payload.get("version"),
+                    store_version,
+                )
+                return False
+            if isinstance(store_key, str) and payload.get("key") != store_key:
+                _LOGGER.debug(
+                    "googlefindmy: Store file %s belongs to key %r, expected %r",
+                    store_path,
+                    payload.get("key"),
+                    store_key,
+                )
+                return False
+            data = payload["data"]
+            if not isinstance(data, dict):
+                raise TypeError("Store envelope carries no data mapping")
+            return all(
+                key in data and data[key] == value for key, value in wanted.items()
+            )
+
+        try:
+            proven = await self._hass.async_add_executor_job(_envelope_holds_values)
+        except (OSError, ValueError, TypeError, KeyError):
+            _LOGGER.debug(
+                "googlefindmy: Could not read back the Store file at %s",
+                store_path,
+                exc_info=True,
+            )
+            return False
+
+        # hass.async_add_executor_job widens the callable's return type to Any.
+        return bool(proven)
 
     # ------------------------------- Get/Set ---------------------------------
 

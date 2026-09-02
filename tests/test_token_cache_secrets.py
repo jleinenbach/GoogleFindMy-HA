@@ -36,8 +36,16 @@ class _StubHass:
         return func(*args, **kwargs)
 
 
-def _install_recording_store(monkeypatch: pytest.MonkeyPatch) -> list[Any]:
-    """Replace the Store stub with a recorder capturing writes and freshness."""
+def _install_recording_store(
+    monkeypatch: pytest.MonkeyPatch, storage_dir: Path
+) -> list[Any]:
+    """Replace the Store stub with a recorder capturing writes and freshness.
+
+    The double owns a real ``path`` and writes the real Home Assistant envelope,
+    because the legacy migration now reads the Store file back before it deletes
+    the legacy bundle. A recorder that only remembers calls would report a
+    migration as unpersisted.
+    """
 
     storage_module = sys.modules["homeassistant.helpers.storage"]
     instances: list[Any] = []
@@ -47,19 +55,30 @@ def _install_recording_store(monkeypatch: pytest.MonkeyPatch) -> list[Any]:
             self._data: dict[str, Any] | None = None
             self.saved_snapshots: list[dict[str, Any]] = []
             self.fresh = False
+            self.key = f"googlefindmy_cache_{len(instances)}"
+            self.path = str(storage_dir / f"{self.key}.json")
             instances.append(self)
 
         async def async_load(self) -> dict[str, Any] | None:
             return self._data
 
-        def async_delay_save(self, writer: Any, _delay: float) -> None:
-            snapshot = writer()
+        def _persist(self, snapshot: dict[str, Any]) -> None:
             self.saved_snapshots.append(snapshot)
             self._data = snapshot
             self.fresh = True
+            envelope = {
+                "version": 1,
+                "minor_version": 1,
+                "key": self.key,
+                "data": snapshot,
+            }
+            Path(self.path).write_text(json.dumps(envelope), encoding="utf-8")
+
+        def async_delay_save(self, writer: Any, _delay: float) -> None:
+            self._persist(writer())
 
         async def async_save(self, data: dict[str, Any]) -> None:
-            self._data = data
+            self._persist(data)
 
     monkeypatch.setattr(storage_module, "Store", _RecordingStore)
     monkeypatch.setattr(token_cache, "Store", _RecordingStore)
@@ -110,7 +129,7 @@ async def test_token_cache_create_migrates_legacy_bundle(
     """Legacy secrets JSON migrates into the Store via TokenCache.create()."""
 
     monkeypatch.setattr(token_cache, "_LEGACY_MIGRATION_DONE", False, raising=False)
-    stores = _install_recording_store(monkeypatch)
+    stores = _install_recording_store(monkeypatch, tmp_path)
 
     hass = _StubHass()
     legacy_path = tmp_path / "legacy_secrets.json"
@@ -153,7 +172,7 @@ async def test_token_cache_migration_runs_only_once(
     """_LEGACY_MIGRATION_DONE avoids deleting later legacy cache files."""
 
     monkeypatch.setattr(token_cache, "_LEGACY_MIGRATION_DONE", False, raising=False)
-    stores = _install_recording_store(monkeypatch)
+    stores = _install_recording_store(monkeypatch, tmp_path)
 
     hass = _StubHass()
     legacy_first = tmp_path / "legacy_first.json"
