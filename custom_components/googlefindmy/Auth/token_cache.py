@@ -22,6 +22,7 @@ Key properties:
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -164,22 +165,29 @@ class TokenCache:
             return
         _set_legacy_migration_flag(True)
 
-        def _read_legacy() -> Mapping[str, Any] | None:
+        def _read_legacy() -> tuple[Mapping[str, Any], str] | None:
             if not os.path.exists(legacy_path):
                 return None
             try:
-                with open(legacy_path, encoding="utf-8") as f:
-                    data = json.load(f)
+                with open(legacy_path, "rb") as f:
+                    raw = f.read()
+                data = json.loads(raw.decode("utf-8"))
                 if isinstance(data, dict):
-                    return cast(Mapping[str, Any], data)
+                    # The digest identifies the exact bytes this migration is
+                    # about, so the removal further down can tell them apart from
+                    # a bundle the login container wrote in the meantime.
+                    return cast(Mapping[str, Any], data), hashlib.sha256(
+                        raw
+                    ).hexdigest()
                 return None
             except Exception:
                 _LOGGER.exception("Failed to read legacy cache file at %s", legacy_path)
                 return None
 
-        legacy_data = await self._hass.async_add_executor_job(_read_legacy)
-        if legacy_data is None:
+        legacy_read = await self._hass.async_add_executor_job(_read_legacy)
+        if legacy_read is None:
             return
+        legacy_data, legacy_digest = legacy_read
 
         normalized_legacy = self._coerce_cache_state(legacy_data)
 
@@ -215,6 +223,34 @@ class TokenCache:
             return
 
         def _remove_legacy() -> None:
+            # Re-read inside the same executor job and unlink only while the file
+            # still holds the bytes this migration proved. The standalone login
+            # replaces this file atomically, and the awaits above leave it a
+            # window; deleting a bundle that was never migrated would cost the
+            # user the full Google login. The same re-read guard is used before
+            # `os.remove` in `config_flow._async_delete_watched_secrets`.
+            try:
+                with open(legacy_path, "rb") as handle:
+                    current = handle.read()
+            except FileNotFoundError:
+                return
+            except OSError:
+                _LOGGER.warning(
+                    "Failed to re-read legacy cache file before removal: %s",
+                    legacy_path,
+                )
+                return
+
+            if hashlib.sha256(current).hexdigest() != legacy_digest:
+                # Not ours to delete. The discovery watcher polls this path and
+                # picks the new bundle up on its next scan.
+                _LOGGER.info(
+                    "googlefindmy: Legacy cache file %s changed while it was being "
+                    "migrated; keeping the newer bundle.",
+                    legacy_path,
+                )
+                return
+
             try:
                 os.remove(legacy_path)
             except OSError:

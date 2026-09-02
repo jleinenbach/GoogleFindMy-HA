@@ -457,3 +457,37 @@ async def test_migration_verifies_against_the_home_assistant_serializer(
     assert not legacy_path.exists(), "Legacy file kept although the data is on disk"
     assert store.stored_keys() >= set(payload)
     assert await cache.get("username") == "légacy@example.com"
+
+
+@pytest.mark.asyncio
+async def test_legacy_file_replaced_during_migration_is_kept(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Isolated condition: a newer bundle lands while the migration is awaiting.
+
+    The standalone login replaces this exact file atomically and the discovery
+    watcher polls it, so the window between reading and deleting is a real
+    producer race. What gets deleted must be the bytes that were proved, not
+    whatever happens to be at the path afterwards.
+    """
+
+    legacy_path = _write_legacy(tmp_path)
+
+    class _RacingStore(_DiskStore):
+        async def async_save(self, data: dict[str, Any]) -> None:
+            # Stands in for the login container writing a fresh bundle into the
+            # window the awaited save opens.
+            legacy_path.write_text(
+                json.dumps({"oauth_token": "brand-new-token"}), encoding="utf-8"
+            )
+            await super().async_save(data)
+
+    store = _RacingStore(tmp_path / "store.json")
+    _install_store(monkeypatch, store)
+
+    await TokenCache.create(_StubHass(), "entry-racing", str(legacy_path))
+
+    assert legacy_path.exists(), "A bundle that was never migrated got deleted"
+    assert json.loads(legacy_path.read_text(encoding="utf-8")) == {
+        "oauth_token": "brand-new-token"
+    }
