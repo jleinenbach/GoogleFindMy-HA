@@ -272,23 +272,27 @@ class TokenCache:
             return False
         store_path: str = raw_path
         store_key = getattr(self._store, "key", None)
-
-        # Compare against the JSON round trip of our own values, not against the
-        # in-memory objects: a tuple is written as a list, and comparing the two
-        # would fail a migration that in fact persisted correctly.
-        wanted = json.loads(json.dumps({key: self._data[key] for key in expected}))
+        # Both envelope fields come from the store itself, so a later migration
+        # that moves the store to another version cannot make the two disagree.
+        store_version = getattr(self._store, "version", STORAGE_VERSION)
 
         def _envelope_holds_values() -> bool:
+            # Inside the guarded call on purpose: building this can raise, and the
+            # promise of this method is that an open question keeps the file.
+            # Compare against the JSON round trip of our own values rather than the
+            # in-memory objects: a tuple is written as a list, and comparing the two
+            # would fail a migration that in fact persisted correctly.
+            wanted = json.loads(json.dumps({key: self._data[key] for key in expected}))
             with open(store_path, encoding="utf-8") as handle:
                 payload = json.load(handle)
             if not isinstance(payload, dict):
                 raise TypeError("Store file carries no envelope")
-            if payload.get("version") != STORAGE_VERSION:
+            if payload.get("version") != store_version:
                 _LOGGER.debug(
                     "googlefindmy: Store file %s carries version %r, expected %r",
                     store_path,
                     payload.get("version"),
-                    STORAGE_VERSION,
+                    store_version,
                 )
                 return False
             if isinstance(store_key, str) and payload.get("key") != store_key:
@@ -316,7 +320,7 @@ class TokenCache:
             )
             return False
 
-        # Cast: hass.async_add_executor_job widens the callable's return to Any.
+        # hass.async_add_executor_job widens the callable's return type to Any.
         return bool(proven)
 
     # ------------------------------- Get/Set ---------------------------------

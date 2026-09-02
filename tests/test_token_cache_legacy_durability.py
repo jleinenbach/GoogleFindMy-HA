@@ -390,3 +390,70 @@ async def test_unloadable_storage_version_keeps_legacy_file(
     await TokenCache.create(_StubHass(), "entry-bad-version", str(legacy_path))
 
     assert legacy_path.exists(), "Legacy file deleted on an unloadable envelope"
+
+
+@pytest.mark.asyncio
+async def test_unserializable_migrated_value_keeps_legacy_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Isolated condition: a migrated key holds a value that cannot be serialized.
+
+    The promise of the verification is that an open question keeps the file, so
+    building the comparison must not be able to escape as an exception either.
+    `TokenCache.create` is called unguarded during setup.
+    """
+
+    legacy_path = _write_legacy(tmp_path)
+    store = _DiskStore(tmp_path / "store.json")
+    store.loaded = {"oauth_token": object()}
+    _install_store(monkeypatch, store)
+
+    await TokenCache.create(_StubHass(), "entry-unserializable", str(legacy_path))
+
+    assert legacy_path.exists(), "Legacy file deleted although nothing was persisted"
+
+
+@pytest.mark.asyncio
+async def test_migration_verifies_against_the_home_assistant_serializer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The proof must hold for what Home Assistant really writes, not for json.dumps.
+
+    Home Assistant serializes store payloads with orjson, which turns a tuple into
+    a list and encodes non-ASCII directly. A verification comparing in-memory
+    objects would fail a migration that in fact persisted correctly.
+    """
+
+    from homeassistant.helpers.json import json_bytes
+
+    class _OrjsonStore(_DiskStore):
+        async def async_save(self, data: dict[str, Any]) -> None:
+            self.save_calls += 1
+            envelope = {
+                "version": self.version,
+                "minor_version": self.minor_version,
+                "key": self.key,
+                "data": data,
+            }
+            Path(self.path).write_bytes(json_bytes(envelope))
+
+    payload = {
+        "oauth_token": "legacy-oauth-token",
+        "username": "légacy@example.com",
+        "fcm_credentials": {
+            "gcm": {"android_id": "111", "security_token": "222"},
+            "fcm": {"registration": {"token": "ünïcode-täken"}},
+        },
+        "counters": [1, 2, 3],
+    }
+    legacy_path = tmp_path / "secrets.json"
+    legacy_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    store = _OrjsonStore(tmp_path / "store.json")
+    _install_store(monkeypatch, store)
+
+    cache = await TokenCache.create(_StubHass(), "entry-orjson", str(legacy_path))
+
+    assert not legacy_path.exists(), "Legacy file kept although the data is on disk"
+    assert store.stored_keys() >= set(payload)
+    assert await cache.get("username") == "légacy@example.com"
