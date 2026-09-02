@@ -117,8 +117,19 @@ def _write_legacy(tmp_path: Path) -> Path:
     return legacy_path
 
 
-def _install_store(monkeypatch: pytest.MonkeyPatch, store: _DiskStore) -> None:
+def _install_store(monkeypatch: pytest.MonkeyPatch, store: Any) -> None:
     monkeypatch.setattr(token_cache, "Store", lambda *_a, **_kw: store)
+
+
+def _install_store_sequence(monkeypatch: pytest.MonkeyPatch, stores: list[Any]) -> None:
+    """Hand out one store per TokenCache, in order, for multi-entry setups."""
+
+    remaining = list(stores)
+
+    def _next_store(*_a: Any, **_kw: Any) -> Any:
+        return remaining.pop(0)
+
+    monkeypatch.setattr(token_cache, "Store", _next_store)
 
 
 @pytest.mark.asyncio
@@ -204,3 +215,103 @@ async def test_delayed_save_is_not_used_for_migration(
 
     assert store.delay_save_calls == 0, "Migration must not use the debounced save"
     assert store.save_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_store_without_path_keeps_legacy_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Isolated condition: the store exposes no path, so nothing can be read back."""
+
+    class _PathlessStore:
+        def __init__(self) -> None:
+            self.saved: list[dict[str, Any]] = []
+
+        async def async_load(self) -> dict[str, Any] | None:
+            return None
+
+        def async_delay_save(
+            self, writer: Callable[[], Any], delay: float = 0.0
+        ) -> None:
+            raise AssertionError("Migration must not use the debounced save")
+
+        async def async_save(self, data: dict[str, Any]) -> None:
+            self.saved.append(data)
+
+    legacy_path = _write_legacy(tmp_path)
+    store = _PathlessStore()
+    _install_store(monkeypatch, store)
+
+    await TokenCache.create(_StubHass(), "entry-pathless", str(legacy_path))
+
+    assert store.saved, "The snapshot should still be handed to the store"
+    assert legacy_path.exists(), (
+        "Legacy file deleted although nothing could be verified"
+    )
+
+
+@pytest.mark.asyncio
+async def test_unreadable_store_envelope_keeps_legacy_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Isolated condition: the file on disk is not a store envelope."""
+
+    legacy_path = _write_legacy(tmp_path)
+    store_file = tmp_path / "store.json"
+    store = _DiskStore(store_file, persists=False)
+    store_file.write_text("not json at all", encoding="utf-8")
+    _install_store(monkeypatch, store)
+
+    await TokenCache.create(_StubHass(), "entry-broken-envelope", str(legacy_path))
+
+    assert legacy_path.exists(), "Legacy file deleted on an unreadable store file"
+
+
+@pytest.mark.asyncio
+async def test_already_persisted_keys_remove_legacy_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Isolated condition: the store already holds the legacy keys, so no write is due.
+
+    Covers the deletion that happens without any write attempt: the merge changes
+    nothing, and the proof still has to come from the file.
+    """
+
+    legacy_path = _write_legacy(tmp_path)
+    store = _DiskStore(tmp_path / "store.json")
+    store.loaded = dict(_LEGACY_PAYLOAD)
+    await store.async_save(dict(_LEGACY_PAYLOAD))
+    store.save_calls = 0
+    _install_store(monkeypatch, store)
+
+    await TokenCache.create(_StubHass(), "entry-already-there", str(legacy_path))
+
+    assert store.save_calls == 0, "Nothing changed, so nothing should be written"
+    assert not legacy_path.exists()
+
+
+@pytest.mark.asyncio
+async def test_failed_verification_does_not_migrate_into_a_second_entry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed migration must not hand the file to the next config entry.
+
+    ``legacy_path`` is one shared module path for every entry, so the process-wide
+    sentinel is also the guard against a second entry adopting the first entry's
+    credentials. Clearing it on failure would delete the file after all, one
+    instance later, and put another account's token into the second store.
+    """
+
+    legacy_path = _write_legacy(tmp_path)
+    failing_store = _DiskStore(tmp_path / "store_a.json", persists=False)
+    second_store = _DiskStore(tmp_path / "store_b.json")
+    _install_store_sequence(monkeypatch, [failing_store, second_store])
+
+    await TokenCache.create(_StubHass(), "entry-a", str(legacy_path))
+    assert legacy_path.exists()
+
+    await TokenCache.create(_StubHass(), "entry-b", str(legacy_path))
+
+    assert legacy_path.exists(), "Second entry deleted the first entry's legacy file"
+    assert second_store.save_calls == 0
+    assert second_store.stored_keys() == set()

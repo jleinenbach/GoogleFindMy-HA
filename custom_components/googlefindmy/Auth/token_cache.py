@@ -156,7 +156,7 @@ class TokenCache:
         Home Assistant logs and swallows write errors instead of raising
         (``helpers/storage.py``, ``_async_handle_write_data``), and the delayed
         write happens later, outside this call. Every path that cannot prove the
-        write leaves the legacy file untouched and lets the migration run again.
+        write leaves the legacy file untouched, to be retried after a restart.
         """
         if _STATE["legacy_migration_done"] != _LEGACY_MIGRATION_DONE:
             _set_legacy_migration_flag(_LEGACY_MIGRATION_DONE)
@@ -196,18 +196,22 @@ class TokenCache:
                 self._data = merged
                 _LOGGER.info("googlefindmy: Merged legacy cache into the Store.")
 
-        # Outside the lock: the Store holds its own write lock.
+        # The Store brings its own write lock, so the save runs outside ours.
         if needs_save:
             await self._async_save_migrated_snapshot()
 
         if not await self._async_store_contains_keys(frozenset(normalized_legacy)):
             _LOGGER.warning(
                 "googlefindmy: Keeping the legacy cache file %s because the merged "
-                "credentials are not on disk yet; the migration will run again.",
+                "credentials for entry '%s' are not on disk; a restart will retry "
+                "the migration.",
                 legacy_path,
+                self.entry_id,
             )
-            # Allow another attempt in this process instead of stranding the file.
-            _set_legacy_migration_flag(False)
+            # The migration sentinel deliberately stays set. It is also the only
+            # guard against migrating this shared file into a second config entry,
+            # and that entry would then own another account's credentials while the
+            # first entry still has none. A restart clears the sentinel anyway.
             return
 
         def _remove_legacy() -> None:
@@ -279,7 +283,7 @@ class TokenCache:
             )
             return False
 
-        return bool(expected.issubset(persisted))
+        return expected.issubset(persisted)
 
     # ------------------------------- Get/Set ---------------------------------
 
