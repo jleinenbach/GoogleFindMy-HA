@@ -1856,6 +1856,16 @@ class PollingOperations(_MixinBase):
                 # not clear a rejection budget on the strength of an outage.
                 # The price of that choice is stated at the end of the loop.
                 cycle_accepted_requests = 0
+                # How many devices returned a location WITH content: the one
+                # strong proof on this path. Kept as a cycle-wide tally because
+                # the reauth verdict is a cycle-wide verdict, and a proof held by
+                # any device outranks a non-permanent rejection by another.
+                cycle_content_proofs = 0
+                # First device that booked a rejection this cycle, with its
+                # error. The end-of-cycle verdict names them, so the message a
+                # user sees still points at a concrete tracker.
+                first_rejecting_device: str | None = None
+                first_rejection_error: Exception | None = None
                 for idx, dev in enumerate(devices):
                     dev_id = dev["id"]
                     dev_name = dev.get("name", dev_id)
@@ -1921,6 +1931,7 @@ class PollingOperations(_MixinBase):
                         # threshold was never reached and the re-auth prompt this
                         # mechanism was built for never appeared.
                         self._set_auth_state(failed=False)
+                        cycle_content_proofs += 1
                         # Behaviour-neutral today and kept as an invariant, not
                         # as a live effect: a mutation that drops this line kills
                         # no test, because the reset two lines down already zeroes
@@ -2346,57 +2357,39 @@ class PollingOperations(_MixinBase):
                         # Transient auth failure - may self-heal in subsequent poll cycles.
                         # Only trigger reauth after multiple consecutive failures.
                         #
-                        # AT MOST ONCE PER CYCLE. The counter measures cycles, its
-                        # name says so and the reauth message reports "persisted
-                        # across %d poll cycles". Incrementing per device made two
-                        # broken trackers worth two cycles, so the threshold of
-                        # three was crossed in the middle of the second cycle and
-                        # the reported number was not a cycle count. The cause is
-                        # recorded for every rejecting device, because the newest
-                        # one is the useful one to show.
-                        if not cycle_booked_transient_auth:
-                            self._consecutive_transient_auth_failures += 1
+                        # NOTHING IS DECIDED HERE. The device records that it was
+                        # rejected; the cycle raises the streak and judges the
+                        # threshold once, after every sibling has been asked. Two
+                        # measured reasons, both from review:
+                        #
+                        # * Incrementing per device made two broken trackers worth
+                        #   two cycles, so the threshold of three was crossed in
+                        #   the middle of the second cycle and the number in the
+                        #   user-facing message was not a cycle count.
+                        # * Judging here returned from the cycle at once, so a
+                        #   sibling that would have answered WITH CONTENT was
+                        #   never asked. The same responses then produced opposite
+                        #   verdicts depending on the order the devices happened
+                        #   to sit in.
+                        #
+                        # The cause is recorded for every rejecting device, because
+                        # the newest one is the useful one to show.
+                        if first_rejecting_device is None:
+                            first_rejecting_device = dev_name
+                            first_rejection_error = transient_err
                         self._last_transient_auth_error = str(transient_err)
                         # Marks the cycle, not the device: the post-loop reset
                         # only fires when NO device rejected, so an idle sibling
                         # cannot clear what this device just booked.
                         cycle_booked_transient_auth = True
 
-                        if (
-                            self._consecutive_transient_auth_failures
-                            >= _MAX_TRANSIENT_AUTH_FAILURES
-                        ):
-                            _LOGGER.error(
-                                "Transient auth failure for %s persisted across %d poll cycles: %s. "
-                                "Triggering re-authentication.",
-                                dev_name,
-                                self._consecutive_transient_auth_failures,
-                                transient_err,
-                            )
-                            self._set_auth_state(
-                                failed=True,
-                                reason=f"Auth failed for {dev_name} after {self._consecutive_transient_auth_failures} attempts",
-                            )
-                            cycle_failed = True
-                            self._last_poll_result = "failed"
-                            self._consecutive_timeouts = 0
-                            reauth_exc = ConfigEntryAuthFailed(
-                                f"Authentication failed after {self._consecutive_transient_auth_failures} attempts; re-authentication required"
-                            )
-                            reauth_exc.reauth_code = (
-                                ReauthReasonCode.NOVA_AUTH_TRANSIENT_EXHAUSTED
-                            )
-                            last_exception = reauth_exc
-                            self._request_poll_reauth(reauth_exc)
-                            return
-
-                        # Not yet at threshold - log warning and continue to next device
+                        # No count in this message on purpose: the streak is
+                        # raised after the loop, so any number printed here would
+                        # be the previous cycle's.
                         _LOGGER.warning(
-                            "Transient auth failure for %s (%d/%d): %s. "
+                            "Transient auth failure for %s: %s. "
                             "Will retry in next poll cycle.",
                             dev_name,
-                            self._consecutive_transient_auth_failures,
-                            _MAX_TRANSIENT_AUTH_FAILURES,
                             transient_err,
                         )
                         cycle_failed = True
@@ -2554,7 +2547,51 @@ class PollingOperations(_MixinBase):
                         await asyncio.sleep(self.device_poll_delay)
 
                 _LOGGER.debug("Completed polling cycle for %d devices", len(devices))
-                if not cycle_booked_transient_auth and cycle_accepted_requests:
+                if cycle_booked_transient_auth and not cycle_content_proofs:
+                    # The cycle rejected and held no proof to the contrary, so the
+                    # streak grows by exactly one and the threshold is judged once,
+                    # with every sibling already asked.
+                    #
+                    # `not cycle_content_proofs` is the part that makes the verdict
+                    # independent of device order. A location WITH content clears
+                    # the counter at its own site; if that happened anywhere in
+                    # this cycle, raising the streak here would undo a proof the
+                    # cycle actually holds, and whether it did would depend on
+                    # which device answered first.
+                    self._consecutive_transient_auth_failures += 1
+                    if (
+                        self._consecutive_transient_auth_failures
+                        >= _MAX_TRANSIENT_AUTH_FAILURES
+                    ):
+                        _LOGGER.error(
+                            "Transient auth failure for %s persisted across %d poll cycles: %s. "
+                            "Triggering re-authentication.",
+                            first_rejecting_device,
+                            self._consecutive_transient_auth_failures,
+                            first_rejection_error,
+                        )
+                        self._set_auth_state(
+                            failed=True,
+                            reason=f"Auth failed for {first_rejecting_device} after {self._consecutive_transient_auth_failures} attempts",
+                        )
+                        cycle_failed = True
+                        self._last_poll_result = "failed"
+                        self._consecutive_timeouts = 0
+                        reauth_exc = ConfigEntryAuthFailed(
+                            f"Authentication failed after {self._consecutive_transient_auth_failures} attempts; re-authentication required"
+                        )
+                        reauth_exc.reauth_code = (
+                            ReauthReasonCode.NOVA_AUTH_TRANSIENT_EXHAUSTED
+                        )
+                        last_exception = reauth_exc
+                        self._request_poll_reauth(reauth_exc)
+                        return
+                    _LOGGER.debug(
+                        "Poll cycle booked a credential rejection (%d/%d).",
+                        self._consecutive_transient_auth_failures,
+                        _MAX_TRANSIENT_AUTH_FAILURES,
+                    )
+                elif not cycle_booked_transient_auth and cycle_accepted_requests:
                     # No device rejected the credentials in this cycle AND at
                     # least one request was accepted, so the streak is broken
                     # and the count goes with it. Both halves are load-bearing:
@@ -2573,9 +2610,11 @@ class PollingOperations(_MixinBase):
                     # per-device version here would hand that straight back. One
                     # per-device reset does survive, at the location-WITH-content
                     # site above, and it is kept on purpose because content is
-                    # the one strong proof on this path. Its price is that within
-                    # a single mixed cycle the end state depends on device order:
-                    # [rejection, content] ends at 0, [content, rejection] at 1.
+                    # the one strong proof on this path. It used to make the end
+                    # state depend on device order -- [rejection, content] ended
+                    # at 0, [content, rejection] at 1 -- which is why the streak
+                    # is now raised and judged once after the loop, gated on the
+                    # cycle-wide content tally. Both orders now end at 0.
                     #
                     # The measured limit of the streak rule, stated instead of
                     # discovered later: "consecutive" is counted over cycles that

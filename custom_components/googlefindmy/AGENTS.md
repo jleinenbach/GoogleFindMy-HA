@@ -275,6 +275,14 @@ and the remaining error merely changed sign: with a 60 s poll interval up to fiv
 three rejections at minutes 0, 2 and 4 -- each separated by a clean cycle -- accumulated to the threshold although they
 were never consecutive. Both revisions share one root cause: the counter was incremented on one clock and zeroed on
 another, and the two are independently configurable, so every ratio yields one of the two errors.
+The verdict is a CYCLE verdict, and both halves of that word are load-bearing. The streak is raised at most once per
+cycle, after every device has been asked, and only when the cycle held no location WITH content. Two measured reasons:
+incrementing per device made two broken trackers worth two cycles, so the threshold fell after two failing cycles
+instead of three and the number in the user-facing message was not a cycle count; and judging inside the loop returned
+from the cycle immediately, so a sibling that would have answered with content was never asked and the same responses
+gave opposite verdicts depending on device order. Both are pinned:
+`test_two_rejecting_devices_count_as_one_failing_cycle` and
+`test_the_reauth_verdict_does_not_depend_on_device_order`.
 The reset therefore sits where the counting happens, and it asks for two things. A poll cycle zeroes the count and
 the stored cause when it booked NO rejection and at least one of its requests was not refused -- a location with
 content, or an empty result, which is the FCM wait returning without raising. The second half is not decoration: a

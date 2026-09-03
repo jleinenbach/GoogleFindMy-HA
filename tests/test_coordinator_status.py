@@ -1257,6 +1257,12 @@ def test_the_production_order_still_reaches_the_reauth_threshold(
         _MAX_TRANSIENT_AUTH_FAILURES
     )
     assert coordinator.config_entry.reauth_calls == 1
+    # The message a user reads must name the tracker that was rejected. The
+    # verdict moved out of the device loop, so the name is carried to the end of
+    # the cycle by hand; without this assertion a mutation dropping that carry
+    # survived the whole tree and the Repairs issue would have read "None".
+    assert coordinator._auth_error_message is not None
+    assert "Device" in coordinator._auth_error_message
 
 
 # --------------------------------------------------------------------------
@@ -1487,3 +1493,57 @@ def test_two_rejecting_devices_count_as_one_failing_cycle(
     # mutation that drops the assignment survived every other test in the tree.
     assert coordinator._last_transient_auth_error is not None
     assert "403" in coordinator._last_transient_auth_error
+
+
+def test_the_reauth_verdict_does_not_depend_on_device_order(
+    coordinator: GoogleFindMyCoordinator, dummy_api: _DummyAPI
+) -> None:
+    """The same answers must give the same verdict, whichever device answers first.
+
+    The threshold check sat inside the device loop and returned as soon as it
+    fired, so a cycle that entered at 2 reauthed on the first rejecting tracker
+    and never asked the siblings. If a sibling would have returned a location
+    WITH content -- the one strong proof on this path, which clears the counter
+    outright -- the reauth was raised over evidence the cycle held but had not
+    looked at yet. Reversing the device order produced the opposite outcome from
+    identical responses.
+
+    The verdict now belongs to the cycle: every device is asked, then the cycle
+    decides. Content beats a rejection, because content is proof and a
+    non-permanent rejection is not.
+    """
+
+    devices = [
+        {"id": "dev-bad", "name": "Bad"},
+        {"id": "dev-good", "name": "Good"},
+    ]
+
+    async def _by_device(device_id: str, *_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        if device_id == "dev-bad":
+            raise NovaAuthError(403, "action rejected")
+        return {
+            "latitude": 37.0,
+            "longitude": -122.0,
+            "last_seen": int(time.time()),
+        }
+
+    # Without this the fixture's AsyncMock stands in for the cycle and the test
+    # measures nothing at all -- it passed that way once, with the counter
+    # simply untouched.
+    del coordinator._async_start_poll_cycle
+
+    for order in (devices, list(reversed(devices))):
+        coordinator._consecutive_transient_auth_failures = 2
+        coordinator._last_transient_auth_error = "rejected"
+        coordinator.config_entry.reauth_calls = 0
+        coordinator.async_set_update_error = Mock()
+        dummy_api.async_get_device_location = _by_device
+
+        loop = coordinator.hass.loop
+        loop.run_until_complete(coordinator._async_start_poll_cycle(order))
+
+        first = order[0]["name"]
+        assert coordinator.config_entry.reauth_calls == 0, f"reauth with {first} first"
+        assert coordinator._consecutive_transient_auth_failures == 0, (
+            f"counter not cleared with {first} first"
+        )
