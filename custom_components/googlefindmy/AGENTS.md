@@ -252,9 +252,12 @@ What that success path does NOW, because this paragraph used to say it was still
 any more: the reset is bound to a positive proof instead of to the absence of an exception
 (`PLAN_GFMY_AUTH_RESET_POSITIVE_PROOF`). The proof differs per path and each one is named: in the poll cycle a location
 WITH content, in the manual locate a record that survives the empty guard, and for the transient-auth counter a
-successful `async_get_basic_device_list` -- the strongest source in the tree, because it has no non-throwing error exit
-and an expired login raises before it can reach the reset. On the poll path the same location WITH content clears the
-counter as well, so the device list is the everyday source, not the only one. An empty result clears nothing at all any
+a poll cycle that rejected nothing while at least one request was accepted. A successful
+`async_get_basic_device_list` proves the ACCOUNT token -- it is the strongest source in the tree, because it has no
+non-throwing error exit and an expired login raises before it can reach the reset -- and it clears the account auth
+state, but it deliberately does NOT clear the counter; the paragraph after next says why. On the poll path a location
+WITH content clears the counter at its own site as well, so the end-of-cycle rule is the everyday source, not the only
+one. An empty result clears nothing at all any
 more AT THE DEVICE SITE: not the idle BLE tag, not the four pre-accept failures named above. Read that as the narrow
 statement it is. A cycle in which nothing was rejected AND at least one request was not refused clears the count itself, cycle-wide,
 so an idle tag can no longer wipe the rejection a sibling booked in the same pass. The price was measured and accepted with the change, and it is bounded:

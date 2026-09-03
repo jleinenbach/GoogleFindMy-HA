@@ -2345,7 +2345,17 @@ class PollingOperations(_MixinBase):
 
                         # Transient auth failure - may self-heal in subsequent poll cycles.
                         # Only trigger reauth after multiple consecutive failures.
-                        self._consecutive_transient_auth_failures += 1
+                        #
+                        # AT MOST ONCE PER CYCLE. The counter measures cycles, its
+                        # name says so and the reauth message reports "persisted
+                        # across %d poll cycles". Incrementing per device made two
+                        # broken trackers worth two cycles, so the threshold of
+                        # three was crossed in the middle of the second cycle and
+                        # the reported number was not a cycle count. The cause is
+                        # recorded for every rejecting device, because the newest
+                        # one is the useful one to show.
+                        if not cycle_booked_transient_auth:
+                            self._consecutive_transient_auth_failures += 1
                         self._last_transient_auth_error = str(transient_err)
                         # Marks the cycle, not the device: the post-loop reset
                         # only fires when NO device rejected, so an idle sibling

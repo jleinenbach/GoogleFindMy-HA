@@ -1428,3 +1428,62 @@ def test_an_empty_device_list_does_not_clear_the_count(
 
     assert coordinator._consecutive_transient_auth_failures == 2
     assert coordinator._last_transient_auth_error == "rejected"
+
+
+def test_two_rejecting_devices_count_as_one_failing_cycle(
+    coordinator: GoogleFindMyCoordinator, dummy_api: _DummyAPI
+) -> None:
+    """The streak counts cycles, so a cycle may raise it by at most one.
+
+    The increment sat inside the device loop and therefore ran once per
+    rejecting tracker. Two broken trackers made a single cycle worth two, so the
+    threshold of three was reached in the middle of the second cycle instead of
+    at the end of the third. The name of the counter says cycles and the reauth
+    message says "persisted across %d poll cycles", so the per-device tally was
+    wrong in both directions: it escalated early, and it reported a number that
+    was not a cycle count.
+    """
+
+    devices = [
+        {"id": "dev-1", "name": "One"},
+        {"id": "dev-2", "name": "Two"},
+    ]
+    dummy_api.device_list = devices
+    coordinator._last_device_list = devices
+    coordinator._last_list_poll_mono = time.monotonic()
+
+    async def _reject(device_id: str, *_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        raise NovaAuthError(403, "action rejected")
+
+    dummy_api.async_get_device_location = _reject
+    del coordinator._async_start_poll_cycle
+    coordinator.async_set_update_error = Mock()
+
+    tasks: list[asyncio.Task[Any]] = []
+    original_create = coordinator.hass.async_create_task
+
+    def _tracking_create(coro: Any, *, name: str | None = None) -> asyncio.Task[Any]:
+        task = original_create(coro, name=name)
+        tasks.append(task)
+        return task
+
+    coordinator.hass.async_create_task = _tracking_create
+
+    loop = coordinator.hass.loop
+    counts: list[int] = []
+    for _ in range(2):
+        coordinator.force_poll_due()
+        loop.run_until_complete(coordinator._async_update_data())
+        if tasks:
+            loop.run_until_complete(asyncio.gather(*tasks))
+            tasks.clear()
+        counts.append(coordinator._consecutive_transient_auth_failures)
+
+    # Measured before the fix: [2, 3], with the reauth raised inside cycle two.
+    assert counts == [1, 2]
+    assert coordinator.config_entry.reauth_calls == 0
+    # The cause is recorded per rejecting device even though the count is not.
+    # Without this the "record it every time" half of the rule is unpinned: a
+    # mutation that drops the assignment survived every other test in the tree.
+    assert coordinator._last_transient_auth_error is not None
+    assert "403" in coordinator._last_transient_auth_error
