@@ -1788,17 +1788,6 @@ class PollingOperations(_MixinBase):
                             timeout=POLL_DEVICE_OUTER_TIMEOUT_S,
                         )
 
-                        # Success path: ensure any previous auth error is cleared
-                        self._set_auth_state(failed=False)
-                        # Reset transient auth failure counter on success
-                        if self._consecutive_transient_auth_failures > 0:
-                            _LOGGER.info(
-                                "Location request succeeded; clearing %d transient auth failure(s).",
-                                self._consecutive_transient_auth_failures,
-                            )
-                            self._consecutive_transient_auth_failures = 0
-                            self._last_transient_auth_error = None
-
                         if not location:
                             # Expected for BLE tags with no reporter nearby: the
                             # inner FCM wait returns an empty result rather than
@@ -1809,6 +1798,39 @@ class PollingOperations(_MixinBase):
                                 dev_id, dev_name, source="empty-result"
                             )
                             continue
+
+                        # A location WITH content, and only that, proves on this
+                        # path that the credentials worked -- the same rule the
+                        # sound handlers state at their own sites ("only an
+                        # ACCEPTED submission proves the credentials worked").
+                        # An empty return proves only that nothing raised.
+                        #
+                        # The guard above therefore runs FIRST. It used not to,
+                        # and that was the defect: an empty dict is WEAK evidence
+                        # that the request was accepted, not proof of it. The 5xx,
+                        # the 429, the network error and the failed FCM
+                        # registration raise LocationRequestNotAcceptedError today
+                        # instead of flattening into {}, but four pre-accept
+                        # failures still arrive here as an empty dict (an
+                        # unregistered FCM receiver provider, a provider returning
+                        # None, a missing token cache, and a failure binding the
+                        # lazily imported decrypt / eid-info modules), because they
+                        # are raised before the handler that would convert them.
+                        #
+                        # The cost of getting this wrong is not cosmetic. The
+                        # counter exists to escalate a genuinely expired login
+                        # after _MAX_TRANSIENT_AUTH_FAILURES cycles; a fleet with
+                        # one idle BLE tag cleared it on every single pass, so the
+                        # threshold was never reached and the re-auth prompt this
+                        # mechanism was built for never appeared.
+                        self._set_auth_state(failed=False)
+                        if self._consecutive_transient_auth_failures > 0:
+                            _LOGGER.info(
+                                "Location request succeeded; clearing %d transient auth failure(s).",
+                                self._consecutive_transient_auth_failures,
+                            )
+                            self._consecutive_transient_auth_failures = 0
+                            self._last_transient_auth_error = None
 
                         # A device returned an authenticated coordinate report
                         # without raising a DecryptionError: positive proof the

@@ -1002,35 +1002,124 @@ async def test_a_rejected_device_never_clears_the_auth_state() -> None:
 
 
 @pytest.mark.asyncio
-async def test_an_empty_return_still_clears_the_counter() -> None:
-    """Characterisation of the reset this change deliberately leaves alone.
+async def test_an_empty_return_proves_nothing_about_the_credentials() -> None:
+    """The reset moved behind the empty guard; this is the same test, inverted.
 
-    An empty result USUALLY MEANS an accepted request that came back without a
-    report, and it still counts as success: the counter goes back to zero and
-    the auth state is cleared. The precision matters, because the sentence that
-    used to stand here -- "that is true today for every 5xx and every 429" -- is
-    no longer true. Those raise before they can reach this path, which is
-    exactly what the change did; the pair to this test is
-    ``test_an_unaccepted_request_no_longer_clears_the_counter``. "Usually" and
-    not "always", because four pre-accept faults still arrive as an empty dict;
-    they are enumerated at the post-loop guard in ``polling.py``.
+    History, kept deliberately: this function used to be called
+    ``test_an_empty_return_still_clears_the_counter`` and asserted the opposite
+    of what it asserts now. It was a characterisation of a reset that was known
+    to be wrong on its own terms and was left alone at the time, with the
+    finding tracked separately. This is the day it changes, and it changes on
+    purpose.
 
-    What remains wrong on its own terms is the reset itself: an accepted request
-    that returned nothing proves only that nothing raised, not that the
-    credentials work. That is tracked as a finding of its own with its own
-    approval gate (`PLAN_GFMY_AUTH_RESET_POSITIVE_PROOF`). This test is here so
-    the day it changes, it changes on purpose.
+    What is wrong with the old behaviour: an empty dict is WEAK evidence that
+    the request was accepted, not proof of it. The 5xx, the 429, the network
+    error and the failed FCM registration now raise
+    ``LocationRequestNotAcceptedError`` instead of flattening into ``{}``, but
+    four pre-accept failures still arrive here as an empty dict (enumerated in
+    ``test_a_cycle_of_only_empty_results_still_reports_success``). Clearing the
+    auth state and the transient counter on that evidence is the false-success
+    reasoning this change removes: the counter exists to escalate a genuinely
+    expired login after three cycles, and a fleet with one idle BLE tag reset
+    it in every single cycle, so the threshold was never reached.
+
+    The positive half is not given up, it moves: a location WITH content still
+    clears both, which is ``test_a_real_location_still_clears_the_auth_state``
+    and ``test_a_real_location_still_resets_the_transient_counter``.
     """
     coordinator = _polling_coordinator({}, _TrackingFilter(), {})
     coordinator.api = _PerDeviceAPI({"dev-1": {}})
     auth_calls: list[dict[str, Any]] = []
     coordinator._set_auth_state = lambda **kwargs: auth_calls.append(kwargs)
     coordinator._consecutive_transient_auth_failures = 2
+    coordinator._last_transient_auth_error = "expired"
+
+    await coordinator._async_start_poll_cycle([{"id": "dev-1", "name": "Hub"}])
+
+    assert not [kw for kw in auth_calls if kw.get("failed") is False]
+    assert coordinator._consecutive_transient_auth_failures == 2
+    assert coordinator._last_transient_auth_error == "expired"
+
+
+@pytest.mark.asyncio
+async def test_a_real_location_still_clears_the_auth_state() -> None:
+    """The positive half of the rule must survive the fix.
+
+    Moving the reset behind the empty guard is only correct if a location WITH
+    content still counts as proof. Without this test the fix could be "improved"
+    into removing the reset altogether, which would strand a pending auth error
+    until the next device-list refresh.
+    """
+    coordinator = _polling_coordinator({}, _TrackingFilter(), {})
+    coordinator.api = _PerDeviceAPI(
+        {
+            "dev-1": {
+                "latitude": 50.0,
+                "longitude": 10.0,
+                "accuracy": 5.0,
+                "last_seen": 100.0,
+            }
+        }
+    )
+    auth_calls: list[dict[str, Any]] = []
+    coordinator._set_auth_state = lambda **kwargs: auth_calls.append(kwargs)
 
     await coordinator._async_start_poll_cycle([{"id": "dev-1", "name": "Hub"}])
 
     assert [kw for kw in auth_calls if kw.get("failed") is False]
+
+
+@pytest.mark.asyncio
+async def test_a_real_location_still_resets_the_transient_counter() -> None:
+    """Same as above for the counter and the stored cause.
+
+    Separate from the auth-state test on purpose: the two live in one block
+    today, and a fix that moves only one of them would otherwise pass.
+    """
+    coordinator = _polling_coordinator({}, _TrackingFilter(), {})
+    coordinator.api = _PerDeviceAPI(
+        {
+            "dev-1": {
+                "latitude": 50.0,
+                "longitude": 10.0,
+                "accuracy": 5.0,
+                "last_seen": 100.0,
+            }
+        }
+    )
+    coordinator._set_auth_state = lambda **kwargs: None
+    coordinator._consecutive_transient_auth_failures = 2
+    coordinator._last_transient_auth_error = "expired"
+
+    await coordinator._async_start_poll_cycle([{"id": "dev-1", "name": "Hub"}])
+
     assert coordinator._consecutive_transient_auth_failures == 0
+    assert coordinator._last_transient_auth_error is None
+
+
+@pytest.mark.asyncio
+async def test_an_empty_return_does_not_clear_a_pending_auth_error() -> None:
+    """The cross-device case, which is why the order of the guard matters.
+
+    One tracker raises a credential failure, a second one comes back empty in
+    the same cycle. With the reset in front of the empty guard, the second
+    device wiped the first device's finding on every pass -- and in a fleet with
+    one idle BLE tag that is every pass, forever. The devices are ordered so the
+    empty one is polled last, which is the order that used to lose the finding.
+    """
+    coordinator = _polling_coordinator({}, _TrackingFilter(), {})
+    coordinator.api = _PerDeviceAPI(
+        {"dev-1": NovaAuthError(401, "expired"), "dev-2": {}}
+    )
+    auth_calls: list[dict[str, Any]] = []
+    coordinator._set_auth_state = lambda **kwargs: auth_calls.append(kwargs)
+    coordinator.config_entry.async_start_reauth = MagicMock()
+
+    await coordinator._async_start_poll_cycle(
+        [{"id": "dev-1", "name": "Hub"}, {"id": "dev-2", "name": "Tag"}]
+    )
+
+    assert not [kw for kw in auth_calls if kw.get("failed") is False]
 
 
 @pytest.mark.asyncio
@@ -1741,15 +1830,17 @@ async def test_an_unaccepted_device_does_not_touch_the_transient_auth_counter() 
 
 @pytest.mark.asyncio
 async def test_an_unaccepted_request_no_longer_clears_the_counter() -> None:
-    """The contract pair to ``test_an_empty_return_still_clears_the_counter``.
+    """The contract pair to
+    ``test_an_empty_return_proves_nothing_about_the_credentials``.
 
     The two are deliberately adjacent claims about the same success path, read
-    from opposite sides. An ACCEPTED request that came back empty still clears
-    the counter -- that reset is wrong on its own terms and is tracked
-    separately (`PLAN_GFMY_AUTH_RESET_POSITIVE_PROOF`), so it is characterised,
-    not changed here. A request that was never accepted no longer reaches that
-    path at all. Splitting them is what makes the difference between the two
-    outcomes checkable instead of a matter of reading the branch.
+    from opposite sides. A request that was never accepted does not reach that
+    path at all; a request that WAS accepted but came back empty reaches it and
+    no longer clears anything either, because an empty dict is weak evidence of
+    acceptance rather than proof of working credentials. The two mechanisms are
+    different and stay separate: one is a raise before the success path, the
+    other is a guard inside it. Splitting them is what makes the difference
+    between the outcomes checkable instead of a matter of reading the branch.
     """
     coordinator = _polling_coordinator({}, _TrackingFilter(), {})
     coordinator.api = _PerDeviceAPI(
