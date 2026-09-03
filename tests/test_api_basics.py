@@ -1321,18 +1321,22 @@ class TestAsyncDeviceLocationErrorMapping:
         not an empty result either.
 
         Collapsing it to ``{}`` was the first attempt and it traded one defect for
-        another. Both production callers read a NON-RAISING return as positive
-        proof that the sign-in works: ``coordinator/polling.py`` clears the auth
-        state and resets the transient-auth counter, and ``coordinator/locate.py``
-        clears the auth state, each BEFORE it looks at whether the result is
-        empty. A permanently rejected tracker would therefore have wiped a real
-        401 on another tracker in every cycle.
+        another. Back then both production callers read a NON-RAISING return as
+        positive proof that the sign-in works: ``coordinator/polling.py`` cleared
+        the auth state and reset the transient-auth counter, and
+        ``coordinator/locate.py`` cleared the auth state, each BEFORE it looked at
+        whether the result was empty, so a permanently rejected tracker wiped a
+        real 401 on another tracker in every cycle.
 
         Passing the error through keeps that reset out of reach and lets each
         handler state the rule at its own site, which is what those two branches
-        were written for. The counterpart lives in
-        ``test_an_empty_return_still_clears_the_counter``: the pre-existing reset
-        on an empty result is deliberately NOT changed here.
+        were written for. Both resets have since moved behind the empty guard
+        (``PLAN_GFMY_AUTH_RESET_POSITIVE_PROOF``), so the reason above is history
+        and this test now pins the narrower of two guarantees rather than the only
+        one. The counterpart lives in
+        ``test_an_empty_return_proves_nothing_about_the_credentials``, which used
+        to be called ``test_an_empty_return_still_clears_the_counter`` and asserted
+        the opposite of what it asserts now.
         """
 
         self._patch_request(monkeypatch, NovaAuthError(404, "gone"))

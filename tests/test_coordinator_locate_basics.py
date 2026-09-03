@@ -406,8 +406,14 @@ class TestAsyncLocateDeviceNovaAuthClassification:
         Flagging it was the original defect. Clearing it is the mirror image and
         just as wrong: a manual locate on a tracker the server rejects proves
         nothing about the credentials, so it must not wipe a pending auth error
-        raised by some other device. Only the second half of this assertion pair
-        depends on api.py passing the error through rather than returning {}.
+        raised by some other device.
+
+        The second half of this pair used to depend on ``api.py`` passing the
+        error through rather than returning ``{}``; it no longer does. The reset
+        now sits behind the empty guard, so an empty return would not clear the
+        state either. Both routes are covered, and
+        ``test_an_empty_manual_locate_does_not_clear_the_auth_state`` is the one
+        that covers the other route on purpose.
         """
         coord.api.async_get_device_location.side_effect = NovaAuthError(404, "gone")
 
@@ -454,6 +460,74 @@ class TestAsyncLocateDeviceNovaAuthClassification:
             if "failed (client error): HTTP 404" in r.message
         }
         assert levels == {logging.WARNING}
+
+    async def test_an_empty_manual_locate_does_not_clear_the_auth_state(
+        self, coord: LocateStub
+    ) -> None:
+        """An empty result proves nothing here either, so it clears nothing.
+
+        The manual path carried the same false-success reasoning as the poll
+        cycle: it cleared the auth state before it had looked at whether the
+        result had any content. A user pressing "locate" on an idle BLE tag
+        therefore wiped a pending credential finding raised by another device,
+        which is precisely the evidence the Repairs issue rests on.
+        """
+        coord.api.async_get_device_location.return_value = {}
+
+        result = await coord.async_locate_device("dev-1")
+
+        assert result == {}
+        assert not [
+            c
+            for c in coord._set_auth_state.call_args_list
+            if c.kwargs.get("failed") is False
+        ]
+
+    async def test_a_successful_manual_locate_still_clears_the_auth_state(
+        self, coord: LocateStub
+    ) -> None:
+        """The positive half survives the move: a real fix still counts as proof."""
+        coord.api.async_get_device_location.return_value = {
+            "latitude": 50.0,
+            "longitude": 10.0,
+            "accuracy": 5.0,
+            "last_seen": 1234567890,
+        }
+
+        await coord.async_locate_device("dev-1")
+
+        assert [
+            c
+            for c in coord._set_auth_state.call_args_list
+            if c.kwargs.get("failed") is False
+        ]
+
+    async def test_a_record_without_coordinates_still_proves_the_credentials(
+        self, coord: LocateStub
+    ) -> None:
+        """The guard against overshooting in the other direction.
+
+        A record carrying only ``last_seen`` is an authenticated server answer:
+        the account was accepted, the row simply has no coordinate report. The
+        method returns ``{}`` for it (see
+        ``test_payload_without_coords_returns_empty``), which makes it tempting
+        to push the reset further down, past the coordinate check. That would
+        throw away a proof the server actually gave us. The reset therefore sits
+        behind the EMPTY guard and in front of the COORDINATE check, and this
+        test is what holds it there.
+        """
+        coord.api.async_get_device_location.return_value = {
+            "last_seen": 1234567890,
+        }
+
+        result = await coord.async_locate_device("dev-1")
+
+        assert result == {}
+        assert [
+            c
+            for c in coord._set_auth_state.call_args_list
+            if c.kwargs.get("failed") is False
+        ]
 
 
 # One row per ``SoundDispatchOutcome`` member: (outcome, accepted, may arm the

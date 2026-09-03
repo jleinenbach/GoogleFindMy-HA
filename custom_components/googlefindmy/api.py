@@ -25,10 +25,13 @@ Token/Auth handling (Step 5.1-D):
   expired". A non-credential rejection therefore leaves the device list as
   `UpdateFailed`, and the location request passes the error on to its callers,
   whose own branches skip the device without touching the re-auth machinery. It
-  is deliberately NOT collapsed to an empty result: both callers read a
-  non-raising return as proof that the credentials work and clear the auth state
-  before they check for emptiness, so a permanently rejected tracker would have
-  masked a real 401 on another tracker. `_classify_nova_auth_error` is the sound-path adapter over the
+  is deliberately NOT collapsed to an empty result. That began as protection
+  against a second defect, now fixed: both callers used to read a non-raising
+  return as proof that the credentials work and cleared the auth state before
+  they checked for emptiness, so a permanently rejected tracker masked a real
+  401 on another tracker. Those resets sit behind the empty guard since
+  (`PLAN_GFMY_AUTH_RESET_POSITIVE_PROOF`); passing the error on stays right
+  because a rejection is a failure and an empty dict cannot say so. `_classify_nova_auth_error` is the sound-path adapter over the
   same predicate. Still open, stated so it is not mistaken for coverage: the
   transport keeps raising a type named "auth" for all of them, so a future
   handler that reads the type instead of the predicate repeats the defect.
@@ -1304,9 +1307,13 @@ class GoogleFindMyAPI:
             - Any OTHER `NovaAuthError` is the server refusing the request, not
               the credentials -- a device removed from the account, a malformed
               body -- and is re-raised unchanged. It is deliberately NOT turned
-              into an empty result: a normal return is what both callers read as
-              "the credentials worked", and they clear the account auth state on
-              it. Only a transient/5xx failure returns `{}`.
+              into an empty result: a return WITH CONTENT is what both callers
+              read as "the credentials worked", and they clear the account auth
+              state on it. An empty return no longer reaches those resets -- they
+              sit behind the empty guard -- but collapsing a rejection into `{}`
+              would still be wrong, because a failure that presents as an idle
+              device is indistinguishable from a healthy idle device. Only a
+              transient/5xx failure returns `{}`.
             - Because the previous two bullets BOTH arrive as `NovaAuthError`,
               the type alone never tells a caller which one it holds. Every
               caller must ask `nova_request.is_credential_rejection`.
@@ -1319,8 +1326,18 @@ class GoogleFindMyAPI:
         Returns:
             A dictionary containing the best available location data for the
             device, or an empty dictionary on a transient failure (5xx, rate
-            limit, timeout). A normal return therefore means the credentials
-            were accepted; callers rely on that.
+            limit, timeout).
+
+            A return WITH CONTENT means the credentials were accepted, and both
+            callers rely on that: they clear the account auth state on it. An
+            EMPTY return means only that nothing raised. Callers must not read it
+            as proof -- four pre-accept failures still arrive this way, and so
+            does every healthy idle BLE tag. Since
+            `PLAN_GFMY_AUTH_RESET_POSITIVE_PROOF` both callers check for
+            emptiness first, and in the poll loop an empty result counts merely
+            as "this request was not refused", which is enough to break a streak
+            of credential rejections and deliberately not enough to clear the
+            auth state.
 
             That reliance is only as sound as the layer below. It holds exactly
             to the extent that a request which never got past this integration's
@@ -1455,21 +1472,33 @@ class GoogleFindMyAPI:
                 # branch for exactly this status.
                 #
                 # Do NOT collapse this to `return {}`. That was the first attempt
-                # and it traded one defect for another: a non-raising return is
+                # and it traded one defect for another. The first reason is now
+                # history and is kept as such: a non-raising return used to be
                 # what both callers read as positive proof that the sign-in
-                # works. coordinator/polling.py clears the auth state and resets
-                # the transient-auth counter, and coordinator/locate.py clears
-                # the auth state, each BEFORE looking at whether the result is
-                # empty. A permanently rejected tracker would then wipe a real
-                # 401 from another tracker in every cycle, and the re-auth prompt
-                # that this whole change exists to postpone would never appear at
-                # all. Raising keeps that reset out of reach.
+                # works. coordinator/polling.py cleared the auth state and reset
+                # the transient-auth counter, and coordinator/locate.py cleared
+                # the auth state, each BEFORE looking at whether the result was
+                # empty, so a permanently rejected tracker wiped a real 401 from
+                # another tracker in every cycle. Both resets now sit BEHIND the
+                # empty guard (`PLAN_GFMY_AUTH_RESET_POSITIVE_PROOF`), so an
+                # empty return cannot reach them any more.
                 #
-                # The 5xx branch below still returns {} and still reaches that
-                # reset. That is pre-existing, it is wrong on its own terms, and
-                # it is tracked as a separate finding
-                # (`PLAN_GFMY_EMPTY_RESULT_DISTINGUISHABLE`) -- not fixed here,
-                # and not made worse here either.
+                # The other half of the reason outlives that fix and is why this
+                # still raises: a client rejection is a failure, and `{}` is the
+                # shape of a healthy idle tag. Handing the caller that shape
+                # hands it a result it cannot classify -- no `cycle_failed`,
+                # nothing for the post-loop guard to count -- and ending exactly
+                # that ambiguity is what the raise sites exist for.
+                #
+                # The 5xx branch below still returns {}. It no longer clears
+                # anything, and measured it is not reached at all any more:
+                # `get_location_data_for_device` converts the 5xx and the 429
+                # into `LocationRequestNotAcceptedError` itself
+                # (`PLAN_GFMY_EMPTY_RESULT_DISTINGUISHABLE`), and its broad
+                # handler re-raises only before the accept line and returns []
+                # after it -- so no `NovaHTTPError` leaves that layer. The sync
+                # wrapper is no exception: it calls this very method. The branch
+                # stays as the guard for the day that conversion moves or goes.
                 #
                 # DEBUG, not WARNING: both callers already log a WARNING naming
                 # the device, so a WARNING here would print the same event twice

@@ -329,11 +329,24 @@ class LocateOperations(_MixinBase):
                     device_id, name
                 )
 
-                # Success path: clear any auth error state
-                self._set_auth_state(failed=False)
-
                 if not location_data:
                     return {}
+
+                # A result WITH content, and only that, proves on this path that
+                # the credentials worked -- the same rule the sound handlers
+                # state at their own sites. An empty return proves only that
+                # nothing raised, and it reaches this method from several
+                # pre-accept failures as well as from a healthy idle tag, so the
+                # guard above runs first. It used not to, and a manual locate on
+                # an idle tag then wiped a pending credential finding raised by
+                # another device.
+                #
+                # The reset sits here and NOT further down, behind the coordinate
+                # check: a record carrying only `last_seen` is an authenticated
+                # server answer. The method returns {} for it, but the account
+                # was accepted, and refusing to count that would be the same
+                # error in the opposite direction.
+                self._set_auth_state(failed=False)
 
                 # Manual locate is upward-only for the reauth budget and never
                 # consumes the poll-only decrypt-proof hint; drop it here (after the
@@ -568,11 +581,12 @@ class LocateOperations(_MixinBase):
                 # diagnostic sensor on. The sign-in was fine the whole time.
                 # api passes such a status through instead of returning {}, so a
                 # manual locate on a deleted tracker reaches this branch and not
-                # the success path above -- which calls _set_auth_state(failed=
-                # False) before the empty guard and would therefore CLEAR a
-                # pending auth error. That clearing still happens for every 5xx
-                # and every empty result; it is pre-existing and tracked as a
-                # finding of its own.
+                # the success path above. That mattered more than it does now:
+                # the success path used to call _set_auth_state(failed=False)
+                # BEFORE the empty guard and would have CLEARED a pending auth
+                # error for every 5xx and every empty result. It no longer does
+                # -- the reset sits behind the empty guard now -- so this branch
+                # is the second line of defence rather than the only one.
                 if not is_credential_rejection(auth_err):
                     _LOGGER.warning(
                         "Manual locate for %s failed (client error): HTTP %s - %s",
@@ -747,8 +761,11 @@ class LocateOperations(_MixinBase):
                 # Two neighbours could be read as precedent, and exactly one of
                 # them is. NOT the `NovaRateLimitError` / `NovaHTTPError` handlers
                 # a few branches up, however tempting the symmetry: `api.py`
-                # answers both with `return {}` of its own (api.py:1535 for the
-                # 429, api.py:1526 for the non-401/403 5xx), so neither type ever
+                # answers both with `return {}` of its own (in `api.py`, the
+                # `except NovaRateLimitError` branch for the 429 and the
+                # `except NovaHTTPError` branch for the non-401/403 5xx; anchors
+                # rather than line numbers, which this file has already outrun
+                # twice), so neither type ever
                 # reaches this method and those two branches are dead on this
                 # path. Nor did this branch inherit their traffic -- before the
                 # request layer started raising, a 5xx returned `[]` from

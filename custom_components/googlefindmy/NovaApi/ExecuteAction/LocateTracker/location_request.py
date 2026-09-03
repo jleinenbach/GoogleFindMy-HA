@@ -104,8 +104,8 @@ class LocationRequestNotAcceptedError(Exception):
     a request that never got that far (no FCM token, a failed FCM registration,
     a 429, a 5xx, a network error, an unclassified Nova failure, or a surfacing
     error before the accept line). ``api.async_get_device_location`` mapped both
-    to ``{}``, so both coordinator callers read every non-raising return as
-    positive proof that the credentials work. This type carries the second state
+    to ``{}``, so both coordinator callers used to read every non-raising return
+    as positive proof that the credentials work. This type carries the second state
     across the ``location_request.py`` boundary -- the layer that flattens it --
     instead of leaving it to be reconstructed downstream once the evidence is
     already gone.

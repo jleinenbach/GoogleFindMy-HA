@@ -1266,6 +1266,44 @@ class PollingOperations(_MixinBase):
                 self._refresh_canonicless_drop_stats(self._entry_id())
 
                 # Success path: if we were in an auth error state, clear it now.
+                #
+                # This is the strongest proof source in the integration FOR THE
+                # ACCOUNT TOKEN, and that is all it is used for here. It was
+                # briefly the transient counter's everyday reset source too; that
+                # is history, and the paragraph below says why it had to stop.
+                # `async_get_basic_device_list` has no non-throwing error exit.
+                # Its OUTER `try` has nine except branches, all of which re-raise:
+                # eight as `ConfigEntryAuthFailed` or `UpdateFailed`, the ninth a
+                # bare `raise` that lets `asyncio.CancelledError` through. Four
+                # further branches sit on inner `try`s and do swallow (a missing
+                # username, two legacy-signature fallbacks, a missing email), but
+                # none of them leaves the method. The method holds exactly one
+                # `return`, and it is the success path. A return that got this far therefore
+                # means Nova accepted the account token, which is exactly what
+                # the AUTH STATE reports -- and an expired login raises before it
+                # can reach this line, so it cannot mask itself here the way it
+                # could through an empty location result. What the counter counts
+                # is a different claim, and it is not settled here.
+                #
+                # Exactly ONE reset belongs in this branch, and it is the auth
+                # state. Even that one belongs here and not above it: the cached
+                # branch skips the call entirely and so proves nothing.
+                #
+                # The transient counter is deliberately NOT reset here, and that
+                # is the correction of an earlier revision which did reset it.
+                # This branch proves the ACCOUNT token; the counter counts the
+                # action RPC accepting that same token, and the two are not the
+                # same claim. Worse, they run on different clocks:
+                # `DEVICE_LIST_POLL_INTERVAL` is a fixed 300 s while the poll
+                # interval is an option between 60 s and 3600 s. Zeroing a
+                # per-cycle counter from this cadence produced one of two errors
+                # at every ratio, both found in review and both pinned as tests
+                # now: at a long poll interval the refresh cleared the count
+                # before every single attempt and the escalation starved, at a
+                # short one rejections that were never consecutive reached the
+                # threshold. A streak is broken where it is counted -- by a poll
+                # cycle that books no rejection (see the end of the device loop)
+                # or by a pass that finds nothing to poll at all.
                 self._set_auth_state(failed=False)
                 self._set_api_status(ApiStatus.OK)
 
@@ -1450,6 +1488,43 @@ class PollingOperations(_MixinBase):
                     or dev_id not in self._devices_with_entry
                 ):
                     devices_to_poll.append(dev)
+
+            if (
+                filtered_devices
+                and not devices_to_poll
+                and not self._is_polling
+                and self._consecutive_transient_auth_failures > 0
+            ):
+                # The account HAS devices and not one of them is pollable: every
+                # tracker is disabled or ignored. No cycle will run, so the
+                # release path the cycle owns is unreachable and a booked streak
+                # would stand for as long as that lasts -- until a tracker is
+                # re-enabled weeks later and its first rejection inherits the old
+                # count into a premature reauth.
+                #
+                # `filtered_devices` is part of the condition and not decoration.
+                # Without it this also fires when the LIST came back empty, which
+                # happens on a backend hiccup once the two-pass empty-list quorum
+                # accepts it -- and clearing a rejection budget on the strength of
+                # an outage is precisely what the second half of the end-of-cycle
+                # condition below refuses to do.
+                #
+                # Measured on the PRE-cooldown list on purpose: a device held
+                # back only by its poll cooldown has proved nothing, and clearing
+                # on that would be a starvation path of its own.
+                #
+                # `not self._is_polling` for a related reason. The poll cycle is a
+                # fire-and-forget task, so a refresh can arrive while an earlier
+                # cycle is still asking its devices. A cycle in flight owns the
+                # streak it is spending; clearing it here would turn a standing 2
+                # into a 1 the moment that cycle books, and with no further cycle
+                # able to run the escalation would be lost for good.
+                _LOGGER.info(
+                    "No pollable device remains; clearing %d transient auth failure(s).",
+                    self._consecutive_transient_auth_failures,
+                )
+                self._consecutive_transient_auth_failures = 0
+                self._last_transient_auth_error = None
 
             # Apply per-device poll cooldowns
             if self._device_poll_cooldown_until and devices_to_poll:
@@ -1765,6 +1840,46 @@ class PollingOperations(_MixinBase):
                 # kept apart so whoever reads the log can tell a configuration
                 # change from an outage.
                 cycle_unaccepted_devices = 0
+                # True once ANY device in this cycle booked a transient auth
+                # failure. A cycle that books none zeroes
+                # `_consecutive_transient_auth_failures` after the loop: that is
+                # the counter's everyday reset source, and it runs on the same
+                # clock that increments it.
+                cycle_booked_transient_auth = False
+                # How many devices got a request this cycle that was not
+                # refused: a location with content, or an empty result, which is
+                # the FCM wait returning without raising.
+                #
+                # The second case is WEAK and knowingly so. Four pre-accept
+                # failures still arrive as an empty dict (an unregistered FCM
+                # provider, a provider returning None, a missing token cache, a
+                # late ImportError), so an empty result does not prove Nova took
+                # the request -- it proves only that nothing raised. That is
+                # enough to break a streak of rejections and deliberately not
+                # enough to clear the auth state, which is why the two verdicts
+                # sit at different sites.
+                #
+                # What is NOT counted here: a timeout, a 5xx, a non-credential
+                # rejection, a stale owner key, a decryption failure and a
+                # LocationRequestNotAcceptedError. Each of those says nothing in
+                # either direction, and a cycle made of nothing but those must
+                # not clear a rejection budget on the strength of an outage.
+                # The price of that choice is stated at the end of the loop.
+                cycle_accepted_requests = 0
+                # How many devices returned a location WITH content: the one
+                # strong proof on this path. Kept as a cycle-wide tally because
+                # the reauth verdict is a cycle-wide verdict, and a proof held by
+                # any device outranks a non-permanent rejection by another.
+                cycle_content_proofs = 0
+                # First device that booked a rejection this cycle, with its
+                # error. The end-of-cycle verdict names them, so the message a
+                # user sees still points at a concrete tracker.
+                first_rejecting_device: str | None = None
+                first_rejection_error: Exception | None = None
+                # Second slot, for a failure that had to queue behind a rejection.
+                # See the timeout branch below for why a rejection cannot simply
+                # be overwritten.
+                independent_error: Exception | None = None
                 for idx, dev in enumerate(devices):
                     dev_id = dev["id"]
                     dev_name = dev.get("name", dev_id)
@@ -1788,17 +1903,6 @@ class PollingOperations(_MixinBase):
                             timeout=POLL_DEVICE_OUTER_TIMEOUT_S,
                         )
 
-                        # Success path: ensure any previous auth error is cleared
-                        self._set_auth_state(failed=False)
-                        # Reset transient auth failure counter on success
-                        if self._consecutive_transient_auth_failures > 0:
-                            _LOGGER.info(
-                                "Location request succeeded; clearing %d transient auth failure(s).",
-                                self._consecutive_transient_auth_failures,
-                            )
-                            self._consecutive_transient_auth_failures = 0
-                            self._last_transient_auth_error = None
-
                         if not location:
                             # Expected for BLE tags with no reporter nearby: the
                             # inner FCM wait returns an empty result rather than
@@ -1808,7 +1912,55 @@ class PollingOperations(_MixinBase):
                             self._log_idle_poll_diagnostics(
                                 dev_id, dev_name, source="empty-result"
                             )
+                            # Weak evidence, and deliberately only counted as
+                            # such: the request was accepted, which is not the
+                            # same as the credentials being proven. It breaks a
+                            # streak of rejections; it does not clear the auth
+                            # state, and it does not zero the counter here.
+                            cycle_accepted_requests += 1
                             continue
+
+                        # A location WITH content, and only that, proves on this
+                        # path that the credentials worked -- the same rule the
+                        # sound handlers state at their own sites ("only an
+                        # ACCEPTED submission proves the credentials worked").
+                        # An empty return proves only that nothing raised.
+                        #
+                        # The guard above therefore runs FIRST. It used not to,
+                        # and that was the defect: an empty dict is WEAK evidence
+                        # that the request was accepted, not proof of it. The 5xx,
+                        # the 429, the network error and the failed FCM
+                        # registration raise LocationRequestNotAcceptedError today
+                        # instead of flattening into {}, but four pre-accept
+                        # failures still arrive here as an empty dict (an
+                        # unregistered FCM receiver provider, a provider returning
+                        # None, a missing token cache, and a failure binding the
+                        # lazily imported decrypt / eid-info modules), because they
+                        # are raised before the handler that would convert them.
+                        #
+                        # The cost of getting this wrong is not cosmetic. The
+                        # counter exists to escalate a genuinely expired login
+                        # after _MAX_TRANSIENT_AUTH_FAILURES cycles; a fleet with
+                        # one idle BLE tag cleared it on every single pass, so the
+                        # threshold was never reached and the re-auth prompt this
+                        # mechanism was built for never appeared.
+                        self._set_auth_state(failed=False)
+                        cycle_content_proofs += 1
+                        # Behaviour-neutral today and kept as an invariant, not
+                        # as a live effect: a mutation that drops this line kills
+                        # no test, because the reset two lines down already zeroes
+                        # the counter at this very site. It is here so the tally
+                        # means what its name says -- every accepted request of
+                        # this cycle -- for the day that site-local reset moves or
+                        # goes away.
+                        cycle_accepted_requests += 1
+                        if self._consecutive_transient_auth_failures > 0:
+                            _LOGGER.info(
+                                "Location request succeeded; clearing %d transient auth failure(s).",
+                                self._consecutive_transient_auth_failures,
+                            )
+                            self._consecutive_transient_auth_failures = 0
+                            self._last_transient_auth_error = None
 
                         # A device returned an authenticated coordinate report
                         # without raising a DecryptionError: positive proof the
@@ -2075,11 +2227,51 @@ class PollingOperations(_MixinBase):
                             self._consecutive_timeouts += 1
                             cycle_failed = True
                             self.note_error(terr, where="poll_timeout", device=dev_name)
+                            # `last_exception` is first-come, but a credential
+                            # rejection holds it only PROVISIONALLY: the
+                            # mixed-cycle branch after the loop withdraws that
+                            # report once a sibling answers WITH CONTENT. Dropping
+                            # this report because the slot is taken would then
+                            # leave NOTHING: the coordinator update reports
+                            # success and every tracker stays available, although
+                            # `last_poll_result` says failed and this device never
+                            # answered at all.
+                            #
+                            # Overwriting the rejection instead would be wrong the
+                            # other way round, because whether the withdrawal
+                            # happens is only known AFTER the loop
+                            # (`cycle_content_proofs`). In a cycle without content
+                            # the rejection is the more specific diagnosis and the
+                            # cause of the running escalation, and it must stay.
+                            # So it is kept in a SECOND slot and handed over only
+                            # if the withdrawal really fires. Identity, not
+                            # truthiness: only the rejection THIS cycle booked
+                            # yields its place. The stale-owner-key and generic
+                            # branches below carry the same rule; the rejection's
+                            # own slot deliberately does not, because a rejection
+                            # must not displace anything.
                             if last_exception is None:
                                 last_exception = UpdateFailed(
                                     f"Location request timed out for {dev_name}"
                                 )
                                 last_exception.__cause__ = terr
+                            # INVARIANT, not a live condition: mutating
+                            # `last_exception is first_rejection_error` to
+                            # `first_rejection_error is not None` survives every
+                            # test, and measurably so -- `independent_error` is
+                            # only ever handed over by the withdrawal, and the
+                            # withdrawal itself demands that identity. The check
+                            # is kept because it states at the point of writing
+                            # what the second slot is FOR, and a later change to
+                            # the handover would otherwise silently widen it.
+                            elif (
+                                last_exception is first_rejection_error
+                                and independent_error is None
+                            ):
+                                independent_error = UpdateFailed(
+                                    f"Location request timed out for {dev_name}"
+                                )
+                                independent_error.__cause__ = terr
                     except SpotAuthPermanentError:
                         _LOGGER.warning(
                             "Authentication failed for %s; triggering reauth flow.",
@@ -2151,9 +2343,12 @@ class PollingOperations(_MixinBase):
                         # api.async_get_device_location passes such a status
                         # through rather than collapsing it to {}, precisely so
                         # this branch is the one that runs. A non-raising return
-                        # would take the success path above, which clears the
-                        # auth state and resets the counter before it looks at
-                        # whether the result is empty.
+                        # would take the success path above, which used to clear
+                        # the auth state and reset the counter before it looked
+                        # at whether the result is empty; since that reset moved
+                        # behind the empty guard it would clear nothing, which
+                        # makes this branch the narrower of two guarantees rather
+                        # than the only one.
                         if not is_credential_rejection(transient_err):
                             _LOGGER.warning(
                                 "Client error (HTTP %s) for %s: %s. "
@@ -2196,15 +2391,15 @@ class PollingOperations(_MixinBase):
                             # counter is neither raised nor reset. A client
                             # rejection says nothing about the credentials in
                             # either direction.
-                            # The neighbouring success path still treats ANY
+                            # The neighbouring success path no longer treats a
                             # non-raising return as proof that the credentials
                             # work: it resets this counter and clears the auth
-                            # state before it looks at whether the result is
-                            # empty. Every 5xx, every 429 and every idle BLE tag
-                            # still reaches that reset. It is pre-existing, it is
-                            # wrong on its own terms, and it is tracked as a
-                            # finding of its own -- a client rejection is kept out
-                            # of it by raising in api.py, nothing more.
+                            # state only for a location WITH content, behind the
+                            # empty guard. An idle BLE tag therefore clears
+                            # nothing, and neither does a rejection that gets
+                            # here -- the raise in api.py keeps it off that path
+                            # entirely, which is one guarantee on top of the
+                            # other, not the only one left.
                             # The all-rejected case is caught after the loop,
                             # not here: whether a rejection is per-device or
                             # account-wide is only knowable once every device
@@ -2215,44 +2410,47 @@ class PollingOperations(_MixinBase):
 
                         # Transient auth failure - may self-heal in subsequent poll cycles.
                         # Only trigger reauth after multiple consecutive failures.
-                        self._consecutive_transient_auth_failures += 1
+                        #
+                        # NOTHING IS DECIDED HERE. The device records that it was
+                        # rejected; the cycle raises the streak and judges the
+                        # threshold once, after every sibling has been asked. Two
+                        # measured reasons, both from review:
+                        #
+                        # * Incrementing per device made two broken trackers worth
+                        #   two cycles, so the threshold of three was crossed in
+                        #   the middle of the second cycle and the number in the
+                        #   user-facing message was not a cycle count.
+                        # * Judging here returned from the cycle at once, so a
+                        #   sibling that would have answered WITH CONTENT was
+                        #   never asked. The same responses then produced opposite
+                        #   verdicts depending on the order the devices happened
+                        #   to sit in.
+                        #
+                        # The cause is recorded for every rejecting device, because
+                        # the newest one is the useful one to show.
+                        # Guarded on the ERROR, not on the name: `dev_name` comes
+                        # from `dev.get("name", dev_id)` and is `None` for a device
+                        # dict that carries an explicit `"name": None`. Guarding on
+                        # the name would let a second rejection overwrite
+                        # `first_rejection_error` while `last_exception` still holds
+                        # the first, and both the second slot above and the
+                        # withdrawal below compare by identity.
+                        if first_rejection_error is None:
+                            first_rejecting_device = dev_name
+                            first_rejection_error = transient_err
                         self._last_transient_auth_error = str(transient_err)
+                        # Marks the cycle, not the device: the post-loop reset
+                        # only fires when NO device rejected, so an idle sibling
+                        # cannot clear what this device just booked.
+                        cycle_booked_transient_auth = True
 
-                        if (
-                            self._consecutive_transient_auth_failures
-                            >= _MAX_TRANSIENT_AUTH_FAILURES
-                        ):
-                            _LOGGER.error(
-                                "Transient auth failure for %s persisted across %d poll cycles: %s. "
-                                "Triggering re-authentication.",
-                                dev_name,
-                                self._consecutive_transient_auth_failures,
-                                transient_err,
-                            )
-                            self._set_auth_state(
-                                failed=True,
-                                reason=f"Auth failed for {dev_name} after {self._consecutive_transient_auth_failures} attempts",
-                            )
-                            cycle_failed = True
-                            self._last_poll_result = "failed"
-                            self._consecutive_timeouts = 0
-                            reauth_exc = ConfigEntryAuthFailed(
-                                f"Authentication failed after {self._consecutive_transient_auth_failures} attempts; re-authentication required"
-                            )
-                            reauth_exc.reauth_code = (
-                                ReauthReasonCode.NOVA_AUTH_TRANSIENT_EXHAUSTED
-                            )
-                            last_exception = reauth_exc
-                            self._request_poll_reauth(reauth_exc)
-                            return
-
-                        # Not yet at threshold - log warning and continue to next device
+                        # No count in this message on purpose: the streak is
+                        # raised after the loop, so any number printed here would
+                        # be the previous cycle's.
                         _LOGGER.warning(
-                            "Transient auth failure for %s (%d/%d): %s. "
+                            "Transient auth failure for %s: %s. "
                             "Will retry in next poll cycle.",
                             dev_name,
-                            self._consecutive_transient_auth_failures,
-                            _MAX_TRANSIENT_AUTH_FAILURES,
                             transient_err,
                         )
                         cycle_failed = True
@@ -2289,8 +2487,15 @@ class PollingOperations(_MixinBase):
                         cycle_failed = True
                         cycle_had_stale_key = True
                         self._consecutive_timeouts = 0
+                        # Queues behind a provisional rejection -- see the
+                        # timeout branch above for the second slot.
                         if last_exception is None:
                             last_exception = stale_err
+                        elif (
+                            last_exception is first_rejection_error
+                            and independent_error is None
+                        ):
+                            independent_error = stale_err
                         continue
                     except OwnerKeyLookupTransientError as owner_transient_err:
                         # Transient owner-key lookup miss (partial server response,
@@ -2402,14 +2607,157 @@ class PollingOperations(_MixinBase):
                         cycle_failed = True
                         self._consecutive_timeouts = 0
                         self.note_error(err, where="poll_exception", device=dev_name)
+                        # Queues behind a provisional rejection -- see the
+                        # timeout branch above for the second slot.
                         if last_exception is None:
                             last_exception = err
+                        elif (
+                            last_exception is first_rejection_error
+                            and independent_error is None
+                        ):
+                            independent_error = err
 
                     # Inter-device delay (except after the last one)
                     if idx < len(devices) - 1 and self.device_poll_delay > 0:
                         await asyncio.sleep(self.device_poll_delay)
 
                 _LOGGER.debug("Completed polling cycle for %d devices", len(devices))
+                if cycle_booked_transient_auth and not cycle_content_proofs:
+                    # The cycle rejected and held no proof to the contrary, so the
+                    # streak grows by exactly one and the threshold is judged once,
+                    # with every sibling already asked.
+                    #
+                    # `not cycle_content_proofs` is the part that makes the verdict
+                    # independent of device order. A location WITH content clears
+                    # the counter at its own site; if that happened anywhere in
+                    # this cycle, raising the streak here would undo a proof the
+                    # cycle actually holds, and whether it did would depend on
+                    # which device answered first.
+                    self._consecutive_transient_auth_failures += 1
+                    if (
+                        self._consecutive_transient_auth_failures
+                        >= _MAX_TRANSIENT_AUTH_FAILURES
+                    ):
+                        _LOGGER.error(
+                            "Transient auth failure for %s persisted across %d poll cycles: %s. "
+                            "Triggering re-authentication.",
+                            first_rejecting_device,
+                            self._consecutive_transient_auth_failures,
+                            first_rejection_error,
+                        )
+                        self._set_auth_state(
+                            failed=True,
+                            reason=f"Auth failed for {first_rejecting_device} after {self._consecutive_transient_auth_failures} attempts",
+                        )
+                        cycle_failed = True
+                        self._last_poll_result = "failed"
+                        self._consecutive_timeouts = 0
+                        reauth_exc = ConfigEntryAuthFailed(
+                            f"Authentication failed after {self._consecutive_transient_auth_failures} attempts; re-authentication required"
+                        )
+                        reauth_exc.reauth_code = (
+                            ReauthReasonCode.NOVA_AUTH_TRANSIENT_EXHAUSTED
+                        )
+                        last_exception = reauth_exc
+                        self._request_poll_reauth(reauth_exc)
+                        return
+                    _LOGGER.debug(
+                        "Poll cycle booked a credential rejection (%d/%d).",
+                        self._consecutive_transient_auth_failures,
+                        _MAX_TRANSIENT_AUTH_FAILURES,
+                    )
+                elif cycle_accepted_requests:
+                    # The cycle is not counted as a failing one -- either nothing
+                    # rejected, or something rejected and a sibling answered WITH
+                    # content, which the branch above lets win -- and at least one
+                    # request was accepted. The streak is broken and the count
+                    # goes with it, together with the stored cause.
+                    #
+                    # `cycle_accepted_requests` rather than
+                    # `not cycle_booked_transient_auth` is what carries the mixed
+                    # case here. A content-bearing device zeroes both fields at
+                    # its own site, but a rejection processed AFTER it writes the
+                    # cause back; without this branch the pair would end as
+                    # (count 0, cause set) in one device order and (count 0, cause
+                    # None) in the other, from identical answers. The diagnostic
+                    # snapshot exports both fields, and a cause standing next to a
+                    # zero count names a failure that is over. Both halves are load-bearing:
+                    # without the second, a cycle in which every device timed
+                    # out or hit a 5xx would count as a clean cycle and clear a
+                    # budget on the strength of an outage. This is the
+                    # counter's everyday reset source, and it deliberately sits
+                    # on the same clock that increments it -- the device-list
+                    # refresh runs on an independent cadence, and resetting from
+                    # there starved the escalation at one ratio and escalated
+                    # non-consecutive rejections at another.
+                    #
+                    # CYCLE-WIDE is the load-bearing part of THIS reset: the
+                    # original defect was an idle BLE tag clearing the rejection
+                    # its sibling had just booked in the same pass, and a
+                    # per-device version here would hand that straight back. One
+                    # per-device reset does survive, at the location-WITH-content
+                    # site above, and it is kept on purpose because content is
+                    # the one strong proof on this path. It used to make the end
+                    # state depend on device order -- [rejection, content] ended
+                    # at 0, [content, rejection] at 1 -- which is why the streak
+                    # is now raised and judged once after the loop, gated on the
+                    # cycle-wide content tally. Both orders now end at 0.
+                    #
+                    # The measured limit of the streak rule, stated instead of
+                    # discovered later: "consecutive" is counted over cycles that
+                    # carried information. A cycle in which every device timed
+                    # out or hit a 5xx carries none, so it neither books nor
+                    # breaks. Measured consequence on a single-device account:
+                    # 403, timeout, 403, timeout, 403 yields 1, 1, 2, 2, 3 and
+                    # does escalate, although the rejections were not adjacent.
+                    # The alternative -- letting an outage break the streak --
+                    # was rejected because it reintroduces the fault this whole
+                    # change removes, absence of evidence used as evidence, and
+                    # because three pinned tests state the opposite rule for the
+                    # non-credential branches.
+                    if self._consecutive_transient_auth_failures > 0:
+                        _LOGGER.info(
+                            "Poll cycle booked no credential rejection; clearing "
+                            "%d transient auth failure(s).",
+                            self._consecutive_transient_auth_failures,
+                        )
+                        self._consecutive_transient_auth_failures = 0
+                    # Outside the guard above on purpose. In a mixed cycle the
+                    # content site has already zeroed the count, and a rejection
+                    # processed after it wrote the cause back -- so the count is
+                    # 0 here while a cause still stands. The two fields are
+                    # exported together and have to end together.
+                    self._last_transient_auth_error = None
+                    # The same reconciliation for the ACCOUNT-WIDE verdict, and
+                    # it is a third field, not a repetition of the two above.
+                    # The rejection branch sets `last_exception`, which is the
+                    # sole driver of `async_set_update_error` in the `finally`
+                    # below, and `GoogleFindMyEntity.available` follows the
+                    # coordinator's `last_update_success`. In a mixed cycle that
+                    # marked EVERY tracker unavailable although a sibling had
+                    # answered WITH CONTENT in the same pass -- the one strong
+                    # proof on this path, which this very branch has just
+                    # accepted as proof for the counter. Accepting it for the
+                    # counter and rejecting it for availability would be two
+                    # verdicts from one cycle. The non-credential 4xx branch
+                    # above already states this rule for its own case: keep
+                    # `cycle_failed`, because the cycle really did not poll every
+                    # device and the diagnostic attribute has to say so, and
+                    # withdraw only the account-wide report.
+                    #
+                    # Identity rather than truthiness, so only the rejection THIS
+                    # cycle booked is withdrawn. A timeout, a stale owner key or
+                    # an account-wide decrypt failure may have got there first
+                    # and stays: none of them is refuted by one device answering.
+                    if (
+                        first_rejection_error is not None
+                        and last_exception is first_rejection_error
+                    ):
+                        # Hand the place over rather than empty it: a failure that
+                        # had to queue behind this rejection is refuted by none of
+                        # this, and dropping it here would report the cycle as a
+                        # successful coordinator update.
+                        last_exception = independent_error
                 # No device's request was accepted: the cycle must surface.
                 # Two counters, one verdict -- see their declaration above for
                 # why they are not the same thing. Either way the device produced
@@ -2417,9 +2765,12 @@ class PollingOperations(_MixinBase):
                 # has nothing to report success about.
                 #
                 # Do NOT lean on the device list to catch this one layer up -- it
-                # is a different RPC (`nbe_list_devices`), and
-                # DEVICE_LIST_POLL_INTERVAL means most cycles reuse the cached
-                # list without calling it at all.
+                # is a different RPC (`nbe_list_devices`) on its own clock:
+                # DEVICE_LIST_POLL_INTERVAL is a fixed 300 s while the poll
+                # interval is configurable between 60 and 3600 s. Below 300 s most
+                # cycles reuse the cached list without calling it at all; at the
+                # default of 300 s it is refreshed in nearly every cycle. The
+                # first reason stands on its own either way.
                 #
                 # Read the check for exactly what it tests. The equality is over
                 # the SUM, so a cycle in which one tracker was rejected and every
@@ -2434,7 +2785,8 @@ class PollingOperations(_MixinBase):
                 # `LocationRequestNotAcceptedError` itself, so the `api.py`
                 # handlers that return `{}` for those four no longer stand
                 # between the failure and this loop, and the empty dict comes
-                # from the no-location fallthrough (`api.py:1427`), which sits
+                # from the no-location fallthrough (`api.py`, the bare `return {}` after
+                # the "No location data for %s" debug), which sits
                 # after the request.
                 #
                 # It does NOT prove that the request was accepted, and the guard

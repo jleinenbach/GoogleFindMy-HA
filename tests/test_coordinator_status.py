@@ -34,7 +34,14 @@ from custom_components.googlefindmy.coordinator import (
     FcmStatus,
     GoogleFindMyCoordinator,
 )
+from custom_components.googlefindmy.coordinator.polling import (
+    _MAX_TRANSIENT_AUTH_FAILURES,
+)
 from custom_components.googlefindmy.device_tracker import GoogleFindMyDeviceTracker
+from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker.decrypt_locations import (
+    StaleOwnerKeyError,
+)
+from custom_components.googlefindmy.NovaApi.nova_request import NovaAuthError
 from tests.helpers import drain_loop
 
 
@@ -957,3 +964,940 @@ def test_issue_183_status_stuck_on_false_readiness_then_recovers(
     dummy_api.is_push_ready = lambda: True
     loop.run_until_complete(coordinator._async_update_data())
     assert coordinator.fcm_status.state == FcmStatus.CONNECTED
+
+
+# --------------------------------------------------------------------------
+# The device list as the proof source for the transient auth counter.
+#
+# Moving the counter reset behind the empty guard in the poll cycle takes away
+# its only everyday reset source: a fleet of idle BLE tags returns empty and no
+# longer clears anything. Without a replacement a counter that once reached 2
+# would sit there forever, and a single later hiccup would ask a user with a
+# perfectly good login to sign in again.
+#
+# ``async_get_basic_device_list`` is the strongest proof source in the tree:
+# it has no non-throwing error exit, so a non-throwing return means Nova
+# accepted the ACCOUNT token. An expired login raises ``ConfigEntryAuthFailed``
+# and never reaches the reset, which is what separates this source from the
+# poll path it replaced.
+#
+# History, because two of the tests below now assert the inverse of what they
+# once did: AP-2 made this refresh the transient counter's everyday reset
+# source as well. AP-7 took that half back. The proof is sound for what it
+# proves -- the auth state is still cleared here -- but the counter counts
+# consecutive POLL CYCLES in which the action RPC rejected, and this refresh
+# runs on an independent cadence (a fixed 300 s against a 60..3600 s option).
+# Zeroing a per-cycle counter from a foreign clock produced starvation at one
+# ratio and premature escalation at another. See the AP-7 block at the end of
+# this file for both, each pinned as a measurement.
+# --------------------------------------------------------------------------
+
+
+def test_a_fresh_device_list_no_longer_resets_the_transient_auth_counter(
+    coordinator: GoogleFindMyCoordinator, dummy_api: _DummyAPI
+) -> None:
+    """A refresh proves the account token; it does not break the streak.
+
+    Inverted deliberately rather than deleted: under AP-2 this asserted zero.
+    What the refresh proves is unchanged and still used -- the auth state is
+    cleared a few lines up. What it does not prove is that the action RPC
+    accepts the same token again, and that is what the counter counts.
+    """
+
+    dummy_api.device_list = [{"id": "dev-1", "name": "Device"}]
+    coordinator._consecutive_transient_auth_failures = 2
+
+    loop = coordinator.hass.loop
+    loop.run_until_complete(coordinator._async_update_data())
+
+    assert coordinator._consecutive_transient_auth_failures == 2
+
+
+def test_a_cached_device_list_does_not_reset_the_counter(
+    coordinator: GoogleFindMyCoordinator, dummy_api: _DummyAPI
+) -> None:
+    """A skipped refresh proves nothing at all, for the counter or the state.
+
+    The cached branch never talks to Nova. Since AP-7 no refresh clears the
+    counter anyway, so this now pins the weaker of two claims -- but it pins
+    the one that would break first if the auth-state reset ever drifted out of
+    the fetch branch: a verdict earned by something that did not happen.
+    """
+
+    dummy_api.device_list = [{"id": "dev-1", "name": "Device"}]
+    coordinator._last_device_list = [{"id": "dev-1", "name": "Device"}]
+    coordinator._last_list_poll_mono = time.monotonic()
+    coordinator._consecutive_transient_auth_failures = 2
+
+    loop = coordinator.hass.loop
+    loop.run_until_complete(coordinator._async_update_data())
+
+    assert coordinator._consecutive_transient_auth_failures == 2
+
+
+def test_a_fresh_device_list_no_longer_clears_the_last_transient_error(
+    coordinator: GoogleFindMyCoordinator, dummy_api: _DummyAPI
+) -> None:
+    """The stored cause travels with the counter, wherever that is cleared.
+
+    Separate from the counter assertion on purpose: the diagnostic snapshot
+    exports both, and the pair has to stay consistent. Under AP-2 both were
+    cleared here; under AP-7 both are cleared by the cycle that breaks the
+    streak. What must never happen is one without the other -- a zero counter
+    beside a cause names a failure that is over, a standing counter beside no
+    cause names one nobody can explain.
+    """
+
+    dummy_api.device_list = [{"id": "dev-1", "name": "Device"}]
+    coordinator._consecutive_transient_auth_failures = 2
+    coordinator._last_transient_auth_error = "expired"
+
+    loop = coordinator.hass.loop
+    loop.run_until_complete(coordinator._async_update_data())
+
+    assert coordinator._last_transient_auth_error == "expired"
+
+
+def test_a_failing_device_list_leaves_the_counter_alone(
+    coordinator: GoogleFindMyCoordinator, dummy_api: _DummyAPI
+) -> None:
+    """An expired login cannot mask itself through the refresh branch.
+
+    This is the guard that keeps the branch honest: everything it resets sits
+    AFTER the await, so a raising call never reaches it. It covered the counter
+    under AP-2 and covers `_set_auth_state(failed=False)` since AP-7; the
+    counter assertion is kept because the ordering is what is under test and a
+    reset drifting back above the await would break both at once.
+    """
+
+    dummy_api.raise_auth = True
+    coordinator._consecutive_transient_auth_failures = 2
+    coordinator._last_transient_auth_error = "expired"
+
+    loop = coordinator.hass.loop
+    with pytest.raises(ConfigEntryAuthFailed):
+        loop.run_until_complete(coordinator._async_update_data())
+
+    assert coordinator._consecutive_transient_auth_failures == 2
+    assert coordinator._last_transient_auth_error == "expired"
+
+
+# --------------------------------------------------------------------------
+# AP-6, kept as history because AP-7 replaced its mechanism.
+#
+# AP-2 made the device-list refresh the everyday reset source for the transient
+# auth counter. That fixed one starvation and created another, and an external
+# reviewer found it before a user did: at the default cadence both the list and
+# the location cycle run every 300 seconds, and `_async_update_data` fetches the
+# list BEFORE it schedules the location cycle. A tracker whose action RPC keeps
+# returning a non-permanent credential rejection therefore had its counter
+# zeroed immediately before every attempt, could only ever climb back to 1, and
+# never reached the threshold of 3.
+#
+# AP-6 answered that with a marker: while a booked location failure stood
+# unproven, no refresh cleared the count. Two further reviews then found the two
+# halves of what the marker could not fix, because it treated a symptom. The
+# counter was incremented per poll cycle and zeroed from the device-list
+# cadence, and the two clocks are independently configurable -- so every ratio
+# produced an error. AP-7 removed the marker entirely and moved the reset onto
+# the clock that counts. The tests below survive as the refresh-side pins of
+# that rule: no refresh, however often it runs, clears the count.
+# --------------------------------------------------------------------------
+
+
+def test_a_booked_location_failure_survives_the_next_list_refresh(
+    coordinator: GoogleFindMyCoordinator, dummy_api: _DummyAPI
+) -> None:
+    """A refresh that follows a booked failure must not clear the counter."""
+
+    dummy_api.device_list = [{"id": "dev-1", "name": "Device"}]
+    coordinator._consecutive_transient_auth_failures = 2
+    coordinator._last_transient_auth_error = "rejected"
+
+    loop = coordinator.hass.loop
+    loop.run_until_complete(coordinator._async_update_data())
+
+    assert coordinator._consecutive_transient_auth_failures == 2
+    assert coordinator._last_transient_auth_error == "rejected"
+
+
+def test_a_clean_cycle_clears_the_counter_without_any_refresh(
+    coordinator: GoogleFindMyCoordinator, dummy_api: _DummyAPI
+) -> None:
+    """The cycle that breaks the streak clears the count by itself.
+
+    This is the guard against over-correcting. Suppressing every reset would
+    strand any counter a one-off hiccup ever raised, which is the defect the
+    device-list reset was introduced to remove. Under AP-6 the clean cycle only
+    released a marker and the following refresh did the clearing; the name of
+    this test said so and is inverted here on purpose. No refresh runs in the
+    second half below, and the counter still reaches zero.
+    """
+
+    dummy_api.device_list = [{"id": "dev-1", "name": "Device"}]
+    coordinator._consecutive_transient_auth_failures = 1
+    coordinator._last_transient_auth_error = "rejected"
+
+    loop = coordinator.hass.loop
+    # A refresh alone proves nothing about the action RPC and must not clear it.
+    loop.run_until_complete(coordinator._async_update_data())
+    assert coordinator._consecutive_transient_auth_failures == 1
+
+    # A poll cycle that books no rejection is what clears it -- with no refresh
+    # anywhere near it.
+    coordinator.async_set_update_error = Mock()
+    del coordinator._async_start_poll_cycle
+    dummy_api.async_get_device_location = AsyncMock(return_value={})
+    loop.run_until_complete(
+        coordinator._async_start_poll_cycle([{"id": "dev-1", "name": "Device"}])
+    )
+    assert coordinator._consecutive_transient_auth_failures == 0
+    assert coordinator._last_transient_auth_error is None
+
+
+def test_two_refreshes_between_two_polls_do_not_clear_the_counter(
+    coordinator: GoogleFindMyCoordinator, dummy_api: _DummyAPI
+) -> None:
+    """No number of list refreshes clears the count.
+
+    Nothing in the code couples the two cadences. `DEVICE_LIST_POLL_INTERVAL`
+    is a fixed 300 s while `location_poll_interval` is an option up to 3600 s,
+    and a deferred empty list re-fetches on the next 60 s tick without moving
+    `_last_list_poll_mono`. Under AP-6 this pinned that a marker must not be
+    consumed by a refresh; three refreshes made the point past any off-by-one
+    reading of "consumes one". Under AP-7 there is no marker to consume, and
+    the same three refreshes pin the stronger rule directly.
+
+    Scope, stated rather than implied by the name: this drives no poll cycle at
+    all (the fixture's `_async_start_poll_cycle` stub stays in place). It
+    measures the refresh side of the rule. The booking site and the real
+    ordering are measured by
+    `test_the_production_order_still_reaches_the_reauth_threshold`.
+    """
+
+    dummy_api.device_list = [{"id": "dev-1", "name": "Device"}]
+    coordinator._consecutive_transient_auth_failures = 2
+    coordinator._last_transient_auth_error = "rejected"
+
+    loop = coordinator.hass.loop
+    for _ in range(3):
+        # Flag rather than a backdated baseline: `_last_list_poll_mono = 0.0`
+        # only reads as "long ago" while `time.monotonic()` already exceeds
+        # DEVICE_LIST_POLL_INTERVAL, which is true on a long-running workstation
+        # and false on a freshly booted CI runner.
+        coordinator._force_device_list_refresh = True
+        loop.run_until_complete(coordinator._async_update_data())
+
+    assert coordinator._consecutive_transient_auth_failures == 2
+    assert coordinator._last_transient_auth_error == "rejected"
+
+
+def test_the_production_order_still_reaches_the_reauth_threshold(
+    coordinator: GoogleFindMyCoordinator, dummy_api: _DummyAPI
+) -> None:
+    """Three failing cycles escalate even though a list refresh precedes each.
+
+    The other tests in this block set the marker by hand and therefore prove
+    the reset rule, not the ordering it exists for. This one drives the real
+    `_async_update_data` -> `_async_start_poll_cycle` sequence with the real
+    booking site, which is exactly what the previous revision's tests missed:
+    they called `_async_start_poll_cycle()` directly and so never saw the list
+    refresh that ran before it in production.
+    """
+
+    dummy_api.device_list = [{"id": "dev-1", "name": "Device"}]
+    location_calls: list[str] = []
+
+    async def _reject(device_id: str, *_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        location_calls.append(device_id)
+        # 403, not 401: `is_credential_rejection` records that a 401 surviving
+        # the refresh sequence is raised as NovaAuthPermanentError instead, so
+        # 403 is the only plain credential rejection a handler actually sees.
+        # The seam below this one -- api.py mapping a transport status onto this
+        # exception -- is pinned in test_api_basics.py and deliberately not
+        # re-tested here; this test owns the coordinator's ordering, not the
+        # transport's classification.
+        raise NovaAuthError(403, "action rejected")
+
+    dummy_api.async_get_device_location = _reject
+
+    # Run the real poll cycle: the ordering under test exists only between the
+    # two, so the fixture's AsyncMock would measure nothing.
+    del coordinator._async_start_poll_cycle
+    # The cycle reports a failed update through the DataUpdateCoordinator base;
+    # without a stub the AttributeError lands in the fire-and-forget task and is
+    # swallowed, which would let this test pass over a broken cycle.
+    coordinator.async_set_update_error = Mock()
+
+    tasks: list[asyncio.Task[Any]] = []
+    original_create = coordinator.hass.async_create_task
+
+    def _tracking_create(coro: Any, *, name: str | None = None) -> asyncio.Task[Any]:
+        task = original_create(coro, name=name)
+        tasks.append(task)
+        return task
+
+    coordinator.hass.async_create_task = _tracking_create
+
+    loop = coordinator.hass.loop
+    for _ in range(_MAX_TRANSIENT_AUTH_FAILURES):
+        # Both cadences made due without touching absolute monotonic values:
+        # the flag for the list, the coordinator's own helper for the poll.
+        # Zeroing the baselines instead would tie the test to the host's
+        # uptime.
+        coordinator._force_device_list_refresh = True
+        coordinator.force_poll_due()
+        loop.run_until_complete(coordinator._async_update_data())
+        if tasks:
+            # gather() re-raises, so a cycle that died on the way to the
+            # booking site fails this test instead of being reported as a
+            # counter that simply did not move.
+            loop.run_until_complete(asyncio.gather(*tasks))
+            tasks.clear()
+
+    assert len(location_calls) == _MAX_TRANSIENT_AUTH_FAILURES
+    assert coordinator._consecutive_transient_auth_failures >= (
+        _MAX_TRANSIENT_AUTH_FAILURES
+    )
+    assert coordinator.config_entry.reauth_calls == 1
+    # The message a user reads must name the tracker that was rejected. The
+    # verdict moved out of the device loop, so the name is carried to the end of
+    # the cycle by hand; without this assertion a mutation dropping that carry
+    # survived the whole tree and the Repairs issue would have read "None".
+    assert coordinator._auth_error_message is not None
+    assert "Device" in coordinator._auth_error_message
+
+
+# --------------------------------------------------------------------------
+# AP-7: the streak has to be broken on the clock that counts it.
+#
+# AP-6 bound the release of the booked failure to the poll cycle, which removed
+# the dependency on how the two cadences line up but left the COUNT itself on
+# the list refresh. Two external reviews then found the two halves of the same
+# root cause, and both are reproduced as measurements below: the counter was
+# incremented per poll cycle and zeroed by a device-list refresh, and the two
+# clocks are independently configurable. Every ratio produces one of the two
+# errors -- a long poll interval starves the escalation, a short one escalates
+# rejections that were never consecutive.
+#
+# So the cycle that breaks the streak now zeroes the count itself, cycle-wide.
+# `_set_auth_state(failed=False)` stays on the list refresh, where it belongs:
+# that branch proves the ACCOUNT token, which is what the auth state is about.
+# It says nothing about the action RPC accepting that token, which is what the
+# counter is about, and conflating the two is what produced both findings.
+#
+# Cycle-wide, not per device, is the load-bearing word: the original defect was
+# an idle BLE tag clearing the rejection its sibling had just booked. A cycle
+# counts as clean only when NO device rejected in it.
+# --------------------------------------------------------------------------
+
+
+def test_a_clean_cycle_between_rejections_breaks_the_streak(
+    coordinator: GoogleFindMyCoordinator, dummy_api: _DummyAPI
+) -> None:
+    """Rejections separated by a clean cycle must not accumulate to the threshold.
+
+    Measured before the fix: with a 60 s location interval and the fixed 300 s
+    device-list interval, up to five poll cycles run without a single refresh.
+    Three 403s at minutes 0, 2 and 4, each separated by a clean empty-result
+    cycle, then reached the threshold and forced a reauth although they were
+    never consecutive. The counter is named `_consecutive_...`; the streak has
+    to be broken by the cycle that breaks it, on that cycle's own clock, not by
+    a refresh running on a slower and independently configurable one.
+
+    The list stays cached on purpose: the absence of a refresh IS the case.
+    """
+
+    device = {"id": "dev-1", "name": "Device"}
+    dummy_api.device_list = [device]
+    coordinator._last_device_list = [device]
+    coordinator._last_list_poll_mono = time.monotonic()
+
+    reject_next = {"value": True}
+    attempts: list[str] = []
+
+    async def _alternate(device_id: str, *_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        attempts.append(device_id)
+        if reject_next["value"]:
+            # 403 rather than 401: a 401 surviving the refresh sequence is
+            # raised as NovaAuthPermanentError, so 403 is the only plain
+            # credential rejection a handler sees.
+            raise NovaAuthError(403, "action rejected")
+        return {}
+
+    dummy_api.async_get_device_location = _alternate
+    del coordinator._async_start_poll_cycle
+    # Without a stub the base class's AttributeError lands in the fire-and-
+    # forget task and is swallowed, which would report a broken cycle as a
+    # counter that simply did not move.
+    coordinator.async_set_update_error = Mock()
+
+    tasks: list[asyncio.Task[Any]] = []
+    original_create = coordinator.hass.async_create_task
+
+    def _tracking_create(coro: Any, *, name: str | None = None) -> asyncio.Task[Any]:
+        task = original_create(coro, name=name)
+        tasks.append(task)
+        return task
+
+    coordinator.hass.async_create_task = _tracking_create
+
+    loop = coordinator.hass.loop
+    counts: list[int] = []
+    for cycle in range(5):
+        reject_next["value"] = cycle % 2 == 0
+        # The coordinator's own helper rather than a zeroed baseline: an
+        # absolute monotonic value measures the host's uptime along with the
+        # behaviour.
+        coordinator.force_poll_due()
+        loop.run_until_complete(coordinator._async_update_data())
+        if tasks:
+            # gather() re-raises, so a cycle that died before reaching the
+            # booking site fails this test instead of passing quietly.
+            loop.run_until_complete(asyncio.gather(*tasks))
+            tasks.clear()
+        counts.append(coordinator._consecutive_transient_auth_failures)
+
+    # Every cycle actually asked. Without this the zeros could equally come
+    # from the no-pollable-device reset, which is a different rule with its own
+    # test, and the assertion below would not measure what its name says.
+    assert len(attempts) == 5
+    # Before the fix this read [1, 1, 2, 2, 3] and raised a reauth.
+    assert counts == [1, 0, 1, 0, 1]
+    assert coordinator.config_entry.reauth_calls == 0
+
+
+def test_a_cycle_with_no_pollable_device_clears_the_stale_count(
+    coordinator: GoogleFindMyCoordinator, dummy_api: _DummyAPI
+) -> None:
+    """A budget must not be stranded when no cycle can run at all.
+
+    If every tracker is disabled or ignored after a failure was booked, no poll
+    cycle runs, so the release path that the cycle owns is unreachable and the
+    count would stand indefinitely. Re-enabling a tracker weeks later would
+    then let its first rejection inherit the old failures and force a premature
+    reauth. A pass that finds nothing to poll saw no rejection either, which is
+    the same evidence a clean cycle provides, so it clears the streak the same
+    way.
+
+    Deliberately measured on the pre-cooldown list: a device held back only by
+    its poll cooldown has not proved anything, and clearing on that would be a
+    starvation path of its own.
+    """
+
+    device = {"id": "dev-1", "name": "Device"}
+    dummy_api.device_list = [device]
+    # Cached list: no refresh runs, so nothing but the rule under test can
+    # clear the counter.
+    coordinator._last_device_list = [device]
+    coordinator._last_list_poll_mono = time.monotonic()
+    # Known to the registry but not enabled for polling -- the "disabled
+    # tracker" case, reached without touching the ignore set. The account still
+    # HAS a device; an empty list is a different situation (an outage) and
+    # deliberately clears nothing.
+    coordinator._devices_with_entry = {"dev-1"}
+    coordinator._enabled_poll_device_ids = set()
+    coordinator._consecutive_transient_auth_failures = 2
+    coordinator._last_transient_auth_error = "rejected"
+
+    loop = coordinator.hass.loop
+    loop.run_until_complete(coordinator._async_update_data())
+
+    assert coordinator._consecutive_transient_auth_failures == 0
+    assert coordinator._last_transient_auth_error is None
+
+
+def test_an_empty_device_list_does_not_clear_the_count(
+    coordinator: GoogleFindMyCoordinator, dummy_api: _DummyAPI
+) -> None:
+    """An outage is not evidence, and an empty list is an outage.
+
+    The no-pollable-device reset asks for two things, and the second one is the
+    guard: the account must HAVE devices while none of them is pollable. A list
+    that came back empty satisfies "nothing to poll" just as well, and the
+    two-pass empty-list quorum lets a backend hiccup through as an accepted
+    empty list. Clearing a rejection budget on that would be the same fault the
+    end-of-cycle condition refuses one layer along -- absence of evidence used
+    as evidence.
+    """
+
+    dummy_api.device_list = []
+    coordinator._last_device_list = []
+    coordinator._last_list_poll_mono = time.monotonic()
+    # Past the cold-start guard: a first-ever empty list raises UpdateFailed and
+    # would never reach the branch under test. This is the later hiccup, the one
+    # the two-pass quorum accepts.
+    coordinator._last_nonempty_wall = time.time()
+    coordinator._force_device_list_refresh = True
+    coordinator._consecutive_transient_auth_failures = 2
+    coordinator._last_transient_auth_error = "rejected"
+
+    loop = coordinator.hass.loop
+    loop.run_until_complete(coordinator._async_update_data())
+
+    assert coordinator._consecutive_transient_auth_failures == 2
+    assert coordinator._last_transient_auth_error == "rejected"
+
+
+def test_two_rejecting_devices_count_as_one_failing_cycle(
+    coordinator: GoogleFindMyCoordinator, dummy_api: _DummyAPI
+) -> None:
+    """The streak counts cycles, so a cycle may raise it by at most one.
+
+    The increment sat inside the device loop and therefore ran once per
+    rejecting tracker. Two broken trackers made a single cycle worth two, so the
+    threshold of three was reached in the middle of the second cycle instead of
+    at the end of the third. The name of the counter says cycles and the reauth
+    message says "persisted across %d poll cycles", so the per-device tally was
+    wrong in both directions: it escalated early, and it reported a number that
+    was not a cycle count.
+    """
+
+    devices = [
+        {"id": "dev-1", "name": "One"},
+        {"id": "dev-2", "name": "Two"},
+    ]
+    dummy_api.device_list = devices
+    coordinator._last_device_list = devices
+    coordinator._last_list_poll_mono = time.monotonic()
+
+    async def _reject(device_id: str, *_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        raise NovaAuthError(403, "action rejected")
+
+    dummy_api.async_get_device_location = _reject
+    del coordinator._async_start_poll_cycle
+    coordinator.async_set_update_error = Mock()
+
+    tasks: list[asyncio.Task[Any]] = []
+    original_create = coordinator.hass.async_create_task
+
+    def _tracking_create(coro: Any, *, name: str | None = None) -> asyncio.Task[Any]:
+        task = original_create(coro, name=name)
+        tasks.append(task)
+        return task
+
+    coordinator.hass.async_create_task = _tracking_create
+
+    loop = coordinator.hass.loop
+    counts: list[int] = []
+    for _ in range(2):
+        coordinator.force_poll_due()
+        loop.run_until_complete(coordinator._async_update_data())
+        if tasks:
+            loop.run_until_complete(asyncio.gather(*tasks))
+            tasks.clear()
+        counts.append(coordinator._consecutive_transient_auth_failures)
+
+    # Measured before the fix: [2, 3], with the reauth raised inside cycle two.
+    assert counts == [1, 2]
+    assert coordinator.config_entry.reauth_calls == 0
+    # The cause is recorded per rejecting device even though the count is not.
+    # Without this the "record it every time" half of the rule is unpinned: a
+    # mutation that drops the assignment survived every other test in the tree.
+    assert coordinator._last_transient_auth_error is not None
+    assert "403" in coordinator._last_transient_auth_error
+
+
+def test_the_reauth_verdict_does_not_depend_on_device_order(
+    coordinator: GoogleFindMyCoordinator, dummy_api: _DummyAPI
+) -> None:
+    """The same answers must give the same verdict, whichever device answers first.
+
+    The threshold check sat inside the device loop and returned as soon as it
+    fired, so a cycle that entered at 2 reauthed on the first rejecting tracker
+    and never asked the siblings. If a sibling would have returned a location
+    WITH content -- the one strong proof on this path, which clears the counter
+    outright -- the reauth was raised over evidence the cycle held but had not
+    looked at yet. Reversing the device order produced the opposite outcome from
+    identical responses.
+
+    The verdict now belongs to the cycle: every device is asked, then the cycle
+    decides. Content beats a rejection, because content is proof and a
+    non-permanent rejection is not.
+    """
+
+    devices = [
+        {"id": "dev-bad", "name": "Bad"},
+        {"id": "dev-good", "name": "Good"},
+    ]
+
+    async def _by_device(device_id: str, *_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        if device_id == "dev-bad":
+            raise NovaAuthError(403, "action rejected")
+        return {
+            "latitude": 37.0,
+            "longitude": -122.0,
+            "last_seen": int(time.time()),
+        }
+
+    # Without this the fixture's AsyncMock stands in for the cycle and the test
+    # measures nothing at all -- it passed that way once, with the counter
+    # simply untouched.
+    del coordinator._async_start_poll_cycle
+
+    for order in (devices, list(reversed(devices))):
+        coordinator._consecutive_transient_auth_failures = 2
+        coordinator._last_transient_auth_error = "rejected"
+        coordinator.config_entry.reauth_calls = 0
+        coordinator.async_set_update_error = Mock()
+        dummy_api.async_get_device_location = _by_device
+
+        loop = coordinator.hass.loop
+        loop.run_until_complete(coordinator._async_start_poll_cycle(order))
+
+        first = order[0]["name"]
+        assert coordinator.config_entry.reauth_calls == 0, f"reauth with {first} first"
+        assert coordinator._consecutive_transient_auth_failures == 0, (
+            f"counter not cleared with {first} first"
+        )
+        # The mock was here before this assertion was, and that gap was the
+        # finding: the cycle accepted the content as proof for the counter and
+        # still reported the rejection account-wide, so every tracker entity
+        # went unavailable next to the one that had just answered. A mocked
+        # collaborator that nothing asserts against measures nothing.
+        assert coordinator.async_set_update_error.call_args_list == [], (
+            f"account marked failed with {first} first: "
+            f"{coordinator.async_set_update_error.call_args_list}"
+        )
+
+
+def test_content_withdraws_only_the_rejection_not_a_timeout(
+    coordinator: GoogleFindMyCoordinator, dummy_api: _DummyAPI
+) -> None:
+    """Content refutes the rejection it stands next to, and nothing else.
+
+    The mixed-cycle branch withdraws the account-wide report of a credential
+    rejection once a sibling has answered WITH content. That withdrawal is bound
+    to the identity of the rejection this cycle booked, and this test is why: a
+    timeout reached ``last_exception`` first, and one device answering says
+    nothing about a device that never answered at all. Dropping the identity
+    check would let content silently swallow an unrelated failure report.
+
+    The push transport is taken down on purpose. With FCM connected a timeout is
+    deliberately ignored to keep the status healthy, so it would never reach
+    ``last_exception`` and this test would measure nothing -- it did exactly
+    that on the first attempt, and passed vacuously with an empty call list.
+    """
+
+    devices = [
+        {"id": "dev-slow", "name": "Slow"},
+        {"id": "dev-bad", "name": "Bad"},
+        {"id": "dev-good", "name": "Good"},
+    ]
+
+    async def _by_device(device_id: str, *_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        if device_id == "dev-slow":
+            raise TimeoutError
+        if device_id == "dev-bad":
+            raise NovaAuthError(403, "action rejected")
+        return {
+            "latitude": 37.0,
+            "longitude": -122.0,
+            "last_seen": int(time.time()),
+        }
+
+    # Without this the fixture's AsyncMock stands in for the cycle and nothing
+    # below measures anything.
+    del coordinator._async_start_poll_cycle
+
+    # No push transport: this is what makes the timeout carry a report at all.
+    coordinator._fcm_status_state = None
+    assert coordinator.is_fcm_connected is False
+
+    # Entering at 2 on purpose. At 0 the "the rejection is withdrawn" assertion
+    # below would hold whatever the branch did, and the sentence would claim a
+    # measurement it never made.
+    coordinator._consecutive_transient_auth_failures = 2
+    coordinator._last_transient_auth_error = "rejected"
+    coordinator.config_entry.reauth_calls = 0
+    coordinator.async_set_update_error = Mock()
+    dummy_api.async_get_device_location = _by_device
+
+    loop = coordinator.hass.loop
+    loop.run_until_complete(coordinator._async_start_poll_cycle(devices, force=True))
+
+    # The rejection is withdrawn (streak cleared, no reauth), the timeout is not.
+    assert coordinator._consecutive_transient_auth_failures == 0
+    assert coordinator._last_transient_auth_error is None
+    assert coordinator.config_entry.reauth_calls == 0
+    reported = coordinator.async_set_update_error.call_args_list
+    assert len(reported) == 1, f"expected the timeout alone, got {reported}"
+    surfaced = reported[0].args[0]
+    assert not isinstance(surfaced, NovaAuthError), (
+        f"the withdrawn rejection surfaced anyway: {surfaced!r}"
+    )
+    assert isinstance(surfaced.__cause__, TimeoutError), (
+        f"expected the timeout to survive, got {surfaced!r}"
+    )
+
+
+@pytest.mark.parametrize(
+    ("raised", "expect_cause"),
+    [
+        (TimeoutError(), True),
+        (StaleOwnerKeyError("tracker v1 < v2"), False),
+        (RuntimeError("boom"), False),
+    ],
+    ids=["timeout", "stale-owner-key", "generic"],
+)
+def test_a_later_failure_survives_the_rejection_it_had_to_queue_behind(
+    coordinator: GoogleFindMyCoordinator,
+    dummy_api: _DummyAPI,
+    raised: BaseException,
+    expect_cause: bool,
+) -> None:
+    """An independent failure must outlive a rejection that is later withdrawn.
+
+    ``last_exception`` is a first-come slot, and a credential rejection holds it
+    only PROVISIONALLY: the mixed-cycle branch withdraws that report once a
+    sibling answers with content. If the rejection arrives FIRST, a later timeout
+    finds the slot taken and drops its own report, and the withdrawal then empties
+    the slot -- so ``async_set_update_error`` is never called and the coordinator
+    calls the cycle a success although a device never answered at all.
+
+    This is the mirror ordering of
+    ``test_content_withdraws_only_the_rejection_not_a_timeout``, which has the
+    timeout reach the slot first. That one passes either way; only this order
+    measures the displacement.
+
+    Parametrised over ALL THREE first-come slots on this path, because the
+    displacement rule is written three times and one case leaves two of them
+    unmeasured: mutating the stale-owner-key and the generic slot back to
+    ``last_exception is None`` both SURVIVED the timeout-only version of this
+    test.
+    """
+
+    devices = [
+        {"id": "dev-bad", "name": "Bad"},
+        {"id": "dev-slow", "name": "Slow"},
+        {"id": "dev-good", "name": "Good"},
+    ]
+
+    async def _by_device(device_id: str, *_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        if device_id == "dev-bad":
+            raise NovaAuthError(403, "action rejected")
+        if device_id == "dev-slow":
+            raise raised
+        return {
+            "latitude": 37.0,
+            "longitude": -122.0,
+            "last_seen": int(time.time()),
+        }
+
+    # Without this the fixture's AsyncMock stands in for the cycle and nothing
+    # below measures anything.
+    del coordinator._async_start_poll_cycle
+
+    # No push transport: with FCM connected the timeout is deliberately ignored
+    # to keep the status healthy and would never reach the slot at all.
+    coordinator._fcm_status_state = None
+    assert coordinator.is_fcm_connected is False
+
+    coordinator._consecutive_transient_auth_failures = 2
+    coordinator._last_transient_auth_error = "rejected"
+    coordinator.config_entry.reauth_calls = 0
+    coordinator.async_set_update_error = Mock()
+    # The timeout and generic branches have no `continue`, so the inter-device
+    # delay (default 5s) would be slept for real. This test decides a branch, not
+    # a duration.
+    coordinator.device_poll_delay = 0
+    dummy_api.async_get_device_location = _by_device
+
+    loop = coordinator.hass.loop
+    loop.run_until_complete(coordinator._async_start_poll_cycle(devices, force=True))
+
+    # The content still withdraws the rejection: streak cleared, no reauth.
+    assert coordinator._consecutive_transient_auth_failures == 0
+    assert coordinator._last_transient_auth_error is None
+    assert coordinator.config_entry.reauth_calls == 0
+
+    # ... but the timeout has to survive it.
+    reported = coordinator.async_set_update_error.call_args_list
+    assert len(reported) == 1, (
+        f"the failure was swallowed with the withdrawn rejection, got {reported}"
+    )
+    surfaced = reported[0].args[0]
+    assert not isinstance(surfaced, NovaAuthError), (
+        f"the withdrawn rejection surfaced anyway: {surfaced!r}"
+    )
+    if expect_cause:
+        # The timeout branch wraps: the original sits in ``__cause__``.
+        assert isinstance(surfaced.__cause__, type(raised)), (
+            f"expected {type(raised).__name__} to survive, got {surfaced!r}"
+        )
+    else:
+        # The other two slots store the exception itself.
+        assert surfaced is raised, (
+            f"expected {type(raised).__name__} to survive, got {surfaced!r}"
+        )
+
+
+def test_without_content_the_rejection_keeps_the_report_it_booked(
+    coordinator: GoogleFindMyCoordinator, dummy_api: _DummyAPI
+) -> None:
+    """No content, no withdrawal -- so the rejection must keep the report.
+
+    The second slot exists because whether the withdrawal fires is only known
+    AFTER the loop. A first attempt at this simply let the later failure overwrite
+    the rejection, and in a cycle WITHOUT content that swapped the more specific
+    diagnosis (the credential rejection driving the running escalation) for the
+    less specific one ("nobody answered"). Measured: the report was
+    ``UpdateFailed('Location request timed out for Slow')`` where it should name
+    the rejection.
+    """
+
+    devices = [
+        {"id": "dev-bad", "name": "Bad"},
+        {"id": "dev-slow", "name": "Slow"},
+    ]
+
+    async def _by_device(device_id: str, *_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        if device_id == "dev-bad":
+            raise NovaAuthError(403, "action rejected")
+        raise TimeoutError
+
+    del coordinator._async_start_poll_cycle
+    coordinator._fcm_status_state = None
+    assert coordinator.is_fcm_connected is False
+    coordinator.async_set_update_error = Mock()
+    coordinator.device_poll_delay = 0
+    dummy_api.async_get_device_location = _by_device
+
+    loop = coordinator.hass.loop
+    loop.run_until_complete(coordinator._async_start_poll_cycle(devices, force=True))
+
+    reported = coordinator.async_set_update_error.call_args_list
+    assert len(reported) == 1, f"expected exactly one report, got {reported}"
+    assert isinstance(reported[0].args[0], NovaAuthError), (
+        f"the rejection was swapped for the later failure: {reported}"
+    )
+
+
+def test_only_the_provisional_rejection_gives_way_not_an_earlier_diagnosis(
+    coordinator: GoogleFindMyCoordinator, dummy_api: _DummyAPI
+) -> None:
+    """Displacement is bound to identity, so it stays a narrow exception.
+
+    The three first-come slots let a later failure displace the rejection this
+    cycle booked, because that rejection may still be withdrawn. They must not
+    become "last failure wins": a stale owner key names one tracker's outdated
+    key, a timeout only says nobody answered, and the first, more specific
+    diagnosis is the one worth reporting.
+
+    Without this the widened condition could be written as an unconditional
+    overwrite and no test would notice -- measured: mutating the timeout slot to
+    ``if True`` left every other pin on this path green.
+    """
+
+    devices = [
+        {"id": "dev-stale", "name": "Stale"},
+        {"id": "dev-slow", "name": "Slow"},
+    ]
+    stale = StaleOwnerKeyError("tracker v1 < v2")
+
+    async def _by_device(device_id: str, *_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        if device_id == "dev-stale":
+            raise stale
+        raise TimeoutError
+
+    del coordinator._async_start_poll_cycle
+
+    # No push transport, or the timeout is ignored on purpose and never competes
+    # for the slot at all.
+    coordinator._fcm_status_state = None
+    assert coordinator.is_fcm_connected is False
+
+    coordinator.async_set_update_error = Mock()
+    coordinator.device_poll_delay = 0
+    dummy_api.async_get_device_location = _by_device
+
+    loop = coordinator.hass.loop
+    loop.run_until_complete(coordinator._async_start_poll_cycle(devices, force=True))
+
+    reported = coordinator.async_set_update_error.call_args_list
+    assert len(reported) == 1, f"expected exactly one report, got {reported}"
+    assert reported[0].args[0] is stale, (
+        f"the later timeout displaced an unrelated earlier diagnosis: {reported}"
+    )
+
+
+def test_the_stored_cause_follows_the_count_in_a_mixed_cycle(
+    coordinator: GoogleFindMyCoordinator, dummy_api: _DummyAPI
+) -> None:
+    """Counter and cause must end in the same state, whichever device answers first.
+
+    The diagnostic snapshot exports both fields. A cause standing next to a zero
+    count names a failure that is over, and the pair used to depend on device
+    order: a content-bearing device zeroes both at its own site, but a rejection
+    processed after it wrote the cause back and the end-of-cycle branches skipped
+    the mixed case entirely.
+    """
+
+    devices = [
+        {"id": "dev-good", "name": "Good"},
+        {"id": "dev-bad", "name": "Bad"},
+    ]
+
+    async def _by_device(device_id: str, *_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        if device_id == "dev-bad":
+            raise NovaAuthError(403, "action rejected")
+        return {
+            "latitude": 37.0,
+            "longitude": -122.0,
+            "last_seen": int(time.time()),
+        }
+
+    del coordinator._async_start_poll_cycle
+
+    for order in (devices, list(reversed(devices))):
+        coordinator._consecutive_transient_auth_failures = 2
+        coordinator._last_transient_auth_error = "old"
+        coordinator.async_set_update_error = Mock()
+        dummy_api.async_get_device_location = _by_device
+
+        loop = coordinator.hass.loop
+        loop.run_until_complete(coordinator._async_start_poll_cycle(order))
+
+        first = order[0]["name"]
+        assert coordinator._consecutive_transient_auth_failures == 0, first
+        assert coordinator._last_transient_auth_error is None, first
+
+
+def test_a_running_cycle_blocks_the_no_pollable_device_reset(
+    coordinator: GoogleFindMyCoordinator, dummy_api: _DummyAPI
+) -> None:
+    """A cycle still in flight owns the streak; nothing else may clear it.
+
+    The poll cycle runs as a fire-and-forget task, so a coordinator refresh can
+    reach this branch while an earlier cycle is still asking its devices. If
+    every tracker was disabled in the meantime, the branch saw "nothing to poll"
+    and cleared a streak the running cycle was still spending: a streak of 2
+    became 0 and then 1 when that cycle booked its rejection, and with no further
+    cycle able to run, the escalation was lost for good.
+    """
+
+    device = {"id": "dev-1", "name": "Device"}
+    dummy_api.device_list = [device]
+    coordinator._last_device_list = [device]
+    coordinator._last_list_poll_mono = time.monotonic()
+    coordinator._devices_with_entry = {"dev-1"}
+    coordinator._enabled_poll_device_ids = set()
+    coordinator._consecutive_transient_auth_failures = 2
+    coordinator._last_transient_auth_error = "rejected"
+    # A cycle started earlier and has not finished.
+    coordinator._is_polling = True
+
+    loop = coordinator.hass.loop
+    loop.run_until_complete(coordinator._async_update_data())
+
+    assert coordinator._consecutive_transient_auth_failures == 2
+    assert coordinator._last_transient_auth_error == "rejected"
+
+    # The guard defers the reset, it does not suppress it. Once that cycle has
+    # retired, the very next refresh finds nothing to poll and no cycle in
+    # flight, and clears the final count.
+    coordinator._is_polling = False
+    loop.run_until_complete(coordinator._async_update_data())
+
+    assert coordinator._consecutive_transient_auth_failures == 0
+    assert coordinator._last_transient_auth_error is None

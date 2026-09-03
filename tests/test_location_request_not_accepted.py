@@ -5,8 +5,9 @@
 request the server ACCEPTED that had nothing to report (the healthy idle outcome of
 a BLE tag with no reporter in range) and for a request that never got that far.
 ``api.async_get_device_location`` mapped both to ``{}``, so both coordinator callers
-read every non-raising return as positive proof that the credentials work
-(``PLAN_GFMY_EMPTY_RESULT_DISTINGUISHABLE``).
+used to read every non-raising return as positive proof that the credentials work
+(``PLAN_GFMY_EMPTY_RESULT_DISTINGUISHABLE``). Those resets have since moved behind
+the empty guard as well (``PLAN_GFMY_AUTH_RESET_POSITIVE_PROOF``).
 
 ``LocationRequestNotAcceptedError`` carries the second state across the
 ``location_request.py`` boundary. This module has two halves, and mixing them up is
@@ -601,13 +602,15 @@ async def test_poll_does_not_clear_the_auth_state_on_the_signal(
 ) -> None:
     """A refused request must not be read as proof that the credentials work.
 
-    This is the defect itself, in miniature. Today the empty result reaches the
-    success path, which runs ``_set_auth_state(failed=False)`` and resets
-    ``_consecutive_transient_auth_failures`` -- so a 5xx wipes the transient-auth
-    counter on its way through, and the escalation budget never fills. The fix is
-    not that the branch below undoes the reset; it is that raising SKIPS the reset
-    entirely. Asserting the counter is untouched is what would catch a well-meant
-    "restore previous behaviour" edit putting it back.
+    This is the defect itself, in miniature. Back then the empty result reached
+    the success path, which ran ``_set_auth_state(failed=False)`` and reset
+    ``_consecutive_transient_auth_failures`` -- so a 5xx wiped the transient-auth
+    counter on its way through, and the escalation budget never filled. The fix
+    is not that the branch below undoes the reset; it is that raising SKIPS the
+    reset entirely. Since then the reset has also moved behind the empty guard,
+    so an empty result would clear nothing even if it arrived here. Asserting the
+    counter is untouched is what would catch a well-meant "restore previous
+    behaviour" edit putting either guarantee back.
     """
     loop = asyncio.get_running_loop()
     devices = [{"id": "dev-refused", "name": "Refused Tag"}]
@@ -689,12 +692,15 @@ async def test_locate_does_not_clear_the_auth_state_on_the_signal(
 ) -> None:
     """The manual path carries the same ordering defect, and the same fix.
 
-    ``coordinator/locate.py`` calls ``_set_auth_state(failed=False)`` immediately
-    after the api call and BEFORE its empty-result guard, so a refused manual
-    locate clears the account's auth-failure state exactly as the poll loop does.
-    Raising skips it. ``note_error`` is the per-tracker DIAGNOSTIC hook, not a
-    counter, and the sibling transient handler calls it by design -- so its use
-    here is asserted as intended behaviour rather than tolerated.
+    ``coordinator/locate.py`` used to call ``_set_auth_state(failed=False)``
+    immediately after the api call and BEFORE its empty-result guard, so a
+    refused manual locate cleared the account's auth-failure state exactly as the
+    poll loop did. Raising skips it, and the reset has since moved behind that
+    guard as well -- see
+    ``test_an_empty_manual_locate_does_not_clear_the_auth_state``. ``note_error``
+    is the per-tracker DIAGNOSTIC hook, not a counter, and the sibling transient
+    handler calls it by design -- so its use here is asserted as intended
+    behaviour rather than tolerated.
     """
     coord = locate_coord
     coord.note_error = MagicMock(return_value=None)
@@ -780,23 +786,36 @@ async def test_locate_warns_and_returns_empty_on_an_unaccepted_request(
 
 
 @pytest.mark.asyncio
-async def test_locate_on_a_healthy_idle_tag_still_returns_empty_and_clears_auth_state(
+async def test_locate_on_a_healthy_idle_tag_returns_empty_and_clears_nothing(
     locate_coord: LocateStub,
 ) -> None:
-    """Drives the positive half of the rule, which no other test in the tree does.
+    """Drives the non-signal half of the seam, which no other test here does.
 
-    Every other test here injects the signal, so all of them observe the branch that
-    SKIPS the auth reset. Measured, a stubbed-out ``async_locate_device`` that did
-    nothing at all would still satisfy ``test_locate_returns_empty_on_the_signal_without_raising``
-    -- an empty dict is what doing nothing returns. The other two are not vacuous
-    that way (one asserts a log record, one asserts ``note_error``), but none of the
-    three shows that the reset still HAPPENS when it should.
+    History, kept on purpose: this function was called
+    ``test_locate_on_a_healthy_idle_tag_still_returns_empty_and_clears_auth_state``
+    and asserted that the reset still HAPPENS on an accepted-but-empty result. It
+    was written to pin the positive side of the raise-site change, at a time when
+    the reset in front of the empty guard was a known defect carried in a plan of
+    its own. That defect is now fixed, and this is the same seam read from the
+    other side.
 
-    So this is the same seam driven with the outcome the plan protects: a BLE tag
-    whose request WAS accepted and had nothing to report. There the empty result
-    still means the credentials worked, and ``_set_auth_state(failed=False)`` must
-    run. Identical return value, opposite side effect -- that difference is the
-    whole change, and this is the only place it is pinned from the positive side.
+    Why the old assertion could not survive it: an empty dict is weak evidence
+    that the request was accepted, not proof of it. Four pre-accept failures still
+    arrive here as an empty dict, and this method cannot tell them from the idle
+    tag. The reset therefore sits behind the empty guard, and an empty result now
+    clears nothing at all.
+
+    What is NOT given up: a result with content still clears the auth state, and a
+    record carrying only ``last_seen`` still counts as proof even though the method
+    returns ``{}`` for it. Both are pinned in
+    ``tests/test_coordinator_locate_basics.py``.
+
+    Every other test in this module injects the signal, so all of them observe the
+    branch that skips the reset for a different reason -- the raise, not the guard.
+    Measured, a stubbed-out ``async_locate_device`` that did nothing at all would
+    still satisfy ``test_locate_returns_empty_on_the_signal_without_raising``. This
+    one is the only place that drives the seam WITHOUT the signal, which is what
+    makes it the witness that the two mechanisms are distinct rather than one.
     """
     coord = locate_coord
     coord.api.async_get_device_location = AsyncMock(return_value={})
@@ -804,7 +823,7 @@ async def test_locate_on_a_healthy_idle_tag_still_returns_empty_and_clears_auth_
     result = await coord.async_locate_device("dev-1")
 
     assert result == {}
-    coord._set_auth_state.assert_called_once_with(failed=False)
+    coord._set_auth_state.assert_not_called()
     coord.note_error.assert_not_called()
 
 

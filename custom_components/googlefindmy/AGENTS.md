@@ -122,15 +122,17 @@ the predicate and not the type; `coordinator/polling.py`, whose `except NovaAuth
 transient-auth counter alone in both directions AND does not record the rejection as the cycle's `last_exception`;
 and `coordinator/locate.py`, whose branch does not flip the account-wide auth state. `location_request.py` names the status in its log records instead of calling every 4xx an
 authentication error, but still only re-raises -- it does not classify.
-Why the location handler raises rather than returning `{}`, since the empty return looks like the gentler option: both
-callers treat ANY non-raising return as positive proof that the credentials work. `polling.py` runs "Success path:
-ensure any previous auth error is cleared" and `locate.py` runs "Success path: clear any auth error state", and both run
-BEFORE the `if not location` guard. An empty return for a rejected device would therefore have RESET the transient-auth
-counter and cleared the auth state, which is the opposite of what those branches say. Worse, it would have done so
-PERMANENTLY: a 5xx clears up, a device deleted from the account does not, so one deleted tracker in the list would reset
-the counter every cycle and a genuinely expired sign-in on another tracker would never reach
-`_MAX_TRANSIENT_AUTH_FAILURES`. The user would never see the reauth prompt at all -- a worse outcome than the defect
-this change exists to fix. Raising keeps a rejected device out of that reset.
+Why the location handler raises rather than returning `{}`, since the empty return looks like the gentler option. The
+original reason no longer holds and is kept here as history: both callers used to treat ANY non-raising return as
+positive proof that the credentials work, running their "Success path" reset BEFORE the `if not location` guard, so an
+empty return for a rejected device would have RESET the transient-auth counter and cleared the auth state -- and
+permanently, because a 5xx clears up while a device deleted from the account does not. That reset now sits BEHIND the
+empty guard on both paths (`PLAN_GFMY_AUTH_RESET_POSITIVE_PROOF`), so raising is no longer the thing that keeps a
+rejection out of it. Raising is still right, for the reason that outlives the defect: a client rejection is a failure
+and belongs in failure handling. An empty dict would flatten it into the shape of a healthy idle tag -- no
+`cycle_failed`, no `failed` in `last_poll_result`, nothing for the post-loop guard to count -- and no caller can tell
+those two apart from the outside, which is why the outcome has to cross the boundary as an exception and not as an
+empty collection.
 Why the poll branch records the rejection without failing the coordinator UPDATE (it does fail the cycle): in the
 cycle's `finally` block `cycle_failed` and `last_exception` drive two different things. `cycle_failed` only writes
 the `last_poll_result` diagnostic attribute that `binary_sensor.py` exposes; `last_exception` drives
@@ -145,13 +147,41 @@ an oversight: every other branch there reports a condition that says something a
 neither flag, so it is not the same shape.) A side effect worth naming: while the client branch held the
 `last_exception` slot, a rejected tracker polled BEFORE a genuinely expired one made the coordinator report the
 harmless 404 and hide the 401.
+The CREDENTIAL rejection branch is the other half of that split and does set both, because a rejected credential does
+say something about the account. It is withdrawn again, once and only where the cycle already has proof to the
+contrary: the mixed-cycle branch after the loop drops `last_exception` when a sibling answered WITH content, which is
+the same proof that branch accepts for the counter. Accepting content as proof for the streak and rejecting it for
+availability would be two verdicts out of one cycle, and the second one took every tracker offline next to the device
+that had just answered. `cycle_failed` is deliberately kept, so `last_poll_result` still says the cycle did not poll
+every device. The withdrawal is bound to the IDENTITY of that cycle's rejection: a timeout or a stale owner key that
+reached the slot first stays, because one device answering refutes neither. (An account-wide decrypt failure cannot
+reach the slot before the withdrawal at all: `_finalize_cycle_decrypt_state` runs AFTER it and fills whatever the
+withdrawal left empty. It does not have to defend its place.)
+That is only half the rule, and the other half lives in the failure branches: `last_exception` is a first-come slot,
+so a rejection booked FIRST would make a later timeout drop its own report -- and the withdrawal would then empty the
+slot. The coordinator update then reports SUCCESS and every tracker stays available, although `last_poll_result` says
+failed and a device never answered at all.
+Overwriting the rejection instead would be wrong the other way round, because whether the withdrawal fires is only
+known AFTER the loop (`cycle_content_proofs`), and in a cycle without content the rejection is the more specific
+diagnosis and the cause of the running escalation. So a rejection holds the slot only PROVISIONALLY and the timeout,
+stale-owner-key and generic branches put their own report in a SECOND slot (`independent_error`); the withdrawal HANDS
+THE PLACE OVER instead of emptying it. The rejection's own slot deliberately carries none of this, because a rejection
+must not displace anything. Do NOT collapse this back to "first failure wins", and do NOT turn the second slot into a
+plain overwrite: the two halves are one rule seen from both ends.
+Pinned by `test_the_reauth_verdict_does_not_depend_on_device_order`,
+`test_content_withdraws_only_the_rejection_not_a_timeout` (timeout first),
+`test_a_later_failure_survives_the_rejection_it_had_to_queue_behind` (rejection first, over all
+three slots), `test_without_content_the_rejection_keeps_the_report_it_booked` (no withdrawal, so the
+rejection stays) and `test_only_the_provisional_rejection_gives_way_not_an_earlier_diagnosis`.
 The all-rejected case is handled after the loop, not in the branch: whether a rejection is per-device or
 account-wide is only knowable once every device has been tried, the same reasoning by which
 `_finalize_cycle_decrypt_state` defers the decrypt verdict. If `cycle_rejected_devices == len(devices)` every device
 was refused, which is account-wide on the rejections' own terms, and the cycle surfaces an `UpdateFailed`. Do NOT
 replace that check with "the device list would have caught it one layer up": `async_get_basic_device_list` is a
-different RPC (`nbe_list_devices`) from the per-device location request, and `DEVICE_LIST_POLL_INTERVAL` (300s,
-`const.py`) means most cycles reuse the cached list without calling it at all. That claim was written here once and
+different RPC (`nbe_list_devices`) from the per-device location request, and it runs on its own clock:
+`DEVICE_LIST_POLL_INTERVAL` is a fixed 300s (`const.py`) while the location poll interval is configurable between 60
+and 3600s. Below 300s most cycles reuse the cached list without calling it at all; at the default of 300s it is
+refreshed in nearly every cycle. Either way the first reason stands on its own. That claim was written here once and
 was wrong.
 Read the check for exactly what it tests, and no more. It does NOT say that a cycle failing the equality had a sibling
 success. It is one of TWO post-loop guards, and the other one is what closed the gap this paragraph used to describe as
@@ -246,14 +276,107 @@ Eight tests pin this: `test_a_rejected_device_does_not_make_every_tracker_unavai
 `test_a_mixed_cycle_of_rejection_and_empty_siblings_stays_silent`,
 `test_a_cycle_where_no_request_was_accepted_reports_an_error` and
 `test_a_mixed_cycle_of_rejection_and_unaccepted_siblings_now_surfaces`.
-What is still NOT fixed there, stated so it is not mistaken for solved: that success path still treats every empty
-result as proof of working credentials. The 5xx and the 429 no longer reach it -- they raise before they can -- but
-every idle BLE tag still does, and so do the four pre-accept failures named above. Deciding what an
-empty result may prove about credentials is a behaviour change of its own with a far wider blast radius (every healthy
-idle poll takes the same path); it is tracked separately (`PLAN_GFMY_AUTH_RESET_POSITIVE_PROOF`) and must not be assumed done. Three tests pin the
-current state so it cannot drift silently: `test_an_empty_return_still_clears_the_counter` characterises the reset that
-stays, `test_an_unaccepted_request_no_longer_clears_the_counter` is its contract pair for the requests that no longer
-reach it, and `test_a_non_credential_4xx_location_is_passed_through` pins the seam that keeps a rejection out of it.
+What that success path does NOW, because this paragraph used to say it was still broken and must not be read that way
+any more: the reset is bound to a positive proof instead of to the absence of an exception
+(`PLAN_GFMY_AUTH_RESET_POSITIVE_PROOF`). The proof differs per path and each one is named: in the poll cycle a location
+WITH content, in the manual locate a record that survives the empty guard, and for the transient-auth counter a
+a poll cycle that rejected nothing while at least one request was accepted. A successful
+`async_get_basic_device_list` proves the ACCOUNT token -- it is the strongest source in the tree, because it has no
+non-throwing error exit and an expired login raises before it can reach the reset -- and it clears the account auth
+state, but it deliberately does NOT clear the counter; the paragraph after next says why. On the poll path a location
+WITH content clears the counter at its own site as well, so the end-of-cycle rule is the everyday source, not the only
+one. An empty result clears nothing at all any
+more AT THE DEVICE SITE: not the idle BLE tag, not the four pre-accept failures named above. Read that as the narrow
+statement it is. A cycle in which nothing was rejected AND at least one request was not refused clears the count itself, cycle-wide,
+so an idle tag can no longer wipe the rejection a sibling booked in the same pass. The price was measured and accepted with the change, and it is bounded:
+an auth error already on screen is now cleared by the next device-list refresh instead of by the next poll of any
+kind. `DEVICE_LIST_POLL_INTERVAL` is a fixed 300 seconds while the poll interval is an option between 60 and 3600
+seconds (default 300), so at the default both run on the same cadence and at the shortest setting the wait grows to at
+most five poll cycles.
+Why the counter is NOT reset from the device-list refresh, written down because two earlier revisions did reset it
+there and each produced its own failure. Revision one cleared it unconditionally: the refresh runs inside the same
+`_async_update_data` and BEFORE the poll cycle is scheduled, so at the default cadence the count was zeroed
+immediately before every attempt, a tracker whose action RPC kept rejecting could only ever climb back to 1, and
+`_MAX_TRANSIENT_AUTH_FAILURES` was never reached. Revision two guarded that with a pending marker released by a clean
+poll cycle. That removed the dependency on how the two cadences line up, but it left the COUNT on the foreign clock
+and the remaining error merely changed sign: with a 60 s poll interval up to five cycles run without a refresh, so
+three rejections at minutes 0, 2 and 4 -- each separated by a clean cycle -- accumulated to the threshold although they
+were never consecutive. Both revisions share one root cause: the counter was incremented on one clock and zeroed on
+another, and the two are independently configurable, so every ratio yields one of the two errors.
+The verdict is a CYCLE verdict, and both halves of that word are load-bearing. The streak is raised at most once per
+cycle, after every device has been asked, and only when the cycle held no location WITH content. Two measured reasons:
+incrementing per device made two broken trackers worth two cycles, so the threshold fell after two failing cycles
+instead of three and the number in the user-facing message was not a cycle count; and judging inside the loop returned
+from the cycle immediately, so a sibling that would have answered with content was never asked and the same responses
+gave opposite verdicts depending on device order. Both are pinned:
+`test_two_rejecting_devices_count_as_one_failing_cycle` and
+`test_the_reauth_verdict_does_not_depend_on_device_order`.
+The reset therefore sits where the counting happens, and it asks for two things. A poll cycle zeroes the count and
+the stored cause when it booked NO rejection and at least one of its requests was not refused -- a location with
+content, or an empty result, which is the FCM wait returning without raising. The second half is not decoration: a
+cycle in which every device timed out, hit a 5xx or was told the request was not accepted carries no information at
+all, and clearing a rejection budget on that would be the same fault one layer along, absence of evidence used as
+evidence. A pass that finds no pollable device does the same, but only while the account HAS devices, none of them
+is enabled and no poll cycle is still in flight, measured on the pre-cooldown list: without that clearing, a budget
+would stand for as long as every tracker stays disabled and a tracker re-enabled weeks later would inherit it into a
+premature reauth. The in-flight condition is a deferral and not a suppression: the poll cycle is fire-and-forget, so a
+refresh can reach this branch while an earlier cycle is still asking its devices, and clearing there would turn a
+standing 2 into a 1 the moment that cycle books its rejection -- with no further cycle able to run, that stale 1 would
+outlive the outage it came from. The next refresh after the cycle retires clears the final count instead. Pinned by
+`test_a_running_cycle_blocks_the_no_pollable_device_reset`. An EMPTY device
+list is expressly not that case -- the two-pass quorum lets a backend hiccup through as an accepted empty list, and an
+outage clears nothing. What the list refresh proves is the ACCOUNT token, and
+only that; it says nothing about the action RPC accepting the same token again, which is what the counter counts.
+A one-off hiccup still heals on the next clean cycle. Suppressing every reset was rejected for the reason the
+device-list reset was introduced in the first place: it would strand any counter a single hiccup ever raised. A
+genuinely expired sign-in does not depend on the counter anyway -- `async_get_basic_device_list` raises
+`ConfigEntryAuthFailed` and the reauth flow starts from there.
+The limit, measured rather than reasoned about, in both directions. A PERSISTENT rejection escalates: with a broken
+tracker next to an idle one the threshold is reached on cycle three, because every cycle books. An INTERMITTENT
+rejection does not escalate when the cycles in between carried information -- 403, empty, 403, empty, 403 measures
+1, 0, 1, 0, 1 and raises no reauth, at any cadence, because the clean cycle zeroes the count on the same clock that
+raised it. It DOES still escalate when the cycles in between carried none: on a single-device account 403, timeout,
+403, timeout, 403 measures 1, 1, 2, 2, 3 and does reauth, because a cycle of pure outage neither books nor breaks.
+"Consecutive" is therefore counted over cycles that carried information, and that reading is a deliberate trade: the
+alternative lets an outage clear a budget, which is the very fault this whole sequence of changes removes. The alternative -- hanging the reset on a positive proof, a location WITH content --
+was rejected: such a location already clears the counter outright at its own site, so the rule would add nothing there
+and would leave a single hiccup standing indefinitely in an all-BLE fleet.
+`test_the_production_order_still_reaches_the_reauth_threshold` drives the real `_async_update_data` ->
+`_async_start_poll_cycle` sequence for three cycles and pins the escalation.
+`test_a_clean_cycle_between_rejections_breaks_the_streak` pins the opposite case over five cycles without a single
+refresh, `test_a_cycle_with_no_pollable_device_clears_the_stale_count` pins the stranded-budget case,
+`test_an_empty_device_list_does_not_clear_the_count` pins that an outage is not that case,
+`test_two_refreshes_between_two_polls_do_not_clear_the_counter` pins that no number of refreshes clears the count, and
+`test_a_clean_cycle_clears_the_counter_without_any_refresh` pins that the cycle alone suffices, so the fix cannot be
+tightened into a sticky suppression.
+The withdrawal reaches a THIRD field, and naming it apart from the other two is the point: the count, the stored
+cause and the ACCOUNT-WIDE report are three things, not one. The rejection branch parks its error in
+`last_exception`, the cycle's `finally` hands that to `async_set_update_error`, and `GoogleFindMyEntity.available`
+follows the coordinator's `last_update_success` -- so a mixed cycle marked EVERY tracker unavailable next to the
+sibling that had just answered WITH content. Accepting that content as proof for the counter and rejecting it for
+availability would be two verdicts out of one cycle. The report is therefore withdrawn as well, bound to the
+IDENTITY of the rejection this cycle booked: a timeout or a stale owner key that reached the slot first stays,
+because one device answering says nothing about a device that never answered at all. A failure that arrives LATER
+survives too, but by a different route: it never reaches `last_exception` at all, because the rejection is sitting
+there, so it goes into the second slot `independent_error` and the withdrawal hands the place over to it. Both
+directions are one rule, and neither is "first failure wins" -- see the fuller statement further up in this file.
+`test_the_reauth_verdict_does_not_depend_on_device_order` asserts the withdrawal,
+`test_content_withdraws_only_the_rejection_not_a_timeout` and
+`test_a_later_failure_survives_the_rejection_it_had_to_queue_behind` assert its two limits, and
+`test_without_content_the_rejection_keeps_the_report_it_booked` pins that the handover happens only when the
+withdrawal really fires. `cycle_failed` is kept, because the
+cycle really did fail to poll every device and the diagnostic attribute has to say so -- the same split the
+non-credential 4xx branch already states for its own case.
+What this does NOT change, named because the reasoning above invites the opposite reading: `_set_auth_state(failed=
+False)` on that same success path stays UNCONDITIONAL. The account token is exactly what that state reports, and the
+list proves it. The consequence is real and accepted: after an escalation raised from the action RPC, the next refresh
+clears the repairs issue while the reauth flow it started stays open in the UI. Two channels, one of which is
+account-scoped and now correct; binding the auth state to the marker as well would delay every legitimate recovery by a
+poll cycle for a display-only gain. Three tests pin the new state so it cannot drift back:
+`test_an_empty_return_proves_nothing_about_the_credentials` carries the inverted assertion together with the history of
+the characterisation it replaces, `test_an_unaccepted_request_no_longer_clears_the_counter` is its contract pair for the
+requests that no longer reach the path at all, and `test_a_non_credential_4xx_location_is_passed_through` pins the seam
+that keeps a rejection out of it.
 What is NOT fixed, stated so the rule is not mistaken for a solved problem: `nova_request.py` still raises a type named
 "auth" for all of them, so a new handler that reads the type repeats the defect, and this paragraph is the only thing
 standing in its way. Giving the non-credential case its own exception class is the open follow-up; it needs an
