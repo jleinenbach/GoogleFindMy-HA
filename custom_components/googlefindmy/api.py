@@ -1477,11 +1477,14 @@ class GoogleFindMyAPI:
                 # that ambiguity is what the raise sites exist for.
                 #
                 # The 5xx branch below still returns {}. It no longer clears
-                # anything, and on the locate path it is not even reached:
-                # `location_request.py` catches the 5xx and the 429 itself and
-                # raises `LocationRequestNotAcceptedError`
-                # (`PLAN_GFMY_EMPTY_RESULT_DISTINGUISHABLE`). It stays for the
-                # sync wrapper below, which has no such layer in front of it.
+                # anything, and measured it is not reached at all any more:
+                # `get_location_data_for_device` converts the 5xx and the 429
+                # into `LocationRequestNotAcceptedError` itself
+                # (`PLAN_GFMY_EMPTY_RESULT_DISTINGUISHABLE`), and its broad
+                # handler re-raises only before the accept line and returns []
+                # after it -- so no `NovaHTTPError` leaves that layer. The sync
+                # wrapper is no exception: it calls this very method. The branch
+                # stays as the guard for the day that conversion moves or goes.
                 #
                 # DEBUG, not WARNING: both callers already log a WARNING naming
                 # the device, so a WARNING here would print the same event twice

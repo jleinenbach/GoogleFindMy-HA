@@ -253,12 +253,22 @@ any more: the reset is bound to a positive proof instead of to the absence of an
 (`PLAN_GFMY_AUTH_RESET_POSITIVE_PROOF`). The proof differs per path and each one is named: in the poll cycle a location
 WITH content, in the manual locate a record that survives the empty guard, and for the transient-auth counter a
 successful `async_get_basic_device_list` -- the strongest source in the tree, because it has no non-throwing error exit
-and an expired login raises before it can reach the reset. An empty result clears nothing at all any more: not the idle
-BLE tag, not the four pre-accept failures named above. The price was measured and accepted with the change, and it is
-bounded: an auth error already on screen is now cleared by the next device-list refresh instead of by the next poll of
-any kind, and both run on the same 300-second cadence. What is bought with it is the escalation that never used to
-happen -- one idle tag reset the counter in every cycle, so a genuinely expired login never reached
-`_MAX_TRANSIENT_AUTH_FAILURES` at all. Three tests pin the new state so it cannot drift back:
+and an expired login raises before it can reach the reset. On the poll path the same location WITH content clears the
+counter as well, so the device list is the everyday source, not the only one. An empty result clears nothing at all any
+more: not the idle BLE tag, not the four pre-accept failures named above. The price was measured and accepted with the
+change, and it is bounded: an auth error already on screen is now cleared by the next device-list refresh instead of by
+the next poll of any kind. `DEVICE_LIST_POLL_INTERVAL` is a fixed 300 seconds while the poll interval is an option
+between 60 and 3600 seconds (default 300), so at the default both run on the same cadence and at the shortest setting
+the wait grows to at most five poll cycles.
+What this does NOT buy, written down because the obvious reading is the wrong one: it does not make the transient-auth
+counter escalate where it used to be starved. Every device-list refresh still resets that counter, and at the default
+settings a refresh falls into every poll cycle, so a single device failing transiently forever still cannot pass
+`_MAX_TRANSIENT_AUTH_FAILURES` -- that threshold is reached WITHIN one cycle, by three devices failing together, or not
+at all. It is a deliberate trade and it is recorded as `R-3` in the plan: the device list is the one proof source that
+cannot lie, and the alternative was a counter with no everyday reset source left. A genuinely expired sign-in does not
+depend on the counter anyway: `async_get_basic_device_list` raises `ConfigEntryAuthFailed` and the reauth flow starts
+from there. What the change does buy is that a pending auth error survives long enough for a user to see it, instead of
+being wiped by the next idle tag. Three tests pin the new state so it cannot drift back:
 `test_an_empty_return_proves_nothing_about_the_credentials` carries the inverted assertion together with the history of
 the characterisation it replaces, `test_an_unaccepted_request_no_longer_clears_the_counter` is its contract pair for the
 requests that no longer reach the path at all, and `test_a_non_credential_4xx_location_is_passed_through` pins the seam
