@@ -1037,11 +1037,24 @@ continues to guard localized device names.
 
 `tests/test_uwt_mode_binary_sensor.py::TestUWTModeSensorDocumentationMatchesSpec`
 introduces a guard family that pins *documentation* rather than behaviour: it
-reads docstrings via `inspect.getdoc` and asserts that a specific, previously
-wrong claim cannot return and that the specification reference stays present.
-It exists because the UWT-mode sensor documented a separation duration the Find
-Hub Network Accessory Specification never defines, which produced misdirected
-automations and bug reports (BSkando#210) without a single failing test.
+reads docstrings via `inspect.getdoc` and asserts that a withdrawn claim cannot
+return, that the corrected statement stays present, and that the specification
+reference stays discoverable. It exists because the UWT-mode sensor documented a
+separation window as its own trigger, which produced misdirected automations and
+bug reports (BSkando#210) without a single failing test.
+
+**Pin the statement, not a token (correction of 2026-09-03).** The first version
+of this family forbade the figure "8-24 hours" as such. That figure turned out to
+be normative DULT (`T_(SEPARATED_UT_TIMEOUT)`), only attached to the wrong thing,
+so the guard was pinning the *replacement* error in place: the docstring had gone
+on to deny that the FMDN mode is the DULT separated state, which the Find Hub
+specification asserts in so many words. A forbidden-token guard cannot tell a
+wrong number from a misattributed one. The family now forbids the withdrawn
+*statements* (normalised for case and line wrapping, each with its subject in the
+pattern so a true sentence using the same words still passes) and requires the
+corrected attribution in the same paragraph as the figure. Read that as the rule
+for new members: name what must not be said and what must be said instead, and
+never make a guard out of a term that a correct sentence would also need.
 
 Use this pattern in one of exactly two situations, and keep four properties:
 

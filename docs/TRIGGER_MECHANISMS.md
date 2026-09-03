@@ -71,30 +71,46 @@ The ecosystem for Android—comprising devices like the Chipolo One Point, Chipo
 Unlike the proprietary obscurity of Apple's initial launch, the DULT specification¹ clearly defines the device states. FMDN trackers maintain a state variable that dictates their advertising payload.
 
 * **Near-Owner State:** In this state, the tracker assumes it is safe. It advertises a rotating MAC address and an Ephemeral ID (EID) that changes frequently—typically every 15 minutes or 1024 seconds. This rapid rotation is a privacy feature to prevent third-party scanning infrastructure (like retail beacons) from tracking the owner.¹⁶  
-* **Separated State:** The transition to the Separated state occurs when the tracker fails to connect to the bonded owner device for a relatively short duration, often defined as **30 minutes** in the DULT drafts.¹⁶ However, entering the Separated *state* does not immediately trigger the alarm; it merely starts the countdown for the "Unwanted Tracking" mode.
+* **Separated State:** The transition to the Separated state occurs when the tracker fails to connect to the bonded owner device for a relatively short duration, defined as **30 minutes** in the DULT drafts.¹⁶ That figure is normative, not a field report: `draft-detecting-unwanted-location-trackers-01` section 3.4.4 with table 2 makes the transition a `SHALL`, and section 3.4.5 the way back. However, entering the Separated *state* does not immediately trigger the alarm; it merely starts the countdown to **motion-detector activation** (`T_(SEPARATED_UT_TIMEOUT)`, section 4.2). The state and that later event are two things, and this document formerly called the later one "Unwanted Tracking mode", which is the FMDN term for the state itself.
 
-### **4.2 Unwanted Tracking (UT) Mode**
+### **4.2 Motion-Detector Activation in the Separated State**
 
-> **Not the same thing as the `uwt_mode` binary sensor.** This section describes the
-> DULT *platform* behaviour, which is reached by elapsed time. The FMDN *unwanted
-> tracking protection mode*, which bit 7 of the hashed-flags byte reports and which the
-> `uwt_mode` entity exposes, is entered and left by command (Data ID `0x07` / `0x08`)
-> per the Find Hub Network Accessory Specification
-> (<https://developers.google.com/nearby/fast-pair/specifications/extensions/fmdn>,
-> retrieved 2026-08-04). Do not read this section as documentation of that sensor, and
-> do not build separation timers on it ([BSkando#210](https://github.com/BSkando/GoogleFindMy-HA/issues/210)). See
+> **What the `uwt_mode` binary sensor does and does not report, corrected 2026-09-03.**
+> The FMDN *unwanted tracking protection mode* that bit 7 of the hashed-flags byte
+> carries **is** the DULT separated state of section 4.1 -- not a separate command-only
+> concept, and not the motion-detector activation this section describes. Mind that
+> difference: the bit follows the state, which begins after 30 minutes of separation,
+> whereas the *autonomous motion-triggered sound* of section 4.3 begins
+> `T_(SEPARATED_UT_TIMEOUT)` later. Not everything in this section sits on that later
+> clock. The static-MAC bullet below does not: the Find Hub specification ties the
+> reduced rotation to the mode being active, hence to the separated state. Sections
+> 4.1 to 4.3 formerly used "UT Mode" for the post-timeout event, which is the FMDN
+> term for the state itself; they now name the later event motion-detector
+> activation, so the two timelines no longer collide. The specification
+> wording is: `"Unwanted tracking protection mode" defined in this document maps to the
+> "separated state" defined by the DULT spec` (Find Hub Network Accessory Specification,
+> section "Unwanted tracking prevention",
+> <https://developers.google.com/nearby/fast-pair/specifications/extensions/fmdn>, retrieved 2026-09-03), and
+> certified devices must also meet the DULT requirements. Data ID `0x07` / `0x08` are an
+> additional, seeker-driven GATT path into and out of the mode. An earlier revision of
+> this block claimed the two were unrelated; that claim is withdrawn.
+>
+> What still does **not** follow is a separation timer. The 8-24 hours below are
+> `T_(SEPARATED_UT_TIMEOUT)` and gate the *motion detector*, not the flag bit, and the
+> advertisement does not say whether that timer has expired. Do not build separation
+> timers on this sensor ([BSkando#210](https://github.com/BSkando/GoogleFindMy-HA/issues/210)). See
 > `custom_components/googlefindmy/binary_sensor.py::GoogleFindMyUWTModeSensor`.
 
-The UT Mode is the critical operational phase for anti-stalking alerts. When a device has been in the Separated state for an extended period, it alters its behavior to become more visible to detection networks.
+This later event is the critical operational phase for anti-stalking alerts. When a device has been in the Separated state for `T_(SEPARATED_UT_TIMEOUT)`, it enables its motion detector, and it is already advertising in a way that makes it more visible to detection networks.
 
-* **Static MAC Address:** Crucially, upon entering UT Mode, the tracker ceases the rapid rotation of its MAC address. The MAC address rotation slows significantly, often persisting for **24 hours**. This allows the "Unknown Tracker Alert" algorithms on Android and iOS devices to recognize the device as a persistent companion rather than a series of transient devices passing by.¹⁷  
+* **Static MAC Address:** Crucially, upon entering the mode, the tracker ceases the rapid rotation of its MAC address. Per the Find Hub Network Accessory Specification this follows the *mode being active*, that is the separated state of section 4.1, and not the expiry of `T_(SEPARATED_UT_TIMEOUT)`. It is therefore the one item in this section that is not gated by the timeout. The MAC address rotation slows significantly, often persisting for **24 hours**. This allows the "Unknown Tracker Alert" algorithms on Android and iOS devices to recognize the device as a persistent companion rather than a series of transient devices passing by.¹⁷  
 * **The UT Flag:** The Bluetooth Low Energy advertising payload includes a specific bit—DULT_ACCESSORY_CAPABILITY_MOTION_DETECTOR_UT_BIT_POS—that signals to scanning devices that this tracker is in a separated/lost state and supports motion-detected sound.¹⁸
 
 ### **4.3 Autonomous Sound Logic in DULT Devices**
 
 The DULT specification mandates that trackers support an audible alert to locate the device. For autonomous triggering (i.e., the tracker beeping without a phone command), the FMDN implementation mirrors the Apple logic to ensure cross-compatibility and safety.
 
-* **Time Window:** The standard window for enabling the autonomous motion-gated sound is **8 to 24 hours** of separation.¹⁵  
+* **Time Window:** The standard window for enabling the autonomous motion-gated sound is **8 to 24 hours** of separation.¹⁵ For FMDN this figure is normative rather than a field report: it is DULT `T_(SEPARATED_UT_TIMEOUT)`, a "random value between 8-24 hours chosen from a uniform distribution" (section 3.12.2.1 with table 16).  
 * **Motion Trigger:** Similar to AirTags, FMDN trackers utilize accelerometer interrupts to wake the device and play a sound. The specific hardware implementation varies by manufacturer, but the logic remains consistent: If (State == UT_MODE && Time > Alert_Window && Motion == Detected) -> Play_Sound().
 
 ## **5. Hardware Anatomy and Sensor Specifics**
