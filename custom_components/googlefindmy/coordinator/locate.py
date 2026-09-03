@@ -329,11 +329,24 @@ class LocateOperations(_MixinBase):
                     device_id, name
                 )
 
-                # Success path: clear any auth error state
-                self._set_auth_state(failed=False)
-
                 if not location_data:
                     return {}
+
+                # A result WITH content, and only that, proves on this path that
+                # the credentials worked -- the same rule the sound handlers
+                # state at their own sites. An empty return proves only that
+                # nothing raised, and it reaches this method from several
+                # pre-accept failures as well as from a healthy idle tag, so the
+                # guard above runs first. It used not to, and a manual locate on
+                # an idle tag then wiped a pending credential finding raised by
+                # another device.
+                #
+                # The reset sits here and NOT further down, behind the coordinate
+                # check: a record carrying only `last_seen` is an authenticated
+                # server answer. The method returns {} for it, but the account
+                # was accepted, and refusing to count that would be the same
+                # error in the opposite direction.
+                self._set_auth_state(failed=False)
 
                 # Manual locate is upward-only for the reauth budget and never
                 # consumes the poll-only decrypt-proof hint; drop it here (after the
