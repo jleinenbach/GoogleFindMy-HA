@@ -80,7 +80,12 @@ Unlike the proprietary obscurity of Apple's initial launch, the DULT specificati
 > carries **is** the DULT separated state of section 4.1 -- not a separate command-only
 > concept, and not the post-timeout phase this section 4.2 calls "UT Mode". Mind that
 > difference: the bit follows the state, which begins after 30 minutes of separation,
-> whereas everything below begins `T_(SEPARATED_UT_TIMEOUT)` later. The specification
+> whereas the *autonomous motion-triggered sound* of section 4.3 begins
+> `T_(SEPARATED_UT_TIMEOUT)` later. Not everything in this section sits on that later
+> clock. The static-MAC bullet below does not: the Find Hub specification ties the
+> reduced rotation to the mode being active, hence to the separated state, and this
+> section's "UT Mode" wording conflates the state with the post-timeout phase. The
+> specification
 > wording is: `"Unwanted tracking protection mode" defined in this document maps to the
 > "separated state" defined by the DULT spec` (Find Hub Network Accessory Specification,
 > section "Unwanted tracking prevention",
@@ -97,7 +102,7 @@ Unlike the proprietary obscurity of Apple's initial launch, the DULT specificati
 
 The UT Mode is the critical operational phase for anti-stalking alerts. When a device has been in the Separated state for an extended period, it alters its behavior to become more visible to detection networks.
 
-* **Static MAC Address:** Crucially, upon entering UT Mode, the tracker ceases the rapid rotation of its MAC address. The MAC address rotation slows significantly, often persisting for **24 hours**. This allows the "Unknown Tracker Alert" algorithms on Android and iOS devices to recognize the device as a persistent companion rather than a series of transient devices passing by.¹⁷  
+* **Static MAC Address:** Crucially, upon entering the mode, the tracker ceases the rapid rotation of its MAC address. Per the Find Hub Network Accessory Specification this follows the *mode being active*, that is the separated state of section 4.1, and not the expiry of `T_(SEPARATED_UT_TIMEOUT)`; the "UT Mode" wording of this section conflates the two. The MAC address rotation slows significantly, often persisting for **24 hours**. This allows the "Unknown Tracker Alert" algorithms on Android and iOS devices to recognize the device as a persistent companion rather than a series of transient devices passing by.¹⁷  
 * **The UT Flag:** The Bluetooth Low Energy advertising payload includes a specific bit—DULT_ACCESSORY_CAPABILITY_MOTION_DETECTOR_UT_BIT_POS—that signals to scanning devices that this tracker is in a separated/lost state and supports motion-detected sound.¹⁸
 
 ### **4.3 Autonomous Sound Logic in DULT Devices**
