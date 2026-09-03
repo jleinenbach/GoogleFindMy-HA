@@ -1487,15 +1487,24 @@ class PollingOperations(_MixinBase):
                 ):
                     devices_to_poll.append(dev)
 
-            if not devices_to_poll and self._consecutive_transient_auth_failures > 0:
-                # Nothing is pollable at all: every tracker is disabled or
-                # ignored. No cycle will run, so the release path the cycle owns
-                # is unreachable and a booked streak would stand for as long as
-                # that lasts -- until a tracker is re-enabled weeks later and its
-                # first rejection inherits the old count into a premature reauth.
-                # A pass that finds nothing to poll saw no rejection either,
-                # which is the same evidence a clean cycle gives, so it breaks
-                # the streak the same way.
+            if (
+                filtered_devices
+                and not devices_to_poll
+                and self._consecutive_transient_auth_failures > 0
+            ):
+                # The account HAS devices and not one of them is pollable: every
+                # tracker is disabled or ignored. No cycle will run, so the
+                # release path the cycle owns is unreachable and a booked streak
+                # would stand for as long as that lasts -- until a tracker is
+                # re-enabled weeks later and its first rejection inherits the old
+                # count into a premature reauth.
+                #
+                # `filtered_devices` is part of the condition and not decoration.
+                # Without it this also fires when the LIST came back empty, which
+                # happens on a backend hiccup once the two-pass empty-list quorum
+                # accepts it -- and clearing a rejection budget on the strength of
+                # an outage is precisely what the second half of the end-of-cycle
+                # condition below refuses to do.
                 #
                 # Measured on the PRE-cooldown list on purpose: a device held
                 # back only by its poll cooldown has proved nothing, and clearing
@@ -1827,14 +1836,25 @@ class PollingOperations(_MixinBase):
                 # the counter's everyday reset source, and it runs on the same
                 # clock that increments it.
                 cycle_booked_transient_auth = False
-                # How many devices got an ACCEPTED request this cycle: a
-                # location with content, or an empty result, which is the FCM
-                # wait returning without raising. Both mean Nova took the
-                # request; neither a 5xx, nor a timeout, nor a
-                # LocationRequestNotAcceptedError does, and those say nothing
-                # about the credentials in either direction. Requiring at least
-                # one of these before the streak is broken is what keeps a cycle
-                # of pure outage from counting as evidence.
+                # How many devices got a request this cycle that was not
+                # refused: a location with content, or an empty result, which is
+                # the FCM wait returning without raising.
+                #
+                # The second case is WEAK and knowingly so. Four pre-accept
+                # failures still arrive as an empty dict (an unregistered FCM
+                # provider, a provider returning None, a missing token cache, a
+                # late ImportError), so an empty result does not prove Nova took
+                # the request -- it proves only that nothing raised. That is
+                # enough to break a streak of rejections and deliberately not
+                # enough to clear the auth state, which is why the two verdicts
+                # sit at different sites.
+                #
+                # What is NOT counted here: a timeout, a 5xx, a non-credential
+                # rejection, a stale owner key, a decryption failure and a
+                # LocationRequestNotAcceptedError. Each of those says nothing in
+                # either direction, and a cycle made of nothing but those must
+                # not clear a rejection budget on the strength of an outage.
+                # The price of that choice is stated at the end of the loop.
                 cycle_accepted_requests = 0
                 for idx, dev in enumerate(devices):
                     dev_id = dev["id"]
@@ -2537,10 +2557,28 @@ class PollingOperations(_MixinBase):
                     # there starved the escalation at one ratio and escalated
                     # non-consecutive rejections at another.
                     #
-                    # CYCLE-WIDE, not per device, is the load-bearing part: the
+                    # CYCLE-WIDE is the load-bearing part of THIS reset: the
                     # original defect was an idle BLE tag clearing the rejection
-                    # its sibling had just booked in the same pass. A per-device
-                    # reset would hand that straight back.
+                    # its sibling had just booked in the same pass, and a
+                    # per-device version here would hand that straight back. One
+                    # per-device reset does survive, at the location-WITH-content
+                    # site above, and it is kept on purpose because content is
+                    # the one strong proof on this path. Its price is that within
+                    # a single mixed cycle the end state depends on device order:
+                    # [rejection, content] ends at 0, [content, rejection] at 1.
+                    #
+                    # The measured limit of the streak rule, stated instead of
+                    # discovered later: "consecutive" is counted over cycles that
+                    # carried information. A cycle in which every device timed
+                    # out or hit a 5xx carries none, so it neither books nor
+                    # breaks. Measured consequence on a single-device account:
+                    # 403, timeout, 403, timeout, 403 yields 1, 1, 2, 2, 3 and
+                    # does escalate, although the rejections were not adjacent.
+                    # The alternative -- letting an outage break the streak --
+                    # was rejected because it reintroduces the fault this whole
+                    # change removes, absence of evidence used as evidence, and
+                    # because three pinned tests state the opposite rule for the
+                    # non-credential branches.
                     if self._consecutive_transient_auth_failures > 0:
                         _LOGGER.info(
                             "Poll cycle booked no credential rejection; clearing "

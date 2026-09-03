@@ -256,8 +256,8 @@ successful `async_get_basic_device_list` -- the strongest source in the tree, be
 and an expired login raises before it can reach the reset. On the poll path the same location WITH content clears the
 counter as well, so the device list is the everyday source, not the only one. An empty result clears nothing at all any
 more AT THE DEVICE SITE: not the idle BLE tag, not the four pre-accept failures named above. Read that as the narrow
-statement it is. A cycle in which nothing was rejected clears the count itself, cycle-wide, so an idle tag can no longer wipe the
-rejection a sibling booked in the same pass. The price was measured and accepted with the change, and it is bounded:
+statement it is. A cycle in which nothing was rejected AND at least one request was not refused clears the count itself, cycle-wide,
+so an idle tag can no longer wipe the rejection a sibling booked in the same pass. The price was measured and accepted with the change, and it is bounded:
 an auth error already on screen is now cleared by the next device-list refresh instead of by the next poll of any
 kind. `DEVICE_LIST_POLL_INTERVAL` is a fixed 300 seconds while the poll interval is an option between 60 and 3600
 seconds (default 300), so at the default both run on the same cadence and at the shortest setting the wait grows to at
@@ -272,25 +272,36 @@ and the remaining error merely changed sign: with a 60 s poll interval up to fiv
 three rejections at minutes 0, 2 and 4 -- each separated by a clean cycle -- accumulated to the threshold although they
 were never consecutive. Both revisions share one root cause: the counter was incremented on one clock and zeroed on
 another, and the two are independently configurable, so every ratio yields one of the two errors.
-The reset therefore sits where the counting happens. A poll cycle that books NO rejection zeroes the count and the
-stored cause. A pass that finds no pollable device at all does the same, measured on the pre-cooldown list: it saw no
-rejection either, and without it a budget would stand for as long as every tracker stays disabled, so a tracker
-re-enabled weeks later would inherit it into a premature reauth. What the list refresh proves is the ACCOUNT token, and
+The reset therefore sits where the counting happens, and it asks for two things. A poll cycle zeroes the count and
+the stored cause when it booked NO rejection and at least one of its requests was not refused -- a location with
+content, or an empty result, which is the FCM wait returning without raising. The second half is not decoration: a
+cycle in which every device timed out, hit a 5xx or was told the request was not accepted carries no information at
+all, and clearing a rejection budget on that would be the same fault one layer along, absence of evidence used as
+evidence. A pass that finds no pollable device does the same, but only while the account HAS devices and none of them
+is enabled, measured on the pre-cooldown list: without that clearing, a budget would stand for as long as every
+tracker stays disabled and a tracker re-enabled weeks later would inherit it into a premature reauth. An EMPTY device
+list is expressly not that case -- the two-pass quorum lets a backend hiccup through as an accepted empty list, and an
+outage clears nothing. What the list refresh proves is the ACCOUNT token, and
 only that; it says nothing about the action RPC accepting the same token again, which is what the counter counts.
 A one-off hiccup still heals on the next clean cycle. Suppressing every reset was rejected for the reason the
 device-list reset was introduced in the first place: it would strand any counter a single hiccup ever raised. A
 genuinely expired sign-in does not depend on the counter anyway -- `async_get_basic_device_list` raises
 `ConfigEntryAuthFailed` and the reauth flow starts from there.
-The limit, measured rather than reasoned about: a PERSISTENT rejection escalates, and with a broken tracker next to an
-idle one the threshold is reached on cycle three, because every cycle books. An INTERMITTENT rejection does NOT
-escalate, at any cadence, because the clean cycle in between zeroes the count on the same clock that raised it. That is
-what a consecutive counter means. The alternative -- hanging the reset on a positive proof, a location WITH content --
+The limit, measured rather than reasoned about, in both directions. A PERSISTENT rejection escalates: with a broken
+tracker next to an idle one the threshold is reached on cycle three, because every cycle books. An INTERMITTENT
+rejection does not escalate when the cycles in between carried information -- 403, empty, 403, empty, 403 measures
+1, 0, 1, 0, 1 and raises no reauth, at any cadence, because the clean cycle zeroes the count on the same clock that
+raised it. It DOES still escalate when the cycles in between carried none: on a single-device account 403, timeout,
+403, timeout, 403 measures 1, 1, 2, 2, 3 and does reauth, because a cycle of pure outage neither books nor breaks.
+"Consecutive" is therefore counted over cycles that carried information, and that reading is a deliberate trade: the
+alternative lets an outage clear a budget, which is the very fault this whole sequence of changes removes. The alternative -- hanging the reset on a positive proof, a location WITH content --
 was rejected: such a location already clears the counter outright at its own site, so the rule would add nothing there
 and would leave a single hiccup standing indefinitely in an all-BLE fleet.
 `test_the_production_order_still_reaches_the_reauth_threshold` drives the real `_async_update_data` ->
 `_async_start_poll_cycle` sequence for three cycles and pins the escalation.
 `test_a_clean_cycle_between_rejections_breaks_the_streak` pins the opposite case over five cycles without a single
 refresh, `test_a_cycle_with_no_pollable_device_clears_the_stale_count` pins the stranded-budget case,
+`test_an_empty_device_list_does_not_clear_the_count` pins that an outage is not that case,
 `test_two_refreshes_between_two_polls_do_not_clear_the_counter` pins that no number of refreshes clears the count, and
 `test_a_clean_cycle_clears_the_counter_without_any_refresh` pins that the cycle alone suffices, so the fix cannot be
 tightened into a sticky suppression.

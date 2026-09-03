@@ -1305,8 +1305,10 @@ def test_a_clean_cycle_between_rejections_breaks_the_streak(
     coordinator._last_list_poll_mono = time.monotonic()
 
     reject_next = {"value": True}
+    attempts: list[str] = []
 
     async def _alternate(device_id: str, *_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        attempts.append(device_id)
         if reject_next["value"]:
             # 403 rather than 401: a 401 surviving the refresh sequence is
             # raised as NovaAuthPermanentError, so 403 is the only plain
@@ -1347,6 +1349,10 @@ def test_a_clean_cycle_between_rejections_breaks_the_streak(
             tasks.clear()
         counts.append(coordinator._consecutive_transient_auth_failures)
 
+    # Every cycle actually asked. Without this the zeros could equally come
+    # from the no-pollable-device reset, which is a different rule with its own
+    # test, and the assertion below would not measure what its name says.
+    assert len(attempts) == 5
     # Before the fix this read [1, 1, 2, 2, 3] and raised a reauth.
     assert counts == [1, 0, 1, 0, 1]
     assert coordinator.config_entry.reauth_calls == 0
@@ -1377,7 +1383,9 @@ def test_a_cycle_with_no_pollable_device_clears_the_stale_count(
     coordinator._last_device_list = [device]
     coordinator._last_list_poll_mono = time.monotonic()
     # Known to the registry but not enabled for polling -- the "disabled
-    # tracker" case, reached without touching the ignore set.
+    # tracker" case, reached without touching the ignore set. The account still
+    # HAS a device; an empty list is a different situation (an outage) and
+    # deliberately clears nothing.
     coordinator._devices_with_entry = {"dev-1"}
     coordinator._enabled_poll_device_ids = set()
     coordinator._consecutive_transient_auth_failures = 2
@@ -1388,3 +1396,35 @@ def test_a_cycle_with_no_pollable_device_clears_the_stale_count(
 
     assert coordinator._consecutive_transient_auth_failures == 0
     assert coordinator._last_transient_auth_error is None
+
+
+def test_an_empty_device_list_does_not_clear_the_count(
+    coordinator: GoogleFindMyCoordinator, dummy_api: _DummyAPI
+) -> None:
+    """An outage is not evidence, and an empty list is an outage.
+
+    The no-pollable-device reset asks for two things, and the second one is the
+    guard: the account must HAVE devices while none of them is pollable. A list
+    that came back empty satisfies "nothing to poll" just as well, and the
+    two-pass empty-list quorum lets a backend hiccup through as an accepted
+    empty list. Clearing a rejection budget on that would be the same fault the
+    end-of-cycle condition refuses one layer along -- absence of evidence used
+    as evidence.
+    """
+
+    dummy_api.device_list = []
+    coordinator._last_device_list = []
+    coordinator._last_list_poll_mono = time.monotonic()
+    # Past the cold-start guard: a first-ever empty list raises UpdateFailed and
+    # would never reach the branch under test. This is the later hiccup, the one
+    # the two-pass quorum accepts.
+    coordinator._last_nonempty_wall = time.time()
+    coordinator._force_device_list_refresh = True
+    coordinator._consecutive_transient_auth_failures = 2
+    coordinator._last_transient_auth_error = "rejected"
+
+    loop = coordinator.hass.loop
+    loop.run_until_complete(coordinator._async_update_data())
+
+    assert coordinator._consecutive_transient_auth_failures == 2
+    assert coordinator._last_transient_auth_error == "rejected"
