@@ -1492,6 +1492,7 @@ class PollingOperations(_MixinBase):
             if (
                 filtered_devices
                 and not devices_to_poll
+                and not self._is_polling
                 and self._consecutive_transient_auth_failures > 0
             ):
                 # The account HAS devices and not one of them is pollable: every
@@ -1511,6 +1512,13 @@ class PollingOperations(_MixinBase):
                 # Measured on the PRE-cooldown list on purpose: a device held
                 # back only by its poll cooldown has proved nothing, and clearing
                 # on that would be a starvation path of its own.
+                #
+                # `not self._is_polling` for a related reason. The poll cycle is a
+                # fire-and-forget task, so a refresh can arrive while an earlier
+                # cycle is still asking its devices. A cycle in flight owns the
+                # streak it is spending; clearing it here would turn a standing 2
+                # into a 1 the moment that cycle books, and with no further cycle
+                # able to run the escalation would be lost for good.
                 _LOGGER.info(
                     "No pollable device remains; clearing %d transient auth failure(s).",
                     self._consecutive_transient_auth_failures,

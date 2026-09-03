@@ -1589,3 +1589,43 @@ def test_the_stored_cause_follows_the_count_in_a_mixed_cycle(
         first = order[0]["name"]
         assert coordinator._consecutive_transient_auth_failures == 0, first
         assert coordinator._last_transient_auth_error is None, first
+
+
+def test_a_running_cycle_blocks_the_no_pollable_device_reset(
+    coordinator: GoogleFindMyCoordinator, dummy_api: _DummyAPI
+) -> None:
+    """A cycle still in flight owns the streak; nothing else may clear it.
+
+    The poll cycle runs as a fire-and-forget task, so a coordinator refresh can
+    reach this branch while an earlier cycle is still asking its devices. If
+    every tracker was disabled in the meantime, the branch saw "nothing to poll"
+    and cleared a streak the running cycle was still spending: a streak of 2
+    became 0 and then 1 when that cycle booked its rejection, and with no further
+    cycle able to run, the escalation was lost for good.
+    """
+
+    device = {"id": "dev-1", "name": "Device"}
+    dummy_api.device_list = [device]
+    coordinator._last_device_list = [device]
+    coordinator._last_list_poll_mono = time.monotonic()
+    coordinator._devices_with_entry = {"dev-1"}
+    coordinator._enabled_poll_device_ids = set()
+    coordinator._consecutive_transient_auth_failures = 2
+    coordinator._last_transient_auth_error = "rejected"
+    # A cycle started earlier and has not finished.
+    coordinator._is_polling = True
+
+    loop = coordinator.hass.loop
+    loop.run_until_complete(coordinator._async_update_data())
+
+    assert coordinator._consecutive_transient_auth_failures == 2
+    assert coordinator._last_transient_auth_error == "rejected"
+
+    # The guard defers the reset, it does not suppress it. Once that cycle has
+    # retired, the very next refresh finds nothing to poll and no cycle in
+    # flight, and clears the final count.
+    coordinator._is_polling = False
+    loop.run_until_complete(coordinator._async_update_data())
+
+    assert coordinator._consecutive_transient_auth_failures == 0
+    assert coordinator._last_transient_auth_error is None

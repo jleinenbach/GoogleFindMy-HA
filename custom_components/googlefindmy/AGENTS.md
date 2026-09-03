@@ -288,9 +288,14 @@ the stored cause when it booked NO rejection and at least one of its requests wa
 content, or an empty result, which is the FCM wait returning without raising. The second half is not decoration: a
 cycle in which every device timed out, hit a 5xx or was told the request was not accepted carries no information at
 all, and clearing a rejection budget on that would be the same fault one layer along, absence of evidence used as
-evidence. A pass that finds no pollable device does the same, but only while the account HAS devices and none of them
-is enabled, measured on the pre-cooldown list: without that clearing, a budget would stand for as long as every
-tracker stays disabled and a tracker re-enabled weeks later would inherit it into a premature reauth. An EMPTY device
+evidence. A pass that finds no pollable device does the same, but only while the account HAS devices, none of them
+is enabled and no poll cycle is still in flight, measured on the pre-cooldown list: without that clearing, a budget
+would stand for as long as every tracker stays disabled and a tracker re-enabled weeks later would inherit it into a
+premature reauth. The in-flight condition is a deferral and not a suppression: the poll cycle is fire-and-forget, so a
+refresh can reach this branch while an earlier cycle is still asking its devices, and clearing there would turn a
+standing 2 into a 1 the moment that cycle books its rejection -- with no further cycle able to run, that stale 1 would
+outlive the outage it came from. The next refresh after the cycle retires clears the final count instead. Pinned by
+`test_a_running_cycle_blocks_the_no_pollable_device_reset`. An EMPTY device
 list is expressly not that case -- the two-pass quorum lets a backend hiccup through as an accepted empty list, and an
 outage clears nothing. What the list refresh proves is the ACCOUNT token, and
 only that; it says nothing about the action RPC accepting the same token again, which is what the counter counts.
