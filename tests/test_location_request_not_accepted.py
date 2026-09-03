@@ -780,23 +780,35 @@ async def test_locate_warns_and_returns_empty_on_an_unaccepted_request(
 
 
 @pytest.mark.asyncio
-async def test_locate_on_a_healthy_idle_tag_still_returns_empty_and_clears_auth_state(
+async def test_locate_on_a_healthy_idle_tag_returns_empty_and_clears_nothing(
     locate_coord: LocateStub,
 ) -> None:
-    """Drives the positive half of the rule, which no other test in the tree does.
+    """Drives the non-signal half of the seam, which no other test here does.
 
-    Every other test here injects the signal, so all of them observe the branch that
-    SKIPS the auth reset. Measured, a stubbed-out ``async_locate_device`` that did
-    nothing at all would still satisfy ``test_locate_returns_empty_on_the_signal_without_raising``
-    -- an empty dict is what doing nothing returns. The other two are not vacuous
-    that way (one asserts a log record, one asserts ``note_error``), but none of the
-    three shows that the reset still HAPPENS when it should.
+    History, kept on purpose: this function was called
+    ``test_locate_on_a_healthy_idle_tag_still_returns_empty_and_clears_auth_state``
+    and asserted that the reset still HAPPENS on an accepted-but-empty result. It
+    was written to pin the positive side of the raise-site change, at a time when
+    the reset in front of the empty guard was a known finding tracked separately.
+    That finding is now fixed, and this is the same seam read from the other side.
 
-    So this is the same seam driven with the outcome the plan protects: a BLE tag
-    whose request WAS accepted and had nothing to report. There the empty result
-    still means the credentials worked, and ``_set_auth_state(failed=False)`` must
-    run. Identical return value, opposite side effect -- that difference is the
-    whole change, and this is the only place it is pinned from the positive side.
+    Why the old assertion could not survive it: an empty dict is weak evidence
+    that the request was accepted, not proof of it. Four pre-accept failures still
+    arrive here as an empty dict, and this method cannot tell them from the idle
+    tag. The reset therefore sits behind the empty guard, and an empty result now
+    clears nothing at all.
+
+    What is NOT given up: a result with content still clears the auth state, and a
+    record carrying only ``last_seen`` still counts as proof even though the method
+    returns ``{}`` for it. Both are pinned in
+    ``tests/test_coordinator_locate_basics.py``.
+
+    Every other test in this module injects the signal, so all of them observe the
+    branch that skips the reset for a different reason -- the raise, not the guard.
+    Measured, a stubbed-out ``async_locate_device`` that did nothing at all would
+    still satisfy ``test_locate_returns_empty_on_the_signal_without_raising``. This
+    one is the only place that drives the seam WITHOUT the signal, which is what
+    makes it the witness that the two mechanisms are distinct rather than one.
     """
     coord = locate_coord
     coord.api.async_get_device_location = AsyncMock(return_value={})
@@ -804,7 +816,7 @@ async def test_locate_on_a_healthy_idle_tag_still_returns_empty_and_clears_auth_
     result = await coord.async_locate_device("dev-1")
 
     assert result == {}
-    coord._set_auth_state.assert_called_once_with(failed=False)
+    coord._set_auth_state.assert_not_called()
     coord.note_error.assert_not_called()
 
 
