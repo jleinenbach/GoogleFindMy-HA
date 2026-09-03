@@ -1266,7 +1266,28 @@ class PollingOperations(_MixinBase):
                 self._refresh_canonicless_drop_stats(self._entry_id())
 
                 # Success path: if we were in an auth error state, clear it now.
+                #
+                # This is the strongest proof source in the integration, and
+                # after the poll loop stopped resetting on an empty result it is
+                # also the only everyday one left for the transient counter.
+                # `async_get_basic_device_list` has no non-throwing error exit:
+                # every except branch ends in `raise ConfigEntryAuthFailed` or
+                # `raise UpdateFailed`. A return that got this far therefore
+                # means Nova accepted the account token, which is exactly what
+                # the counter counts -- and an expired login raises before it can
+                # reach this line, so it cannot mask itself here the way it could
+                # through an empty location result.
+                #
+                # Both resets belong in this branch and not above it: the cached
+                # branch skips the call entirely and so proves nothing.
                 self._set_auth_state(failed=False)
+                if self._consecutive_transient_auth_failures > 0:
+                    _LOGGER.info(
+                        "Device list refresh succeeded; clearing %d transient auth failure(s).",
+                        self._consecutive_transient_auth_failures,
+                    )
+                    self._consecutive_transient_auth_failures = 0
+                    self._last_transient_auth_error = None
                 self._set_api_status(ApiStatus.OK)
 
                 # Normalize payloads and filter/dedupe devices using pure helpers

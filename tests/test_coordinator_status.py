@@ -957,3 +957,96 @@ def test_issue_183_status_stuck_on_false_readiness_then_recovers(
     dummy_api.is_push_ready = lambda: True
     loop.run_until_complete(coordinator._async_update_data())
     assert coordinator.fcm_status.state == FcmStatus.CONNECTED
+
+
+# --------------------------------------------------------------------------
+# The device list as the proof source for the transient auth counter.
+#
+# Moving the counter reset behind the empty guard in the poll cycle takes away
+# its only everyday reset source: a fleet of idle BLE tags returns empty and no
+# longer clears anything. Without a replacement a counter that once reached 2
+# would sit there forever, and a single later hiccup would ask a user with a
+# perfectly good login to sign in again.
+#
+# ``async_get_basic_device_list`` is the strongest proof source in the tree:
+# it has no non-throwing error exit, so a non-throwing return means Nova
+# accepted the account token -- which is exactly what the counter counts. An
+# expired login raises ``ConfigEntryAuthFailed`` and never reaches the reset,
+# which is what separates this source from the poll path it replaces.
+# --------------------------------------------------------------------------
+
+
+def test_a_fresh_device_list_resets_the_transient_auth_counter(
+    coordinator: GoogleFindMyCoordinator, dummy_api: _DummyAPI
+) -> None:
+    """A real device-list refresh proves the credentials and clears the counter."""
+
+    dummy_api.device_list = [{"id": "dev-1", "name": "Device"}]
+    coordinator._consecutive_transient_auth_failures = 2
+
+    loop = coordinator.hass.loop
+    loop.run_until_complete(coordinator._async_update_data())
+
+    assert coordinator._consecutive_transient_auth_failures == 0
+
+
+def test_a_cached_device_list_does_not_reset_the_counter(
+    coordinator: GoogleFindMyCoordinator, dummy_api: _DummyAPI
+) -> None:
+    """A skipped refresh proves nothing; the reset belongs in the fetch branch.
+
+    The cached branch never talks to Nova. Resetting there would reintroduce
+    the very defect this change removes, one layer up: a counter cleared by
+    something that did not happen.
+    """
+
+    dummy_api.device_list = [{"id": "dev-1", "name": "Device"}]
+    coordinator._last_device_list = [{"id": "dev-1", "name": "Device"}]
+    coordinator._last_list_poll_mono = time.monotonic()
+    coordinator._consecutive_transient_auth_failures = 2
+
+    loop = coordinator.hass.loop
+    loop.run_until_complete(coordinator._async_update_data())
+
+    assert coordinator._consecutive_transient_auth_failures == 2
+
+
+def test_a_fresh_device_list_clears_the_last_transient_error(
+    coordinator: GoogleFindMyCoordinator, dummy_api: _DummyAPI
+) -> None:
+    """The stored cause is cleared with the counter, not left behind.
+
+    Separate from the counter assertion on purpose: the diagnostic snapshot
+    exports both, and a stale cause next to a zero counter names a failure that
+    is over.
+    """
+
+    dummy_api.device_list = [{"id": "dev-1", "name": "Device"}]
+    coordinator._consecutive_transient_auth_failures = 2
+    coordinator._last_transient_auth_error = "expired"
+
+    loop = coordinator.hass.loop
+    loop.run_until_complete(coordinator._async_update_data())
+
+    assert coordinator._last_transient_auth_error is None
+
+
+def test_a_failing_device_list_leaves_the_counter_alone(
+    coordinator: GoogleFindMyCoordinator, dummy_api: _DummyAPI
+) -> None:
+    """An expired login cannot mask itself through the new reset source.
+
+    This is the guard that makes the new source safe to rely on: the reset must
+    sit AFTER the await, so a raising call never reaches it.
+    """
+
+    dummy_api.raise_auth = True
+    coordinator._consecutive_transient_auth_failures = 2
+    coordinator._last_transient_auth_error = "expired"
+
+    loop = coordinator.hass.loop
+    with pytest.raises(ConfigEntryAuthFailed):
+        loop.run_until_complete(coordinator._async_update_data())
+
+    assert coordinator._consecutive_transient_auth_failures == 2
+    assert coordinator._last_transient_auth_error == "expired"
