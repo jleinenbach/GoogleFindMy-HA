@@ -2194,9 +2194,12 @@ class PollingOperations(_MixinBase):
                         # api.async_get_device_location passes such a status
                         # through rather than collapsing it to {}, precisely so
                         # this branch is the one that runs. A non-raising return
-                        # would take the success path above, which clears the
-                        # auth state and resets the counter before it looks at
-                        # whether the result is empty.
+                        # would take the success path above, which used to clear
+                        # the auth state and reset the counter before it looked
+                        # at whether the result is empty; since that reset moved
+                        # behind the empty guard it would clear nothing, which
+                        # makes this branch the narrower of two guarantees rather
+                        # than the only one.
                         if not is_credential_rejection(transient_err):
                             _LOGGER.warning(
                                 "Client error (HTTP %s) for %s: %s. "
@@ -2239,15 +2242,15 @@ class PollingOperations(_MixinBase):
                             # counter is neither raised nor reset. A client
                             # rejection says nothing about the credentials in
                             # either direction.
-                            # The neighbouring success path still treats ANY
+                            # The neighbouring success path no longer treats a
                             # non-raising return as proof that the credentials
                             # work: it resets this counter and clears the auth
-                            # state before it looks at whether the result is
-                            # empty. Every 5xx, every 429 and every idle BLE tag
-                            # still reaches that reset. It is pre-existing, it is
-                            # wrong on its own terms, and it is tracked as a
-                            # finding of its own -- a client rejection is kept out
-                            # of it by raising in api.py, nothing more.
+                            # state only for a location WITH content, behind the
+                            # empty guard. An idle BLE tag therefore clears
+                            # nothing, and neither does a rejection that gets
+                            # here -- the raise in api.py keeps it off that path
+                            # entirely, which is one guarantee on top of the
+                            # other, not the only one left.
                             # The all-rejected case is caught after the loop,
                             # not here: whether a rejection is per-device or
                             # account-wide is only knowable once every device

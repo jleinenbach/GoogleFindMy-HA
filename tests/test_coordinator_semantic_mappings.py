@@ -976,10 +976,15 @@ async def test_a_rejected_device_never_clears_the_auth_state() -> None:
 
     ``api.async_get_device_location`` passes a non-credential 4xx through
     instead of returning ``{}``, so the poll loop never reaches the success
-    path for that device. Were it to return ``{}``, the loop would call
-    ``_set_auth_state(failed=False)`` and reset the transient counter BEFORE
-    the empty guard, and a permanently deleted tracker would wipe a pending
-    401 from another tracker in every single cycle.
+    path for that device. What that was worth when this test was written, kept
+    as history: the reset ran BEFORE the empty guard back then, so a returned
+    ``{}`` would have called ``_set_auth_state(failed=False)`` and reset the
+    transient counter, and a permanently deleted tracker would have wiped a
+    pending 401 from another tracker in every single cycle. The reset has since
+    moved behind that guard -- see
+    ``test_an_empty_return_proves_nothing_about_the_credentials`` -- so the seam
+    now holds twice over: the rejection never reaches the success path, and an
+    empty result would prove nothing there if it did.
     """
     coordinator = _polling_coordinator({}, _TrackingFilter(), {})
     coordinator.api = _DecryptFailAPI(NovaAuthError(404, "gone"))
@@ -1008,8 +1013,8 @@ async def test_an_empty_return_proves_nothing_about_the_credentials() -> None:
     History, kept deliberately: this function used to be called
     ``test_an_empty_return_still_clears_the_counter`` and asserted the opposite
     of what it asserts now. It was a characterisation of a reset that was known
-    to be wrong on its own terms and was left alone at the time, with the
-    finding tracked separately. This is the day it changes, and it changes on
+    to be wrong on its own terms and was left alone at the time, carried in a
+    plan of its own instead. This is the day it changes, and it changes on
     purpose.
 
     What is wrong with the old behaviour: an empty dict is WEAK evidence that
@@ -1793,11 +1798,14 @@ async def test_a_mixed_cycle_of_rejection_and_unaccepted_siblings_now_surfaces()
 async def test_an_unaccepted_device_does_not_touch_the_transient_auth_counter() -> None:
     """Neither cleared nor raised: a refused request says nothing about credentials.
 
-    Two claims in one, and both matter. NOT CLEARED is the defect being fixed --
-    the success path runs ``_set_auth_state(failed=False)`` and zeroes the
-    counter before it looks at the result, so every 5xx used to wipe the
-    escalation budget on its way through. Raising skips that path entirely; the
-    branch does not undo the reset, it never happens.
+    Two claims in one, and both matter. NOT CLEARED was the defect this test was
+    written against: the success path ran ``_set_auth_state(failed=False)`` and
+    zeroed the counter before it looked at the result, so every 5xx wiped the
+    escalation budget on its way through. Two independent changes now stand
+    between a refused request and that reset: raising skips the path entirely,
+    and the reset itself has moved behind the empty guard
+    (``test_an_empty_return_proves_nothing_about_the_credentials``). Neither
+    undoes a reset; both keep it from happening.
 
     NOT RAISED is the other half, and it is what a well-meant "treat it like the
     transient-auth branch" edit would break. A server that is down is not a

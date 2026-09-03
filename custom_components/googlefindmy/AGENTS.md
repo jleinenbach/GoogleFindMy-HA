@@ -122,15 +122,17 @@ the predicate and not the type; `coordinator/polling.py`, whose `except NovaAuth
 transient-auth counter alone in both directions AND does not record the rejection as the cycle's `last_exception`;
 and `coordinator/locate.py`, whose branch does not flip the account-wide auth state. `location_request.py` names the status in its log records instead of calling every 4xx an
 authentication error, but still only re-raises -- it does not classify.
-Why the location handler raises rather than returning `{}`, since the empty return looks like the gentler option: both
-callers treat ANY non-raising return as positive proof that the credentials work. `polling.py` runs "Success path:
-ensure any previous auth error is cleared" and `locate.py` runs "Success path: clear any auth error state", and both run
-BEFORE the `if not location` guard. An empty return for a rejected device would therefore have RESET the transient-auth
-counter and cleared the auth state, which is the opposite of what those branches say. Worse, it would have done so
-PERMANENTLY: a 5xx clears up, a device deleted from the account does not, so one deleted tracker in the list would reset
-the counter every cycle and a genuinely expired sign-in on another tracker would never reach
-`_MAX_TRANSIENT_AUTH_FAILURES`. The user would never see the reauth prompt at all -- a worse outcome than the defect
-this change exists to fix. Raising keeps a rejected device out of that reset.
+Why the location handler raises rather than returning `{}`, since the empty return looks like the gentler option. The
+original reason no longer holds and is kept here as history: both callers used to treat ANY non-raising return as
+positive proof that the credentials work, running their "Success path" reset BEFORE the `if not location` guard, so an
+empty return for a rejected device would have RESET the transient-auth counter and cleared the auth state -- and
+permanently, because a 5xx clears up while a device deleted from the account does not. That reset now sits BEHIND the
+empty guard on both paths (`PLAN_GFMY_AUTH_RESET_POSITIVE_PROOF`), so raising is no longer the thing that keeps a
+rejection out of it. Raising is still right, for the reason that outlives the defect: a client rejection is a failure
+and belongs in failure handling. An empty dict would flatten it into the shape of a healthy idle tag -- no
+`cycle_failed`, no `failed` in `last_poll_result`, nothing for the post-loop guard to count -- and no caller can tell
+those two apart from the outside, which is why the outcome has to cross the boundary as an exception and not as an
+empty collection.
 Why the poll branch records the rejection without failing the coordinator UPDATE (it does fail the cycle): in the
 cycle's `finally` block `cycle_failed` and `last_exception` drive two different things. `cycle_failed` only writes
 the `last_poll_result` diagnostic attribute that `binary_sensor.py` exposes; `last_exception` drives
@@ -246,14 +248,21 @@ Eight tests pin this: `test_a_rejected_device_does_not_make_every_tracker_unavai
 `test_a_mixed_cycle_of_rejection_and_empty_siblings_stays_silent`,
 `test_a_cycle_where_no_request_was_accepted_reports_an_error` and
 `test_a_mixed_cycle_of_rejection_and_unaccepted_siblings_now_surfaces`.
-What is still NOT fixed there, stated so it is not mistaken for solved: that success path still treats every empty
-result as proof of working credentials. The 5xx and the 429 no longer reach it -- they raise before they can -- but
-every idle BLE tag still does, and so do the four pre-accept failures named above. Deciding what an
-empty result may prove about credentials is a behaviour change of its own with a far wider blast radius (every healthy
-idle poll takes the same path); it is tracked separately (`PLAN_GFMY_AUTH_RESET_POSITIVE_PROOF`) and must not be assumed done. Three tests pin the
-current state so it cannot drift silently: `test_an_empty_return_still_clears_the_counter` characterises the reset that
-stays, `test_an_unaccepted_request_no_longer_clears_the_counter` is its contract pair for the requests that no longer
-reach it, and `test_a_non_credential_4xx_location_is_passed_through` pins the seam that keeps a rejection out of it.
+What that success path does NOW, because this paragraph used to say it was still broken and must not be read that way
+any more: the reset is bound to a positive proof instead of to the absence of an exception
+(`PLAN_GFMY_AUTH_RESET_POSITIVE_PROOF`). The proof differs per path and each one is named: in the poll cycle a location
+WITH content, in the manual locate a record that survives the empty guard, and for the transient-auth counter a
+successful `async_get_basic_device_list` -- the strongest source in the tree, because it has no non-throwing error exit
+and an expired login raises before it can reach the reset. An empty result clears nothing at all any more: not the idle
+BLE tag, not the four pre-accept failures named above. The price was measured and accepted with the change, and it is
+bounded: an auth error already on screen is now cleared by the next device-list refresh instead of by the next poll of
+any kind, and both run on the same 300-second cadence. What is bought with it is the escalation that never used to
+happen -- one idle tag reset the counter in every cycle, so a genuinely expired login never reached
+`_MAX_TRANSIENT_AUTH_FAILURES` at all. Three tests pin the new state so it cannot drift back:
+`test_an_empty_return_proves_nothing_about_the_credentials` carries the inverted assertion together with the history of
+the characterisation it replaces, `test_an_unaccepted_request_no_longer_clears_the_counter` is its contract pair for the
+requests that no longer reach the path at all, and `test_a_non_credential_4xx_location_is_passed_through` pins the seam
+that keeps a rejection out of it.
 What is NOT fixed, stated so the rule is not mistaken for a solved problem: `nova_request.py` still raises a type named
 "auth" for all of them, so a new handler that reads the type repeats the defect, and this paragraph is the only thing
 standing in its way. Giving the non-credential case its own exception class is the open follow-up; it needs an

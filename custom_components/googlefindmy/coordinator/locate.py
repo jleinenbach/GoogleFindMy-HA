@@ -581,11 +581,12 @@ class LocateOperations(_MixinBase):
                 # diagnostic sensor on. The sign-in was fine the whole time.
                 # api passes such a status through instead of returning {}, so a
                 # manual locate on a deleted tracker reaches this branch and not
-                # the success path above -- which calls _set_auth_state(failed=
-                # False) before the empty guard and would therefore CLEAR a
-                # pending auth error. That clearing still happens for every 5xx
-                # and every empty result; it is pre-existing and tracked as a
-                # finding of its own.
+                # the success path above. That mattered more than it does now:
+                # the success path used to call _set_auth_state(failed=False)
+                # BEFORE the empty guard and would have CLEARED a pending auth
+                # error for every 5xx and every empty result. It no longer does
+                # -- the reset sits behind the empty guard now -- so this branch
+                # is the second line of defence rather than the only one.
                 if not is_credential_rejection(auth_err):
                     _LOGGER.warning(
                         "Manual locate for %s failed (client error): HTTP %s - %s",

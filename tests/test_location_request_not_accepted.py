@@ -5,8 +5,9 @@
 request the server ACCEPTED that had nothing to report (the healthy idle outcome of
 a BLE tag with no reporter in range) and for a request that never got that far.
 ``api.async_get_device_location`` mapped both to ``{}``, so both coordinator callers
-read every non-raising return as positive proof that the credentials work
-(``PLAN_GFMY_EMPTY_RESULT_DISTINGUISHABLE``).
+used to read every non-raising return as positive proof that the credentials work
+(``PLAN_GFMY_EMPTY_RESULT_DISTINGUISHABLE``). Those resets have since moved behind
+the empty guard as well (``PLAN_GFMY_AUTH_RESET_POSITIVE_PROOF``).
 
 ``LocationRequestNotAcceptedError`` carries the second state across the
 ``location_request.py`` boundary. This module has two halves, and mixing them up is
@@ -601,13 +602,15 @@ async def test_poll_does_not_clear_the_auth_state_on_the_signal(
 ) -> None:
     """A refused request must not be read as proof that the credentials work.
 
-    This is the defect itself, in miniature. Today the empty result reaches the
-    success path, which runs ``_set_auth_state(failed=False)`` and resets
-    ``_consecutive_transient_auth_failures`` -- so a 5xx wipes the transient-auth
-    counter on its way through, and the escalation budget never fills. The fix is
-    not that the branch below undoes the reset; it is that raising SKIPS the reset
-    entirely. Asserting the counter is untouched is what would catch a well-meant
-    "restore previous behaviour" edit putting it back.
+    This is the defect itself, in miniature. Back then the empty result reached
+    the success path, which ran ``_set_auth_state(failed=False)`` and reset
+    ``_consecutive_transient_auth_failures`` -- so a 5xx wiped the transient-auth
+    counter on its way through, and the escalation budget never filled. The fix
+    is not that the branch below undoes the reset; it is that raising SKIPS the
+    reset entirely. Since then the reset has also moved behind the empty guard,
+    so an empty result would clear nothing even if it arrived here. Asserting the
+    counter is untouched is what would catch a well-meant "restore previous
+    behaviour" edit putting either guarantee back.
     """
     loop = asyncio.get_running_loop()
     devices = [{"id": "dev-refused", "name": "Refused Tag"}]
@@ -689,12 +692,15 @@ async def test_locate_does_not_clear_the_auth_state_on_the_signal(
 ) -> None:
     """The manual path carries the same ordering defect, and the same fix.
 
-    ``coordinator/locate.py`` calls ``_set_auth_state(failed=False)`` immediately
-    after the api call and BEFORE its empty-result guard, so a refused manual
-    locate clears the account's auth-failure state exactly as the poll loop does.
-    Raising skips it. ``note_error`` is the per-tracker DIAGNOSTIC hook, not a
-    counter, and the sibling transient handler calls it by design -- so its use
-    here is asserted as intended behaviour rather than tolerated.
+    ``coordinator/locate.py`` used to call ``_set_auth_state(failed=False)``
+    immediately after the api call and BEFORE its empty-result guard, so a
+    refused manual locate cleared the account's auth-failure state exactly as the
+    poll loop did. Raising skips it, and the reset has since moved behind that
+    guard as well -- see
+    ``test_an_empty_manual_locate_does_not_clear_the_auth_state``. ``note_error``
+    is the per-tracker DIAGNOSTIC hook, not a counter, and the sibling transient
+    handler calls it by design -- so its use here is asserted as intended
+    behaviour rather than tolerated.
     """
     coord = locate_coord
     coord.note_error = MagicMock(return_value=None)
@@ -789,8 +795,9 @@ async def test_locate_on_a_healthy_idle_tag_returns_empty_and_clears_nothing(
     ``test_locate_on_a_healthy_idle_tag_still_returns_empty_and_clears_auth_state``
     and asserted that the reset still HAPPENS on an accepted-but-empty result. It
     was written to pin the positive side of the raise-site change, at a time when
-    the reset in front of the empty guard was a known finding tracked separately.
-    That finding is now fixed, and this is the same seam read from the other side.
+    the reset in front of the empty guard was a known defect carried in a plan of
+    its own. That defect is now fixed, and this is the same seam read from the
+    other side.
 
     Why the old assertion could not survive it: an empty dict is weak evidence
     that the request was accepted, not proof of it. Four pre-accept failures still
