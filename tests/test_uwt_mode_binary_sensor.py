@@ -388,11 +388,20 @@ class TestUWTModeSensorDocumentationMatchesSpec:
     the right keywords. Widen them when a regression slips past, not before.
     """
 
-    #: Matches the separation figure in its common spellings, including
-    #: hyphen/en-dash/em-dash variants, "8 to 24" and the spelled-out form. The
-    #: figure itself is no longer forbidden; see the attribution guard below.
+    #: Matches the separation figure in its common spellings: hyphen, en-dash
+    #: and em-dash variants, "8 to 24", "8 and 24", the "between ... and ..."
+    #: frame, and the spelled-out forms of both. The figure itself is no longer
+    #: forbidden; see the attribution guard below.
+    #:
+    #: Widened on 2026-09-03 after a review found that
+    #: "separated for between eight and twenty-four hours" matched neither this
+    #: expression nor any withdrawn-claim pattern, so the original false
+    #: duration could return in an ordinary rephrasing with every guard green.
     SEPARATION_FIGURE_RE = re.compile(
-        r"8\s*[-\u2010-\u2015]\s*24\s*h|8\s+to\s+24\s+h|eight\s+to\s+twenty[- ]four",
+        r"8\s*(?:[-\u2010-\u2015]|to|and)\s*24\s*h"
+        r"|between\s+8\s*(?:[-\u2010-\u2015]|to|and)\s*24"
+        r"|eight\s+(?:to|and)\s+twenty[- ]four"
+        r"|between\s+eight\s+and\s+twenty[- ]four",
         re.IGNORECASE,
     )
 
@@ -422,7 +431,11 @@ class TestUWTModeSensorDocumentationMatchesSpec:
             r"only\s+(?:entered|set|activated)\s+by\s+command",
             r"only\s+by\s+command",
             r"no\s+such\s+window\s+exists",
-            r"turns\s+on\s+after",
+            r"turns\s+on\s+(?:after|once|when)",
+            r"(?:becomes|goes)\s+active\s+(?:after|once|when)",
+            r"(?:switches|flips)\s+(?:to\s+)?on\s+(?:after|once|when)",
+            r"activates\s+(?:after|once|when)",
+            r"(?:set|reported)\s+after\s+(?:a|the)?\s*separation",
             r"chime\s+is\s+a\s+dult\s+platform\s+behaviour",
             r"is\s+not\s+the\s+(?:dult\s+)?separated\s+state",
         )
