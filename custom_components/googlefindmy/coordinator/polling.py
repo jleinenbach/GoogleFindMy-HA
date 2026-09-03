@@ -1267,9 +1267,10 @@ class PollingOperations(_MixinBase):
 
                 # Success path: if we were in an auth error state, clear it now.
                 #
-                # This is the strongest proof source in the integration, and
-                # after the poll loop stopped resetting on an empty result it is
-                # also the only everyday one left for the transient counter.
+                # This is the strongest proof source in the integration FOR THE
+                # ACCOUNT TOKEN, and that is all it is used for here. It was
+                # briefly the transient counter's everyday reset source too; that
+                # is history, and the paragraph below says why it had to stop.
                 # `async_get_basic_device_list` has no non-throwing error exit.
                 # Its OUTER `try` has nine except branches, all of which re-raise:
                 # eight as `ConfigEntryAuthFailed` or `UpdateFailed`, the ninth a
@@ -1279,9 +1280,10 @@ class PollingOperations(_MixinBase):
                 # none of them leaves the method. The method holds exactly one
                 # `return`, and it is the success path. A return that got this far therefore
                 # means Nova accepted the account token, which is exactly what
-                # the counter counts -- and an expired login raises before it can
-                # reach this line, so it cannot mask itself here the way it could
-                # through an empty location result.
+                # the AUTH STATE reports -- and an expired login raises before it
+                # can reach this line, so it cannot mask itself here the way it
+                # could through an empty location result. What the counter counts
+                # is a different claim, and it is not settled here.
                 #
                 # Exactly ONE reset belongs in this branch, and it is the auth
                 # state. Even that one belongs here and not above it: the cached
