@@ -339,6 +339,33 @@ class TestUWTModeSensorCoordinatorUpdate:
 # ===========================================================================
 
 
+#: Subjects the withdrawn claims were made about. A claim pattern only fires
+#: when one of these stands in the same clause, so that a true sentence about a
+#: different mechanism -- the "Skip ringing authentication" control flag, say --
+#: does not trip a guard written for the mode semantics.
+_UWT_SUBJECT = (
+    r"(?:uwt|unwanted tracking protection mode|\bmode\b|this bit|the bit"
+    r"|this sensor|the sensor|separated state|separation window)"
+)
+
+#: Gap between subject and claim. Bounded, and it may not cross a sentence or
+#: clause boundary, so an unrelated neighbouring sentence cannot supply the
+#: subject for a claim it has nothing to do with.
+_CLAUSE_GAP = r"[^.;:]{0,60}"
+
+
+def _scoped_to_uwt_subject(claim: str) -> tuple[str, str]:
+    """Return *claim* anchored to a UWT subject, in both clause orders.
+
+    Both orders are needed because English puts the subject on either side:
+    "the mode is command-driven" and "a command-driven mode".
+    """
+    return (
+        rf"{_UWT_SUBJECT}{_CLAUSE_GAP}{claim}",
+        rf"{claim}{_CLAUSE_GAP}{_UWT_SUBJECT}",
+    )
+
+
 class TestUWTModeSensorDocumentationMatchesSpec:
     """Guard the docstrings against the semantics drift around BSkando#210.
 
@@ -370,28 +397,36 @@ class TestUWTModeSensorDocumentationMatchesSpec:
     )
 
     #: Claims withdrawn on 2026-09-03 against the specification wording, as
-    #: patterns rather than spellings (property 1 in ``tests/AGENTS.md``). They
-    #: run against the docstring normalised to lowercase with whitespace
-    #: collapsed, so recasing or rewrapping the old paragraph does not walk
-    #: past them, and they cover the two claims in both their directions: that
-    #: the mode is command-only, and that the sensor follows a separation
-    #: window.
+    #: patterns rather than spellings (property 1 in ``tests/AGENTS.md``), each
+    #: scoped to a UWT subject by :func:`_scoped_to_uwt_subject`. They run
+    #: against the docstring normalised to lowercase with whitespace collapsed,
+    #: so recasing or rewrapping the old paragraph does not walk past them, and
+    #: they cover both withdrawn claims in both directions: that the mode is
+    #: command-only, and that the sensor follows a separation window.
     #:
-    #: Subjects are carried on purpose. The bare phrase "is not what this bit
-    #: reports" is a *true* statement about the motion detector, which the
-    #: corrected docstring needs, so only the withdrawn claim about the chime is
-    #: matched. Per property 2 the guarded docstrings do not restate either
-    #: withdrawn claim, which is what lets these patterns stay broad without an
-    #: exception for the paragraph that mentions the history.
-    WITHDRAWN_CLAIM_PATTERNS = (
-        r"not by elapsed time",
-        r"command[-\s]driven",
-        r"(?:mode|it)\s+is\s+(?:entered and left|only entered)\s+by\s+command",
-        r"only\s+by\s+command",
-        r"no\s+such\s+window\s+exists",
-        r"(?:sensor|bit|entity|it)\s+turns\s+on\s+after",
-        r"chime\s+is\s+a\s+dult\s+platform\s+behaviour",
-        r"is\s+not\s+the\s+(?:dult\s+)?separated\s+state",
+    #: Subjects are load-bearing twice over. "is not what this bit reports" is a
+    #: *true* statement about the motion detector, so only the withdrawn claim
+    #: about the chime is matched; and "only by command" or "no such window
+    #: exists" can be true of a different mechanism, which is why none of these
+    #: fires without a UWT subject in the same clause.
+    #:
+    #: Per property 2 the guarded docstrings do not restate either withdrawn
+    #: claim, which is what lets these patterns stay broad without an exception
+    #: for the paragraph that mentions the history.
+    WITHDRAWN_CLAIM_PATTERNS = tuple(
+        pattern
+        for claim in (
+            r"not by elapsed time",
+            r"command[-\s]driven",
+            r"is\s+entered\s+and\s+left\s+by\s+command",
+            r"only\s+(?:entered|set|activated)\s+by\s+command",
+            r"only\s+by\s+command",
+            r"no\s+such\s+window\s+exists",
+            r"turns\s+on\s+after",
+            r"chime\s+is\s+a\s+dult\s+platform\s+behaviour",
+            r"is\s+not\s+the\s+(?:dult\s+)?separated\s+state",
+        )
+        for pattern in _scoped_to_uwt_subject(claim)
     )
 
     @staticmethod
