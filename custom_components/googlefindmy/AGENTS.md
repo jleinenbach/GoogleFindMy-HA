@@ -267,18 +267,30 @@ immediately before every attempt: a tracker whose action RPC kept returning a no
 only ever climb back to 1 and never reached `_MAX_TRANSIENT_AUTH_FAILURES`. That was the state of the first revision of
 this change, recorded as `R-3` in the plan, and an external reviewer found it before a user did. What the list proves is
 the ACCOUNT token, and only that; it says nothing about the action RPC accepting the same token again, which is what the
-counter counts. So a booked location failure now sets `_transient_auth_failure_since_list_refresh`, and the next refresh
-CONSUMES that marker instead of clearing the count. A one-off hiccup is still healed, by the refresh after next rather
-than the next one; a persistent rejection accumulates across cycles until the threshold. The marker is consumed and not
-sticky on purpose: suppressing the reset outright would strand any counter a single hiccup ever raised, which is the
-defect this reset source was introduced to remove. A genuinely expired sign-in does not depend on the counter anyway:
-`async_get_basic_device_list` raises `ConfigEntryAuthFailed` and the reauth flow starts from there. What the change does
-buy is that a pending auth error survives long enough for a user to see it, instead of being wiped by the next idle tag.
+counter counts. So a booked location failure sets `_transient_auth_failure_pending`, and while that marker stands the
+refresh leaves the count alone. Released by a POLL CYCLE that books no rejection, never by the refresh itself, and that
+difference is the whole design. A marker a refresh consumed would assume exactly one refresh per cycle, and nothing
+couples the two: `DEVICE_LIST_POLL_INTERVAL` is a fixed 300 s while `location_poll_interval` reaches 3600 s, and a
+deferred empty list re-fetches on the next 60 s tick without moving `_last_list_poll_mono`. At any poll setting above
+600 s, and already at the default whenever one empty list is deferred, a second refresh would fall into the same gap and
+clear the count -- the same starvation one layer along. Bound to the cycle it holds at every cadence. A one-off hiccup
+still heals: the next clean cycle releases the marker and the refresh after that clears the count. Suppressing the reset
+outright was rejected for the same reason it was introduced: it would strand any counter a single hiccup ever raised. A
+genuinely expired sign-in does not depend on the counter anyway: `async_get_basic_device_list` raises
+`ConfigEntryAuthFailed` and the reauth flow starts from there. What the change does buy is that a pending auth error
+survives long enough for a user to see it, instead of being wiped by the next idle tag.
 `test_the_production_order_still_reaches_the_reauth_threshold` drives the real `_async_update_data` ->
 `_async_start_poll_cycle` sequence for three cycles and pins the escalation; the tests it replaces called
 `_async_start_poll_cycle()` directly and so never saw the refresh that preceded it in production.
-`test_the_refresh_after_next_still_heals_a_single_hiccup` pins the other side, so the fix cannot be tightened into a
-sticky suppression. Three tests pin the new state so it cannot drift back:
+`test_two_refreshes_between_two_polls_do_not_clear_the_counter` pins the cadence independence, and
+`test_a_clean_cycle_releases_the_counter_for_the_next_refresh` pins the other side, so the fix cannot be tightened into
+a sticky suppression.
+What this does NOT change, named because the reasoning above invites the opposite reading: `_set_auth_state(failed=
+False)` on that same success path stays UNCONDITIONAL. The account token is exactly what that state reports, and the
+list proves it. The consequence is real and accepted: after an escalation raised from the action RPC, the next refresh
+clears the repairs issue while the reauth flow it started stays open in the UI. Two channels, one of which is
+account-scoped and now correct; binding the auth state to the marker as well would delay every legitimate recovery by a
+poll cycle for a display-only gain. Three tests pin the new state so it cannot drift back:
 `test_an_empty_return_proves_nothing_about_the_credentials` carries the inverted assertion together with the history of
 the characterisation it replaces, `test_an_unaccepted_request_no_longer_clears_the_counter` is its contract pair for the
 requests that no longer reach the path at all, and `test_a_non_credential_4xx_location_is_passed_through` pins the seam

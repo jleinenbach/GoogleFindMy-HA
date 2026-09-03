@@ -1085,7 +1085,7 @@ def test_a_booked_location_failure_survives_the_next_list_refresh(
     dummy_api.device_list = [{"id": "dev-1", "name": "Device"}]
     coordinator._consecutive_transient_auth_failures = 2
     coordinator._last_transient_auth_error = "rejected"
-    coordinator._transient_auth_failure_since_list_refresh = True
+    coordinator._transient_auth_failure_pending = True
 
     loop = coordinator.hass.loop
     loop.run_until_complete(coordinator._async_update_data())
@@ -1094,28 +1094,76 @@ def test_a_booked_location_failure_survives_the_next_list_refresh(
     assert coordinator._last_transient_auth_error == "rejected"
 
 
-def test_the_refresh_after_next_still_heals_a_single_hiccup(
+def test_a_clean_cycle_releases_the_counter_for_the_next_refresh(
     coordinator: GoogleFindMyCoordinator, dummy_api: _DummyAPI
 ) -> None:
-    """One failure is consumed by one refresh; the next one clears the counter.
+    """A cycle that books nothing lets the next refresh clear the counter.
 
     This is the guard against over-correcting. Suppressing the reset outright
     would strand any counter a one-off hiccup ever raised, which is the defect
-    AP-2 was written to remove. The marker is therefore consumed, not sticky.
+    the device-list reset was introduced to remove. The release hangs on the
+    poll cycle rather than on the refresh, so it does not depend on how the two
+    cadences line up.
     """
 
     dummy_api.device_list = [{"id": "dev-1", "name": "Device"}]
     coordinator._consecutive_transient_auth_failures = 1
-    coordinator._transient_auth_failure_since_list_refresh = True
+    coordinator._transient_auth_failure_pending = True
 
     loop = coordinator.hass.loop
+    # A refresh alone proves nothing about the action RPC and must not clear it.
     loop.run_until_complete(coordinator._async_update_data())
     assert coordinator._consecutive_transient_auth_failures == 1
-    assert coordinator._transient_auth_failure_since_list_refresh is False
+    assert coordinator._transient_auth_failure_pending is True
 
-    coordinator._last_list_poll_mono = 0.0
+    # A poll cycle that books no rejection is what releases the marker.
+    coordinator.async_set_update_error = Mock()
+    del coordinator._async_start_poll_cycle
+    dummy_api.async_get_device_location = AsyncMock(return_value={})
+    loop.run_until_complete(
+        coordinator._async_start_poll_cycle([{"id": "dev-1", "name": "Device"}])
+    )
+    assert coordinator._transient_auth_failure_pending is False
+
+    # Force the refresh through the flag, not by backdating a monotonic
+    # baseline. `_last_list_poll_mono = 0.0` only reads as "long ago" while
+    # `time.monotonic()` already exceeds DEVICE_LIST_POLL_INTERVAL, which is
+    # true on a long-running workstation and false on a freshly booted CI
+    # runner -- the earlier version of this test passed here and failed there
+    # for exactly that reason.
+    coordinator._force_device_list_refresh = True
     loop.run_until_complete(coordinator._async_update_data())
     assert coordinator._consecutive_transient_auth_failures == 0
+
+
+def test_two_refreshes_between_two_polls_do_not_clear_the_counter(
+    coordinator: GoogleFindMyCoordinator, dummy_api: _DummyAPI
+) -> None:
+    """The guard must not assume one list refresh per poll cycle.
+
+    Nothing in the code couples the two cadences. `DEVICE_LIST_POLL_INTERVAL`
+    is a fixed 300 s while `location_poll_interval` is an option up to 3600 s,
+    and a deferred empty list re-fetches on the next 60 s tick without moving
+    `_last_list_poll_mono`. A marker that a refresh consumed would therefore be
+    eaten by the first refresh and the count cleared by the second, which is
+    the same starvation one layer along. Two refreshes with no poll in between
+    are the smallest case that tells the two designs apart.
+    """
+
+    dummy_api.device_list = [{"id": "dev-1", "name": "Device"}]
+    coordinator._consecutive_transient_auth_failures = 2
+    coordinator._last_transient_auth_error = "rejected"
+    coordinator._transient_auth_failure_pending = True
+
+    loop = coordinator.hass.loop
+    for _ in range(3):
+        # Flag rather than a backdated baseline: see the note in
+        # test_a_clean_cycle_releases_the_counter_for_the_next_refresh.
+        coordinator._force_device_list_refresh = True
+        loop.run_until_complete(coordinator._async_update_data())
+
+    assert coordinator._consecutive_transient_auth_failures == 2
+    assert coordinator._last_transient_auth_error == "rejected"
 
 
 def test_the_production_order_still_reaches_the_reauth_threshold(
@@ -1136,7 +1184,14 @@ def test_the_production_order_still_reaches_the_reauth_threshold(
 
     async def _reject(device_id: str, *_args: Any, **_kwargs: Any) -> dict[str, Any]:
         location_calls.append(device_id)
-        raise NovaAuthError(401, "action rejected")
+        # 403, not 401: `is_credential_rejection` records that a 401 surviving
+        # the refresh sequence is raised as NovaAuthPermanentError instead, so
+        # 403 is the only plain credential rejection a handler actually sees.
+        # The seam below this one -- api.py mapping a transport status onto this
+        # exception -- is pinned in test_api_basics.py and deliberately not
+        # re-tested here; this test owns the coordinator's ordering, not the
+        # transport's classification.
+        raise NovaAuthError(403, "action rejected")
 
     dummy_api.async_get_device_location = _reject
 
@@ -1160,10 +1215,12 @@ def test_the_production_order_still_reaches_the_reauth_threshold(
 
     loop = coordinator.hass.loop
     for _ in range(_MAX_TRANSIENT_AUTH_FAILURES):
-        # Both cadences due, which is the default configuration: the list
-        # interval and the location interval are both 300 seconds.
-        coordinator._last_list_poll_mono = 0.0
-        coordinator._last_poll_mono = 0.0
+        # Both cadences made due without touching absolute monotonic values:
+        # the flag for the list, the coordinator's own helper for the poll.
+        # Zeroing the baselines instead would tie the test to the host's
+        # uptime.
+        coordinator._force_device_list_refresh = True
+        coordinator.force_poll_due()
         loop.run_until_complete(coordinator._async_update_data())
         if tasks:
             # gather() re-raises, so a cycle that died on the way to the

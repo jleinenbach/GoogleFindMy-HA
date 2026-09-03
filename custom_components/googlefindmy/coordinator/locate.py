@@ -761,8 +761,11 @@ class LocateOperations(_MixinBase):
                 # Two neighbours could be read as precedent, and exactly one of
                 # them is. NOT the `NovaRateLimitError` / `NovaHTTPError` handlers
                 # a few branches up, however tempting the symmetry: `api.py`
-                # answers both with `return {}` of its own (api.py:1535 for the
-                # 429, api.py:1526 for the non-401/403 5xx), so neither type ever
+                # answers both with `return {}` of its own (in `api.py`, the
+                # `except NovaRateLimitError` branch for the 429 and the
+                # `except NovaHTTPError` branch for the non-401/403 5xx; anchors
+                # rather than line numbers, which this file has already outrun
+                # twice), so neither type ever
                 # reaches this method and those two branches are dead on this
                 # path. Nor did this branch inherit their traffic -- before the
                 # request layer started raising, a 5xx returned `[]` from

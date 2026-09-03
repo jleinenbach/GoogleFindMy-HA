@@ -190,7 +190,7 @@ class PollingOperations(_MixinBase):
     _fcm_error_count: int
     _fcm_last_error: str | None
     _last_transient_auth_error: str | None
-    _transient_auth_failure_since_list_refresh: bool
+    _transient_auth_failure_pending: bool
     _is_polling: bool
     _startup_complete: bool
 
@@ -1272,8 +1272,11 @@ class PollingOperations(_MixinBase):
                 # after the poll loop stopped resetting on an empty result it is
                 # also the only everyday one left for the transient counter.
                 # `async_get_basic_device_list` has no non-throwing error exit:
-                # every except branch ends in `raise ConfigEntryAuthFailed` or
-                # `raise UpdateFailed`. A return that got this far therefore
+                # every except branch re-raises, eight of them as
+                # `ConfigEntryAuthFailed` or `UpdateFailed` and the ninth as the
+                # bare `raise` that lets `asyncio.CancelledError` through
+                # untouched. The method holds exactly one `return`, and it is the
+                # success path. A return that got this far therefore
                 # means Nova accepted the account token, which is exactly what
                 # the counter counts -- and an expired login raises before it can
                 # reach this line, so it cannot mask itself here the way it could
@@ -1282,22 +1285,37 @@ class PollingOperations(_MixinBase):
                 # Both resets belong in this branch and not above it: the cached
                 # branch skips the call entirely and so proves nothing.
                 self._set_auth_state(failed=False)
-                if self._transient_auth_failure_since_list_refresh:
-                    # A location RPC booked a transient rejection since the last
-                    # refresh. Clearing the counter here would starve the
-                    # escalation it feeds: at the default cadence both intervals
-                    # are 300 s and this refresh runs in the same
-                    # `_async_update_data` BEFORE the poll cycle is scheduled, so
-                    # a tracker whose action RPC keeps rejecting would see its
-                    # count zeroed before every single attempt and could never
-                    # pass 1. What this branch proves is the ACCOUNT token; it
-                    # says nothing about the action RPC accepting that token
-                    # again, and only the latter is what the counter counts.
+                if self._transient_auth_failure_pending:
+                    # A location RPC booked a transient rejection that no later
+                    # poll cycle has disproved yet. Clearing the counter here
+                    # would starve the escalation it feeds: this refresh runs in
+                    # the same `_async_update_data` and BEFORE the poll cycle is
+                    # scheduled, so a tracker whose action RPC keeps rejecting
+                    # would see its count zeroed before every single attempt and
+                    # could never pass 1. What this branch proves is the ACCOUNT
+                    # token; it says nothing about the action RPC accepting that
+                    # token again, and only the latter is what the counter
+                    # counts.
                     #
-                    # Consume the marker instead of making it sticky: a one-off
-                    # hiccup is healed by the refresh after next, a persistent
-                    # rejection accumulates across cycles until the threshold.
-                    self._transient_auth_failure_since_list_refresh = False
+                    # The gate hangs on the POLL CYCLE, not on this refresh, and
+                    # the difference is load-bearing. A marker that a refresh
+                    # consumed would assume exactly one refresh per cycle, and
+                    # nothing in the code couples the two: `DEVICE_LIST_POLL_
+                    # INTERVAL` is a fixed 300 s while the poll interval is an
+                    # option up to 3600 s, and a deferred empty list re-fetches
+                    # on the next 60 s tick without moving `_last_list_poll_mono`.
+                    # Either way a second refresh would fall into the same gap
+                    # and clear the count, which is the very starvation this
+                    # guard exists to prevent. A cycle that books nothing clears
+                    # the marker instead (see the end of the device loop), so a
+                    # one-off hiccup still heals and a persistent rejection
+                    # accumulates until the threshold.
+                    _LOGGER.debug(
+                        "Device list refresh succeeded but a transient auth "
+                        "failure is still unproven (%d booked); leaving the "
+                        "counter alone.",
+                        self._consecutive_transient_auth_failures,
+                    )
                 elif self._consecutive_transient_auth_failures > 0:
                     _LOGGER.info(
                         "Device list refresh succeeded; clearing %d transient auth failure(s).",
@@ -1803,6 +1821,11 @@ class PollingOperations(_MixinBase):
                 # kept apart so whoever reads the log can tell a configuration
                 # change from an outage.
                 cycle_unaccepted_devices = 0
+                # True once this cycle booked a transient auth failure. A cycle
+                # that books none clears `_transient_auth_failure_pending` after
+                # the loop, which is what lets the device-list refresh resume its
+                # job as the everyday reset source.
+                cycle_booked_transient_auth = False
                 for idx, dev in enumerate(devices):
                     dev_id = dev["id"]
                     dev_name = dev.get("name", dev_id)
@@ -1872,7 +1895,7 @@ class PollingOperations(_MixinBase):
                         # Cleared unconditionally, next to the counter it guards:
                         # a marker outliving the count it stands for would eat
                         # the following list reset for nothing.
-                        self._transient_auth_failure_since_list_refresh = False
+                        self._transient_auth_failure_pending = False
 
                         # A device returned an authenticated coordinate report
                         # without raising a DecryptionError: positive proof the
@@ -2203,7 +2226,7 @@ class PollingOperations(_MixinBase):
                         # never outlives the count it stands for. Neutral for the
                         # counter either way (this path reauths immediately), and
                         # kept so a reader does not have to prove that.
-                        self._transient_auth_failure_since_list_refresh = False
+                        self._transient_auth_failure_pending = False
                         reauth_exc = ConfigEntryAuthFailed(
                             "Google credentials invalid; re-authentication required"
                         )
@@ -2289,11 +2312,11 @@ class PollingOperations(_MixinBase):
                         # Only trigger reauth after multiple consecutive failures.
                         self._consecutive_transient_auth_failures += 1
                         self._last_transient_auth_error = str(transient_err)
-                        # Tell the next device-list refresh that this budget is
-                        # in use, so it does not clear what this cycle just
-                        # booked. Set on every booking, not only the first: the
-                        # refresh consumes exactly one marker per pass.
-                        self._transient_auth_failure_since_list_refresh = True
+                        # Tell the device-list refresh that this budget is in
+                        # use, so it does not clear what this cycle just booked.
+                        # Only a later cycle without a booking takes it back.
+                        self._transient_auth_failure_pending = True
+                        cycle_booked_transient_auth = True
 
                         if (
                             self._consecutive_transient_auth_failures
@@ -2487,6 +2510,15 @@ class PollingOperations(_MixinBase):
                         await asyncio.sleep(self.device_poll_delay)
 
                 _LOGGER.debug("Completed polling cycle for %d devices", len(devices))
+                if not cycle_booked_transient_auth:
+                    # No device rejected the credentials this cycle, so the
+                    # earlier rejection is no longer the newest word on them and
+                    # the device-list refresh may clear the counter again. This
+                    # is the ONLY release path besides the two sites that zero
+                    # the counter outright; binding it to the cycle instead of to
+                    # the refresh is what makes the guard independent of how the
+                    # two cadences happen to line up.
+                    self._transient_auth_failure_pending = False
                 # No device's request was accepted: the cycle must surface.
                 # Two counters, one verdict -- see their declaration above for
                 # why they are not the same thing. Either way the device produced
@@ -2511,7 +2543,8 @@ class PollingOperations(_MixinBase):
                 # `LocationRequestNotAcceptedError` itself, so the `api.py`
                 # handlers that return `{}` for those four no longer stand
                 # between the failure and this loop, and the empty dict comes
-                # from the no-location fallthrough (`api.py:1427`), which sits
+                # from the no-location fallthrough (`api.py`, the bare `return {}` after
+                # the "No location data for %s" debug), which sits
                 # after the request.
                 #
                 # It does NOT prove that the request was accepted, and the guard
