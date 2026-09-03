@@ -153,17 +153,35 @@ contrary: the mixed-cycle branch after the loop drops `last_exception` when a si
 the same proof that branch accepts for the counter. Accepting content as proof for the streak and rejecting it for
 availability would be two verdicts out of one cycle, and the second one took every tracker offline next to the device
 that had just answered. `cycle_failed` is deliberately kept, so `last_poll_result` still says the cycle did not poll
-every device. The withdrawal is bound to the IDENTITY of that cycle's rejection: a timeout, a stale owner key or an
-account-wide decrypt failure that reached the slot first stays, because one device answering refutes none of them.
-Pinned by `test_the_reauth_verdict_does_not_depend_on_device_order` and
-`test_content_withdraws_only_the_rejection_not_a_timeout`.
+every device. The withdrawal is bound to the IDENTITY of that cycle's rejection: a timeout or a stale owner key that
+reached the slot first stays, because one device answering refutes neither. (An account-wide decrypt failure cannot
+reach the slot before the withdrawal at all: `_finalize_cycle_decrypt_state` runs AFTER it and fills whatever the
+withdrawal left empty. It does not have to defend its place.)
+That is only half the rule, and the other half lives in the failure branches: `last_exception` is a first-come slot,
+so a rejection booked FIRST would make a later timeout drop its own report -- and the withdrawal would then empty the
+slot. The coordinator update then reports SUCCESS and every tracker stays available, although `last_poll_result` says
+failed and a device never answered at all.
+Overwriting the rejection instead would be wrong the other way round, because whether the withdrawal fires is only
+known AFTER the loop (`cycle_content_proofs`), and in a cycle without content the rejection is the more specific
+diagnosis and the cause of the running escalation. So a rejection holds the slot only PROVISIONALLY and the timeout,
+stale-owner-key and generic branches put their own report in a SECOND slot (`independent_error`); the withdrawal HANDS
+THE PLACE OVER instead of emptying it. The rejection's own slot deliberately carries none of this, because a rejection
+must not displace anything. Do NOT collapse this back to "first failure wins", and do NOT turn the second slot into a
+plain overwrite: the two halves are one rule seen from both ends.
+Pinned by `test_the_reauth_verdict_does_not_depend_on_device_order`,
+`test_content_withdraws_only_the_rejection_not_a_timeout` (timeout first),
+`test_a_later_failure_survives_the_rejection_it_had_to_queue_behind` (rejection first, over all
+three slots), `test_without_content_the_rejection_keeps_the_report_it_booked` (no withdrawal, so the
+rejection stays) and `test_only_the_provisional_rejection_gives_way_not_an_earlier_diagnosis`.
 The all-rejected case is handled after the loop, not in the branch: whether a rejection is per-device or
 account-wide is only knowable once every device has been tried, the same reasoning by which
 `_finalize_cycle_decrypt_state` defers the decrypt verdict. If `cycle_rejected_devices == len(devices)` every device
 was refused, which is account-wide on the rejections' own terms, and the cycle surfaces an `UpdateFailed`. Do NOT
 replace that check with "the device list would have caught it one layer up": `async_get_basic_device_list` is a
-different RPC (`nbe_list_devices`) from the per-device location request, and `DEVICE_LIST_POLL_INTERVAL` (300s,
-`const.py`) means most cycles reuse the cached list without calling it at all. That claim was written here once and
+different RPC (`nbe_list_devices`) from the per-device location request, and it runs on its own clock:
+`DEVICE_LIST_POLL_INTERVAL` is a fixed 300s (`const.py`) while the location poll interval is configurable between 60
+and 3600s. Below 300s most cycles reuse the cached list without calling it at all; at the default of 300s it is
+refreshed in nearly every cycle. Either way the first reason stands on its own. That claim was written here once and
 was wrong.
 Read the check for exactly what it tests, and no more. It does NOT say that a cycle failing the equality had a sibling
 success. It is one of TWO post-loop guards, and the other one is what closed the gap this paragraph used to describe as
@@ -337,10 +355,16 @@ cause and the ACCOUNT-WIDE report are three things, not one. The rejection branc
 follows the coordinator's `last_update_success` -- so a mixed cycle marked EVERY tracker unavailable next to the
 sibling that had just answered WITH content. Accepting that content as proof for the counter and rejecting it for
 availability would be two verdicts out of one cycle. The report is therefore withdrawn as well, bound to the
-IDENTITY of the rejection this cycle booked: a timeout, a stale owner key or an account-wide decrypt failure that
-reached the slot first stays, because one device answering says nothing about a device that never answered at all.
+IDENTITY of the rejection this cycle booked: a timeout or a stale owner key that reached the slot first stays,
+because one device answering says nothing about a device that never answered at all. A failure that arrives LATER
+survives too, but by a different route: it never reaches `last_exception` at all, because the rejection is sitting
+there, so it goes into the second slot `independent_error` and the withdrawal hands the place over to it. Both
+directions are one rule, and neither is "first failure wins" -- see the fuller statement further up in this file.
 `test_the_reauth_verdict_does_not_depend_on_device_order` asserts the withdrawal,
-`test_content_withdraws_only_the_rejection_not_a_timeout` asserts its limit. `cycle_failed` is kept, because the
+`test_content_withdraws_only_the_rejection_not_a_timeout` and
+`test_a_later_failure_survives_the_rejection_it_had_to_queue_behind` assert its two limits, and
+`test_without_content_the_rejection_keeps_the_report_it_booked` pins that the handover happens only when the
+withdrawal really fires. `cycle_failed` is kept, because the
 cycle really did fail to poll every device and the diagnostic attribute has to say so -- the same split the
 non-credential 4xx branch already states for its own case.
 What this does NOT change, named because the reasoning above invites the opposite reading: `_set_auth_state(failed=

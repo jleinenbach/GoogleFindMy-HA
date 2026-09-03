@@ -1876,6 +1876,10 @@ class PollingOperations(_MixinBase):
                 # user sees still points at a concrete tracker.
                 first_rejecting_device: str | None = None
                 first_rejection_error: Exception | None = None
+                # Second slot, for a failure that had to queue behind a rejection.
+                # See the timeout branch below for why a rejection cannot simply
+                # be overwritten.
+                independent_error: Exception | None = None
                 for idx, dev in enumerate(devices):
                     dev_id = dev["id"]
                     dev_name = dev.get("name", dev_id)
@@ -2223,11 +2227,51 @@ class PollingOperations(_MixinBase):
                             self._consecutive_timeouts += 1
                             cycle_failed = True
                             self.note_error(terr, where="poll_timeout", device=dev_name)
+                            # `last_exception` is first-come, but a credential
+                            # rejection holds it only PROVISIONALLY: the
+                            # mixed-cycle branch after the loop withdraws that
+                            # report once a sibling answers WITH CONTENT. Dropping
+                            # this report because the slot is taken would then
+                            # leave NOTHING: the coordinator update reports
+                            # success and every tracker stays available, although
+                            # `last_poll_result` says failed and this device never
+                            # answered at all.
+                            #
+                            # Overwriting the rejection instead would be wrong the
+                            # other way round, because whether the withdrawal
+                            # happens is only known AFTER the loop
+                            # (`cycle_content_proofs`). In a cycle without content
+                            # the rejection is the more specific diagnosis and the
+                            # cause of the running escalation, and it must stay.
+                            # So it is kept in a SECOND slot and handed over only
+                            # if the withdrawal really fires. Identity, not
+                            # truthiness: only the rejection THIS cycle booked
+                            # yields its place. The stale-owner-key and generic
+                            # branches below carry the same rule; the rejection's
+                            # own slot deliberately does not, because a rejection
+                            # must not displace anything.
                             if last_exception is None:
                                 last_exception = UpdateFailed(
                                     f"Location request timed out for {dev_name}"
                                 )
                                 last_exception.__cause__ = terr
+                            # INVARIANT, not a live condition: mutating
+                            # `last_exception is first_rejection_error` to
+                            # `first_rejection_error is not None` survives every
+                            # test, and measurably so -- `independent_error` is
+                            # only ever handed over by the withdrawal, and the
+                            # withdrawal itself demands that identity. The check
+                            # is kept because it states at the point of writing
+                            # what the second slot is FOR, and a later change to
+                            # the handover would otherwise silently widen it.
+                            elif (
+                                last_exception is first_rejection_error
+                                and independent_error is None
+                            ):
+                                independent_error = UpdateFailed(
+                                    f"Location request timed out for {dev_name}"
+                                )
+                                independent_error.__cause__ = terr
                     except SpotAuthPermanentError:
                         _LOGGER.warning(
                             "Authentication failed for %s; triggering reauth flow.",
@@ -2384,7 +2428,14 @@ class PollingOperations(_MixinBase):
                         #
                         # The cause is recorded for every rejecting device, because
                         # the newest one is the useful one to show.
-                        if first_rejecting_device is None:
+                        # Guarded on the ERROR, not on the name: `dev_name` comes
+                        # from `dev.get("name", dev_id)` and is `None` for a device
+                        # dict that carries an explicit `"name": None`. Guarding on
+                        # the name would let a second rejection overwrite
+                        # `first_rejection_error` while `last_exception` still holds
+                        # the first, and both the second slot above and the
+                        # withdrawal below compare by identity.
+                        if first_rejection_error is None:
                             first_rejecting_device = dev_name
                             first_rejection_error = transient_err
                         self._last_transient_auth_error = str(transient_err)
@@ -2436,8 +2487,15 @@ class PollingOperations(_MixinBase):
                         cycle_failed = True
                         cycle_had_stale_key = True
                         self._consecutive_timeouts = 0
+                        # Queues behind a provisional rejection -- see the
+                        # timeout branch above for the second slot.
                         if last_exception is None:
                             last_exception = stale_err
+                        elif (
+                            last_exception is first_rejection_error
+                            and independent_error is None
+                        ):
+                            independent_error = stale_err
                         continue
                     except OwnerKeyLookupTransientError as owner_transient_err:
                         # Transient owner-key lookup miss (partial server response,
@@ -2549,8 +2607,15 @@ class PollingOperations(_MixinBase):
                         cycle_failed = True
                         self._consecutive_timeouts = 0
                         self.note_error(err, where="poll_exception", device=dev_name)
+                        # Queues behind a provisional rejection -- see the
+                        # timeout branch above for the second slot.
                         if last_exception is None:
                             last_exception = err
+                        elif (
+                            last_exception is first_rejection_error
+                            and independent_error is None
+                        ):
+                            independent_error = err
 
                     # Inter-device delay (except after the last one)
                     if idx < len(devices) - 1 and self.device_poll_delay > 0:
@@ -2688,7 +2753,11 @@ class PollingOperations(_MixinBase):
                         first_rejection_error is not None
                         and last_exception is first_rejection_error
                     ):
-                        last_exception = None
+                        # Hand the place over rather than empty it: a failure that
+                        # had to queue behind this rejection is refuted by none of
+                        # this, and dropping it here would report the cycle as a
+                        # successful coordinator update.
+                        last_exception = independent_error
                 # No device's request was accepted: the cycle must surface.
                 # Two counters, one verdict -- see their declaration above for
                 # why they are not the same thing. Either way the device produced
@@ -2696,9 +2765,12 @@ class PollingOperations(_MixinBase):
                 # has nothing to report success about.
                 #
                 # Do NOT lean on the device list to catch this one layer up -- it
-                # is a different RPC (`nbe_list_devices`), and
-                # DEVICE_LIST_POLL_INTERVAL means most cycles reuse the cached
-                # list without calling it at all.
+                # is a different RPC (`nbe_list_devices`) on its own clock:
+                # DEVICE_LIST_POLL_INTERVAL is a fixed 300 s while the poll
+                # interval is configurable between 60 and 3600 s. Below 300 s most
+                # cycles reuse the cached list without calling it at all; at the
+                # default of 300 s it is refreshed in nearly every cycle. The
+                # first reason stands on its own either way.
                 #
                 # Read the check for exactly what it tests. The equality is over
                 # the SUM, so a cycle in which one tracker was rejected and every

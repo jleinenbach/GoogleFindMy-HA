@@ -38,6 +38,9 @@ from custom_components.googlefindmy.coordinator.polling import (
     _MAX_TRANSIENT_AUTH_FAILURES,
 )
 from custom_components.googlefindmy.device_tracker import GoogleFindMyDeviceTracker
+from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker.decrypt_locations import (
+    StaleOwnerKeyError,
+)
 from custom_components.googlefindmy.NovaApi.nova_request import NovaAuthError
 from tests.helpers import drain_loop
 
@@ -1625,6 +1628,196 @@ def test_content_withdraws_only_the_rejection_not_a_timeout(
     )
     assert isinstance(surfaced.__cause__, TimeoutError), (
         f"expected the timeout to survive, got {surfaced!r}"
+    )
+
+
+@pytest.mark.parametrize(
+    ("raised", "expect_cause"),
+    [
+        (TimeoutError(), True),
+        (StaleOwnerKeyError("tracker v1 < v2"), False),
+        (RuntimeError("boom"), False),
+    ],
+    ids=["timeout", "stale-owner-key", "generic"],
+)
+def test_a_later_failure_survives_the_rejection_it_had_to_queue_behind(
+    coordinator: GoogleFindMyCoordinator,
+    dummy_api: _DummyAPI,
+    raised: BaseException,
+    expect_cause: bool,
+) -> None:
+    """An independent failure must outlive a rejection that is later withdrawn.
+
+    ``last_exception`` is a first-come slot, and a credential rejection holds it
+    only PROVISIONALLY: the mixed-cycle branch withdraws that report once a
+    sibling answers with content. If the rejection arrives FIRST, a later timeout
+    finds the slot taken and drops its own report, and the withdrawal then empties
+    the slot -- so ``async_set_update_error`` is never called and the coordinator
+    calls the cycle a success although a device never answered at all.
+
+    This is the mirror ordering of
+    ``test_content_withdraws_only_the_rejection_not_a_timeout``, which has the
+    timeout reach the slot first. That one passes either way; only this order
+    measures the displacement.
+
+    Parametrised over ALL THREE first-come slots on this path, because the
+    displacement rule is written three times and one case leaves two of them
+    unmeasured: mutating the stale-owner-key and the generic slot back to
+    ``last_exception is None`` both SURVIVED the timeout-only version of this
+    test.
+    """
+
+    devices = [
+        {"id": "dev-bad", "name": "Bad"},
+        {"id": "dev-slow", "name": "Slow"},
+        {"id": "dev-good", "name": "Good"},
+    ]
+
+    async def _by_device(device_id: str, *_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        if device_id == "dev-bad":
+            raise NovaAuthError(403, "action rejected")
+        if device_id == "dev-slow":
+            raise raised
+        return {
+            "latitude": 37.0,
+            "longitude": -122.0,
+            "last_seen": int(time.time()),
+        }
+
+    # Without this the fixture's AsyncMock stands in for the cycle and nothing
+    # below measures anything.
+    del coordinator._async_start_poll_cycle
+
+    # No push transport: with FCM connected the timeout is deliberately ignored
+    # to keep the status healthy and would never reach the slot at all.
+    coordinator._fcm_status_state = None
+    assert coordinator.is_fcm_connected is False
+
+    coordinator._consecutive_transient_auth_failures = 2
+    coordinator._last_transient_auth_error = "rejected"
+    coordinator.config_entry.reauth_calls = 0
+    coordinator.async_set_update_error = Mock()
+    # The timeout and generic branches have no `continue`, so the inter-device
+    # delay (default 5s) would be slept for real. This test decides a branch, not
+    # a duration.
+    coordinator.device_poll_delay = 0
+    dummy_api.async_get_device_location = _by_device
+
+    loop = coordinator.hass.loop
+    loop.run_until_complete(coordinator._async_start_poll_cycle(devices, force=True))
+
+    # The content still withdraws the rejection: streak cleared, no reauth.
+    assert coordinator._consecutive_transient_auth_failures == 0
+    assert coordinator._last_transient_auth_error is None
+    assert coordinator.config_entry.reauth_calls == 0
+
+    # ... but the timeout has to survive it.
+    reported = coordinator.async_set_update_error.call_args_list
+    assert len(reported) == 1, (
+        f"the failure was swallowed with the withdrawn rejection, got {reported}"
+    )
+    surfaced = reported[0].args[0]
+    assert not isinstance(surfaced, NovaAuthError), (
+        f"the withdrawn rejection surfaced anyway: {surfaced!r}"
+    )
+    if expect_cause:
+        # The timeout branch wraps: the original sits in ``__cause__``.
+        assert isinstance(surfaced.__cause__, type(raised)), (
+            f"expected {type(raised).__name__} to survive, got {surfaced!r}"
+        )
+    else:
+        # The other two slots store the exception itself.
+        assert surfaced is raised, (
+            f"expected {type(raised).__name__} to survive, got {surfaced!r}"
+        )
+
+
+def test_without_content_the_rejection_keeps_the_report_it_booked(
+    coordinator: GoogleFindMyCoordinator, dummy_api: _DummyAPI
+) -> None:
+    """No content, no withdrawal -- so the rejection must keep the report.
+
+    The second slot exists because whether the withdrawal fires is only known
+    AFTER the loop. A first attempt at this simply let the later failure overwrite
+    the rejection, and in a cycle WITHOUT content that swapped the more specific
+    diagnosis (the credential rejection driving the running escalation) for the
+    less specific one ("nobody answered"). Measured: the report was
+    ``UpdateFailed('Location request timed out for Slow')`` where it should name
+    the rejection.
+    """
+
+    devices = [
+        {"id": "dev-bad", "name": "Bad"},
+        {"id": "dev-slow", "name": "Slow"},
+    ]
+
+    async def _by_device(device_id: str, *_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        if device_id == "dev-bad":
+            raise NovaAuthError(403, "action rejected")
+        raise TimeoutError
+
+    del coordinator._async_start_poll_cycle
+    coordinator._fcm_status_state = None
+    assert coordinator.is_fcm_connected is False
+    coordinator.async_set_update_error = Mock()
+    coordinator.device_poll_delay = 0
+    dummy_api.async_get_device_location = _by_device
+
+    loop = coordinator.hass.loop
+    loop.run_until_complete(coordinator._async_start_poll_cycle(devices, force=True))
+
+    reported = coordinator.async_set_update_error.call_args_list
+    assert len(reported) == 1, f"expected exactly one report, got {reported}"
+    assert isinstance(reported[0].args[0], NovaAuthError), (
+        f"the rejection was swapped for the later failure: {reported}"
+    )
+
+
+def test_only_the_provisional_rejection_gives_way_not_an_earlier_diagnosis(
+    coordinator: GoogleFindMyCoordinator, dummy_api: _DummyAPI
+) -> None:
+    """Displacement is bound to identity, so it stays a narrow exception.
+
+    The three first-come slots let a later failure displace the rejection this
+    cycle booked, because that rejection may still be withdrawn. They must not
+    become "last failure wins": a stale owner key names one tracker's outdated
+    key, a timeout only says nobody answered, and the first, more specific
+    diagnosis is the one worth reporting.
+
+    Without this the widened condition could be written as an unconditional
+    overwrite and no test would notice -- measured: mutating the timeout slot to
+    ``if True`` left every other pin on this path green.
+    """
+
+    devices = [
+        {"id": "dev-stale", "name": "Stale"},
+        {"id": "dev-slow", "name": "Slow"},
+    ]
+    stale = StaleOwnerKeyError("tracker v1 < v2")
+
+    async def _by_device(device_id: str, *_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        if device_id == "dev-stale":
+            raise stale
+        raise TimeoutError
+
+    del coordinator._async_start_poll_cycle
+
+    # No push transport, or the timeout is ignored on purpose and never competes
+    # for the slot at all.
+    coordinator._fcm_status_state = None
+    assert coordinator.is_fcm_connected is False
+
+    coordinator.async_set_update_error = Mock()
+    coordinator.device_poll_delay = 0
+    dummy_api.async_get_device_location = _by_device
+
+    loop = coordinator.hass.loop
+    loop.run_until_complete(coordinator._async_start_poll_cycle(devices, force=True))
+
+    reported = coordinator.async_set_update_error.call_args_list
+    assert len(reported) == 1, f"expected exactly one report, got {reported}"
+    assert reported[0].args[0] is stale, (
+        f"the later timeout displaced an unrelated earlier diagnosis: {reported}"
     )
 
 
