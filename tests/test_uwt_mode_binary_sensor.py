@@ -340,42 +340,128 @@ class TestUWTModeSensorCoordinatorUpdate:
 
 
 class TestUWTModeSensorDocumentationMatchesSpec:
-    """Guard the docstrings against the semantics drift fixed for BSkando#210.
+    """Guard the docstrings against the semantics drift around BSkando#210.
 
-    The class docstring once claimed a fixed separation window that the Find Hub
-    Network Accessory Specification does not define, which produced misdirected
-    automations and bug reports.
+    Two errors, in sequence, are what these guards exist for. The docstring
+    first claimed the sensor turns on after a fixed 8-24 hour separation window.
+    The correction then overshot and denied the window exists at all, and denied
+    that the FMDN mode is the DULT separated state. Both denials are refuted by
+    the specifications in their own words: the Find Hub Network Accessory
+    Specification maps its unwanted tracking protection mode onto the DULT
+    separated state, and ``T_(SEPARATED_UT_TIMEOUT)`` is a normative DULT value.
+
+    A figure guard alone pinned the second error in place: it forbade the number
+    as such, and the number is correct. So the guard moved from the *number* to
+    the *statement*. Forbidden are the withdrawn claims; required is the DULT
+    mapping, and the figure is allowed exactly when it is attributed to the
+    motion detector rather than to this bit.
 
     Scope and blind spot, stated plainly: these are pattern and presence checks,
-    not prose review. They pin that the debunked figure stays out (in any of its
-    common spellings) and that the specification reference stays discoverable.
-    They cannot tell a well-written docstring from a bag of the right keywords.
-    Widen them when a regression slips past, not before.
+    not prose review. They cannot tell a well-written docstring from a bag of
+    the right keywords. Widen them when a regression slips past, not before.
     """
 
-    #: Matches the debunked separation figure in its common spellings, including
-    #: hyphen/en-dash/em-dash variants, "8 to 24" and the spelled-out form.
+    #: Matches the separation figure in its common spellings, including
+    #: hyphen/en-dash/em-dash variants, "8 to 24" and the spelled-out form. The
+    #: figure itself is no longer forbidden; see the attribution guard below.
     SEPARATION_FIGURE_RE = re.compile(
         r"8\s*[-\u2010-\u2015]\s*24\s*h|8\s+to\s+24\s+h|eight\s+to\s+twenty[- ]four",
         re.IGNORECASE,
     )
 
-    def test_docstring_does_not_claim_a_separation_duration(self) -> None:
-        """The debunked separation figure must not reappear in the docstrings."""
-        class_doc = inspect.getdoc(GoogleFindMyUWTModeSensor) or ""
-        is_on_doc = inspect.getdoc(GoogleFindMyUWTModeSensor.is_on.fget) or ""
-        icon_doc = inspect.getdoc(GoogleFindMyUWTModeSensor.icon.fget) or ""
+    #: Claims withdrawn on 2026-09-03 against the specification wording, in
+    #: normalised form (lowercase, whitespace collapsed) so that recasing or
+    #: rewrapping the old paragraph does not walk past the guard.
+    #:
+    #: Each entry carries its subject on purpose. The bare phrase "is not what
+    #: this bit reports" is a *true* statement about the motion detector, which
+    #: the corrected docstring needs; only the claim about the chime was
+    #: withdrawn, so the chime is named in the pattern.
+    WITHDRAWN_CLAIMS = (
+        "not by elapsed time",
+        "no such window exists in the specification",
+        "mode is entered and left by command",
+        "chime is a dult platform behaviour and is not what this bit reports",
+    )
 
-        for name, doc in (
-            ("class", class_doc),
-            ("is_on", is_on_doc),
-            ("icon", icon_doc),
+    @staticmethod
+    def _normalise(doc: str) -> str:
+        """Return *doc* lowercased with all whitespace runs collapsed."""
+        return " ".join(doc.split()).lower()
+
+    def test_docstring_does_not_reassert_the_withdrawn_command_only_claim(
+        self,
+    ) -> None:
+        """The mode is not command-only, and the docstrings must not say it is."""
+        docs = {
+            "class": inspect.getdoc(GoogleFindMyUWTModeSensor) or "",
+            "is_on": inspect.getdoc(GoogleFindMyUWTModeSensor.is_on.fget) or "",
+            "icon": inspect.getdoc(GoogleFindMyUWTModeSensor.icon.fget) or "",
+        }
+
+        for name, doc in docs.items():
+            normalised = self._normalise(doc)
+            for claim in self.WITHDRAWN_CLAIMS:
+                assert claim not in normalised, (
+                    f"{name} docstring reasserts a withdrawn claim: {claim!r}. "
+                    "The FMDN mode maps onto the DULT separated state, which a "
+                    "device enters autonomously after 30 minutes of separation."
+                )
+
+    def test_docstring_names_the_dult_mapping_and_its_timer(self) -> None:
+        """The corrected semantics must stay stated, not merely un-denied.
+
+        Deleting the withdrawn claim without putting the mapping in its place
+        would satisfy the negative guard above and still leave the reader with
+        no way to find out how the mode is actually entered.
+        """
+        class_doc = inspect.getdoc(GoogleFindMyUWTModeSensor) or ""
+
+        for token in (
+            "DULT",
+            "separated state",
+            "30 minutes",
+            "3.4.4",
+            "T_(SEPARATED_UT_TIMEOUT)",
         ):
-            match = self.SEPARATION_FIGURE_RE.search(doc)
-            assert match is None, (
-                f"{name} docstring reintroduces the debunked separation figure: "
-                f"{match.group(0)!r}"
+            assert token in class_doc, (
+                f"class docstring no longer names {token!r}; the DULT mapping "
+                "that replaced the command-only claim is not discoverable."
             )
+
+    def test_separation_figure_is_attributed_to_the_motion_detector(self) -> None:
+        """If the 8-24 hour figure appears, it must gate the chime, not the bit.
+
+        The figure is normative DULT and may be named. What must not return is
+        the original error of tying it to this sensor turning on, so naming it
+        obliges the docstring to name what it actually gates.
+
+        The check is per PARAGRAPH, not per docstring. A presence check over the
+        whole text would pass on a docstring that states the figure in one place
+        and mentions the motion detector in an unrelated one, which is the shape
+        the original error had.
+        """
+        docs = {
+            "class": inspect.getdoc(GoogleFindMyUWTModeSensor) or "",
+            "is_on": inspect.getdoc(GoogleFindMyUWTModeSensor.is_on.fget) or "",
+            "icon": inspect.getdoc(GoogleFindMyUWTModeSensor.icon.fget) or "",
+        }
+
+        for name, doc in docs.items():
+            for paragraph in re.split(r"\n\s*\n", doc):
+                if self.SEPARATION_FIGURE_RE.search(paragraph) is None:
+                    continue
+                normalised = self._normalise(paragraph)
+                assert "motion detector" in normalised, (
+                    f"{name} docstring names the 8-24 hour figure in a paragraph "
+                    "that does not name the motion detector it gates; that is "
+                    "the original BSkando#210 error."
+                )
+                assert "t_(separated_ut_timeout)" in normalised, (
+                    f"{name} docstring names the 8-24 hour figure without its "
+                    "DULT identifier alongside it, so a reader cannot check the "
+                    "attribution."
+                )
 
     def test_docstring_names_spec_term_and_source(self) -> None:
         """The docstrings must name the specification term, source and mechanism."""
@@ -388,8 +474,9 @@ class TestUWTModeSensorDocumentationMatchesSpec:
             in class_doc
         )
         assert "unwanted tracking protection mode" in is_on_doc
-        # The mode is command-driven; both Data IDs must stay named, otherwise the
-        # "not by elapsed time" statement loses its evidence.
+        # Both Data IDs must stay named: they are the additional, seeker-driven
+        # GATT path into and out of the mode, and the "Skip ringing
+        # authentication" caveat below hangs off 0x07.
         assert "0x07" in class_doc
         assert "0x08" in class_doc
 
