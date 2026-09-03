@@ -34,7 +34,11 @@ from custom_components.googlefindmy.coordinator import (
     FcmStatus,
     GoogleFindMyCoordinator,
 )
+from custom_components.googlefindmy.coordinator.polling import (
+    _MAX_TRANSIENT_AUTH_FAILURES,
+)
 from custom_components.googlefindmy.device_tracker import GoogleFindMyDeviceTracker
+from custom_components.googlefindmy.NovaApi.nova_request import NovaAuthError
 from tests.helpers import drain_loop
 
 
@@ -1050,3 +1054,126 @@ def test_a_failing_device_list_leaves_the_counter_alone(
 
     assert coordinator._consecutive_transient_auth_failures == 2
     assert coordinator._last_transient_auth_error == "expired"
+
+
+# --------------------------------------------------------------------------
+# AP-6: the list refresh must not erase a failure budget that is still being
+# spent.
+#
+# AP-2 made the device-list refresh the everyday reset source for the transient
+# auth counter. That fixed one starvation and created another, and an external
+# reviewer found it before a user did: at the default cadence both the list and
+# the location cycle run every 300 seconds, and `_async_update_data` fetches the
+# list BEFORE it schedules the location cycle. A tracker whose action RPC keeps
+# returning a non-permanent credential rejection therefore had its counter
+# zeroed immediately before every attempt, could only ever climb back to 1, and
+# never reached the threshold of 3.
+#
+# The list proves the ACCOUNT token, because `async_get_basic_device_list` has
+# no non-throwing error exit. It does not prove that the action RPC accepts that
+# same token again. So the reset is now conditional: a booked location failure
+# consumes the next list reset instead of being erased by it. A single hiccup
+# still heals (the refresh after next clears it), a persistent one accumulates.
+# --------------------------------------------------------------------------
+
+
+def test_a_booked_location_failure_survives_the_next_list_refresh(
+    coordinator: GoogleFindMyCoordinator, dummy_api: _DummyAPI
+) -> None:
+    """A refresh that follows a booked failure must not clear the counter."""
+
+    dummy_api.device_list = [{"id": "dev-1", "name": "Device"}]
+    coordinator._consecutive_transient_auth_failures = 2
+    coordinator._last_transient_auth_error = "rejected"
+    coordinator._transient_auth_failure_since_list_refresh = True
+
+    loop = coordinator.hass.loop
+    loop.run_until_complete(coordinator._async_update_data())
+
+    assert coordinator._consecutive_transient_auth_failures == 2
+    assert coordinator._last_transient_auth_error == "rejected"
+
+
+def test_the_refresh_after_next_still_heals_a_single_hiccup(
+    coordinator: GoogleFindMyCoordinator, dummy_api: _DummyAPI
+) -> None:
+    """One failure is consumed by one refresh; the next one clears the counter.
+
+    This is the guard against over-correcting. Suppressing the reset outright
+    would strand any counter a one-off hiccup ever raised, which is the defect
+    AP-2 was written to remove. The marker is therefore consumed, not sticky.
+    """
+
+    dummy_api.device_list = [{"id": "dev-1", "name": "Device"}]
+    coordinator._consecutive_transient_auth_failures = 1
+    coordinator._transient_auth_failure_since_list_refresh = True
+
+    loop = coordinator.hass.loop
+    loop.run_until_complete(coordinator._async_update_data())
+    assert coordinator._consecutive_transient_auth_failures == 1
+    assert coordinator._transient_auth_failure_since_list_refresh is False
+
+    coordinator._last_list_poll_mono = 0.0
+    loop.run_until_complete(coordinator._async_update_data())
+    assert coordinator._consecutive_transient_auth_failures == 0
+
+
+def test_the_production_order_still_reaches_the_reauth_threshold(
+    coordinator: GoogleFindMyCoordinator, dummy_api: _DummyAPI
+) -> None:
+    """Three failing cycles escalate even though a list refresh precedes each.
+
+    The other tests in this block set the marker by hand and therefore prove
+    the reset rule, not the ordering it exists for. This one drives the real
+    `_async_update_data` -> `_async_start_poll_cycle` sequence with the real
+    booking site, which is exactly what the previous revision's tests missed:
+    they called `_async_start_poll_cycle()` directly and so never saw the list
+    refresh that ran before it in production.
+    """
+
+    dummy_api.device_list = [{"id": "dev-1", "name": "Device"}]
+    location_calls: list[str] = []
+
+    async def _reject(device_id: str, *_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        location_calls.append(device_id)
+        raise NovaAuthError(401, "action rejected")
+
+    dummy_api.async_get_device_location = _reject
+
+    # Run the real poll cycle: the ordering under test exists only between the
+    # two, so the fixture's AsyncMock would measure nothing.
+    del coordinator._async_start_poll_cycle
+    # The cycle reports a failed update through the DataUpdateCoordinator base;
+    # without a stub the AttributeError lands in the fire-and-forget task and is
+    # swallowed, which would let this test pass over a broken cycle.
+    coordinator.async_set_update_error = Mock()
+
+    tasks: list[asyncio.Task[Any]] = []
+    original_create = coordinator.hass.async_create_task
+
+    def _tracking_create(coro: Any, *, name: str | None = None) -> asyncio.Task[Any]:
+        task = original_create(coro, name=name)
+        tasks.append(task)
+        return task
+
+    coordinator.hass.async_create_task = _tracking_create
+
+    loop = coordinator.hass.loop
+    for _ in range(_MAX_TRANSIENT_AUTH_FAILURES):
+        # Both cadences due, which is the default configuration: the list
+        # interval and the location interval are both 300 seconds.
+        coordinator._last_list_poll_mono = 0.0
+        coordinator._last_poll_mono = 0.0
+        loop.run_until_complete(coordinator._async_update_data())
+        if tasks:
+            # gather() re-raises, so a cycle that died on the way to the
+            # booking site fails this test instead of being reported as a
+            # counter that simply did not move.
+            loop.run_until_complete(asyncio.gather(*tasks))
+            tasks.clear()
+
+    assert len(location_calls) == _MAX_TRANSIENT_AUTH_FAILURES
+    assert coordinator._consecutive_transient_auth_failures >= (
+        _MAX_TRANSIENT_AUTH_FAILURES
+    )
+    assert coordinator.config_entry.reauth_calls == 1

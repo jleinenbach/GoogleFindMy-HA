@@ -190,6 +190,7 @@ class PollingOperations(_MixinBase):
     _fcm_error_count: int
     _fcm_last_error: str | None
     _last_transient_auth_error: str | None
+    _transient_auth_failure_since_list_refresh: bool
     _is_polling: bool
     _startup_complete: bool
 
@@ -1281,7 +1282,23 @@ class PollingOperations(_MixinBase):
                 # Both resets belong in this branch and not above it: the cached
                 # branch skips the call entirely and so proves nothing.
                 self._set_auth_state(failed=False)
-                if self._consecutive_transient_auth_failures > 0:
+                if self._transient_auth_failure_since_list_refresh:
+                    # A location RPC booked a transient rejection since the last
+                    # refresh. Clearing the counter here would starve the
+                    # escalation it feeds: at the default cadence both intervals
+                    # are 300 s and this refresh runs in the same
+                    # `_async_update_data` BEFORE the poll cycle is scheduled, so
+                    # a tracker whose action RPC keeps rejecting would see its
+                    # count zeroed before every single attempt and could never
+                    # pass 1. What this branch proves is the ACCOUNT token; it
+                    # says nothing about the action RPC accepting that token
+                    # again, and only the latter is what the counter counts.
+                    #
+                    # Consume the marker instead of making it sticky: a one-off
+                    # hiccup is healed by the refresh after next, a persistent
+                    # rejection accumulates across cycles until the threshold.
+                    self._transient_auth_failure_since_list_refresh = False
+                elif self._consecutive_transient_auth_failures > 0:
                     _LOGGER.info(
                         "Device list refresh succeeded; clearing %d transient auth failure(s).",
                         self._consecutive_transient_auth_failures,
@@ -1852,6 +1869,10 @@ class PollingOperations(_MixinBase):
                             )
                             self._consecutive_transient_auth_failures = 0
                             self._last_transient_auth_error = None
+                        # Cleared unconditionally, next to the counter it guards:
+                        # a marker outliving the count it stands for would eat
+                        # the following list reset for nothing.
+                        self._transient_auth_failure_since_list_refresh = False
 
                         # A device returned an authenticated coordinate report
                         # without raising a DecryptionError: positive proof the
@@ -2178,6 +2199,11 @@ class PollingOperations(_MixinBase):
                         self._last_poll_result = "failed"
                         self._consecutive_timeouts = 0
                         self._consecutive_transient_auth_failures = 0
+                        # Same invariant as the poll-success site: the marker
+                        # never outlives the count it stands for. Neutral for the
+                        # counter either way (this path reauths immediately), and
+                        # kept so a reader does not have to prove that.
+                        self._transient_auth_failure_since_list_refresh = False
                         reauth_exc = ConfigEntryAuthFailed(
                             "Google credentials invalid; re-authentication required"
                         )
@@ -2263,6 +2289,11 @@ class PollingOperations(_MixinBase):
                         # Only trigger reauth after multiple consecutive failures.
                         self._consecutive_transient_auth_failures += 1
                         self._last_transient_auth_error = str(transient_err)
+                        # Tell the next device-list refresh that this budget is
+                        # in use, so it does not clear what this cycle just
+                        # booked. Set on every booking, not only the first: the
+                        # refresh consumes exactly one marker per pass.
+                        self._transient_auth_failure_since_list_refresh = True
 
                         if (
                             self._consecutive_transient_auth_failures

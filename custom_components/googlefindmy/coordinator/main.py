@@ -909,6 +909,12 @@ class GoogleFindMyCoordinator(
         # Google's backend is temporarily slow to propagate refreshed tokens.
         self._consecutive_transient_auth_failures: int = 0
         self._last_transient_auth_error: str | None = None
+        # True once a location RPC booked a transient rejection that the next
+        # device-list refresh has not yet accounted for. The refresh proves the
+        # ACCOUNT token, not that the action RPC accepts it again, so it must
+        # not erase a budget that is still being spent (see the reset site in
+        # polling.py for the starvation this prevents).
+        self._transient_auth_failure_since_list_refresh: bool = False
 
         # FIX 3: structured, redaction-safe record of the most recent reauth
         # trigger, mirrored into diagnostics so the reason is visible without a

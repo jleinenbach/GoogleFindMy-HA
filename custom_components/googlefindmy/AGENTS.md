@@ -260,15 +260,25 @@ change, and it is bounded: an auth error already on screen is now cleared by the
 the next poll of any kind. `DEVICE_LIST_POLL_INTERVAL` is a fixed 300 seconds while the poll interval is an option
 between 60 and 3600 seconds (default 300), so at the default both run on the same cadence and at the shortest setting
 the wait grows to at most five poll cycles.
-What this does NOT buy, written down because the obvious reading is the wrong one: it does not make the transient-auth
-counter escalate where it used to be starved. Every device-list refresh still resets that counter, and at the default
-settings a refresh falls into every poll cycle, so a single device failing transiently forever still cannot pass
-`_MAX_TRANSIENT_AUTH_FAILURES` -- that threshold is reached WITHIN one cycle, by three devices failing together, or not
-at all. It is a deliberate trade and it is recorded as `R-3` in the plan: the device list is the one proof source that
-cannot lie, and the alternative was a counter with no everyday reset source left. A genuinely expired sign-in does not
-depend on the counter anyway: `async_get_basic_device_list` raises `ConfigEntryAuthFailed` and the reauth flow starts
-from there. What the change does buy is that a pending auth error survives long enough for a user to see it, instead of
-being wiped by the next idle tag. Three tests pin the new state so it cannot drift back:
+Why that reset is CONDITIONAL, written down because the unconditional version starved the very escalation the counter
+feeds. The device-list refresh runs inside the same `_async_update_data` and BEFORE the poll cycle is scheduled, and at
+the default settings both cadences are 300 seconds. Clearing the counter there on every pass therefore zeroed it
+immediately before every attempt: a tracker whose action RPC kept returning a non-permanent credential rejection could
+only ever climb back to 1 and never reached `_MAX_TRANSIENT_AUTH_FAILURES`. That was the state of the first revision of
+this change, recorded as `R-3` in the plan, and an external reviewer found it before a user did. What the list proves is
+the ACCOUNT token, and only that; it says nothing about the action RPC accepting the same token again, which is what the
+counter counts. So a booked location failure now sets `_transient_auth_failure_since_list_refresh`, and the next refresh
+CONSUMES that marker instead of clearing the count. A one-off hiccup is still healed, by the refresh after next rather
+than the next one; a persistent rejection accumulates across cycles until the threshold. The marker is consumed and not
+sticky on purpose: suppressing the reset outright would strand any counter a single hiccup ever raised, which is the
+defect this reset source was introduced to remove. A genuinely expired sign-in does not depend on the counter anyway:
+`async_get_basic_device_list` raises `ConfigEntryAuthFailed` and the reauth flow starts from there. What the change does
+buy is that a pending auth error survives long enough for a user to see it, instead of being wiped by the next idle tag.
+`test_the_production_order_still_reaches_the_reauth_threshold` drives the real `_async_update_data` ->
+`_async_start_poll_cycle` sequence for three cycles and pins the escalation; the tests it replaces called
+`_async_start_poll_cycle()` directly and so never saw the refresh that preceded it in production.
+`test_the_refresh_after_next_still_heals_a_single_hiccup` pins the other side, so the fix cannot be tightened into a
+sticky suppression. Three tests pin the new state so it cannot drift back:
 `test_an_empty_return_proves_nothing_about_the_credentials` carries the inverted assertion together with the history of
 the characterisation it replaces, `test_an_unaccepted_request_no_longer_clears_the_counter` is its contract pair for the
 requests that no longer reach the path at all, and `test_a_non_credential_4xx_location_is_passed_through` pins the seam

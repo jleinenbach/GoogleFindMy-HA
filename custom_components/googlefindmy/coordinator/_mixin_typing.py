@@ -111,6 +111,7 @@ class _MixinBase:
     _fcm_defer_started_mono: float
     _consecutive_transient_auth_failures: int
     _last_transient_auth_error: str | None
+    _transient_auth_failure_since_list_refresh: bool
     # Structured, redaction-safe record of the most recent reauth trigger (FIX 3).
     _reauth_reason: ReauthReason | None
     _consecutive_decrypt_failures: int
