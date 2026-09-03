@@ -106,7 +106,6 @@ def _base_coordinator(
     coordinator._consecutive_timeouts = 0
     coordinator._consecutive_transient_auth_failures = 0
     coordinator._last_transient_auth_error = None
-    coordinator._transient_auth_failure_pending = False
     # FIX 3: reauth-reason state normally seeded by ``__init__`` (bypassed via
     # ``__new__`` here); the poll-reauth choke point records through these.
     coordinator._reauth_reason = None
@@ -1032,6 +1031,20 @@ async def test_an_empty_return_proves_nothing_about_the_credentials() -> None:
     The positive half is not given up, it moves: a location WITH content still
     clears both, which is ``test_a_real_location_still_clears_the_auth_state``
     and ``test_a_real_location_still_resets_the_transient_counter``.
+
+    AP-7 amendment, and the counter assertions below are inverted a second time
+    because of it. What this test owns is unchanged and is what its name says:
+    an empty return proves NOTHING about the credentials, so the auth state is
+    untouched and nothing is cleared AT THIS DEVICE SITE. What changed is one
+    layer up. The counter counts consecutive poll CYCLES in which the action RPC
+    rejected, and a cycle in which no device rejected while at least one request
+    was accepted breaks that streak at the end of the loop. Leaving the reset on
+    the device-list refresh instead was measured twice and failed twice: the
+    refresh runs on an independently configurable cadence, which starved the
+    escalation at one ratio and escalated non-consecutive rejections at another.
+    Weak evidence is enough to break a streak of rejections; it is not enough to
+    clear an auth state, and that difference is the whole of what this test
+    still pins.
     """
     coordinator = _polling_coordinator({}, _TrackingFilter(), {})
     coordinator.api = _PerDeviceAPI({"dev-1": {}})
@@ -1043,8 +1056,11 @@ async def test_an_empty_return_proves_nothing_about_the_credentials() -> None:
     await coordinator._async_start_poll_cycle([{"id": "dev-1", "name": "Hub"}])
 
     assert not [kw for kw in auth_calls if kw.get("failed") is False]
-    assert coordinator._consecutive_transient_auth_failures == 2
-    assert coordinator._last_transient_auth_error == "expired"
+    # Cleared by the end-of-cycle streak break, not by the device site: no
+    # device rejected in this cycle and the empty return counts as an accepted
+    # request. Under AP-1 this read 2 and "expired".
+    assert coordinator._consecutive_transient_auth_failures == 0
+    assert coordinator._last_transient_auth_error is None
 
 
 @pytest.mark.asyncio

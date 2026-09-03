@@ -974,16 +974,32 @@ def test_issue_183_status_stuck_on_false_readiness_then_recovers(
 #
 # ``async_get_basic_device_list`` is the strongest proof source in the tree:
 # it has no non-throwing error exit, so a non-throwing return means Nova
-# accepted the account token -- which is exactly what the counter counts. An
-# expired login raises ``ConfigEntryAuthFailed`` and never reaches the reset,
-# which is what separates this source from the poll path it replaces.
+# accepted the ACCOUNT token. An expired login raises ``ConfigEntryAuthFailed``
+# and never reaches the reset, which is what separates this source from the
+# poll path it replaced.
+#
+# History, because two of the tests below now assert the inverse of what they
+# once did: AP-2 made this refresh the transient counter's everyday reset
+# source as well. AP-7 took that half back. The proof is sound for what it
+# proves -- the auth state is still cleared here -- but the counter counts
+# consecutive POLL CYCLES in which the action RPC rejected, and this refresh
+# runs on an independent cadence (a fixed 300 s against a 60..3600 s option).
+# Zeroing a per-cycle counter from a foreign clock produced starvation at one
+# ratio and premature escalation at another. See the AP-7 block at the end of
+# this file for both, each pinned as a measurement.
 # --------------------------------------------------------------------------
 
 
-def test_a_fresh_device_list_resets_the_transient_auth_counter(
+def test_a_fresh_device_list_no_longer_resets_the_transient_auth_counter(
     coordinator: GoogleFindMyCoordinator, dummy_api: _DummyAPI
 ) -> None:
-    """A real device-list refresh proves the credentials and clears the counter."""
+    """A refresh proves the account token; it does not break the streak.
+
+    Inverted deliberately rather than deleted: under AP-2 this asserted zero.
+    What the refresh proves is unchanged and still used -- the auth state is
+    cleared a few lines up. What it does not prove is that the action RPC
+    accepts the same token again, and that is what the counter counts.
+    """
 
     dummy_api.device_list = [{"id": "dev-1", "name": "Device"}]
     coordinator._consecutive_transient_auth_failures = 2
@@ -991,17 +1007,18 @@ def test_a_fresh_device_list_resets_the_transient_auth_counter(
     loop = coordinator.hass.loop
     loop.run_until_complete(coordinator._async_update_data())
 
-    assert coordinator._consecutive_transient_auth_failures == 0
+    assert coordinator._consecutive_transient_auth_failures == 2
 
 
 def test_a_cached_device_list_does_not_reset_the_counter(
     coordinator: GoogleFindMyCoordinator, dummy_api: _DummyAPI
 ) -> None:
-    """A skipped refresh proves nothing; the reset belongs in the fetch branch.
+    """A skipped refresh proves nothing at all, for the counter or the state.
 
-    The cached branch never talks to Nova. Resetting there would reintroduce
-    the very defect this change removes, one layer up: a counter cleared by
-    something that did not happen.
+    The cached branch never talks to Nova. Since AP-7 no refresh clears the
+    counter anyway, so this now pins the weaker of two claims -- but it pins
+    the one that would break first if the auth-state reset ever drifted out of
+    the fetch branch: a verdict earned by something that did not happen.
     """
 
     dummy_api.device_list = [{"id": "dev-1", "name": "Device"}]
@@ -1015,14 +1032,17 @@ def test_a_cached_device_list_does_not_reset_the_counter(
     assert coordinator._consecutive_transient_auth_failures == 2
 
 
-def test_a_fresh_device_list_clears_the_last_transient_error(
+def test_a_fresh_device_list_no_longer_clears_the_last_transient_error(
     coordinator: GoogleFindMyCoordinator, dummy_api: _DummyAPI
 ) -> None:
-    """The stored cause is cleared with the counter, not left behind.
+    """The stored cause travels with the counter, wherever that is cleared.
 
     Separate from the counter assertion on purpose: the diagnostic snapshot
-    exports both, and a stale cause next to a zero counter names a failure that
-    is over.
+    exports both, and the pair has to stay consistent. Under AP-2 both were
+    cleared here; under AP-7 both are cleared by the cycle that breaks the
+    streak. What must never happen is one without the other -- a zero counter
+    beside a cause names a failure that is over, a standing counter beside no
+    cause names one nobody can explain.
     """
 
     dummy_api.device_list = [{"id": "dev-1", "name": "Device"}]
@@ -1032,16 +1052,19 @@ def test_a_fresh_device_list_clears_the_last_transient_error(
     loop = coordinator.hass.loop
     loop.run_until_complete(coordinator._async_update_data())
 
-    assert coordinator._last_transient_auth_error is None
+    assert coordinator._last_transient_auth_error == "expired"
 
 
 def test_a_failing_device_list_leaves_the_counter_alone(
     coordinator: GoogleFindMyCoordinator, dummy_api: _DummyAPI
 ) -> None:
-    """An expired login cannot mask itself through the new reset source.
+    """An expired login cannot mask itself through the refresh branch.
 
-    This is the guard that makes the new source safe to rely on: the reset must
-    sit AFTER the await, so a raising call never reaches it.
+    This is the guard that keeps the branch honest: everything it resets sits
+    AFTER the await, so a raising call never reaches it. It covered the counter
+    under AP-2 and covers `_set_auth_state(failed=False)` since AP-7; the
+    counter assertion is kept because the ordering is what is under test and a
+    reset drifting back above the await would break both at once.
     """
 
     dummy_api.raise_auth = True
@@ -1057,8 +1080,7 @@ def test_a_failing_device_list_leaves_the_counter_alone(
 
 
 # --------------------------------------------------------------------------
-# AP-6: the list refresh must not erase a failure budget that is still being
-# spent.
+# AP-6, kept as history because AP-7 replaced its mechanism.
 #
 # AP-2 made the device-list refresh the everyday reset source for the transient
 # auth counter. That fixed one starvation and created another, and an external
@@ -1069,19 +1091,14 @@ def test_a_failing_device_list_leaves_the_counter_alone(
 # zeroed immediately before every attempt, could only ever climb back to 1, and
 # never reached the threshold of 3.
 #
-# The list proves the ACCOUNT token, because `async_get_basic_device_list` has
-# no non-throwing error exit. It does not prove that the action RPC accepts that
-# same token again. So the reset is conditional: while a booked location failure
-# stands unproven, no refresh clears the count. The marker is released by a poll
-# CYCLE that books nothing, never by the refresh itself -- an earlier revision
-# had the refresh consume it, which silently assumed one refresh per cycle and
-# starved the escalation again wherever the two cadences did not line up.
-#
-# The measured limit, so the tests below are not read as more than they are: a
-# PERSISTENT rejection escalates (every cycle books, nothing is released), an
-# INTERMITTENT one on a single device does not, because a cycle that books
-# nothing releases the marker and the next refresh clears the count. That is the
-# meaning of a consecutive counter, and it is stated rather than discovered.
+# AP-6 answered that with a marker: while a booked location failure stood
+# unproven, no refresh cleared the count. Two further reviews then found the two
+# halves of what the marker could not fix, because it treated a symptom. The
+# counter was incremented per poll cycle and zeroed from the device-list
+# cadence, and the two clocks are independently configurable -- so every ratio
+# produced an error. AP-7 removed the marker entirely and moved the reset onto
+# the clock that counts. The tests below survive as the refresh-side pins of
+# that rule: no refresh, however often it runs, clears the count.
 # --------------------------------------------------------------------------
 
 
@@ -1093,7 +1110,6 @@ def test_a_booked_location_failure_survives_the_next_list_refresh(
     dummy_api.device_list = [{"id": "dev-1", "name": "Device"}]
     coordinator._consecutive_transient_auth_failures = 2
     coordinator._last_transient_auth_error = "rejected"
-    coordinator._transient_auth_failure_pending = True
 
     loop = coordinator.hass.loop
     loop.run_until_complete(coordinator._async_update_data())
@@ -1102,78 +1118,70 @@ def test_a_booked_location_failure_survives_the_next_list_refresh(
     assert coordinator._last_transient_auth_error == "rejected"
 
 
-def test_a_clean_cycle_releases_the_counter_for_the_next_refresh(
+def test_a_clean_cycle_clears_the_counter_without_any_refresh(
     coordinator: GoogleFindMyCoordinator, dummy_api: _DummyAPI
 ) -> None:
-    """A cycle that books nothing lets the next refresh clear the counter.
+    """The cycle that breaks the streak clears the count by itself.
 
-    This is the guard against over-correcting. Suppressing the reset outright
-    would strand any counter a one-off hiccup ever raised, which is the defect
-    the device-list reset was introduced to remove. The release hangs on the
-    poll cycle rather than on the refresh, so it does not depend on how the two
-    cadences line up.
+    This is the guard against over-correcting. Suppressing every reset would
+    strand any counter a one-off hiccup ever raised, which is the defect the
+    device-list reset was introduced to remove. Under AP-6 the clean cycle only
+    released a marker and the following refresh did the clearing; the name of
+    this test said so and is inverted here on purpose. No refresh runs in the
+    second half below, and the counter still reaches zero.
     """
 
     dummy_api.device_list = [{"id": "dev-1", "name": "Device"}]
     coordinator._consecutive_transient_auth_failures = 1
-    coordinator._transient_auth_failure_pending = True
+    coordinator._last_transient_auth_error = "rejected"
 
     loop = coordinator.hass.loop
     # A refresh alone proves nothing about the action RPC and must not clear it.
     loop.run_until_complete(coordinator._async_update_data())
     assert coordinator._consecutive_transient_auth_failures == 1
-    assert coordinator._transient_auth_failure_pending is True
 
-    # A poll cycle that books no rejection is what releases the marker.
+    # A poll cycle that books no rejection is what clears it -- with no refresh
+    # anywhere near it.
     coordinator.async_set_update_error = Mock()
     del coordinator._async_start_poll_cycle
     dummy_api.async_get_device_location = AsyncMock(return_value={})
     loop.run_until_complete(
         coordinator._async_start_poll_cycle([{"id": "dev-1", "name": "Device"}])
     )
-    assert coordinator._transient_auth_failure_pending is False
-
-    # Force the refresh through the flag, not by backdating a monotonic
-    # baseline. `_last_list_poll_mono = 0.0` only reads as "long ago" while
-    # `time.monotonic()` already exceeds DEVICE_LIST_POLL_INTERVAL, which is
-    # true on a long-running workstation and false on a freshly booted CI
-    # runner -- the earlier version of this test passed here and failed there
-    # for exactly that reason.
-    coordinator._force_device_list_refresh = True
-    loop.run_until_complete(coordinator._async_update_data())
     assert coordinator._consecutive_transient_auth_failures == 0
+    assert coordinator._last_transient_auth_error is None
 
 
 def test_two_refreshes_between_two_polls_do_not_clear_the_counter(
     coordinator: GoogleFindMyCoordinator, dummy_api: _DummyAPI
 ) -> None:
-    """The guard must not assume one list refresh per poll cycle.
+    """No number of list refreshes clears the count.
 
     Nothing in the code couples the two cadences. `DEVICE_LIST_POLL_INTERVAL`
     is a fixed 300 s while `location_poll_interval` is an option up to 3600 s,
     and a deferred empty list re-fetches on the next 60 s tick without moving
-    `_last_list_poll_mono`. A marker that a refresh consumed would therefore be
-    eaten by the first refresh and the count cleared by the second, which is
-    the same starvation one layer along. Refreshes with no poll in between are
-    the case that tells the two designs apart, and three of them make the point
-    past any off-by-one reading of "consumes one".
+    `_last_list_poll_mono`. Under AP-6 this pinned that a marker must not be
+    consumed by a refresh; three refreshes made the point past any off-by-one
+    reading of "consumes one". Under AP-7 there is no marker to consume, and
+    the same three refreshes pin the stronger rule directly.
 
     Scope, stated rather than implied by the name: this drives no poll cycle at
-    all (the fixture's `_async_start_poll_cycle` stub stays in place) and sets
-    the marker by hand. It measures the refresh side of the rule. The booking
-    site and the real ordering are measured by
+    all (the fixture's `_async_start_poll_cycle` stub stays in place). It
+    measures the refresh side of the rule. The booking site and the real
+    ordering are measured by
     `test_the_production_order_still_reaches_the_reauth_threshold`.
     """
 
     dummy_api.device_list = [{"id": "dev-1", "name": "Device"}]
     coordinator._consecutive_transient_auth_failures = 2
     coordinator._last_transient_auth_error = "rejected"
-    coordinator._transient_auth_failure_pending = True
 
     loop = coordinator.hass.loop
     for _ in range(3):
-        # Flag rather than a backdated baseline: see the note in
-        # test_a_clean_cycle_releases_the_counter_for_the_next_refresh.
+        # Flag rather than a backdated baseline: `_last_list_poll_mono = 0.0`
+        # only reads as "long ago" while `time.monotonic()` already exceeds
+        # DEVICE_LIST_POLL_INTERVAL, which is true on a long-running workstation
+        # and false on a freshly booted CI runner.
         coordinator._force_device_list_refresh = True
         loop.run_until_complete(coordinator._async_update_data())
 
@@ -1249,3 +1257,134 @@ def test_the_production_order_still_reaches_the_reauth_threshold(
         _MAX_TRANSIENT_AUTH_FAILURES
     )
     assert coordinator.config_entry.reauth_calls == 1
+
+
+# --------------------------------------------------------------------------
+# AP-7: the streak has to be broken on the clock that counts it.
+#
+# AP-6 bound the release of the booked failure to the poll cycle, which removed
+# the dependency on how the two cadences line up but left the COUNT itself on
+# the list refresh. Two external reviews then found the two halves of the same
+# root cause, and both are reproduced as measurements below: the counter was
+# incremented per poll cycle and zeroed by a device-list refresh, and the two
+# clocks are independently configurable. Every ratio produces one of the two
+# errors -- a long poll interval starves the escalation, a short one escalates
+# rejections that were never consecutive.
+#
+# So the cycle that breaks the streak now zeroes the count itself, cycle-wide.
+# `_set_auth_state(failed=False)` stays on the list refresh, where it belongs:
+# that branch proves the ACCOUNT token, which is what the auth state is about.
+# It says nothing about the action RPC accepting that token, which is what the
+# counter is about, and conflating the two is what produced both findings.
+#
+# Cycle-wide, not per device, is the load-bearing word: the original defect was
+# an idle BLE tag clearing the rejection its sibling had just booked. A cycle
+# counts as clean only when NO device rejected in it.
+# --------------------------------------------------------------------------
+
+
+def test_a_clean_cycle_between_rejections_breaks_the_streak(
+    coordinator: GoogleFindMyCoordinator, dummy_api: _DummyAPI
+) -> None:
+    """Rejections separated by a clean cycle must not accumulate to the threshold.
+
+    Measured before the fix: with a 60 s location interval and the fixed 300 s
+    device-list interval, up to five poll cycles run without a single refresh.
+    Three 403s at minutes 0, 2 and 4, each separated by a clean empty-result
+    cycle, then reached the threshold and forced a reauth although they were
+    never consecutive. The counter is named `_consecutive_...`; the streak has
+    to be broken by the cycle that breaks it, on that cycle's own clock, not by
+    a refresh running on a slower and independently configurable one.
+
+    The list stays cached on purpose: the absence of a refresh IS the case.
+    """
+
+    device = {"id": "dev-1", "name": "Device"}
+    dummy_api.device_list = [device]
+    coordinator._last_device_list = [device]
+    coordinator._last_list_poll_mono = time.monotonic()
+
+    reject_next = {"value": True}
+
+    async def _alternate(device_id: str, *_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        if reject_next["value"]:
+            # 403 rather than 401: a 401 surviving the refresh sequence is
+            # raised as NovaAuthPermanentError, so 403 is the only plain
+            # credential rejection a handler sees.
+            raise NovaAuthError(403, "action rejected")
+        return {}
+
+    dummy_api.async_get_device_location = _alternate
+    del coordinator._async_start_poll_cycle
+    # Without a stub the base class's AttributeError lands in the fire-and-
+    # forget task and is swallowed, which would report a broken cycle as a
+    # counter that simply did not move.
+    coordinator.async_set_update_error = Mock()
+
+    tasks: list[asyncio.Task[Any]] = []
+    original_create = coordinator.hass.async_create_task
+
+    def _tracking_create(coro: Any, *, name: str | None = None) -> asyncio.Task[Any]:
+        task = original_create(coro, name=name)
+        tasks.append(task)
+        return task
+
+    coordinator.hass.async_create_task = _tracking_create
+
+    loop = coordinator.hass.loop
+    counts: list[int] = []
+    for cycle in range(5):
+        reject_next["value"] = cycle % 2 == 0
+        # The coordinator's own helper rather than a zeroed baseline: an
+        # absolute monotonic value measures the host's uptime along with the
+        # behaviour.
+        coordinator.force_poll_due()
+        loop.run_until_complete(coordinator._async_update_data())
+        if tasks:
+            # gather() re-raises, so a cycle that died before reaching the
+            # booking site fails this test instead of passing quietly.
+            loop.run_until_complete(asyncio.gather(*tasks))
+            tasks.clear()
+        counts.append(coordinator._consecutive_transient_auth_failures)
+
+    # Before the fix this read [1, 1, 2, 2, 3] and raised a reauth.
+    assert counts == [1, 0, 1, 0, 1]
+    assert coordinator.config_entry.reauth_calls == 0
+
+
+def test_a_cycle_with_no_pollable_device_clears_the_stale_count(
+    coordinator: GoogleFindMyCoordinator, dummy_api: _DummyAPI
+) -> None:
+    """A budget must not be stranded when no cycle can run at all.
+
+    If every tracker is disabled or ignored after a failure was booked, no poll
+    cycle runs, so the release path that the cycle owns is unreachable and the
+    count would stand indefinitely. Re-enabling a tracker weeks later would
+    then let its first rejection inherit the old failures and force a premature
+    reauth. A pass that finds nothing to poll saw no rejection either, which is
+    the same evidence a clean cycle provides, so it clears the streak the same
+    way.
+
+    Deliberately measured on the pre-cooldown list: a device held back only by
+    its poll cooldown has not proved anything, and clearing on that would be a
+    starvation path of its own.
+    """
+
+    device = {"id": "dev-1", "name": "Device"}
+    dummy_api.device_list = [device]
+    # Cached list: no refresh runs, so nothing but the rule under test can
+    # clear the counter.
+    coordinator._last_device_list = [device]
+    coordinator._last_list_poll_mono = time.monotonic()
+    # Known to the registry but not enabled for polling -- the "disabled
+    # tracker" case, reached without touching the ignore set.
+    coordinator._devices_with_entry = {"dev-1"}
+    coordinator._enabled_poll_device_ids = set()
+    coordinator._consecutive_transient_auth_failures = 2
+    coordinator._last_transient_auth_error = "rejected"
+
+    loop = coordinator.hass.loop
+    loop.run_until_complete(coordinator._async_update_data())
+
+    assert coordinator._consecutive_transient_auth_failures == 0
+    assert coordinator._last_transient_auth_error is None

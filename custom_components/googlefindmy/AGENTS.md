@@ -256,45 +256,44 @@ successful `async_get_basic_device_list` -- the strongest source in the tree, be
 and an expired login raises before it can reach the reset. On the poll path the same location WITH content clears the
 counter as well, so the device list is the everyday source, not the only one. An empty result clears nothing at all any
 more AT THE DEVICE SITE: not the idle BLE tag, not the four pre-accept failures named above. Read that as the narrow
-statement it is. A cycle in which nothing was rejected still releases the pending marker, so an idle tag can still open
-the door for the NEXT device-list refresh to clear the count -- one refresh later and only while no rejection stands. The price was measured and accepted with the
-change, and it is bounded: an auth error already on screen is now cleared by the next device-list refresh instead of by
-the next poll of any kind. `DEVICE_LIST_POLL_INTERVAL` is a fixed 300 seconds while the poll interval is an option
-between 60 and 3600 seconds (default 300), so at the default both run on the same cadence and at the shortest setting
-the wait grows to at most five poll cycles.
-Why that reset is CONDITIONAL, written down because the unconditional version starved the very escalation the counter
-feeds. The device-list refresh runs inside the same `_async_update_data` and BEFORE the poll cycle is scheduled, and at
-the default settings both cadences are 300 seconds. Clearing the counter there on every pass therefore zeroed it
-immediately before every attempt: a tracker whose action RPC kept returning a non-permanent credential rejection could
-only ever climb back to 1 and never reached `_MAX_TRANSIENT_AUTH_FAILURES`. That was the state of the first revision of
-this change, recorded as `R-3` in the plan, and an external reviewer found it before a user did. What the list proves is
-the ACCOUNT token, and only that; it says nothing about the action RPC accepting the same token again, which is what the
-counter counts. So a booked location failure sets `_transient_auth_failure_pending`, and while that marker stands the
-refresh leaves the count alone. Released by a POLL CYCLE that books no rejection, never by the refresh itself, and that
-difference is the whole design. A marker a refresh consumed would assume exactly one refresh per cycle, and nothing
-couples the two: `DEVICE_LIST_POLL_INTERVAL` is a fixed 300 s while `location_poll_interval` reaches 3600 s, and a
-deferred empty list re-fetches on the next 60 s tick without moving `_last_list_poll_mono`. At any poll setting above
-600 s, and already at the default whenever one empty list is deferred, a second refresh would fall into the same gap and
-clear the count -- the same starvation one layer along. Bound to the cycle it holds at every cadence. A one-off hiccup
-still heals: the next clean cycle releases the marker and the refresh after that clears the count. Suppressing the reset
-outright was rejected for the same reason it was introduced: it would strand any counter a single hiccup ever raised. A
-genuinely expired sign-in does not depend on the counter anyway: `async_get_basic_device_list` raises
-`ConfigEntryAuthFailed` and the reauth flow starts from there. What the change does buy is that a pending auth error
-survives long enough for a user to see it, rather than being wiped by the next idle tag inside the same cycle.
-The limit of that, measured over ten cycles rather than reasoned about: a PERSISTENT rejection escalates -- with a
-broken tracker next to an idle one the threshold is reached on cycle three, because every cycle books and nothing is
-ever released. An INTERMITTENT rejection on a single device does NOT escalate: the cycles in between book nothing,
-release the marker, and the next refresh clears the count. That is what a consecutive counter means, and the reset is
-sampled at refresh time rather than at cycle end, so "consecutive" is measured on a coarser clock than the poll. If
-that ever needs to change, the release would have to hang on a positive proof (a location WITH content) instead of on
-the absence of a rejection -- which would make the device-list refresh a dead reset source, because a location with
-content already clears the counter outright at its own site. The two cannot both be true at once.
+statement it is. A cycle in which nothing was rejected clears the count itself, cycle-wide, so an idle tag can no longer wipe the
+rejection a sibling booked in the same pass. The price was measured and accepted with the change, and it is bounded:
+an auth error already on screen is now cleared by the next device-list refresh instead of by the next poll of any
+kind. `DEVICE_LIST_POLL_INTERVAL` is a fixed 300 seconds while the poll interval is an option between 60 and 3600
+seconds (default 300), so at the default both run on the same cadence and at the shortest setting the wait grows to at
+most five poll cycles.
+Why the counter is NOT reset from the device-list refresh, written down because two earlier revisions did reset it
+there and each produced its own failure. Revision one cleared it unconditionally: the refresh runs inside the same
+`_async_update_data` and BEFORE the poll cycle is scheduled, so at the default cadence the count was zeroed
+immediately before every attempt, a tracker whose action RPC kept rejecting could only ever climb back to 1, and
+`_MAX_TRANSIENT_AUTH_FAILURES` was never reached. Revision two guarded that with a pending marker released by a clean
+poll cycle. That removed the dependency on how the two cadences line up, but it left the COUNT on the foreign clock
+and the remaining error merely changed sign: with a 60 s poll interval up to five cycles run without a refresh, so
+three rejections at minutes 0, 2 and 4 -- each separated by a clean cycle -- accumulated to the threshold although they
+were never consecutive. Both revisions share one root cause: the counter was incremented on one clock and zeroed on
+another, and the two are independently configurable, so every ratio yields one of the two errors.
+The reset therefore sits where the counting happens. A poll cycle that books NO rejection zeroes the count and the
+stored cause. A pass that finds no pollable device at all does the same, measured on the pre-cooldown list: it saw no
+rejection either, and without it a budget would stand for as long as every tracker stays disabled, so a tracker
+re-enabled weeks later would inherit it into a premature reauth. What the list refresh proves is the ACCOUNT token, and
+only that; it says nothing about the action RPC accepting the same token again, which is what the counter counts.
+A one-off hiccup still heals on the next clean cycle. Suppressing every reset was rejected for the reason the
+device-list reset was introduced in the first place: it would strand any counter a single hiccup ever raised. A
+genuinely expired sign-in does not depend on the counter anyway -- `async_get_basic_device_list` raises
+`ConfigEntryAuthFailed` and the reauth flow starts from there.
+The limit, measured rather than reasoned about: a PERSISTENT rejection escalates, and with a broken tracker next to an
+idle one the threshold is reached on cycle three, because every cycle books. An INTERMITTENT rejection does NOT
+escalate, at any cadence, because the clean cycle in between zeroes the count on the same clock that raised it. That is
+what a consecutive counter means. The alternative -- hanging the reset on a positive proof, a location WITH content --
+was rejected: such a location already clears the counter outright at its own site, so the rule would add nothing there
+and would leave a single hiccup standing indefinitely in an all-BLE fleet.
 `test_the_production_order_still_reaches_the_reauth_threshold` drives the real `_async_update_data` ->
-`_async_start_poll_cycle` sequence for three cycles and pins the escalation; the tests it replaces called
-`_async_start_poll_cycle()` directly and so never saw the refresh that preceded it in production.
-`test_two_refreshes_between_two_polls_do_not_clear_the_counter` pins the cadence independence, and
-`test_a_clean_cycle_releases_the_counter_for_the_next_refresh` pins the other side, so the fix cannot be tightened into
-a sticky suppression.
+`_async_start_poll_cycle` sequence for three cycles and pins the escalation.
+`test_a_clean_cycle_between_rejections_breaks_the_streak` pins the opposite case over five cycles without a single
+refresh, `test_a_cycle_with_no_pollable_device_clears_the_stale_count` pins the stranded-budget case,
+`test_two_refreshes_between_two_polls_do_not_clear_the_counter` pins that no number of refreshes clears the count, and
+`test_a_clean_cycle_clears_the_counter_without_any_refresh` pins that the cycle alone suffices, so the fix cannot be
+tightened into a sticky suppression.
 What this does NOT change, named because the reasoning above invites the opposite reading: `_set_auth_state(failed=
 False)` on that same success path stays UNCONDITIONAL. The account token is exactly what that state reports, and the
 list proves it. The consequence is real and accepted: after an escalation raised from the action RPC, the next refresh
