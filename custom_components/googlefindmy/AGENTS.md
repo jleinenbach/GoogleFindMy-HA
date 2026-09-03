@@ -255,7 +255,9 @@ WITH content, in the manual locate a record that survives the empty guard, and f
 successful `async_get_basic_device_list` -- the strongest source in the tree, because it has no non-throwing error exit
 and an expired login raises before it can reach the reset. On the poll path the same location WITH content clears the
 counter as well, so the device list is the everyday source, not the only one. An empty result clears nothing at all any
-more: not the idle BLE tag, not the four pre-accept failures named above. The price was measured and accepted with the
+more AT THE DEVICE SITE: not the idle BLE tag, not the four pre-accept failures named above. Read that as the narrow
+statement it is. A cycle in which nothing was rejected still releases the pending marker, so an idle tag can still open
+the door for the NEXT device-list refresh to clear the count -- one refresh later and only while no rejection stands. The price was measured and accepted with the
 change, and it is bounded: an auth error already on screen is now cleared by the next device-list refresh instead of by
 the next poll of any kind. `DEVICE_LIST_POLL_INTERVAL` is a fixed 300 seconds while the poll interval is an option
 between 60 and 3600 seconds (default 300), so at the default both run on the same cadence and at the shortest setting
@@ -278,7 +280,15 @@ still heals: the next clean cycle releases the marker and the refresh after that
 outright was rejected for the same reason it was introduced: it would strand any counter a single hiccup ever raised. A
 genuinely expired sign-in does not depend on the counter anyway: `async_get_basic_device_list` raises
 `ConfigEntryAuthFailed` and the reauth flow starts from there. What the change does buy is that a pending auth error
-survives long enough for a user to see it, instead of being wiped by the next idle tag.
+survives long enough for a user to see it, rather than being wiped by the next idle tag inside the same cycle.
+The limit of that, measured over ten cycles rather than reasoned about: a PERSISTENT rejection escalates -- with a
+broken tracker next to an idle one the threshold is reached on cycle three, because every cycle books and nothing is
+ever released. An INTERMITTENT rejection on a single device does NOT escalate: the cycles in between book nothing,
+release the marker, and the next refresh clears the count. That is what a consecutive counter means, and the reset is
+sampled at refresh time rather than at cycle end, so "consecutive" is measured on a coarser clock than the poll. If
+that ever needs to change, the release would have to hang on a positive proof (a location WITH content) instead of on
+the absence of a rejection -- which would make the device-list refresh a dead reset source, because a location with
+content already clears the counter outright at its own site. The two cannot both be true at once.
 `test_the_production_order_still_reaches_the_reauth_threshold` drives the real `_async_update_data` ->
 `_async_start_poll_cycle` sequence for three cycles and pins the escalation; the tests it replaces called
 `_async_start_poll_cycle()` directly and so never saw the refresh that preceded it in production.

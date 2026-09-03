@@ -1071,9 +1071,17 @@ def test_a_failing_device_list_leaves_the_counter_alone(
 #
 # The list proves the ACCOUNT token, because `async_get_basic_device_list` has
 # no non-throwing error exit. It does not prove that the action RPC accepts that
-# same token again. So the reset is now conditional: a booked location failure
-# consumes the next list reset instead of being erased by it. A single hiccup
-# still heals (the refresh after next clears it), a persistent one accumulates.
+# same token again. So the reset is conditional: while a booked location failure
+# stands unproven, no refresh clears the count. The marker is released by a poll
+# CYCLE that books nothing, never by the refresh itself -- an earlier revision
+# had the refresh consume it, which silently assumed one refresh per cycle and
+# starved the escalation again wherever the two cadences did not line up.
+#
+# The measured limit, so the tests below are not read as more than they are: a
+# PERSISTENT rejection escalates (every cycle books, nothing is released), an
+# INTERMITTENT one on a single device does not, because a cycle that books
+# nothing releases the marker and the next refresh clears the count. That is the
+# meaning of a consecutive counter, and it is stated rather than discovered.
 # --------------------------------------------------------------------------
 
 
@@ -1146,8 +1154,15 @@ def test_two_refreshes_between_two_polls_do_not_clear_the_counter(
     and a deferred empty list re-fetches on the next 60 s tick without moving
     `_last_list_poll_mono`. A marker that a refresh consumed would therefore be
     eaten by the first refresh and the count cleared by the second, which is
-    the same starvation one layer along. Two refreshes with no poll in between
-    are the smallest case that tells the two designs apart.
+    the same starvation one layer along. Refreshes with no poll in between are
+    the case that tells the two designs apart, and three of them make the point
+    past any off-by-one reading of "consumes one".
+
+    Scope, stated rather than implied by the name: this drives no poll cycle at
+    all (the fixture's `_async_start_poll_cycle` stub stays in place) and sets
+    the marker by hand. It measures the refresh side of the rule. The booking
+    site and the real ordering are measured by
+    `test_the_production_order_still_reaches_the_reauth_threshold`.
     """
 
     dummy_api.device_list = [{"id": "dev-1", "name": "Device"}]

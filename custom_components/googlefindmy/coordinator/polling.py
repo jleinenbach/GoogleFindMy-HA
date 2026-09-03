@@ -1271,12 +1271,14 @@ class PollingOperations(_MixinBase):
                 # This is the strongest proof source in the integration, and
                 # after the poll loop stopped resetting on an empty result it is
                 # also the only everyday one left for the transient counter.
-                # `async_get_basic_device_list` has no non-throwing error exit:
-                # every except branch re-raises, eight of them as
-                # `ConfigEntryAuthFailed` or `UpdateFailed` and the ninth as the
-                # bare `raise` that lets `asyncio.CancelledError` through
-                # untouched. The method holds exactly one `return`, and it is the
-                # success path. A return that got this far therefore
+                # `async_get_basic_device_list` has no non-throwing error exit.
+                # Its OUTER `try` has nine except branches, all of which re-raise:
+                # eight as `ConfigEntryAuthFailed` or `UpdateFailed`, the ninth a
+                # bare `raise` that lets `asyncio.CancelledError` through. Four
+                # further branches sit on inner `try`s and do swallow (a missing
+                # username, two legacy-signature fallbacks, a missing email), but
+                # none of them leaves the method. The method holds exactly one
+                # `return`, and it is the success path. A return that got this far therefore
                 # means Nova accepted the account token, which is exactly what
                 # the counter counts -- and an expired login raises before it can
                 # reach this line, so it cannot mask itself here the way it could
