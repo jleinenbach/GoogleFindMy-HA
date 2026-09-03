@@ -964,10 +964,12 @@ class GoogleFindMyUWTModeSensor(GoogleFindMyDeviceEntity, BinarySensorEntity):
           detected motion (DULT section 3.12.2.1 with table 16; section 3.4.4
           carries the state transition only, not the detector). This is
           normative, and it gates the motion-triggered chime, not the setting of
-          this bit. An earlier docstring here first claimed the sensor turns on
-          after that window, and was then corrected into denying the window
-          exists at all; both were wrong, and it is the second error that this
-          paragraph replaces (BSkando#210).
+          this bit. Two earlier revisions of this docstring misplaced the figure
+          in opposite directions; both are withdrawn, and the correction of
+          record is the attribution stated here (BSkando#210). Neither is
+          restated, so the guards in
+          ``tests/test_uwt_mode_binary_sensor.py`` need no exception for this
+          paragraph.
         - The Find Hub specification's own "24 hours", which is the reduced MAC
           address rotation period WHILE the mode is active.
 

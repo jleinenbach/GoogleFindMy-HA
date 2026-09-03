@@ -369,19 +369,29 @@ class TestUWTModeSensorDocumentationMatchesSpec:
         re.IGNORECASE,
     )
 
-    #: Claims withdrawn on 2026-09-03 against the specification wording, in
-    #: normalised form (lowercase, whitespace collapsed) so that recasing or
-    #: rewrapping the old paragraph does not walk past the guard.
+    #: Claims withdrawn on 2026-09-03 against the specification wording, as
+    #: patterns rather than spellings (property 1 in ``tests/AGENTS.md``). They
+    #: run against the docstring normalised to lowercase with whitespace
+    #: collapsed, so recasing or rewrapping the old paragraph does not walk
+    #: past them, and they cover the two claims in both their directions: that
+    #: the mode is command-only, and that the sensor follows a separation
+    #: window.
     #:
-    #: Each entry carries its subject on purpose. The bare phrase "is not what
-    #: this bit reports" is a *true* statement about the motion detector, which
-    #: the corrected docstring needs; only the claim about the chime was
-    #: withdrawn, so the chime is named in the pattern.
-    WITHDRAWN_CLAIMS = (
-        "not by elapsed time",
-        "no such window exists in the specification",
-        "mode is entered and left by command",
-        "chime is a dult platform behaviour and is not what this bit reports",
+    #: Subjects are carried on purpose. The bare phrase "is not what this bit
+    #: reports" is a *true* statement about the motion detector, which the
+    #: corrected docstring needs, so only the withdrawn claim about the chime is
+    #: matched. Per property 2 the guarded docstrings do not restate either
+    #: withdrawn claim, which is what lets these patterns stay broad without an
+    #: exception for the paragraph that mentions the history.
+    WITHDRAWN_CLAIM_PATTERNS = (
+        r"not by elapsed time",
+        r"command[-\s]driven",
+        r"(?:mode|it)\s+is\s+(?:entered and left|only entered)\s+by\s+command",
+        r"only\s+by\s+command",
+        r"no\s+such\s+window\s+exists",
+        r"(?:sensor|bit|entity|it)\s+turns\s+on\s+after",
+        r"chime\s+is\s+a\s+dult\s+platform\s+behaviour",
+        r"is\s+not\s+the\s+(?:dult\s+)?separated\s+state",
     )
 
     @staticmethod
@@ -392,7 +402,16 @@ class TestUWTModeSensorDocumentationMatchesSpec:
     def test_docstring_does_not_reassert_the_withdrawn_command_only_claim(
         self,
     ) -> None:
-        """The mode is not command-only, and the docstrings must not say it is."""
+        """The mode is not command-only, and the docstrings must not say it is.
+
+        Case (a) in ``tests/AGENTS.md``, corrective: the withdrawn claim shipped
+        and produced misdirected automations (BSkando#210).
+
+        Retirement condition: the DULT mapping has survived a release cycle
+        unchanged, or BSkando#210 has closed. Either makes this a historical
+        note rather than a live correction, and the positive guard below is
+        then the only one still earning its place.
+        """
         docs = {
             "class": inspect.getdoc(GoogleFindMyUWTModeSensor) or "",
             "is_on": inspect.getdoc(GoogleFindMyUWTModeSensor.is_on.fget) or "",
@@ -401,11 +420,14 @@ class TestUWTModeSensorDocumentationMatchesSpec:
 
         for name, doc in docs.items():
             normalised = self._normalise(doc)
-            for claim in self.WITHDRAWN_CLAIMS:
-                assert claim not in normalised, (
-                    f"{name} docstring reasserts a withdrawn claim: {claim!r}. "
-                    "The FMDN mode maps onto the DULT separated state, which a "
-                    "device enters autonomously after 30 minutes of separation."
+            for pattern in self.WITHDRAWN_CLAIM_PATTERNS:
+                match = re.search(pattern, normalised)
+                assert match is None, (
+                    f"{name} docstring reasserts a withdrawn claim "
+                    f"({pattern!r} matched {match.group(0)!r}). The FMDN mode "
+                    "maps onto the DULT separated state, which a device enters "
+                    "autonomously after 30 minutes of separation, and the 8-24 "
+                    "hour figure gates the motion detector rather than this bit."
                 )
 
     def test_docstring_names_the_dult_mapping_and_its_timer(self) -> None:
@@ -414,6 +436,11 @@ class TestUWTModeSensorDocumentationMatchesSpec:
         Deleting the withdrawn claim without putting the mapping in its place
         would satisfy the negative guard above and still leave the reader with
         no way to find out how the mode is actually entered.
+
+        Retirement condition: this one outlives the negative guard. It becomes
+        obsolete only when the mapping stops being load-bearing for readers of
+        this sensor, that is when the entity itself is removed or the mapping is
+        stated somewhere a docstring edit cannot silently drop.
         """
         class_doc = inspect.getdoc(GoogleFindMyUWTModeSensor) or ""
 
@@ -440,6 +467,10 @@ class TestUWTModeSensorDocumentationMatchesSpec:
         whole text would pass on a docstring that states the figure in one place
         and mentions the motion detector in an unrelated one, which is the shape
         the original error had.
+
+        Retirement condition: the figure disappears from these docstrings
+        altogether, at which point the guard is inert by construction, or
+        BSkando#210 closes with the attribution unchallenged across a release.
         """
         docs = {
             "class": inspect.getdoc(GoogleFindMyUWTModeSensor) or "",
