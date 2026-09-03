@@ -2663,6 +2663,32 @@ class PollingOperations(_MixinBase):
                     # 0 here while a cause still stands. The two fields are
                     # exported together and have to end together.
                     self._last_transient_auth_error = None
+                    # The same reconciliation for the ACCOUNT-WIDE verdict, and
+                    # it is a third field, not a repetition of the two above.
+                    # The rejection branch sets `last_exception`, which is the
+                    # sole driver of `async_set_update_error` in the `finally`
+                    # below, and `GoogleFindMyEntity.available` follows the
+                    # coordinator's `last_update_success`. In a mixed cycle that
+                    # marked EVERY tracker unavailable although a sibling had
+                    # answered WITH CONTENT in the same pass -- the one strong
+                    # proof on this path, which this very branch has just
+                    # accepted as proof for the counter. Accepting it for the
+                    # counter and rejecting it for availability would be two
+                    # verdicts from one cycle. The non-credential 4xx branch
+                    # above already states this rule for its own case: keep
+                    # `cycle_failed`, because the cycle really did not poll every
+                    # device and the diagnostic attribute has to say so, and
+                    # withdraw only the account-wide report.
+                    #
+                    # Identity rather than truthiness, so only the rejection THIS
+                    # cycle booked is withdrawn. A timeout, a stale owner key or
+                    # an account-wide decrypt failure may have got there first
+                    # and stays: none of them is refuted by one device answering.
+                    if (
+                        first_rejection_error is not None
+                        and last_exception is first_rejection_error
+                    ):
+                        last_exception = None
                 # No device's request was accepted: the cycle must surface.
                 # Two counters, one verdict -- see their declaration above for
                 # why they are not the same thing. Either way the device produced

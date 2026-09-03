@@ -1547,6 +1547,85 @@ def test_the_reauth_verdict_does_not_depend_on_device_order(
         assert coordinator._consecutive_transient_auth_failures == 0, (
             f"counter not cleared with {first} first"
         )
+        # The mock was here before this assertion was, and that gap was the
+        # finding: the cycle accepted the content as proof for the counter and
+        # still reported the rejection account-wide, so every tracker entity
+        # went unavailable next to the one that had just answered. A mocked
+        # collaborator that nothing asserts against measures nothing.
+        assert coordinator.async_set_update_error.call_args_list == [], (
+            f"account marked failed with {first} first: "
+            f"{coordinator.async_set_update_error.call_args_list}"
+        )
+
+
+def test_content_withdraws_only_the_rejection_not_a_timeout(
+    coordinator: GoogleFindMyCoordinator, dummy_api: _DummyAPI
+) -> None:
+    """Content refutes the rejection it stands next to, and nothing else.
+
+    The mixed-cycle branch withdraws the account-wide report of a credential
+    rejection once a sibling has answered WITH content. That withdrawal is bound
+    to the identity of the rejection this cycle booked, and this test is why: a
+    timeout reached ``last_exception`` first, and one device answering says
+    nothing about a device that never answered at all. Dropping the identity
+    check would let content silently swallow an unrelated failure report.
+
+    The push transport is taken down on purpose. With FCM connected a timeout is
+    deliberately ignored to keep the status healthy, so it would never reach
+    ``last_exception`` and this test would measure nothing -- it did exactly
+    that on the first attempt, and passed vacuously with an empty call list.
+    """
+
+    devices = [
+        {"id": "dev-slow", "name": "Slow"},
+        {"id": "dev-bad", "name": "Bad"},
+        {"id": "dev-good", "name": "Good"},
+    ]
+
+    async def _by_device(device_id: str, *_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        if device_id == "dev-slow":
+            raise TimeoutError
+        if device_id == "dev-bad":
+            raise NovaAuthError(403, "action rejected")
+        return {
+            "latitude": 37.0,
+            "longitude": -122.0,
+            "last_seen": int(time.time()),
+        }
+
+    # Without this the fixture's AsyncMock stands in for the cycle and nothing
+    # below measures anything.
+    del coordinator._async_start_poll_cycle
+
+    # No push transport: this is what makes the timeout carry a report at all.
+    coordinator._fcm_status_state = None
+    assert coordinator.is_fcm_connected is False
+
+    # Entering at 2 on purpose. At 0 the "the rejection is withdrawn" assertion
+    # below would hold whatever the branch did, and the sentence would claim a
+    # measurement it never made.
+    coordinator._consecutive_transient_auth_failures = 2
+    coordinator._last_transient_auth_error = "rejected"
+    coordinator.config_entry.reauth_calls = 0
+    coordinator.async_set_update_error = Mock()
+    dummy_api.async_get_device_location = _by_device
+
+    loop = coordinator.hass.loop
+    loop.run_until_complete(coordinator._async_start_poll_cycle(devices, force=True))
+
+    # The rejection is withdrawn (streak cleared, no reauth), the timeout is not.
+    assert coordinator._consecutive_transient_auth_failures == 0
+    assert coordinator._last_transient_auth_error is None
+    assert coordinator.config_entry.reauth_calls == 0
+    reported = coordinator.async_set_update_error.call_args_list
+    assert len(reported) == 1, f"expected the timeout alone, got {reported}"
+    surfaced = reported[0].args[0]
+    assert not isinstance(surfaced, NovaAuthError), (
+        f"the withdrawn rejection surfaced anyway: {surfaced!r}"
+    )
+    assert isinstance(surfaced.__cause__, TimeoutError), (
+        f"expected the timeout to survive, got {surfaced!r}"
+    )
 
 
 def test_the_stored_cause_follows_the_count_in_a_mixed_cycle(

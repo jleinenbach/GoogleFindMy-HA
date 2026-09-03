@@ -147,6 +147,16 @@ an oversight: every other branch there reports a condition that says something a
 neither flag, so it is not the same shape.) A side effect worth naming: while the client branch held the
 `last_exception` slot, a rejected tracker polled BEFORE a genuinely expired one made the coordinator report the
 harmless 404 and hide the 401.
+The CREDENTIAL rejection branch is the other half of that split and does set both, because a rejected credential does
+say something about the account. It is withdrawn again, once and only where the cycle already has proof to the
+contrary: the mixed-cycle branch after the loop drops `last_exception` when a sibling answered WITH content, which is
+the same proof that branch accepts for the counter. Accepting content as proof for the streak and rejecting it for
+availability would be two verdicts out of one cycle, and the second one took every tracker offline next to the device
+that had just answered. `cycle_failed` is deliberately kept, so `last_poll_result` still says the cycle did not poll
+every device. The withdrawal is bound to the IDENTITY of that cycle's rejection: a timeout, a stale owner key or an
+account-wide decrypt failure that reached the slot first stays, because one device answering refutes none of them.
+Pinned by `test_the_reauth_verdict_does_not_depend_on_device_order` and
+`test_content_withdraws_only_the_rejection_not_a_timeout`.
 The all-rejected case is handled after the loop, not in the branch: whether a rejection is per-device or
 account-wide is only knowable once every device has been tried, the same reasoning by which
 `_finalize_cycle_decrypt_state` defers the decrypt verdict. If `cycle_rejected_devices == len(devices)` every device
@@ -321,6 +331,18 @@ refresh, `test_a_cycle_with_no_pollable_device_clears_the_stale_count` pins the 
 `test_two_refreshes_between_two_polls_do_not_clear_the_counter` pins that no number of refreshes clears the count, and
 `test_a_clean_cycle_clears_the_counter_without_any_refresh` pins that the cycle alone suffices, so the fix cannot be
 tightened into a sticky suppression.
+The withdrawal reaches a THIRD field, and naming it apart from the other two is the point: the count, the stored
+cause and the ACCOUNT-WIDE report are three things, not one. The rejection branch parks its error in
+`last_exception`, the cycle's `finally` hands that to `async_set_update_error`, and `GoogleFindMyEntity.available`
+follows the coordinator's `last_update_success` -- so a mixed cycle marked EVERY tracker unavailable next to the
+sibling that had just answered WITH content. Accepting that content as proof for the counter and rejecting it for
+availability would be two verdicts out of one cycle. The report is therefore withdrawn as well, bound to the
+IDENTITY of the rejection this cycle booked: a timeout, a stale owner key or an account-wide decrypt failure that
+reached the slot first stays, because one device answering says nothing about a device that never answered at all.
+`test_the_reauth_verdict_does_not_depend_on_device_order` asserts the withdrawal,
+`test_content_withdraws_only_the_rejection_not_a_timeout` asserts its limit. `cycle_failed` is kept, because the
+cycle really did fail to poll every device and the diagnostic attribute has to say so -- the same split the
+non-credential 4xx branch already states for its own case.
 What this does NOT change, named because the reasoning above invites the opposite reading: `_set_auth_state(failed=
 False)` on that same success path stays UNCONDITIONAL. The account token is exactly what that state reports, and the
 list proves it. The consequence is real and accepted: after an escalation raised from the action RPC, the next refresh
