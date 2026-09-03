@@ -1307,9 +1307,13 @@ class GoogleFindMyAPI:
             - Any OTHER `NovaAuthError` is the server refusing the request, not
               the credentials -- a device removed from the account, a malformed
               body -- and is re-raised unchanged. It is deliberately NOT turned
-              into an empty result: a normal return is what both callers read as
-              "the credentials worked", and they clear the account auth state on
-              it. Only a transient/5xx failure returns `{}`.
+              into an empty result: a return WITH CONTENT is what both callers
+              read as "the credentials worked", and they clear the account auth
+              state on it. An empty return no longer reaches those resets -- they
+              sit behind the empty guard -- but collapsing a rejection into `{}`
+              would still be wrong, because a failure that presents as an idle
+              device is indistinguishable from a healthy idle device. Only a
+              transient/5xx failure returns `{}`.
             - Because the previous two bullets BOTH arrive as `NovaAuthError`,
               the type alone never tells a caller which one it holds. Every
               caller must ask `nova_request.is_credential_rejection`.
@@ -1322,8 +1326,18 @@ class GoogleFindMyAPI:
         Returns:
             A dictionary containing the best available location data for the
             device, or an empty dictionary on a transient failure (5xx, rate
-            limit, timeout). A normal return therefore means the credentials
-            were accepted; callers rely on that.
+            limit, timeout).
+
+            A return WITH CONTENT means the credentials were accepted, and both
+            callers rely on that: they clear the account auth state on it. An
+            EMPTY return means only that nothing raised. Callers must not read it
+            as proof -- four pre-accept failures still arrive this way, and so
+            does every healthy idle BLE tag. Since
+            `PLAN_GFMY_AUTH_RESET_POSITIVE_PROOF` both callers check for
+            emptiness first, and in the poll loop an empty result counts merely
+            as "this request was not refused", which is enough to break a streak
+            of credential rejections and deliberately not enough to clear the
+            auth state.
 
             That reliance is only as sound as the layer below. It holds exactly
             to the extent that a request which never got past this integration's
