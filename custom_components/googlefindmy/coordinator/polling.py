@@ -2591,10 +2591,22 @@ class PollingOperations(_MixinBase):
                         self._consecutive_transient_auth_failures,
                         _MAX_TRANSIENT_AUTH_FAILURES,
                     )
-                elif not cycle_booked_transient_auth and cycle_accepted_requests:
-                    # No device rejected the credentials in this cycle AND at
-                    # least one request was accepted, so the streak is broken
-                    # and the count goes with it. Both halves are load-bearing:
+                elif cycle_accepted_requests:
+                    # The cycle is not counted as a failing one -- either nothing
+                    # rejected, or something rejected and a sibling answered WITH
+                    # content, which the branch above lets win -- and at least one
+                    # request was accepted. The streak is broken and the count
+                    # goes with it, together with the stored cause.
+                    #
+                    # `cycle_accepted_requests` rather than
+                    # `not cycle_booked_transient_auth` is what carries the mixed
+                    # case here. A content-bearing device zeroes both fields at
+                    # its own site, but a rejection processed AFTER it writes the
+                    # cause back; without this branch the pair would end as
+                    # (count 0, cause set) in one device order and (count 0, cause
+                    # None) in the other, from identical answers. The diagnostic
+                    # snapshot exports both fields, and a cause standing next to a
+                    # zero count names a failure that is over. Both halves are load-bearing:
                     # without the second, a cycle in which every device timed
                     # out or hit a 5xx would count as a clean cycle and clear a
                     # budget on the strength of an outage. This is the
@@ -2635,7 +2647,12 @@ class PollingOperations(_MixinBase):
                             self._consecutive_transient_auth_failures,
                         )
                         self._consecutive_transient_auth_failures = 0
-                        self._last_transient_auth_error = None
+                    # Outside the guard above on purpose. In a mixed cycle the
+                    # content site has already zeroed the count, and a rejection
+                    # processed after it wrote the cause back -- so the count is
+                    # 0 here while a cause still stands. The two fields are
+                    # exported together and have to end together.
+                    self._last_transient_auth_error = None
                 # No device's request was accepted: the cycle must surface.
                 # Two counters, one verdict -- see their declaration above for
                 # why they are not the same thing. Either way the device produced

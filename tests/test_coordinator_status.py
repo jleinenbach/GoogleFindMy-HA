@@ -1547,3 +1547,45 @@ def test_the_reauth_verdict_does_not_depend_on_device_order(
         assert coordinator._consecutive_transient_auth_failures == 0, (
             f"counter not cleared with {first} first"
         )
+
+
+def test_the_stored_cause_follows_the_count_in_a_mixed_cycle(
+    coordinator: GoogleFindMyCoordinator, dummy_api: _DummyAPI
+) -> None:
+    """Counter and cause must end in the same state, whichever device answers first.
+
+    The diagnostic snapshot exports both fields. A cause standing next to a zero
+    count names a failure that is over, and the pair used to depend on device
+    order: a content-bearing device zeroes both at its own site, but a rejection
+    processed after it wrote the cause back and the end-of-cycle branches skipped
+    the mixed case entirely.
+    """
+
+    devices = [
+        {"id": "dev-good", "name": "Good"},
+        {"id": "dev-bad", "name": "Bad"},
+    ]
+
+    async def _by_device(device_id: str, *_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        if device_id == "dev-bad":
+            raise NovaAuthError(403, "action rejected")
+        return {
+            "latitude": 37.0,
+            "longitude": -122.0,
+            "last_seen": int(time.time()),
+        }
+
+    del coordinator._async_start_poll_cycle
+
+    for order in (devices, list(reversed(devices))):
+        coordinator._consecutive_transient_auth_failures = 2
+        coordinator._last_transient_auth_error = "old"
+        coordinator.async_set_update_error = Mock()
+        dummy_api.async_get_device_location = _by_device
+
+        loop = coordinator.hass.loop
+        loop.run_until_complete(coordinator._async_start_poll_cycle(order))
+
+        first = order[0]["name"]
+        assert coordinator._consecutive_transient_auth_failures == 0, first
+        assert coordinator._last_transient_auth_error is None, first
