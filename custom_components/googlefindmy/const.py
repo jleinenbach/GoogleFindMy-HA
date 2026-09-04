@@ -56,6 +56,17 @@ class SoundDispatchOutcome(StrEnum):
 
     Only ``TRANSPORT_FAILED`` justifies a push cooldown. Only ``ACCEPTED`` proves
     that the credentials worked.
+
+    See IRR-CA-SOUND-FAILURE-CLASS in ``docs/PLAY_SOUND_ARCHITECTURE.md`` for the
+    per-member "may a caller arm a push cooldown" table this type carries, and
+    IRR-CA-STOP-BREAKS-SELF-INFLICTED-COOLDOWN for the qualifier on the stop
+    path. There the readiness gate lets a stop through a running window when the
+    stop carries our own fresh cancel key, so a window armed by a play cannot
+    lock out a stop this integration can correlate; and when such a stop then
+    fails on the transport, the cooldown is reported through
+    ``_note_stop_transport_problem_without_extending()``, which puts a window
+    that was already running back instead of restarting it, so a stop cannot
+    feed the window it just broke through.
     """
 
     ACCEPTED = "accepted"
