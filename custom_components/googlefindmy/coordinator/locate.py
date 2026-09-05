@@ -27,6 +27,7 @@ from homeassistant.exceptions import ConfigEntryAuthFailed, HomeAssistantError
 from .._reauth_reason import ReauthReasonCode
 from ..const import (
     DEFAULT_MIN_POLL_INTERVAL,
+    PlaySoundOutcome,
     SoundDispatchOutcome,
     StopSoundOutcome,
 )
@@ -929,7 +930,7 @@ class LocateOperations(_MixinBase):
             return False
         return not self._cached_sound_uuid_is_stale(device_id)
 
-    async def async_play_sound(self, device_id: str) -> bool:
+    async def async_play_sound(self, device_id: str) -> PlaySoundOutcome:
         """Play sound on a device using the native async API (no executor).
 
         Guard with can_play_sound(); on failure, start a short cooldown to avoid repeated errors.
@@ -942,14 +943,57 @@ class LocateOperations(_MixinBase):
             device_id: The canonical ID of the device.
 
         Returns:
-            True if the command was submitted successfully, False otherwise.
+            A :class:`PlaySoundOutcome`. Three-valued on purpose: ``ACCEPTED``
+            (Nova took the command), ``SUPPRESSED`` (declined here by a local
+            condition that clears itself, so waiting is the whole remedy) and
+            ``FAILED`` (everything else, from a device that cannot ring to a
+            server rejection). The dividing line between the latter two is the
+            REMEDY, not where the decision was taken; see ``PlaySoundOutcome``
+            and IRR-CA-PLAY-REMEDY-SPLIT. The bool this method used to return
+            merged all three, so one message had to advise on all of them.
         """
+        # The capability verdict is read BEFORE the readiness gate, because the
+        # gate answers "may we send" with a single bool for two conditions whose
+        # remedies are opposites. ``can_ring is False`` is permanent -- waiting
+        # never makes a device ring that reports it cannot -- while the gate's
+        # only other refusal, an active push cooldown, passes on its own within
+        # ninety seconds. Those are its two ``False`` paths and there is no
+        # third: an unknown device is waved through optimistically rather than
+        # refused. Reading both as SUPPRESSED would tell the owner of a
+        # non-ringing tracker to try again in a moment, forever. The stop path
+        # has no equivalent branch: its gate checks push readiness only and
+        # never asks about capability.
+        # getattr, like the timestamp store below: some tests build the
+        # coordinator via __new__ and never run __init__, and a gate that
+        # raises AttributeError before the api call would fail them for a
+        # reason that has nothing to do with what they pin.
+        caps_by_device = getattr(self, "_device_caps", None) or {}
+        caps = caps_by_device.get(device_id)
+        if caps and caps.get("can_ring") is False:
+            # Warning, not debug: the user-facing message for FAILED points at
+            # the log as the carrier of the specific cause, and a message that
+            # points at a log which says nothing is worse than no message. This
+            # branch is reached once per explicit service call, never in a loop.
+            #
+            # No device identifier of any kind, neither the id (AGENTS.md
+            # section 5, "never log ... device IDs") nor the display name, which
+            # the same section names as derived identifying information to
+            # redact. The coordinate warnings above do carry the display name;
+            # this line does not follow them, because it is new and the
+            # attribution it would buy is already in the user-facing error, which
+            # names the device and appears at the same moment. What the log is
+            # for here is the CAUSE, and the cause is device-independent.
+            _LOGGER.warning(
+                "Play Sound was refused: the device reports it cannot ring "
+                "(can_ring is False). Waiting will not change this."
+            )
+            return PlaySoundOutcome.FAILED
         if not self.can_play_sound(device_id):
             _LOGGER.debug(
-                "Suppressing play_sound call for %s: capability/push not ready",
+                "Suppressing play_sound call for %s: push cooldown active",
                 device_id,
             )
-            return False
+            return PlaySoundOutcome.SUPPRESSED
         try:
             play = await self.api.async_play_sound(device_id)
             # api.async_play_sound carries two independent facts. ``accepted``
@@ -1019,7 +1063,15 @@ class LocateOperations(_MixinBase):
                 # an expired sign-in produces. async_stop_sound has always
                 # applied this rule and states the reason; the two paths agree.
                 self._set_auth_state(failed=False)
-            return ok
+            # Negative form, as on the stop path: the safe default of this
+            # branch is failure. An ``if/elif`` cascade over the seven members
+            # of SoundDispatchOutcome would let a value from outside the enum --
+            # a bool from a stale test double, a member added later without
+            # visiting this site -- fall through to success. Only ACCEPTED is
+            # success, and only it is named here.
+            if play.outcome is not SoundDispatchOutcome.ACCEPTED:
+                return PlaySoundOutcome.FAILED
+            return PlaySoundOutcome.ACCEPTED
         except ConfigEntryAuthFailed as auth_exc:
             self._set_auth_state(
                 failed=True, reason=f"Auth failed during play_sound: {auth_exc}"
@@ -1028,7 +1080,7 @@ class LocateOperations(_MixinBase):
                 await self.async_request_refresh()
             except Exception:
                 pass
-            return False
+            return PlaySoundOutcome.FAILED
         except (TimeoutError, ClientConnectionError, ClientError) as conn_err:
             _LOGGER.warning(
                 "Connection failed during play_sound for %s: %s",
@@ -1037,7 +1089,7 @@ class LocateOperations(_MixinBase):
             )
             self.note_error(conn_err, where="async_play_sound", device=device_id)
             self._note_push_transport_problem()
-            return False
+            return PlaySoundOutcome.FAILED
         except Exception as err:
             _LOGGER.error(
                 "Unexpected error during play_sound for %s: %s",
@@ -1052,7 +1104,7 @@ class LocateOperations(_MixinBase):
             # left is this method's own body around the call, or an api
             # implementation that breaks the Protocol. Blaming the transport for
             # either is the misclassification IRR-CA-SOUND-FAILURE-CLASS stops.
-            return False
+            return PlaySoundOutcome.FAILED
 
     async def async_stop_sound(
         self,

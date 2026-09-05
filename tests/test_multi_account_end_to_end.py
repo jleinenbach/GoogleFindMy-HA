@@ -23,6 +23,7 @@ from custom_components.googlefindmy.const import (
     DOMAIN,
     SERVICE_LOCATE_DEVICE,
     SERVICE_PLAY_SOUND,
+    PlaySoundOutcome,
     StopSoundOutcome,
 )
 from tests.helpers import drain_loop
@@ -449,10 +450,14 @@ def test_multi_account_end_to_end(
             self.locate_calls.append(canonical_id)
             return {"canonical_id": canonical_id, "entry_id": self.cache.entry_id}
 
-        async def _async_play_sound(self: Any, canonical_id: str) -> bool:
+        async def _async_play_sound(self: Any, canonical_id: str) -> PlaySoundOutcome:
             token = f"fcm-token-{self.cache.entry_id}"
             self.play_calls.append((canonical_id, token))
-            return True
+            # Same reason as the stop stub below: production returns the enum,
+            # and the service handler treats anything that is not ACCEPTED as a
+            # failure. A bool here used to read as success; it now surfaces as
+            # the contract breach it is.
+            return PlaySoundOutcome.ACCEPTED
 
         async def _async_stop_sound(self: Any, _canonical_id: str) -> StopSoundOutcome:
             # Production returns the enum; a bool would slip through the

@@ -238,6 +238,93 @@ class StopSoundOutcome(StrEnum):
 
 
 # --------------------------------------------------------------------------------------
+# Play Sound outcome (coordinator -> service boundary)
+# --------------------------------------------------------------------------------------
+
+
+class PlaySoundOutcome(StrEnum):
+    """Outcome of a Play Sound attempt, as classified by the coordinator.
+
+    Three states, told apart by the REMEDY they call for -- the same dividing
+    line ``StopSoundOutcome`` draws, and for the same reason: one message
+    cannot advise both the user who only has to wait and the user who has to
+    act. Before this type existed the play path returned a plain ``bool``, so
+    six unrelated conditions -- a push cooldown that clears itself after ninety
+    seconds, a device that cannot ring at all, a missing action token, a server
+    rejection, a rate limit and a bug of our own -- reached the service handler
+    as one ``False`` and were answered with one message that had to list every
+    possibility and point at the log. See IRR-CA-PLAY-REMEDY-SPLIT.
+
+    This is deliberately NOT ``SoundDispatchOutcome``. That type is the verdict
+    of ``api.py`` on a command that was handed to it, and the coordinator holds
+    three states it never produces: the local readiness gate declining to send,
+    a ``ConfigEntryAuthFailed`` from an ``api`` implementation that raises it
+    (the one in this repository does not on the sound paths; the handler is
+    defensive, because ``api`` is a Protocol), and a failure in this method's
+    own body around the call. Passing the API type through the coordinator
+    would leave those three without a truthful value. The layers keep their own
+    vocabulary; the mapping between them lives in ``async_play_sound``.
+
+    There is no analogue to ``StopSoundOutcome.UNCORRELATED`` here. Nova returns
+    no parsable ExecuteActionResponse, so no reply proves the device rang -- but
+    that caveat holds for EVERY accepted play, not for a subset, and it is
+    already stated once in IRR-CA-NO-RING-CONFIRMATION rather than encoded as a
+    fourth member.
+    """
+
+    ACCEPTED = "accepted"
+    """Nova took the command.
+
+    "Accepted" is a statement about the submission, not about the device: no
+    reply of the cloud API can prove a ring started (IRR-CA-NO-RING-CONFIRMATION).
+    """
+
+    SUPPRESSED = "suppressed"
+    """Never sent, because a local condition that clears itself said no.
+
+    Exactly one condition qualifies today, and it is narrower than "the gate
+    said no": an active push cooldown, reached only while this integration does
+    not yet know whether the device can ring at all. ``can_play_sound`` answers
+    a known capability first and never consults the cooldown for such a device,
+    and its remaining branches end optimistically -- an unknown device is waved
+    through, not suppressed. So the cooldown is the whole of it, it passes on
+    its own within ninety seconds, and "try again in a moment" is the whole of
+    the advice.
+
+    A device whose capability says it cannot ring does NOT qualify, however
+    local that verdict is: waiting never changes it. It is filed under
+    ``FAILED`` -- the dividing line is the remedy, not where the decision was
+    taken.
+    """
+
+    FAILED = "failed"
+    """The attempt was made or refused, and waiting is not the answer.
+
+    Covers everything ``SUPPRESSED`` does not: a device that cannot ring, a
+    missing action token, an expired sign-in, a server rejection, a rate limit,
+    a network error, and a bug of this integration's own.
+
+    Two of these deserve a word, because both look like patience cases and are
+    not. A rate limit does pass with time, but it is filed here for symmetry
+    with ``StopSoundOutcome.FAILED``, whose docstring names it explicitly; two
+    sibling paths sorting the same condition differently would be worse than
+    one blunt edge, and the user message names the rate limit. And
+    ``SoundDispatchOutcome.NOT_SENT`` never reaches the wire either, yet a
+    missing action token is a setup or credential problem far more often than a
+    moment's patience.
+
+    Note what this member does NOT claim. An authentication rejection arrives
+    here as part of ``REJECTED_AUTH``, which also carries a plain HTTP 403 --
+    and 403 is an authorization verdict that a server must return even for a
+    resource that does not exist (Google AIP-193). Reading it as "your sign-in
+    expired" would tell the owner of a deleted device to check their
+    credentials, which is the misreading ``is_credential_rejection`` already
+    removed once. The user-facing message therefore names the log as the carrier
+    of the specific cause instead of guessing at it.
+    """
+
+
+# --------------------------------------------------------------------------------------
 # Shared textual constants
 # --------------------------------------------------------------------------------------
 # Use the Greek small letter mu instead of the deprecated micro sign.

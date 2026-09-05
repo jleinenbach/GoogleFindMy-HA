@@ -803,8 +803,11 @@
     "play_sound_failed": {
       "message": "Impossibile riprodurre il suono su {device_id}: {error}"
     },
+    "play_sound_rejected": {
+      "message": "Non è stato possibile avviare Play Sound per {device_id}. La voce di log di questo tentativo ne indica il motivo; di solito è un accesso scaduto, un token mancante, un errore del server o di rete, oppure un limite di frequenza."
+    },
     "play_sound_suppressed": {
-      "message": "Non è stato possibile avviare Play Sound per {device_id}. La voce di log di questo tentativo ne indica il motivo; può darsi che Home Assistant non riesca ancora a raggiungere il dispositivo, che l'accesso sia scaduto, oppure che si tratti di un errore del server, di rete o di limite di frequenza."
+      "message": "Play Sound per {device_id} non è stato inviato. Home Assistant al momento non riesce a raggiungere il dispositivo; riprova tra un istante."
     },
     "stop_sound_failed": {
       "message": "Impossibile interrompere il suono su {device_id}: {error}"

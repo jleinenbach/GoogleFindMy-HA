@@ -20,10 +20,11 @@ from unittest.mock import MagicMock
 
 import pytest
 from aiohttp import ClientConnectionError
-from homeassistant.exceptions import HomeAssistantError
+from homeassistant.exceptions import ConfigEntryAuthFailed, HomeAssistantError
 
 from custom_components.googlefindmy.const import (
     DEFAULT_MIN_POLL_INTERVAL,
+    PlaySoundOutcome,
     PlaySoundResult,
     SoundDispatchOutcome,
     StopSoundOutcome,
@@ -530,33 +531,83 @@ class TestAsyncLocateDeviceNovaAuthClassification:
         ]
 
 
-# One row per ``SoundDispatchOutcome`` member: (outcome, accepted, may arm the
-# push cooldown). Kept at module level so the exhaustiveness guard below reads
-# the same table the parametrisation runs on.
-PLAY_OUTCOME_CASES: list[tuple[SoundDispatchOutcome, bool, bool]] = [
-    (SoundDispatchOutcome.ACCEPTED, True, False),
-    (SoundDispatchOutcome.REJECTED_AUTH, False, False),
-    (SoundDispatchOutcome.REJECTED_RATE_LIMIT, False, False),
-    (SoundDispatchOutcome.REJECTED_SERVER, False, False),
-    (SoundDispatchOutcome.NOT_SENT, False, False),
-    (SoundDispatchOutcome.INTERNAL_ERROR, False, False),
-    (SoundDispatchOutcome.TRANSPORT_FAILED, False, True),
+# One row per ``SoundDispatchOutcome`` member: (dispatch, resulting
+# PlaySoundOutcome, may arm the push cooldown). Kept at module level so the
+# exhaustiveness guards below read the same table the parametrisation runs on.
+#
+# Every non-acceptance maps to FAILED, and none of them to SUPPRESSED: once
+# api.py has been asked, no answer of its is undone by waiting a moment. The
+# one condition that is -- the local readiness gate declining to send -- never
+# reaches this table, because it returns before the api call. Rate limiting is
+# the deliberate blunt edge (see PlaySoundOutcome.FAILED), matching the stop
+# path rather than sorting the same condition two ways.
+PLAY_OUTCOME_CASES: list[tuple[SoundDispatchOutcome, PlaySoundOutcome, bool]] = [
+    (SoundDispatchOutcome.ACCEPTED, PlaySoundOutcome.ACCEPTED, False),
+    (SoundDispatchOutcome.REJECTED_AUTH, PlaySoundOutcome.FAILED, False),
+    (SoundDispatchOutcome.REJECTED_RATE_LIMIT, PlaySoundOutcome.FAILED, False),
+    (SoundDispatchOutcome.REJECTED_SERVER, PlaySoundOutcome.FAILED, False),
+    (SoundDispatchOutcome.NOT_SENT, PlaySoundOutcome.FAILED, False),
+    (SoundDispatchOutcome.INTERNAL_ERROR, PlaySoundOutcome.FAILED, False),
+    (SoundDispatchOutcome.TRANSPORT_FAILED, PlaySoundOutcome.FAILED, True),
 ]
 
 
 class TestAsyncPlaySoundGating:
     """Exercise gating branches of ``async_play_sound``."""
 
-    async def test_blocks_when_cannot_play_sound(self, coord: LocateStub) -> None:
+    async def test_a_device_that_cannot_ring_is_a_failure_not_a_suppression(
+        self, coord: LocateStub, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """The permanent half of the gate must not advise waiting.
+
+        ``can_play_sound`` answers two conditions with one ``False``: a
+        capability that says the device cannot ring, and an active push
+        cooldown. Only the second passes with time. Reporting the first as
+        SUPPRESSED would tell the owner of a non-ringing tracker to try again in
+        a moment, forever.
+        """
+
         coord._device_caps["dev-1"] = {"can_ring": False}
-        ok = await coord.async_play_sound("dev-1")
-        assert ok is False
+        coord.get_device_display_name = MagicMock(return_value="Jens keyring")
+        with caplog.at_level(logging.WARNING):
+            outcome = await coord.async_play_sound("dev-1")
+        assert outcome is PlaySoundOutcome.FAILED
+        coord.api.async_play_sound.assert_not_called()
+        # The warning is written in normal operation, so it falls under
+        # AGENTS.md section 5 -- both halves of it: no device id, and no derived
+        # identifying information such as a user-provided device name. Asserting
+        # the absence here rather than trusting the review that caught it twice.
+        assert "cannot ring" in caplog.text
+        assert "dev-1" not in caplog.text
+        assert "Jens keyring" not in caplog.text
+
+    async def test_an_active_push_cooldown_suppresses(self, coord: LocateStub) -> None:
+        """The transient half of the same gate, and the only source of SUPPRESSED.
+
+        No answer from ``api.py`` can produce SUPPRESSED (see
+        ``PLAY_OUTCOME_CASES``); this branch is the whole of it, so without this
+        test the member could be removed and the suite would stay green.
+
+        Note what the gate does NOT do, and what this test therefore has to
+        arrange: a cached ``can_ring: True`` is answered on the fast path and
+        never reaches the cooldown check at all. The suppressible case is the
+        one where the capability is still unknown -- which is also why the
+        cooldown is the sole source of this member rather than one of three.
+        """
+
+        coord._device_caps.pop("dev-1", None)
+        coord._api_push_ready = MagicMock(return_value=False)
+        coord._push_cooldown_until = time.monotonic() + 90
+
+        outcome = await coord.async_play_sound("dev-1")
+
+        assert outcome is PlaySoundOutcome.SUPPRESSED
         coord.api.async_play_sound.assert_not_called()
 
     async def test_success_stores_uuid(self, coord: LocateStub) -> None:
         coord._device_caps["dev-1"] = {"can_ring": True}
-        ok = await coord.async_play_sound("dev-1")
-        assert ok is True
+        outcome = await coord.async_play_sound("dev-1")
+        assert outcome is PlaySoundOutcome.ACCEPTED
         assert coord._sound_request_uuids.get("dev-1") == "uuid-stub"
         coord._async_save_sound_uuids.assert_awaited_once()
 
@@ -565,8 +616,8 @@ class TestAsyncPlaySoundGating:
         coord.api.async_play_sound.return_value = PlaySoundResult(
             SoundDispatchOutcome.TRANSPORT_FAILED
         )
-        ok = await coord.async_play_sound("dev-1")
-        assert ok is False
+        outcome = await coord.async_play_sound("dev-1")
+        assert outcome is PlaySoundOutcome.FAILED
         coord._note_push_transport_problem.assert_called_once()
 
     async def test_unexpected_exception_is_not_a_transport_problem(
@@ -585,8 +636,8 @@ class TestAsyncPlaySoundGating:
 
         coord._device_caps["dev-1"] = {"can_ring": True}
         coord.api.async_play_sound.side_effect = RuntimeError("boom")
-        ok = await coord.async_play_sound("dev-1")
-        assert ok is False
+        outcome = await coord.async_play_sound("dev-1")
+        assert outcome is PlaySoundOutcome.FAILED
         coord.note_error.assert_called_once()
         coord._note_push_transport_problem.assert_not_called()
 
@@ -606,7 +657,7 @@ class TestAsyncPlaySoundGating:
             SoundDispatchOutcome.TRANSPORT_FAILED
         )
 
-        assert await coord.async_play_sound("dev-1") is False
+        assert await coord.async_play_sound("dev-1") is PlaySoundOutcome.FAILED
 
         coord._set_auth_state.assert_not_called()
 
@@ -617,18 +668,18 @@ class TestAsyncPlaySoundGating:
 
         coord._device_caps["dev-1"] = {"can_ring": True}
 
-        assert await coord.async_play_sound("dev-1") is True
+        assert await coord.async_play_sound("dev-1") is PlaySoundOutcome.ACCEPTED
 
         coord._set_auth_state.assert_called_once_with(failed=False)
 
     @pytest.mark.parametrize(
-        ("outcome", "expect_accepted", "expect_cooldown"), PLAY_OUTCOME_CASES
+        ("outcome", "expect_outcome", "expect_cooldown"), PLAY_OUTCOME_CASES
     )
     async def test_only_a_transport_failure_arms_the_push_cooldown(
         self,
         coord: LocateStub,
         outcome: SoundDispatchOutcome,
-        expect_accepted: bool,
+        expect_outcome: PlaySoundOutcome,
         expect_cooldown: bool,
     ) -> None:
         """A server saying no is not a network outage.
@@ -646,7 +697,7 @@ class TestAsyncPlaySoundGating:
         coord._device_caps["dev-1"] = {"can_ring": True}
         coord.api.async_play_sound.return_value = PlaySoundResult(outcome)
 
-        assert await coord.async_play_sound("dev-1") is expect_accepted
+        assert await coord.async_play_sound("dev-1") is expect_outcome
 
         assert coord._note_push_transport_problem.called is expect_cooldown
 
@@ -659,6 +710,95 @@ class TestAsyncPlaySoundGating:
         """
 
         assert {case[0] for case in PLAY_OUTCOME_CASES} == set(SoundDispatchOutcome)
+
+    def test_the_play_outcome_type_stays_three_valued(self) -> None:
+        """Pin the size of ``PlaySoundOutcome`` and the reachability of each member.
+
+        A fourth member -- ``UNSUPPORTED`` for the device that cannot ring was
+        the candidate -- would need a user-facing message of its own in eleven
+        files, and the button is not offered for such a device in the first
+        place. The decision was to keep three; a later member added without
+        revisiting that trade-off shows up here rather than in a translation
+        review.
+
+        The second assertion pins the case table, not the code: SUPPRESSED must
+        NOT appear as a result of any dispatch outcome, because it is reachable
+        only from the readiness gate. A row claiming otherwise would be a
+        contradiction the parametrised run itself could not catch, since it
+        would then simply assert the wrong expectation. What covers SUPPRESSED
+        behaviourally is ``test_an_active_push_cooldown_suppresses``, and
+        nothing here substitutes for it.
+        """
+
+        assert set(PlaySoundOutcome) == {
+            PlaySoundOutcome.ACCEPTED,
+            PlaySoundOutcome.SUPPRESSED,
+            PlaySoundOutcome.FAILED,
+        }
+        assert {case[1] for case in PLAY_OUTCOME_CASES} == {
+            PlaySoundOutcome.ACCEPTED,
+            PlaySoundOutcome.FAILED,
+        }
+
+    async def test_a_config_entry_auth_failure_is_a_failure(
+        self, coord: LocateStub
+    ) -> None:
+        """The one FAILED exit that no dispatch outcome can reach.
+
+        ``api.py`` does not raise ``ConfigEntryAuthFailed`` on the sound paths --
+        it classifies in band -- so this handler guards against an ``api``
+        implementation that does, ``api`` being a Protocol. Untested, it was the
+        only new FAILED exit with nothing holding it there.
+        """
+
+        coord._device_caps["dev-1"] = {"can_ring": True}
+        coord.api.async_play_sound.side_effect = ConfigEntryAuthFailed("expired")
+
+        outcome = await coord.async_play_sound("dev-1")
+
+        assert outcome is PlaySoundOutcome.FAILED
+        coord._set_auth_state.assert_called_once()
+        assert coord._set_auth_state.call_args.kwargs["failed"] is True
+        coord.async_request_refresh.assert_awaited_once()
+        coord._note_push_transport_problem.assert_not_called()
+
+    async def test_a_failing_refresh_does_not_change_the_auth_outcome(
+        self, coord: LocateStub
+    ) -> None:
+        """The refresh is a courtesy, not part of the verdict.
+
+        ``async_request_refresh`` is called for the user's benefit after an auth
+        failure and its own failure is swallowed on purpose. Untested, the
+        swallow could start swallowing the outcome too.
+        """
+
+        coord._device_caps["dev-1"] = {"can_ring": True}
+        coord.api.async_play_sound.side_effect = ConfigEntryAuthFailed("expired")
+        coord.async_request_refresh.side_effect = RuntimeError("refresh is down")
+
+        outcome = await coord.async_play_sound("dev-1")
+
+        assert outcome is PlaySoundOutcome.FAILED
+
+    async def test_an_outcome_from_outside_the_enum_is_not_success(
+        self, coord: LocateStub
+    ) -> None:
+        """The negative form, probed rather than asserted about.
+
+        The mapping is written as ``is not ACCEPTED`` and not as a cascade over
+        the seven members, so that a value from outside the enum -- a stale test
+        double, a member added later without visiting the call site -- ends as
+        FAILED instead of falling through to success.
+        """
+
+        coord._device_caps["dev-1"] = {"can_ring": True}
+        coord.api.async_play_sound.return_value = PlaySoundResult(
+            "a-value-that-is-not-a-member"  # type: ignore[arg-type]
+        )
+
+        outcome = await coord.async_play_sound("dev-1")
+
+        assert outcome is PlaySoundOutcome.FAILED
 
 
 # One row per ``SoundDispatchOutcome`` member on the stop side: (dispatch,
@@ -865,7 +1005,7 @@ class TestStopBreaksSelfInflictedCooldown:
             SoundDispatchOutcome.TRANSPORT_FAILED, cancel_key="uuid-ambiguous"
         )
 
-        assert await coord.async_play_sound("dev-1") is False
+        assert await coord.async_play_sound("dev-1") is PlaySoundOutcome.FAILED
         assert coord._sound_request_uuids.get("dev-1") == "uuid-ambiguous"
         assert coord._push_cooldown_until > time.monotonic()
 

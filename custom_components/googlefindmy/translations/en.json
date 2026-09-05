@@ -803,8 +803,11 @@
     "play_sound_failed": {
       "message": "Failed to play sound on {device_id}: {error}"
     },
+    "play_sound_rejected": {
+      "message": "Play Sound for {device_id} could not be started. The log entry for this attempt names the reason; it is usually an expired sign-in, a missing token, a server or network error, or a rate limit."
+    },
     "play_sound_suppressed": {
-      "message": "Play Sound for {device_id} could not be started. The log entry for this attempt names the reason; it may be that Home Assistant is not ready to reach the device yet, or that the sign-in expired, or a server, network or rate-limit error."
+      "message": "Play Sound for {device_id} was not sent. Home Assistant is not ready to reach the device right now; try again in a moment."
     },
     "stop_sound_failed": {
       "message": "Failed to stop sound on {device_id}: {error}"

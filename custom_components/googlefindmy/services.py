@@ -47,6 +47,7 @@ from .const import (
     SERVICE_STOP_SOUND,
     SERVICE_SUBENTRY_KEY,
     TRACKER_SUBENTRY_KEY,
+    PlaySoundOutcome,
     StopSoundOutcome,
     map_token_hex_digest,
     map_token_secret_seed,
@@ -886,9 +887,9 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
             )
         try:
             runtime, canonical_id = await _resolve_runtime_for_device_id(raw_device_id)
-            ok = await runtime.coordinator.async_play_sound(canonical_id)
-            if not ok:
-                placeholders = {"device_id": str(raw_device_id)}
+            outcome = await runtime.coordinator.async_play_sound(canonical_id)
+            placeholders = {"device_id": str(raw_device_id)}
+            if outcome is PlaySoundOutcome.SUPPRESSED:
                 raise _service_validation_error(
                     "Play sound suppressed for device '{device_id}'".format(
                         **placeholders
@@ -898,6 +899,34 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
                     # the literal "{error}" (it formats under suppress(KeyError)).
                     # Same defect class as the stop path, same fix.
                     translation_key="play_sound_suppressed",
+                    translation_placeholders=placeholders,
+                )
+            if outcome is not PlaySoundOutcome.ACCEPTED:
+                # Closed set, closed handling, and written in the negative form
+                # for the same reason the stop path is: the safe default here is
+                # failure. A value from outside the enum -- a bool from a stale
+                # test double, a member added later without visiting this site --
+                # must not be reported to the user as a ring that started.
+                #
+                # FAILED and that stray value share one message on purpose. The
+                # play path has exactly two user-facing outcomes, and the
+                # difference between them is what the user should DO: wait, or
+                # look at the log and act. An unknown value belongs to the
+                # second group; splitting it off would need a third message in
+                # eleven files that says the same thing. The contract breach
+                # itself is not silent, it goes to the log below.
+                if outcome is not PlaySoundOutcome.FAILED:
+                    # No device id: AGENTS.md section 5 forbids logging them, and
+                    # this line adds nothing by naming one -- the breach is in the
+                    # coordinator's contract, not in a particular tracker.
+                    _LOGGER.error(
+                        "async_play_sound returned %r, which is not a "
+                        "PlaySoundOutcome; reporting it as a failure",
+                        outcome,
+                    )
+                raise _service_validation_error(
+                    "Play sound for '{device_id}' was rejected".format(**placeholders),
+                    translation_key="play_sound_rejected",
                     translation_placeholders=placeholders,
                 )
         except ServiceValidationError:

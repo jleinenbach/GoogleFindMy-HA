@@ -29,7 +29,7 @@ from unittest import mock
 import pytest
 
 from custom_components.googlefindmy import services
-from custom_components.googlefindmy.const import StopSoundOutcome
+from custom_components.googlefindmy.const import PlaySoundOutcome, StopSoundOutcome
 from custom_components.googlefindmy.services import (
     HomeAssistantError,
     ServiceValidationError,
@@ -248,14 +248,13 @@ class TestResolverDispatch:
     async def test_play_sound_suppressed_raises(
         self, full_ctx: dict[str, Any], monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A coordinator that returns ``False`` (suppressed) surfaces as a
-        play_sound_suppressed validation error.
+        """A coordinator that suppresses surfaces as a play_sound_suppressed error.
 
         Not ``play_sound_failed``: that template needs an ``{error}`` this call
         site has no value for, so the user would be shown the raw brace.
         """
         coord = SimpleNamespace(
-            async_play_sound=mock.AsyncMock(return_value=False),
+            async_play_sound=mock.AsyncMock(return_value=PlaySoundOutcome.SUPPRESSED),
             get_device_display_name=mock.Mock(return_value="Tag"),
         )
         hass = _hass_with_coordinator(coord)
@@ -270,6 +269,85 @@ class TestResolverDispatch:
                 _FakeCall({"device_id": "dev1"})
             )
         assert excinfo.value.translation_key == "play_sound_suppressed"
+
+    @pytest.mark.asyncio
+    async def test_play_sound_failed_raises_its_own_key(
+        self, full_ctx: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """FAILED and SUPPRESSED must not share a message.
+
+        They differ in what the user has to do: wait, or read the log and act.
+        Before ``PlaySoundOutcome`` existed both arrived as one ``False`` and
+        were answered with one text that had to list every possible cause.
+        """
+        coord = SimpleNamespace(
+            async_play_sound=mock.AsyncMock(return_value=PlaySoundOutcome.FAILED),
+            get_device_display_name=mock.Mock(return_value="Tag"),
+        )
+        hass = _hass_with_coordinator(coord)
+        monkeypatch.setattr(
+            services.dr,
+            "async_get",
+            lambda _h: SimpleNamespace(async_get=lambda _d: None),
+        )
+        handlers = _register(hass, full_ctx)
+        with pytest.raises(ServiceValidationError) as excinfo:
+            await handlers[services.SERVICE_PLAY_SOUND](
+                _FakeCall({"device_id": "dev1"})
+            )
+        assert excinfo.value.translation_key == "play_sound_rejected"
+
+    @pytest.mark.asyncio
+    async def test_play_sound_accepted_raises_nothing(
+        self, full_ctx: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The positive half of the closed set, so the branch cannot swallow success."""
+        coord = SimpleNamespace(
+            async_play_sound=mock.AsyncMock(return_value=PlaySoundOutcome.ACCEPTED),
+            get_device_display_name=mock.Mock(return_value="Tag"),
+        )
+        hass = _hass_with_coordinator(coord)
+        monkeypatch.setattr(
+            services.dr,
+            "async_get",
+            lambda _h: SimpleNamespace(async_get=lambda _d: None),
+        )
+        handlers = _register(hass, full_ctx)
+        await handlers[services.SERVICE_PLAY_SOUND](_FakeCall({"device_id": "dev1"}))
+
+    @pytest.mark.asyncio
+    async def test_play_sound_value_outside_the_enum_is_not_reported_as_success(
+        self,
+        full_ctx: dict[str, Any],
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Closed set, closed handling -- the same rule the stop path states.
+
+        A stale double returning the old ``True`` is the realistic case. Silence
+        here would report a ring that never started as started; the breach also
+        has to be visible to whoever maintains the double, so it is logged.
+        """
+        coord = SimpleNamespace(
+            async_play_sound=mock.AsyncMock(return_value=True),
+            get_device_display_name=mock.Mock(return_value="Tag"),
+        )
+        hass = _hass_with_coordinator(coord)
+        monkeypatch.setattr(
+            services.dr,
+            "async_get",
+            lambda _h: SimpleNamespace(async_get=lambda _d: None),
+        )
+        handlers = _register(hass, full_ctx)
+        with caplog.at_level("ERROR"), pytest.raises(ServiceValidationError) as excinfo:
+            await handlers[services.SERVICE_PLAY_SOUND](
+                _FakeCall({"device_id": "dev1"})
+            )
+        assert excinfo.value.translation_key == "play_sound_rejected"
+        assert "not a PlaySoundOutcome" in caplog.text
+        # AGENTS.md section 5: no device ids in logs. Pinned rather than trusted,
+        # for the same reason as in the coordinator.
+        assert "dev1" not in caplog.text
 
     @pytest.mark.parametrize(
         ("service_const", "coord_attr", "translation_key"),
@@ -623,18 +701,39 @@ class TestSoundTranslationPlaceholders:
         )
 
     @pytest.mark.asyncio
-    async def test_play_sound_suppressed_key_gets_all_its_placeholders(
-        self, full_ctx: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+    @pytest.mark.parametrize(
+        ("outcome", "translation_key"),
+        [
+            (PlaySoundOutcome.SUPPRESSED, "play_sound_suppressed"),
+            (PlaySoundOutcome.FAILED, "play_sound_rejected"),
+            (RuntimeError("boom"), "play_sound_failed"),
+        ],
+    )
+    async def test_play_sound_keys_get_all_their_placeholders(
+        self,
+        full_ctx: dict[str, Any],
+        monkeypatch: pytest.MonkeyPatch,
+        outcome: Any,
+        translation_key: str,
     ) -> None:
         """The play path belongs to the same class and was its last gap.
 
         ``play_sound_failed`` carries an ``{error}`` the suppression branch
         cannot fill. Until button.py stopped swallowing ServiceValidationError
         the defect was invisible; pinning only the stop keys left it standing.
+
+        Parametrised over every reachable play key rather than the one branch
+        that was noticed first: ``play_sound_rejected`` joined the class with
+        the remedy split, and a guard that grows one method per key is a guard
+        that stops growing.
         """
 
+        if isinstance(outcome, Exception):
+            play = mock.AsyncMock(side_effect=outcome)
+        else:
+            play = mock.AsyncMock(return_value=outcome)
         coord = SimpleNamespace(
-            async_play_sound=mock.AsyncMock(return_value=False),
+            async_play_sound=play,
             get_device_display_name=mock.Mock(return_value="Tag"),
         )
         hass = _hass_with_coordinator(coord)
@@ -650,10 +749,10 @@ class TestSoundTranslationPlaceholders:
                 _FakeCall({"device_id": "dev1"})
             )
 
-        key = excinfo.value.translation_key
+        assert excinfo.value.translation_key == translation_key
         supplied = set(excinfo.value.translation_placeholders or {})
-        required = self._template_placeholders(str(key))
+        required = self._template_placeholders(translation_key)
         assert required <= supplied, (
-            f"{key} would render with a stray literal: "
+            f"{translation_key} would render with a stray literal: "
             f"missing {sorted(required - supplied)}"
         )
