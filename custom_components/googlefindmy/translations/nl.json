@@ -803,8 +803,11 @@
     "play_sound_failed": {
       "message": "Kan geluid niet afspelen op {device_id}: {error}"
     },
+    "play_sound_rejected": {
+      "message": "Play Sound voor {device_id} kon niet worden gestart. De logregel van deze poging noemt de reden; meestal is dat een verlopen aanmelding, een ontbrekend token, een server- of netwerkfout, of een snelheidslimiet."
+    },
     "play_sound_suppressed": {
-      "message": "Play Sound voor {device_id} kon niet worden gestart. De logregel van deze poging noemt de reden; mogelijk kan Home Assistant het apparaat nog niet bereiken, is de aanmelding verlopen, of gaat het om een server-, netwerk- of snelheidslimietfout."
+      "message": "Play Sound voor {device_id} is niet verzonden. Home Assistant kan het apparaat op dit moment niet bereiken; probeer het zo meteen opnieuw."
     },
     "stop_sound_failed": {
       "message": "Kan geluid niet stoppen op {device_id}: {error}"

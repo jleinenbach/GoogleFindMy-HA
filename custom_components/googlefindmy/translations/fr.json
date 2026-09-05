@@ -803,8 +803,11 @@
     "play_sound_failed": {
       "message": "Échec de la lecture du son sur {device_id} : {error}"
     },
+    "play_sound_rejected": {
+      "message": "Play Sound pour {device_id} n'a pas pu être lancé. L'entrée de journal de cette tentative en indique la raison; il s'agit le plus souvent d'une connexion expirée, d'un jeton manquant, d'une erreur serveur ou réseau, ou d'une limite de débit."
+    },
     "play_sound_suppressed": {
-      "message": "Play Sound pour {device_id} n'a pas pu être lancé. L'entrée de journal de cette tentative en indique la raison; Home Assistant n'est peut-être pas encore en mesure de joindre l'appareil, la connexion a pu expirer, ou il s'agit d'une erreur serveur, réseau ou de limite de débit."
+      "message": "Play Sound pour {device_id} n'a pas été envoyé. Home Assistant ne parvient pas à joindre l'appareil pour le moment ; réessayez dans un instant."
     },
     "stop_sound_failed": {
       "message": "Échec de l’arrêt du son sur {device_id} : {error}"

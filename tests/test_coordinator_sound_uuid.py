@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 from custom_components.googlefindmy.const import (
+    PlaySoundOutcome,
     PlaySoundResult,
     SoundDispatchOutcome,
     StopSoundOutcome,
@@ -39,7 +40,7 @@ async def test_async_play_sound_stores_uuid() -> None:
 
     result = await coordinator.async_play_sound("device-1")
 
-    assert result is True
+    assert result is PlaySoundOutcome.ACCEPTED
     assert coordinator._sound_request_uuids == {"device-1": "uuid-1"}  # type: ignore[attr-defined]
     assert api_calls == [SimpleNamespace(device_id="device-1")]
 
@@ -73,7 +74,7 @@ async def test_async_play_sound_skips_store_on_non_accepted_play() -> None:
 
     result = await coordinator.async_play_sound("device-1")
 
-    assert result is False
+    assert result is PlaySoundOutcome.FAILED
     assert coordinator._sound_request_uuids == {}  # type: ignore[attr-defined]
     assert transport_problems == [True]
 
@@ -108,7 +109,7 @@ async def test_non_accepted_play_keeps_existing_cancel_key() -> None:
 
     result = await coordinator.async_play_sound("device-1")
 
-    assert result is False
+    assert result is PlaySoundOutcome.FAILED
     # The previous, still-valid cancel key survives untouched.
     assert coordinator._sound_request_uuids == {"device-1": "uuid-ringing"}  # type: ignore[attr-defined]
 
@@ -143,7 +144,7 @@ async def test_post_dispatch_ambiguous_play_caches_uuid() -> None:
 
     result = await coordinator.async_play_sound("device-1")
 
-    assert result is False
+    assert result is PlaySoundOutcome.FAILED
     # The ambiguous-dispatch key is cached so a later Stop can target it.
     assert coordinator._sound_request_uuids == {"device-1": "uuid-postsend"}  # type: ignore[attr-defined]
     assert transport_problems == [True]
@@ -184,7 +185,7 @@ async def test_ambiguous_play_does_not_overwrite_known_cancel_key() -> None:
 
     result = await coordinator.async_play_sound("device-1")
 
-    assert result is False
+    assert result is PlaySoundOutcome.FAILED
     # The known-good cancel key survives; the ambiguous UUID is discarded.
     assert coordinator._sound_request_uuids == {"device-1": "uuid-ringing"}  # type: ignore[attr-defined]
     assert transport_problems == [True]
@@ -216,7 +217,7 @@ async def test_ambiguous_play_keeps_fresh_tracked_cancel_key() -> None:
 
     result = await coordinator.async_play_sound("device-1")
 
-    assert result is False
+    assert result is PlaySoundOutcome.FAILED
     assert coordinator._sound_request_uuids == {"device-1": "uuid-ringing"}  # type: ignore[attr-defined]
 
 
@@ -254,7 +255,7 @@ async def test_ambiguous_play_replaces_expired_cancel_key() -> None:
 
     result = await coordinator.async_play_sound("device-1")
 
-    assert result is False
+    assert result is PlaySoundOutcome.FAILED
     # The expired key is treated as absent, so the fresh handle is cached.
     assert coordinator._sound_request_uuids == {"device-1": "uuid-fresh-ambiguous"}  # type: ignore[attr-defined]
     assert transport_problems == [True]
@@ -371,7 +372,7 @@ async def test_ambiguous_play_keeps_untracked_cancel_key() -> None:
 
     result = await coordinator.async_play_sound("device-1")
 
-    assert result is False
+    assert result is PlaySoundOutcome.FAILED
     assert coordinator._sound_request_uuids == {"device-1": "uuid-ringing"}  # type: ignore[attr-defined]
 
 

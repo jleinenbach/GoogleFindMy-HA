@@ -803,8 +803,11 @@
     "play_sound_failed": {
       "message": "Nie udało się odtworzyć dźwięku na {device_id}: {error}"
     },
+    "play_sound_rejected": {
+      "message": "Nie udało się uruchomić polecenia Play Sound dla {device_id}. Wpis w dzienniku dla tej próby podaje przyczynę; zwykle jest to wygasłe logowanie, brakujący token, błąd serwera lub sieci albo ograniczenie liczby żądań."
+    },
     "play_sound_suppressed": {
-      "message": "Nie udało się uruchomić polecenia Play Sound dla {device_id}. Wpis w dzienniku dla tej próby podaje przyczynę; Home Assistant może jeszcze nie być w stanie połączyć się z urządzeniem, logowanie mogło wygasnąć, albo wystąpił błąd serwera, sieci lub ograniczenia liczby żądań."
+      "message": "Nie wysłano polecenia Play Sound dla {device_id}. Home Assistant nie może teraz połączyć się z urządzeniem; spróbuj ponownie za chwilę."
     },
     "stop_sound_failed": {
       "message": "Nie udało się zatrzymać dźwięku na {device_id}: {error}"

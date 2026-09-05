@@ -202,6 +202,62 @@ in `tests/test_coordinator_locate_basics.py` carry one row per enum member and
 are guarded against a member being added without a decision, so the "may a
 caller arm a push cooldown" column above is a measured claim, not a wish.
 
+**IRR-CA-PLAY-REMEDY-SPLIT (what the user is supposed to do about it).**
+`SoundDispatchOutcome` says who refused. It does not say what the person who
+pressed the button should do next, and that is a different question with a
+different answer set. `coordinator.async_play_sound` therefore returns its own
+type, `PlaySoundOutcome`, and `services.py` turns it into one of two messages:
+
+| `PlaySoundOutcome` | Reached by | User message | Remedy |
+|---|---|---|---|
+| `ACCEPTED` | `SoundDispatchOutcome.ACCEPTED` | none (the call succeeds) | none -- though "accepted" is still a statement about the submission, not about the device (IRR-CA-NO-RING-CONFIRMATION) |
+| `SUPPRESSED` | the readiness gate, on an active push cooldown while the ring capability is still unknown | `play_sound_suppressed` | wait; the window clears itself within 90 seconds |
+| `FAILED` | everything else: `can_ring is False`, all six non-accepting `SoundDispatchOutcome` members, `ConfigEntryAuthFailed`, a connection error, an unexpected exception, and any value from outside the enum | `play_sound_rejected` | read the log entry, then act on what it names |
+
+This is the split the stop path has carried since `StopSoundOutcome` landed, and
+the dividing line is the same: the REMEDY, not how far the request travelled.
+Two members of the readiness gate's single `False` end on opposite sides of it.
+A device whose cached capability says `can_ring is False` is `FAILED`, because
+no amount of waiting makes it ring; an active push cooldown is `SUPPRESSED`,
+because waiting is the entire fix. Those are the gate's only two `False` paths
+-- an unknown device is waved through optimistically -- so `SUPPRESSED` has
+exactly one source, and no answer of `api.py` can produce it.
+
+Two deliberate blunt edges. `REJECTED_RATE_LIMIT` does pass with time and is
+still filed under `FAILED`, matching `StopSoundOutcome.FAILED` rather than
+sorting the same condition two ways across sibling paths; the message names the
+rate limit. And `NOT_SENT` never reaches the wire and is `FAILED` all the same,
+for the reason its own docstring gives.
+
+**Why there is no third message for authentication.** `REJECTED_AUTH` looks like
+the obvious candidate for "your sign-in expired, sign in again", and it is not
+one -- not because the expired sign-in is absent from it, but because it is
+indistinguishable inside it.
+
+Three different situations arrive under that one member. A 401 that survived the
+refresh sequence is raised as `NovaAuthError(..., is_permanent=True)`
+(`nova_request.py`), and `is_credential_rejection()` answers True on the
+permanence flag before it ever looks at the status. A plain HTTP 403 answers
+True on the status. And an error with no readable status answers True as the
+conservative default. `PlaySoundResult` carries the outcome, not the permanence
+flag, so by the time the coordinator sees `REJECTED_AUTH` the three are one.
+
+Only the first of them means "sign in again". The second may not: 403 is an
+authorization verdict, and Google's own API guidance (AIP-193) requires
+`PERMISSION_DENIED` (HTTP 403) even for a resource that does not exist, with the
+permission check running *before* the existence check. A message that read
+`REJECTED_AUTH` as an expired sign-in would therefore tell the owner of a deleted
+or unshared device to check their credentials -- precisely the misreading
+`is_credential_rejection` removed once already, and its docstring says so.
+
+The fix is not a third message on an ambiguous member; it is to stop the
+ambiguity at its source by surfacing `is_permanent` in the result, which is a
+change to the `api.py` contract and is tracked separately. Until then,
+`play_sound_rejected` names the expired sign-in among the possible causes and
+points at the log, exactly as `stop_sound_rejected` does -- and the log entry
+does distinguish the three, because `nova_request.py` logs the permanent 401 in
+its own words.
+
 **IRR-CA-STOP-BREAKS-SELF-INFLICTED-COOLDOWN (the window must not silence its
 own remedy).** A play that reaches the wire and then loses the answer does two
 things in one breath: it stores a cancel key, and it correctly arms the

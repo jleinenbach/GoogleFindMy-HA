@@ -803,8 +803,11 @@
     "play_sound_failed": {
       "message": "No se pudo reproducir sonido en {device_id}: {error}"
     },
+    "play_sound_rejected": {
+      "message": "No se pudo iniciar Play Sound para {device_id}. La entrada del registro de este intento indica el motivo; suele ser una sesión caducada, un token ausente, un error del servidor o de red, o un límite de peticiones."
+    },
     "play_sound_suppressed": {
-      "message": "No se pudo iniciar Play Sound para {device_id}. La entrada del registro de este intento indica el motivo; puede que Home Assistant aún no pueda acceder al dispositivo, que la sesión haya caducado, o que se trate de un error del servidor, de red o de límite de peticiones."
+      "message": "No se envió Play Sound para {device_id}. Home Assistant no puede acceder al dispositivo en este momento; inténtalo de nuevo en un momento."
     },
     "stop_sound_failed": {
       "message": "No se pudo detener el sonido en {device_id}: {error}"

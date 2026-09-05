@@ -803,8 +803,11 @@
     "play_sound_failed": {
       "message": "השמעת צליל על {device_id} נכשלה: {error}"
     },
+    "play_sound_rejected": {
+      "message": "לא ניתן היה להפעיל את Play Sound עבור {device_id}. רשומת היומן של הניסיון הזה מציינת את הסיבה; לרוב מדובר בהתחברות שפגה, באסימון חסר, בשגיאת שרת או רשת, או במגבלת קצב."
+    },
     "play_sound_suppressed": {
-      "message": "לא ניתן היה להפעיל את Play Sound עבור {device_id}. רשומת היומן של הניסיון הזה מציינת את הסיבה; ייתכן ש-Home Assistant עדיין אינו מצליח להגיע למכשיר, שההתחברות פגה, או שמדובר בשגיאת שרת, רשת או מגבלת קצב."
+      "message": "הפקודה Play Sound עבור {device_id} לא נשלחה. Home Assistant אינו מצליח להגיע למכשיר כרגע; נסו שוב בעוד רגע."
     },
     "stop_sound_failed": {
       "message": "עצירת הצליל על {device_id} נכשלה: {error}"
