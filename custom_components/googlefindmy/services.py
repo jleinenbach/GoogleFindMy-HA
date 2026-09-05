@@ -916,10 +916,12 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
                 # eleven files that says the same thing. The contract breach
                 # itself is not silent, it goes to the log below.
                 if outcome is not PlaySoundOutcome.FAILED:
+                    # No device id: AGENTS.md section 5 forbids logging them, and
+                    # this line adds nothing by naming one -- the breach is in the
+                    # coordinator's contract, not in a particular tracker.
                     _LOGGER.error(
-                        "async_play_sound for %s returned %r, which is not a "
+                        "async_play_sound returned %r, which is not a "
                         "PlaySoundOutcome; reporting it as a failure",
-                        canonical_id,
                         outcome,
                     )
                 raise _service_validation_error(

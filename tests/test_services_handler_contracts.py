@@ -317,7 +317,10 @@ class TestResolverDispatch:
 
     @pytest.mark.asyncio
     async def test_play_sound_value_outside_the_enum_is_not_reported_as_success(
-        self, full_ctx: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+        self,
+        full_ctx: dict[str, Any],
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
     ) -> None:
         """Closed set, closed handling -- the same rule the stop path states.
 
@@ -336,11 +339,15 @@ class TestResolverDispatch:
             lambda _h: SimpleNamespace(async_get=lambda _d: None),
         )
         handlers = _register(hass, full_ctx)
-        with pytest.raises(ServiceValidationError) as excinfo:
+        with caplog.at_level("ERROR"), pytest.raises(ServiceValidationError) as excinfo:
             await handlers[services.SERVICE_PLAY_SOUND](
                 _FakeCall({"device_id": "dev1"})
             )
         assert excinfo.value.translation_key == "play_sound_rejected"
+        assert "not a PlaySoundOutcome" in caplog.text
+        # AGENTS.md section 5: no device ids in logs. Pinned rather than trusted,
+        # for the same reason as in the coordinator.
+        assert "dev1" not in caplog.text
 
     @pytest.mark.parametrize(
         ("service_const", "coord_attr", "translation_key"),
