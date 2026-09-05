@@ -975,16 +975,17 @@ class LocateOperations(_MixinBase):
             # points at a log which says nothing is worse than no message. This
             # branch is reached once per explicit service call, never in a loop.
             #
-            # The display name, never the device id: AGENTS.md section 5 forbids
-            # logging device ids, and a WARNING is written in normal operation.
-            # Same shape as the coordinate warnings above -- the qualifier drops
-            # out entirely when no name is known rather than falling back to the
-            # identifier.
-            device_label = self.get_device_display_name(device_id)
+            # No device identifier of any kind, neither the id (AGENTS.md
+            # section 5, "never log ... device IDs") nor the display name, which
+            # the same section names as derived identifying information to
+            # redact. The coordinate warnings above do carry the display name;
+            # this line does not follow them, because it is new and the
+            # attribution it would buy is already in the user-facing error, which
+            # names the device and appears at the same moment. What the log is
+            # for here is the CAUSE, and the cause is device-independent.
             _LOGGER.warning(
-                "Play Sound%s was refused: the device reports it cannot ring "
-                "(can_ring is False). Waiting will not change this.",
-                f" for {device_label}" if device_label else "",
+                "Play Sound was refused: the device reports it cannot ring "
+                "(can_ring is False). Waiting will not change this."
             )
             return PlaySoundOutcome.FAILED
         if not self.can_play_sound(device_id):

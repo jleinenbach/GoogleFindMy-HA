@@ -568,15 +568,18 @@ class TestAsyncPlaySoundGating:
         """
 
         coord._device_caps["dev-1"] = {"can_ring": False}
+        coord.get_device_display_name = MagicMock(return_value="Jens keyring")
         with caplog.at_level(logging.WARNING):
             outcome = await coord.async_play_sound("dev-1")
         assert outcome is PlaySoundOutcome.FAILED
         coord.api.async_play_sound.assert_not_called()
-        # The warning is written in normal operation, so it falls under the
-        # never-log-device-ids rule (AGENTS.md section 5). Asserting the absence
-        # here rather than trusting the review that caught it once.
+        # The warning is written in normal operation, so it falls under
+        # AGENTS.md section 5 -- both halves of it: no device id, and no derived
+        # identifying information such as a user-provided device name. Asserting
+        # the absence here rather than trusting the review that caught it twice.
         assert "cannot ring" in caplog.text
         assert "dev-1" not in caplog.text
+        assert "Jens keyring" not in caplog.text
 
     async def test_an_active_push_cooldown_suppresses(self, coord: LocateStub) -> None:
         """The transient half of the same gate, and the only source of SUPPRESSED.
