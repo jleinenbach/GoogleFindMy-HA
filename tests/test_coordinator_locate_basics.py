@@ -753,6 +753,24 @@ class TestAsyncPlaySoundGating:
         coord.async_request_refresh.assert_awaited_once()
         coord._note_push_transport_problem.assert_not_called()
 
+    async def test_a_failing_refresh_does_not_change_the_auth_outcome(
+        self, coord: LocateStub
+    ) -> None:
+        """The refresh is a courtesy, not part of the verdict.
+
+        ``async_request_refresh`` is called for the user's benefit after an auth
+        failure and its own failure is swallowed on purpose. Untested, the
+        swallow could start swallowing the outcome too.
+        """
+
+        coord._device_caps["dev-1"] = {"can_ring": True}
+        coord.api.async_play_sound.side_effect = ConfigEntryAuthFailed("expired")
+        coord.async_request_refresh.side_effect = RuntimeError("refresh is down")
+
+        outcome = await coord.async_play_sound("dev-1")
+
+        assert outcome is PlaySoundOutcome.FAILED
+
     async def test_an_outcome_from_outside_the_enum_is_not_success(
         self, coord: LocateStub
     ) -> None:
