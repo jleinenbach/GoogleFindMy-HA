@@ -84,10 +84,12 @@ from .helpers.cache import (
     sanitize_decoder_row as _sanitize_decoder_row,
 )
 from .helpers.geo import (
-    coerce_float as _coerce_float_impl,
+    ACCURACY_BUCKET_STATS,
+    accuracy_bucket,
+    recorded_accuracy_pair,
 )
 from .helpers.geo import (
-    recorded_accuracy_pair,
+    coerce_float as _coerce_float_impl,
 )
 from .helpers.stats import (
     ApiStatus,
@@ -357,24 +359,11 @@ def _resolve_last_seen_from_attributes(
 _DEVICE_TYPE_PHONE = 20
 
 
-def _accuracy_bucket(accuracy_m: Any) -> str | None:
-    """Bucket a raw accuracy radius into a coarse, non-correlating class.
-
-    Half-open intervals: ``<10`` = [0,10), ``10-50`` = [10,50), ``50-200`` =
-    [50,200), ``>200`` = [200, inf). ``None`` or a negative/non-numeric value
-    collapses to ``None`` (a raw float would be re-identifying, POPETS'25).
-    """
-    if not isinstance(accuracy_m, (int, float)) or isinstance(accuracy_m, bool):
-        return None
-    if accuracy_m < 0 or not math.isfinite(accuracy_m):
-        return None
-    if accuracy_m < 10:
-        return "<10"
-    if accuracy_m < 50:
-        return "10-50"
-    if accuracy_m < 200:
-        return "50-200"
-    return ">200"
+# Classification moved to coordinator.helpers.geo so the cache write path can
+# reach it too (main.py imports cache.py, so the reverse would be a cycle).
+# Re-exported under the historical private name: this module stays the caller
+# the diagnostics tests address, while geo owns the single boundary table.
+_accuracy_bucket = accuracy_bucket
 
 
 def _round_age(age_seconds: float) -> int:
@@ -845,6 +834,11 @@ class GoogleFindMyCoordinator(
             "accuracy_sanitized_count": 0,  # accuracy values clamped to valid range
             "speed_gate_rejects": 0,  # fixes rejected as physically implausible (#177)
             "round_trip_recoveries": 0,  # gated fixes recovered as legitimate returns (Q2-A)
+            # Coarse fixes rejected because a better, reliable and still-fresh
+            # position was already cached (#216, core of #211). Never counts a
+            # cold start, an unreliable cached fix or a stale one - those are
+            # accepted, because a coarse position still beats none at all.
+            "accuracy_gate_rejects": 0,
             # Canonicless drops on the last main poll (transition-independent
             # diagnostics aggregate). Absolute per-poll values, not increments;
             # listed here so the restore path (iterates self.stats.keys()) and the
@@ -853,6 +847,20 @@ class GoogleFindMyCoordinator(
             "canonicless_drop_benign": 0,
             "canonicless_drop_warn": 0,
         }
+        # Distribution of the REPORTED accuracy of incoming fixes (#216). The
+        # reject counter above answers "how often did the gate fire"; it does
+        # not answer "are 200 m and factor 4 in the right place". Only the
+        # distribution answers that, and it has to be collected BEFORE the gate,
+        # or it would only ever see the fixes that got through.
+        #
+        # Keys are DERIVED from the single classification table in
+        # coordinator.helpers.geo, never listed a second time here: a class
+        # added there without a counter would otherwise fail silently
+        # (increment_stat only warns on an unknown key). Flat, not nested -
+        # increment_stat looks up ``stat_name in self.stats`` and the cache
+        # restore path iterates ``self.stats.keys()``; a nested dict would miss
+        # both.
+        self.stats.update(dict.fromkeys(ACCURACY_BUCKET_STATS.values(), 0))
         _LOGGER.debug("Initialized stats: %s", self.stats)
 
         self._consecutive_timeouts: int = 0
@@ -1958,11 +1966,18 @@ class GoogleFindMyCoordinator(
         """Build the anonymized per-device telemetry list for diagnostics (P1-3).
 
         Each entry carries an opaque position ``index`` over ``sorted(device_ids)``
-        plus exactly seven fields: ``device_class``, ``last_poll_age_s``,
-        ``last_fix_age_s``, ``last_accuracy_bucket``, ``is_own_report``,
-        ``has_key``. No names, canonical IDs, coordinates, or clear-text keys are
-        emitted. Empty/None ``self.data`` yields ``[]``; any failure degrades to
-        ``[]`` rather than leaking a partial record.
+        plus ``device_class``, ``last_poll_age_s``, ``last_fix_age_s``,
+        ``last_accuracy_bucket``, ``is_own_report``, ``has_key`` and the two
+        accuracy-gate fields ``coarse_fix_accuracy_bucket`` /
+        ``coarse_fix_age_s``. No names, canonical IDs, coordinates, or
+        clear-text keys are emitted. Empty/None ``self.data`` yields ``[]``; any
+        failure degrades to ``[]`` rather than leaking a partial record.
+
+        The two coarse-fix fields report what the accuracy gate discarded (#216)
+        WITHOUT its coordinates: a diagnostics dump is routinely pasted into a
+        public issue, and a raw radius or position would be re-identifying
+        (P1-3). The coordinates of the discarded fix stay on the entity, where
+        the user - and only the user - can see roughly which city it named.
         """
         try:
             rows = self.data or []
@@ -2011,6 +2026,15 @@ class GoogleFindMyCoordinator(
                 if accuracy_raw is None:
                     accuracy_raw = row.get("accuracy")
 
+                coarse = self.get_coarse_fix(dev_id)
+                coarse_bucket = None
+                coarse_age_s: int | None = None
+                if coarse:
+                    coarse_bucket = _accuracy_bucket(coarse.get("accuracy"))
+                    coarse_seen = coarse.get("last_seen")
+                    if isinstance(coarse_seen, (int, float)):
+                        coarse_age_s = _round_age(max(0.0, now_epoch - coarse_seen))
+
                 entries.append(
                     {
                         "index": index,
@@ -2020,6 +2044,8 @@ class GoogleFindMyCoordinator(
                         "last_accuracy_bucket": _accuracy_bucket(accuracy_raw),
                         "is_own_report": row.get("is_own_report", None),
                         "has_key": bool(slot.get("encrypted_identity_key")),
+                        "coarse_fix_accuracy_bucket": coarse_bucket,
+                        "coarse_fix_age_s": coarse_age_s,
                     }
                 )
             return entries
@@ -2097,6 +2123,14 @@ class GoogleFindMyCoordinator(
         self._device_last_good_location.pop(device_id, None)
         # Round-trip anchor shares the same lifecycle as the location caches above.
         self._round_trip_anchors.pop(device_id, None)
+        # The accuracy gate's coarse fix (#216) is a position too, so it follows the
+        # same lifecycle: without this a deleted device would keep leaking its last
+        # coarse position through ``coarse_latitude``/``coarse_longitude``, and a
+        # device re-added under the same id would inherit it. Read defensively
+        # (getattr) because the store is created lazily on the first rejection.
+        coarse_store = getattr(self, "_device_coarse_fix", None)
+        if coarse_store is not None:
+            coarse_store.pop(device_id, None)
         # Device-id-keyed timing caches follow the same lifecycle; drop them so a
         # re-added device with the same id starts with clean poll-interval state.
         self._device_update_history.pop(device_id, None)

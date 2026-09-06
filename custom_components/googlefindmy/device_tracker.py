@@ -1491,6 +1491,42 @@ class GoogleFindMyDeviceTracker(GoogleFindMyDeviceEntity, TrackerEntity, Restore
         if plus_code is not None:
             attributes["plus_code"] = plus_code
 
+        # Coarse fix the accuracy gate discarded (#216). Exposed as side
+        # information only: deliberately NOT as latitude/longitude, so Home
+        # Assistant's zone logic never sees it. That logic is the actual damage
+        # the gate prevents - it treats the accuracy radius as the zone
+        # tolerance (``zone_dist - zone_radius < radius``), so a 460 m fix 346 m
+        # away from a 32 m home zone would be published as "home".
+        #
+        # It is kept rather than dropped because a coarse fix still names the
+        # city, and without any fix we would not even know that. Read from the
+        # coordinator (single writer, in the fusion), never written here.
+        coarse = None
+        get_coarse = getattr(self.coordinator, "get_coarse_fix", None)
+        if callable(get_coarse):
+            coarse = get_coarse(self.device_id)
+        if coarse:
+            # Expire it by the SAME rule the gate itself uses. Without this the
+            # coarse fix would outlive every later good fix and keep naming a
+            # city from hours ago - the round-trip anchor next door has a TTL and
+            # the last-good fix has a retention predicate, so an unbounded third
+            # store would be the odd one out. No second time constant: the shared
+            # ``stale_threshold`` option decides here as well.
+            coarse_age = location_age_seconds(coarse, time.time())
+            threshold = resolve_stale_threshold(self.coordinator)
+            if coarse_age is None or coarse_age > threshold:
+                coarse = None
+        if coarse:
+            coarse_lat = coarse.get("latitude")
+            coarse_lon = coarse.get("longitude")
+            if coarse_lat is not None and coarse_lon is not None:
+                attributes["coarse_latitude"] = coarse_lat
+                attributes["coarse_longitude"] = coarse_lon
+            if coarse.get("accuracy") is not None:
+                attributes["coarse_accuracy"] = coarse["accuracy"]
+            if coarse.get("last_seen") is not None:
+                attributes["coarse_last_seen"] = coarse["last_seen"]
+
         self._attr_extra_state_attributes = attributes
 
     @callback

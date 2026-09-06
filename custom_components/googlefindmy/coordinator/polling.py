@@ -2143,6 +2143,12 @@ class PollingOperations(_MixinBase):
                         # Sanitize invariants + enrich fields (label, utc-string)
                         location = _sanitize_decoder_row(location)
 
+                        # Tally the accuracy class BEFORE the fusion (#216): the
+                        # gate may reject below and this loop then skips straight
+                        # to the next device, so a counter after it would miss
+                        # exactly the coarse fixes the distribution is for.
+                        self.count_accuracy_class(location)
+
                         if not self._apply_weighted_location_fusion(dev_id, location):
                             continue
 

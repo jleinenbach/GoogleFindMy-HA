@@ -104,6 +104,9 @@ class LocateStub(LocateOperations):
         self._should_preserve_precise_home_coordinates = MagicMock(return_value=False)
         self.update_device_cache = MagicMock(return_value=None)
         self._apply_weighted_location_fusion = MagicMock(return_value=True)
+        # The manual locate tallies the accuracy class right before the fusion
+        # (#216); without this the stub raises AttributeError there.
+        self.count_accuracy_class = MagicMock(return_value=None)
         self.note_error = MagicMock(return_value=None)
         self.push_updated = MagicMock(return_value=None)
         self._short_error_message = MagicMock(return_value="short-err")

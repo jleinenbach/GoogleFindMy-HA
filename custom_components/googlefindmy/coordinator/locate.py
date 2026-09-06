@@ -486,6 +486,10 @@ class LocateOperations(_MixinBase):
                 # Sanitize invariants + derive labels before significance gating
                 slot = _sanitize_decoder_row(slot)
 
+                # Tally the accuracy class BEFORE the fusion (#216); see the
+                # identical call in the poll loop for the reasoning.
+                self.count_accuracy_class(slot)
+
                 if not self._apply_weighted_location_fusion(device_id, slot):
                     return {}
 

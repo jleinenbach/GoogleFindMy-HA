@@ -1,0 +1,953 @@
+# tests/test_cache_accuracy_gate.py
+"""Behavioral tests for the comparative accuracy gate (#216, core of #211).
+
+The gate lives in the clear-jump branch of ``_apply_weighted_location_fusion``,
+right after the kinematic speed gate. Where the speed gate asks whether a jump
+is physically *possible*, this one asks whether the incoming fix is good enough
+to *displace* what is already cached.
+
+It is a comparison, never an absolute cut-off. Its removed predecessor
+(``min_accuracy_threshold``, default 100 m, removed one day after it shipped in
+47a18cc5, "causing too many problems") discarded on the incoming radius alone
+and froze trackers. A coarse fix still tells us the city, and without any fix we
+would not even know that - so nothing is discarded unless a better, reliable and
+still-fresh alternative is actually present.
+
+Harness mirrors ``tests/test_cache_speed_gate.py``: a
+``MagicMock(spec=CacheOperations)`` carrying the cached ``existing`` fix, with
+``_apply_weighted_location_fusion`` invoked unbound. That suite stubs no
+``ConfigEntry`` either, so ``tests/AGENTS.md``'s ``make_config_entry`` rule does
+not bite here; it is used only in the one case that exercises the real option
+lookup through ``resolve_stale_threshold``.
+
+PROVENANCE OF THE NUMBERS in ``FIELD_CASES``: these are not invented. They are
+the eleven fixes the planned rule would have discarded on the maintainer's own
+production Home Assistant instance, extracted from the recorder database over
+10.4 days and ~30k deduplicated tracker events on 2026-09-06. Erhebungsweg,
+Vorbehalte und Rohwerte:
+``memory/projects/googlefindmy-upstream-issues/quellen/ha_feldmessung_2026-09-06.md``.
+Without that pointer these are just numbers again in six months.
+"""
+
+from __future__ import annotations
+
+import time
+from typing import Any
+from unittest.mock import MagicMock
+
+import pytest
+
+from custom_components.googlefindmy.const import (
+    DEFAULT_ACCURACY_GATE_ENABLED,
+    DEFAULT_STALE_THRESHOLD,
+    OPT_ACCURACY_GATE_ENABLED,
+    OPT_STALE_THRESHOLD,
+)
+from custom_components.googlefindmy.coordinator.cache import (
+    CacheOperations,
+    _haversine_distance_impl,
+)
+from custom_components.googlefindmy.coordinator.helpers.geo import (
+    ACCURACY_BUCKET_STATS,
+    ACCURACY_GATE_MIN_M,
+    ACCURACY_GATE_RATIO,
+    accuracy_bucket,
+)
+from tests.helpers.config_entries_stub import make_config_entry
+
+# ~5.5 km apart: far beyond any accuracy sum used here, so the clear-jump branch
+# (dist > radius_sum) executes, and slow enough over the timespans below that the
+# speed gate never fires (that gate is exercised in its own suite).
+HOME = (49.866000, 10.839000)
+FAR = (49.916000, 10.839000)
+
+
+def _now() -> float:
+    """Wall-clock now. The gate compares against it, not against report deltas."""
+    return time.time()
+
+
+def _coord(
+    existing: dict[str, Any] | None,
+    *,
+    gate_enabled: bool = True,
+    entry: Any = None,
+) -> MagicMock:
+    coord = MagicMock(spec=CacheOperations)
+    coord._device_location_data = {"dev": existing} if existing else {}
+    coord.increment_stat = MagicMock()
+    coord._speed_gate_enabled = MagicMock(return_value=True)
+    coord._round_trip_confirm_enabled = MagicMock(return_value=True)
+    coord._accuracy_gate_enabled = MagicMock(return_value=gate_enabled)
+    # Real implementations: the gate must write the coarse fix through the
+    # production code path, not through a mock that swallows it.
+    coord._record_coarse_fix = lambda dev, row: CacheOperations._record_coarse_fix(
+        coord, dev, row
+    )
+    coord.get_coarse_fix = lambda dev: CacheOperations.get_coarse_fix(coord, dev)
+    coord._device_coarse_fix = {}
+    if entry is not None:
+        coord.config_entry = entry
+    return coord
+
+
+def _existing(
+    *,
+    age_s: float = 300.0,
+    acc: float = 20.0,
+    estimated: bool = False,
+) -> dict[str, Any]:
+    fix: dict[str, Any] = {
+        "latitude": HOME[0],
+        "longitude": HOME[1],
+        "accuracy": acc,
+        "last_seen": _now() - age_s,
+        "location_type": "sensor",
+    }
+    if estimated:
+        fix["accuracy_estimated"] = True
+    return fix
+
+
+def _incoming(
+    *,
+    acc: float | None = 1600.0,
+    is_own: bool = False,
+    age_s: float = 0.0,
+    lat: float = FAR[0],
+    lon: float = FAR[1],
+) -> dict[str, Any]:
+    fix: dict[str, Any] = {
+        "latitude": lat,
+        "longitude": lon,
+        "last_seen": _now() - age_s,
+        "is_own_report": is_own,
+    }
+    if acc is not None:
+        fix["accuracy"] = acc
+    return fix
+
+
+def _fuse(coord: MagicMock, new_data: dict[str, Any]) -> bool:
+    return CacheOperations._apply_weighted_location_fusion(coord, "dev", new_data)
+
+
+def _rejects(coord: MagicMock) -> int:
+    return sum(
+        1
+        for call in coord.increment_stat.call_args_list
+        if call.args and call.args[0] == "accuracy_gate_rejects"
+    )
+
+
+# ------------------------------------------------- (a)-(c) nothing to lose
+
+
+def test_no_existing_fix_accepts_coarse() -> None:
+    """(a) Cold start: a 1600 m fix is all we have, so it is accepted."""
+    coord = _coord(None)
+    assert _fuse(coord, _incoming()) is True
+    assert _rejects(coord) == 0
+
+
+def test_stale_existing_accepts_coarse() -> None:
+    """(b) Cached fix older than stale_threshold -> coarse wins (guards A-1).
+
+    This is the exact failure mode of the removed predecessor: it discarded
+    without asking whether the alternative was still worth anything, and froze
+    the tracker on an ancient position.
+    """
+    coord = _coord(_existing(age_s=DEFAULT_STALE_THRESHOLD + 60))
+    assert _fuse(coord, _incoming()) is True
+    assert _rejects(coord) == 0
+
+
+def test_unreliable_existing_accepts_coarse() -> None:
+    """(c) Cached fix is the sanitized 200 m estimate -> coarse wins."""
+    coord = _coord(_existing(acc=200.0, estimated=True))
+    assert _fuse(coord, _incoming()) is True
+    assert _rejects(coord) == 0
+
+
+def test_existing_without_timestamp_accepts_coarse() -> None:
+    """Unknown age counts as not-trustworthy, so the incoming fix wins."""
+    existing = _existing()
+    del existing["last_seen"]
+    coord = _coord(existing)
+    assert _fuse(coord, _incoming()) is True
+    assert _rejects(coord) == 0
+
+
+# ------------------------------------------------- (d)-(f) the comparison
+
+
+def test_coarse_jump_against_fresh_precise_fix_is_rejected() -> None:
+    """(d) 1600 m against a fresh 20 m fix -> rejected, counter rises once."""
+    coord = _coord(_existing(acc=20.0, age_s=300))
+    assert _fuse(coord, _incoming(acc=1600.0)) is False
+    assert _rejects(coord) == 1
+
+
+def test_below_lower_bound_is_not_rejected() -> None:
+    """(e) 150 m never fires: below ACCURACY_GATE_MIN_M, whatever the ratio."""
+    assert 150.0 < ACCURACY_GATE_MIN_M
+    coord = _coord(_existing(acc=5.0, age_s=300))  # ratio 30, but too fine
+    assert _fuse(coord, _incoming(acc=150.0)) is True
+    assert _rejects(coord) == 0
+
+
+def test_ratio_not_reached_is_not_rejected() -> None:
+    """(f) 300 m against 200 m is only 1.5x worse -> accepted."""
+    assert 300.0 < ACCURACY_GATE_RATIO * 200.0
+    coord = _coord(_existing(acc=200.0, age_s=300))
+    assert _fuse(coord, _incoming(acc=300.0)) is True
+    assert _rejects(coord) == 0
+
+
+def test_ratio_boundary() -> None:
+    """Exactly at the ratio rejects; just below it does not."""
+    base = 60.0
+    at = ACCURACY_GATE_RATIO * base  # 240 m, above the 200 m lower bound
+    assert at >= ACCURACY_GATE_MIN_M
+    coord_at = _coord(_existing(acc=base, age_s=300))
+    assert _fuse(coord_at, _incoming(acc=at)) is False
+    coord_below = _coord(_existing(acc=base, age_s=300))
+    assert _fuse(coord_below, _incoming(acc=at - 1.0)) is True
+
+
+def test_lower_bound_boundary() -> None:
+    """Exactly at ACCURACY_GATE_MIN_M rejects; one metre below does not."""
+    coord_at = _coord(_existing(acc=1.0, age_s=300))
+    assert _fuse(coord_at, _incoming(acc=ACCURACY_GATE_MIN_M)) is False
+    coord_below = _coord(_existing(acc=1.0, age_s=300))
+    assert _fuse(coord_below, _incoming(acc=ACCURACY_GATE_MIN_M - 1.0)) is True
+
+
+# ------------------------------------------------- (g)-(j) shape of the rule
+
+
+def test_own_report_is_gated_too() -> None:
+    """(g) No own-report bypass, unlike the speed gate (E6).
+
+    A phone reports ITS OWN position, not the tracker's, so an own fix with a
+    1600 m radius is exactly as coarse as a foreign one. The speed gate's bypass
+    is about cryptographic provenance; this gate is about physical uncertainty.
+    """
+    coord = _coord(_existing(acc=20.0, age_s=300))
+    assert _fuse(coord, _incoming(acc=1600.0, is_own=True)) is False
+    assert _rejects(coord) == 1
+
+
+def test_accuracy_less_fix_falls_through() -> None:
+    """(h) No measured accuracy -> falls through to downstream sanitization."""
+    coord = _coord(_existing(acc=20.0, age_s=300))
+    assert _fuse(coord, _incoming(acc=None)) is True
+    assert _rejects(coord) == 0
+
+
+def test_android_zero_sentinel_falls_through() -> None:
+    """(h') Android's 0.0 no-accuracy sentinel is not a gating discriminant."""
+    coord = _coord(_existing(acc=20.0, age_s=300))
+    assert _fuse(coord, _incoming(acc=0.0)) is True
+    assert _rejects(coord) == 0
+
+
+def test_gate_disabled_behaves_like_before() -> None:
+    """(i) Switch off -> today's behavior, the coarse fix passes."""
+    coord = _coord(_existing(acc=20.0, age_s=300), gate_enabled=False)
+    assert _fuse(coord, _incoming(acc=1600.0)) is True
+    assert _rejects(coord) == 0
+
+
+def test_default_is_enabled() -> None:
+    """The switch defaults to on (V-2: it exists for diagnosis, not for tuning)."""
+    assert DEFAULT_ACCURACY_GATE_ENABLED is True
+
+
+def test_resolver_reads_the_option() -> None:
+    """The real resolver honours the option and its default."""
+    coord = MagicMock(spec=CacheOperations)
+    coord.config_entry = make_config_entry(
+        entry_id="acc-gate", data={}, options={OPT_ACCURACY_GATE_ENABLED: False}
+    )
+    assert CacheOperations._accuracy_gate_enabled(coord) is False
+    coord.config_entry = make_config_entry(entry_id="acc-gate-2", data={}, options={})
+    assert CacheOperations._accuracy_gate_enabled(coord) is True
+
+
+def test_stale_threshold_option_is_honoured() -> None:
+    """A shortened stale_threshold makes the cached fix stale -> coarse wins.
+
+    Uses the real option lookup (make_config_entry) rather than the default, so
+    the age comparison is bound to the shared ``stale_threshold`` option and not
+    to a second, private time constant (E3).
+    """
+    entry = make_config_entry(
+        entry_id="acc-gate-stale", data={}, options={OPT_STALE_THRESHOLD: 120}
+    )
+    coord = _coord(_existing(acc=20.0, age_s=300), entry=entry)
+    assert _fuse(coord, _incoming(acc=1600.0)) is True
+    assert _rejects(coord) == 0
+
+
+def test_no_round_trip_anchor_contact() -> None:
+    """(j) The gate neither seeds nor consumes a round-trip anchor (E7).
+
+    Two levels, both asserted. The store must be untouched (that is the effect),
+    AND the rejected payload must carry no deferred anchor intent (that is the
+    data). The second half is what a first implementation got wrong: the speed
+    gate's accept path pencils ``_round_trip_anchor_seed`` onto the payload just
+    before this gate rejects it. It has no effect today, because the caller
+    aborts on a False return and the marker is only applied after a commit - but
+    a rejected payload carrying a live anchor intent is a trap for whoever
+    touches that ordering next.
+    """
+    coord = _coord(_existing(acc=20.0, age_s=300))
+    coord._round_trip_anchors = {}
+    payload = _incoming(acc=1600.0)
+    assert _fuse(coord, payload) is False
+    assert coord._round_trip_anchors == {}
+    assert "_round_trip_anchor_seed" not in payload
+    assert "_round_trip_anchor_consume" not in payload
+    assert "_supersede_round_trip_anchor" not in payload
+
+
+def test_no_supersede_marker_on_rejected_own_report() -> None:
+    """An own clear jump this gate rejects must not invalidate a live anchor.
+
+    ``_supersede_round_trip_anchor`` is set for every own clear jump before this
+    gate runs. If the gate rejects that jump, no relocation happened, so the
+    existing anchor stays valid.
+    """
+    coord = _coord(_existing(acc=20.0, age_s=300))
+    payload = _incoming(acc=1600.0, is_own=True)
+    assert _fuse(coord, payload) is False
+    assert "_supersede_round_trip_anchor" not in payload
+
+
+def test_coarse_fix_is_recorded_before_the_drop() -> None:
+    """The discarded fix survives as side information (E9, feeds AP5).
+
+    The write must happen before ``return False``: the caller aborts the whole
+    payload on a False return, so a write placed after it would never run.
+    """
+    coord = _coord(_existing(acc=20.0, age_s=300))
+    assert _fuse(coord, _incoming(acc=1600.0)) is False
+    coarse = coord.get_coarse_fix("dev")
+    assert coarse is not None
+    assert coarse["accuracy"] == 1600.0
+    assert coarse["latitude"] == FAR[0]
+    assert coarse["longitude"] == FAR[1]
+
+
+def test_no_coarse_fix_recorded_on_accept() -> None:
+    """An accepted fix leaves no coarse residue."""
+    coord = _coord(_existing(acc=200.0, age_s=300))
+    assert _fuse(coord, _incoming(acc=300.0)) is True
+    assert coord.get_coarse_fix("dev") is None
+
+
+def test_published_position_is_untouched_on_reject() -> None:
+    """A rejected payload never rewrites the cached coordinates."""
+    existing = _existing(acc=20.0, age_s=300)
+    coord = _coord(existing)
+    assert _fuse(coord, _incoming(acc=1600.0)) is False
+    assert coord._device_location_data["dev"]["latitude"] == HOME[0]
+    assert coord._device_location_data["dev"]["accuracy"] == 20.0
+
+
+# ------------------------------------------------- (k) real field regressions
+
+# (new_acc, existing_acc, age_s, jump_m, label). Measured on the maintainer's
+# production instance over 10.4 days; see the provenance note in the module
+# docstring. Every one of these was published as a position before this gate.
+FIELD_CASES = [
+    # The narrowest case in the whole dataset: ratio 4.3. If this one stops
+    # failing, the factor has been chosen too large - factor 6 would let the
+    # single worst incident (an 18.3 km jump) through.
+    (404.9, 94.5, 343, 18294, "narrowest ratio 4.3, 18.3 km jump"),
+    # The zone false alarm: 458.8 m radius, 345.9 m from a 32 m home zone, so
+    # Home Assistant computed 345.9 - 32 = 313.9 < 458.8 and published "home".
+    (458.8, 25.8, 345, 5542, "zone false alarm not_home -> home"),
+    (208.8, 5.5, 972, 4782, "208 m vs 5.5 m"),
+    (319.0, 3.0, 687, 1856, "319 m vs 3 m"),
+    (331.8, 32.2, 918, 1126, "331 m vs 32 m"),
+    (456.3, 18.3, 403, 1113, "456 m vs 18 m"),
+    (202.4, 3.8, 342, 750, "202 m, just above the lower bound"),
+    (273.7, 8.9, 2734, 413, "273 m vs 8.9 m"),
+    (204.5, 10.1, 902, 402, "204 m vs 10 m"),
+    (281.1, 62.5, 1521, 399, "281 m vs 62.5 m, ratio 4.5"),
+    (210.8, 15.8, 2851, 281, "210 m vs 15.8 m"),
+]
+
+
+@pytest.mark.parametrize(
+    ("new_acc", "existing_acc", "age_s", "jump_m", "label"),
+    FIELD_CASES,
+    ids=[case[4] for case in FIELD_CASES],
+)
+def test_measured_field_cases_are_rejected(
+    new_acc: float, existing_acc: float, age_s: int, jump_m: int, label: str
+) -> None:
+    """Every fix the rule discarded on real data must still be discarded."""
+    lat_offset = jump_m / 111_320.0  # metres -> degrees of latitude
+    coord = _coord(_existing(acc=existing_acc, age_s=age_s))
+    payload = _incoming(acc=new_acc, lat=HOME[0] + lat_offset, lon=HOME[1])
+    # Guard the fixture itself: a shrunken jump would silently land in the
+    # overlapping-circles branch and never reach the gate.
+    assert (
+        _haversine_distance_impl(HOME[0], HOME[1], payload["latitude"], HOME[1])
+        > existing_acc + new_acc
+    ), f"fixture {label} no longer produces a clear jump"
+    assert _fuse(coord, payload) is False, label
+    assert _rejects(coord) == 1
+
+
+def test_measured_owner_report_is_not_rejected() -> None:
+    """The counter-case: the worst owner report measured (176.5 m) survives.
+
+    No owner report in the whole 10.4-day dataset exceeded this value, which is
+    why the 200 m lower bound discards none of them - and why the predecessor's
+    100 m default would have discarded seven.
+    """
+    coord = _coord(_existing(acc=20.0, age_s=300))
+    assert _fuse(coord, _incoming(acc=176.5, is_own=True)) is True
+    assert _rejects(coord) == 0
+
+
+# ------------------------------------------------- AP4a: the distribution
+
+# Counting how often the gate fired does not tell us whether 200 m and factor 4
+# sit in the right place. Only the distribution of the REPORTED accuracy does,
+# and it has to be collected before the gate - otherwise it never sees the very
+# fixes that were discarded.
+
+
+def _cache_coord() -> MagicMock:
+    """A coordinator double for the ``update_device_cache`` write path."""
+    coord = MagicMock(spec=CacheOperations)
+    coord._device_location_data = {}
+    coord.increment_stat = MagicMock()
+    coord._speed_gate_enabled = MagicMock(return_value=True)
+    coord._round_trip_confirm_enabled = MagicMock(return_value=True)
+    coord._accuracy_gate_enabled = MagicMock(return_value=True)
+    coord._record_coarse_fix = lambda dev, row: CacheOperations._record_coarse_fix(
+        coord, dev, row
+    )
+    coord.count_accuracy_class = lambda row: CacheOperations.count_accuracy_class(
+        coord, row
+    )
+    # Route the fusion through the real implementation: with the plain spec mock
+    # the gate would never run and this suite would measure nothing.
+    coord._apply_weighted_location_fusion = lambda dev, data: (
+        CacheOperations._apply_weighted_location_fusion(coord, dev, data)
+    )
+    coord._device_coarse_fix = {}
+    return coord
+
+
+def _bucket_calls(coord: MagicMock) -> list[str]:
+    keys = set(ACCURACY_BUCKET_STATS.values())
+    return [
+        call.args[0]
+        for call in coord.increment_stat.call_args_list
+        if call.args and call.args[0] in keys
+    ]
+
+
+@pytest.mark.parametrize(
+    ("accuracy", "expected_class"),
+    [
+        (5.0, "<10"),
+        (25.0, "10-50"),
+        (120.0, "50-200"),
+        (300.0, "200-500"),
+        (1600.0, "500-2000"),  # the radius reported in BSkando#216
+        (5000.0, ">2000"),
+    ],
+    ids=["<10", "10-50", "50-200", "200-500", "500-2000", ">2000"],
+)
+def test_accuracy_class_counted_once(accuracy: float, expected_class: str) -> None:
+    """(k) One fix raises exactly the counter of its class, including the three new ones."""
+    coord = _cache_coord()
+    CacheOperations.update_device_cache(
+        coord, "dev", {"latitude": HOME[0], "longitude": HOME[1], "accuracy": accuracy}
+    )
+    assert _bucket_calls(coord) == [ACCURACY_BUCKET_STATS[expected_class]]
+
+
+def test_accuracy_less_fix_is_not_counted() -> None:
+    """A fix without measured accuracy raises no class counter.
+
+    Otherwise the 200 m fallback the downstream sanitization substitutes would
+    skew the distribution towards exactly the class this gate acts on. Those
+    cases are counted by ``accuracy_sanitized_count`` instead.
+    """
+    coord = _cache_coord()
+    CacheOperations.update_device_cache(
+        coord, "dev", {"latitude": HOME[0], "longitude": HOME[1]}
+    )
+    assert _bucket_calls(coord) == []
+
+
+def test_distribution_sees_more_than_the_rejects() -> None:
+    """(l) The counting sits BEFORE the gate, so it also sees discarded fixes.
+
+    Discriminating assertion: were the counting (wrongly) placed inside the gate,
+    the class total would EQUAL the reject count instead of exceeding it. Two
+    fixes go in, only the second is discarded - so two classes are counted
+    against one reject.
+    """
+    coord = _cache_coord()
+    coord._device_location_data = {"dev": _existing(acc=20.0, age_s=300)}
+    # 1) a fine fix close by: accepted, counted
+    CacheOperations.update_device_cache(
+        coord,
+        "dev",
+        {
+            "latitude": HOME[0],
+            "longitude": HOME[1],
+            "accuracy": 25.0,
+            "last_seen": _now(),
+        },
+    )
+    # Re-seed the cached fix. The commit path further down ``update_device_cache``
+    # runs against mocked helpers here and leaves the slot empty, which is a
+    # limit of this harness, not production behaviour - without re-seeding the
+    # second call would find no baseline and the gate could not fire at all.
+    coord._device_location_data["dev"] = _existing(acc=20.0, age_s=300)
+    # 2) the coarse jump: discarded by the gate, counted all the same
+    CacheOperations.update_device_cache(
+        coord,
+        "dev",
+        {
+            "latitude": FAR[0],
+            "longitude": FAR[1],
+            "accuracy": 1600.0,
+            "last_seen": _now(),
+        },
+    )
+    rejects = _rejects(coord)
+    counted = _bucket_calls(coord)
+    assert rejects == 1
+    assert len(counted) == 2
+    assert len(counted) > rejects
+    # The discarded fix in particular must appear in the distribution.
+    assert ACCURACY_BUCKET_STATS["500-2000"] in counted
+
+
+def test_classes_and_counters_are_in_sync() -> None:
+    """(m) Every class ``accuracy_bucket`` can produce owns a counter, and vice versa.
+
+    A class added later without a counter would fail silently: ``increment_stat``
+    only logs a warning for an unknown key, so the fix would simply not be
+    counted and the distribution would quietly go wrong.
+    """
+    produced = {
+        accuracy_bucket(v)
+        for v in (0, 5, 9.99, 10, 49.9, 50, 199.9, 200, 499.9, 500, 1999.9, 2000, 1e9)
+    }
+    produced.discard(None)
+    assert produced == set(ACCURACY_BUCKET_STATS)
+    assert len(set(ACCURACY_BUCKET_STATS.values())) == len(ACCURACY_BUCKET_STATS)
+
+
+def test_counter_keys_are_initialized_from_the_single_table() -> None:
+    """The init derives the counters from the table instead of relisting them.
+
+    A source-level check, and named as such: it cannot prove the values, only
+    that no second hand-written list exists. The behavioural half is the restore
+    test below.
+    """
+    import inspect
+
+    from custom_components.googlefindmy.coordinator.main import GoogleFindMyCoordinator
+
+    src = inspect.getsource(GoogleFindMyCoordinator.__init__)
+    assert "ACCURACY_BUCKET_STATS" in src
+    for key in ACCURACY_BUCKET_STATS.values():
+        assert f'"{key}"' not in src, f"{key} is listed a second time by hand"
+
+
+@pytest.mark.asyncio
+async def test_class_counters_survive_a_restart() -> None:
+    """The counters rehydrate from the persisted stats cache after a restart.
+
+    ``_async_load_stats`` iterates ``self.stats.keys()``, so a key absent from
+    the init surface would be dropped on every restart and the distribution
+    would never accumulate beyond one session. Mirrors
+    ``tests/test_coordinator_canonicless_stats.py``.
+    """
+    from unittest.mock import AsyncMock
+
+    from tests.helpers.main_coordinator_stub import MainCoordinatorStub
+
+    persisted = {key: 42 for key in ACCURACY_BUCKET_STATS.values()}
+
+    async def _cached(key: str) -> dict[str, int] | None:
+        return persisted if key == "integration_stats" else None
+
+    coord = MainCoordinatorStub(
+        config_entry=make_config_entry(entry_id="acc-gate-restore")
+    )
+    coord.stats = dict.fromkeys(ACCURACY_BUCKET_STATS.values(), 0)
+    coord._stats_save_task = None
+    coord._cache.async_get_cached_value = AsyncMock(side_effect=_cached)
+
+    await coord._async_load_stats()
+
+    for key in ACCURACY_BUCKET_STATS.values():
+        assert coord.stats[key] == 42
+
+
+# ------------------------------------------------- AP5: the coarse fix stays visible
+
+# Discarding the coarse fix as a POSITION is the point; discarding its
+# information is not. A wide fix still names the city, and without any fix we
+# would not even know that. It therefore surfaces as ``coarse_*`` attributes,
+# never as latitude/longitude - so Home Assistant's zone logic cannot see it.
+
+
+def _tracker_entity(coarse: dict[str, Any] | None, display: dict[str, Any]):
+    from types import SimpleNamespace
+
+    from custom_components.googlefindmy import device_tracker as dt
+
+    coordinator = SimpleNamespace(
+        config_entry=make_config_entry(entry_id="coarse-entry", data={}, options={}),
+        get_coarse_fix=lambda dev: dict(coarse) if coarse else None,
+        get_display_location_data_for_subentry=lambda key, dev: display,
+    )
+    entity = dt.GoogleFindMyDeviceTracker.__new__(dt.GoogleFindMyDeviceTracker)
+    entity.coordinator = coordinator
+    # ``device_id`` and ``subentry_key`` are read-only properties backed by
+    # these two attributes.
+    entity._device = {"id": "dev", "name": "Tracker"}
+    entity._subentry_key = "core_tracking"
+    entity._attr_extra_state_attributes = {}
+    entity._select_display_row = lambda: display
+    entity._is_location_stale = lambda: False
+    entity._get_location_age = lambda row=None: 60.0
+    entity._get_location_status = lambda row=None: "Online"
+    entity._attr_name = "Tracker"
+    dt.GoogleFindMyDeviceTracker._sync_location_attrs(entity)
+    return entity
+
+
+def test_coarse_fix_surfaces_as_side_information() -> None:
+    """The discarded fix is readable, and it is NOT the published position."""
+    display = {
+        "latitude": HOME[0],
+        "longitude": HOME[1],
+        "accuracy": 20.0,
+        "last_seen": _now() - 60,
+    }
+    coarse = {
+        "latitude": FAR[0],
+        "longitude": FAR[1],
+        "accuracy": 1600.0,
+        "last_seen": _now() - 30,
+    }
+    entity = _tracker_entity(coarse, display)
+    attrs = entity._attr_extra_state_attributes
+
+    assert attrs["coarse_latitude"] == FAR[0]
+    assert attrs["coarse_longitude"] == FAR[1]
+    assert attrs["coarse_accuracy"] == 1600.0
+    assert "coarse_last_seen" in attrs
+
+    # The entity itself stays on the better position: this is what stops the
+    # zone false alarm, because HA reads latitude/longitude/location_accuracy,
+    # never the coarse_* keys.
+    assert entity._attr_latitude == HOME[0]
+    assert entity._attr_longitude == HOME[1]
+    assert entity._attr_location_accuracy == 20.0
+    assert attrs.get("latitude") != FAR[0]
+
+
+def test_no_coarse_attributes_without_a_discarded_fix() -> None:
+    """No gate rejects, no coarse_* keys - the normal case adds nothing."""
+    display = {
+        "latitude": HOME[0],
+        "longitude": HOME[1],
+        "accuracy": 20.0,
+        "last_seen": _now() - 60,
+    }
+    entity = _tracker_entity(None, display)
+    assert not [
+        k for k in entity._attr_extra_state_attributes if k.startswith("coarse")
+    ]
+
+
+def test_tracker_tolerates_a_coordinator_without_the_accessor() -> None:
+    """An older/partial coordinator double must not break the entity."""
+    from types import SimpleNamespace
+
+    from custom_components.googlefindmy import device_tracker as dt
+
+    display = {
+        "latitude": HOME[0],
+        "longitude": HOME[1],
+        "accuracy": 20.0,
+        "last_seen": _now() - 60,
+    }
+    coordinator = SimpleNamespace(
+        config_entry=make_config_entry(entry_id="no-accessor", data={}, options={}),
+        get_display_location_data_for_subentry=lambda key, dev: display,
+    )
+    entity = dt.GoogleFindMyDeviceTracker.__new__(dt.GoogleFindMyDeviceTracker)
+    entity.coordinator = coordinator
+    # ``device_id`` and ``subentry_key`` are read-only properties backed by
+    # these two attributes.
+    entity._device = {"id": "dev", "name": "Tracker"}
+    entity._subentry_key = "core_tracking"
+    entity._attr_extra_state_attributes = {}
+    entity._select_display_row = lambda: display
+    entity._is_location_stale = lambda: False
+    entity._get_location_age = lambda row=None: 60.0
+    entity._get_location_status = lambda row=None: "Online"
+    dt.GoogleFindMyDeviceTracker._sync_location_attrs(entity)
+    assert entity._attr_latitude == HOME[0]
+
+
+def test_diagnostics_reports_the_coarse_fix_without_coordinates() -> None:
+    """The diagnostics dump carries the class and the age, never the position.
+
+    A dump is routinely pasted into a public issue; a raw radius or a pair of
+    coordinates would be re-identifying (P1-3). The coordinates stay on the
+    entity, where only the user sees them.
+    """
+    from tests.helpers.main_coordinator_stub import MainCoordinatorStub
+
+    coord = MainCoordinatorStub(config_entry=make_config_entry(entry_id="coarse-diag"))
+    coord.data = [
+        {
+            "device_id": "dev",
+            "accuracy": 20.0,
+            "last_seen": _now() - 60,
+            "is_own_report": False,
+        }
+    ]
+    coord._device_location_data = {"dev": {"device_type": 1}}
+    coord._present_last_seen = {}
+    coord._device_coarse_fix = {
+        "dev": {
+            "latitude": FAR[0],
+            "longitude": FAR[1],
+            "accuracy": 1600.0,
+            "last_seen": _now() - 120,
+        }
+    }
+
+    entries = coord.build_per_device_diagnostics()
+
+    assert len(entries) == 1
+    entry = entries[0]
+    assert entry["coarse_fix_accuracy_bucket"] == "500-2000"
+    assert entry["coarse_fix_age_s"] == pytest.approx(120, abs=15)
+    flat = repr(entry)
+    assert str(FAR[0]) not in flat
+    assert "1600" not in flat
+
+
+# ------------------------------------------------- review findings, pinned
+
+# Every case below exists because an independent diff review found the gap. They
+# are the cheapest part of this change and the part most likely to save the next
+# person, so each one names what it would catch.
+
+
+def test_every_fusion_caller_also_counts_the_accuracy_class() -> None:
+    """Structural guard: no entry point may feed the fusion without counting.
+
+    The first implementation put the tally inside ``update_device_cache`` only.
+    Two of the three entry points (the poll loop and the manual locate) run the
+    fusion THEMSELVES and abort on a rejection before ever reaching that call,
+    so the distribution silently lost exactly the coarse fixes it exists to
+    measure - while the test suite stayed green, because it only rebuilt the
+    third path. This guard fails when a fourth caller appears without a tally.
+    """
+    import re
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent / "custom_components" / "googlefindmy"
+    callers: dict[str, int] = {}
+    for path in root.rglob("*.py"):
+        text = path.read_text(encoding="utf-8")
+        # Calls, not the definition itself.
+        hits = len(re.findall(r"self\._apply_weighted_location_fusion\(", text))
+        if hits:
+            callers[str(path.relative_to(root))] = hits
+
+    assert callers, "no fusion caller found - the guard would be vacuous"
+    for rel, _hits in callers.items():
+        text = (root / rel).read_text(encoding="utf-8")
+        assert "count_accuracy_class(" in text, (
+            f"{rel} feeds the fusion but never counts the accuracy class; "
+            "the distribution would miss every fix arriving on that path"
+        )
+
+
+def test_sentinel_accuracy_is_not_counted_as_the_finest_class() -> None:
+    """Android's 0.0 sentinel must not be filed under ``<10``.
+
+    ``accuracy_bucket(0.0)`` returns ``<10`` by itself - correct for the
+    diagnostics view, wrong for this distribution, because the same value counts
+    as accuracy-LESS everywhere else in the gate. Filing it as the finest class
+    would bias the measurement towards precision, i.e. against the very thing it
+    is meant to detect.
+    """
+    coord = _cache_coord()
+    coord.count_accuracy_class({"accuracy": 0.0})
+    coord.count_accuracy_class({"accuracy": -1.0})
+    coord.count_accuracy_class({"accuracy": "n/a"})
+    coord.count_accuracy_class({})
+    assert _bucket_calls(coord) == []
+    # The neighbouring valid value is counted, so the guard is not vacuous.
+    coord.count_accuracy_class({"accuracy": 5.0})
+    assert _bucket_calls(coord) == [ACCURACY_BUCKET_STATS["<10"]]
+
+
+def test_prefused_payload_is_not_counted_twice() -> None:
+    """A payload the poll loop already fused must not be tallied again."""
+    coord = _cache_coord()
+    CacheOperations.update_device_cache(
+        coord,
+        "dev",
+        {
+            "latitude": HOME[0],
+            "longitude": HOME[1],
+            "accuracy": 25.0,
+            "last_seen": _now(),
+            "_fusion_preapplied": True,
+        },
+    )
+    assert _bucket_calls(coord) == []
+
+
+def test_overlapping_coarse_fix_never_reaches_the_gate() -> None:
+    """The whole placement argument, pinned.
+
+    The gate sits in the clear-jump branch. Where the accuracy circles overlap
+    it must NOT fire, because the inverse-square fusion already reduces a coarse
+    fix to near-zero influence and keeps the better accuracy - so there is no
+    displacement to prevent. If this ever starts rejecting, the gate has moved
+    somewhere it does not belong.
+    """
+    existing = _existing(acc=20.0, age_s=300)
+    coord = _coord(existing)
+    # Same spot, so the circles overlap by a wide margin.
+    payload = _incoming(acc=1600.0, lat=HOME[0], lon=HOME[1])
+    assert _fuse(coord, payload) is True
+    assert _rejects(coord) == 0
+    # And the fusion did not degrade the accuracy to the coarse value.
+    assert payload.get("accuracy", 20.0) <= 20.0
+
+
+def test_round_trip_recovery_outranks_the_accuracy_gate() -> None:
+    """Declared limit: a recovered return trip is published even when coarse.
+
+    The recovery leaves the fusion above the accuracy gate. That is deliberate -
+    it has an INDEPENDENT confirmation of the place (the fix landed near a
+    remembered anchor), which is exactly what the gate lacks. Pinning it here so
+    the behaviour is a decision on record rather than an accident, and so a
+    later change to the ordering is visible.
+    """
+    now = _now()
+    existing = {
+        "latitude": HOME[0],
+        "longitude": HOME[1],
+        "accuracy": 20.0,
+        "last_seen": now - 1,
+        "location_type": "sensor",
+    }
+    coord = _coord(existing)
+    # Anchor at the RETURN target, i.e. where the coarse fix lands.
+    coord._round_trip_anchors = {"dev": {"lat": FAR[0], "lon": FAR[1], "ts": now - 60}}
+    # 5.5 km in 1 s is far above the 400 m/s cap, so the speed gate would reject;
+    # the return-trip hatch accepts instead, and the accuracy gate never runs.
+    payload = _incoming(acc=1600.0, age_s=0.0)
+    assert _fuse(coord, payload) is True
+    assert _rejects(coord) == 0
+    assert payload.get("_round_trip_anchor_consume") is True
+
+
+def test_purge_device_drops_the_coarse_fix() -> None:
+    """A deleted device must not keep leaking its last coarse position.
+
+    ``purge_device`` already clears the location cache, the last-good fix and the
+    round-trip anchor for exactly this reason. The coarse fix is a position too,
+    so a device re-added under the same id would otherwise inherit a
+    ``coarse_latitude`` from before its deletion.
+    """
+    from custom_components.googlefindmy.coordinator.main import GoogleFindMyCoordinator
+
+    # Same bare-coordinator harness as tests/test_plus_code_last_known.py's
+    # ``test_purge_device_drops_last_good`` - the sibling leak this mirrors.
+    coord = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
+    coord._device_location_data = {}
+    coord._device_last_good_location = {}
+    coord._round_trip_anchors = {}
+    coord._device_update_history = {}
+    coord._device_interval_history = {}
+    coord._device_caps = {}
+    coord._locate_inflight = set()
+    coord._locate_cooldown_until = {}
+    coord._sound_request_uuids = {}
+    coord._sound_request_timestamps = {}
+    coord._device_poll_cooldown_until = {}
+    coord._present_device_ids = set()
+    coord._present_last_seen = {}
+    coord.data = []
+    coord._is_on_hass_loop = lambda: True
+    coord._ensure_device_name_cache = lambda: {}
+    coord._refresh_subentry_index = lambda *_a, **_k: None
+    coord._store_subentry_snapshots = lambda *_a, **_k: None
+    coord.async_set_updated_data = lambda *_a, **_k: None
+
+    coord._record_coarse_fix(
+        "dev-1",
+        {
+            "latitude": FAR[0],
+            "longitude": FAR[1],
+            "accuracy": 1600.0,
+            "last_seen": _now(),
+        },
+    )
+    assert coord.get_coarse_fix("dev-1") is not None
+
+    coord.purge_device("dev-1")
+
+    assert coord.get_coarse_fix("dev-1") is None
+
+
+def test_coarse_fix_expires_with_the_stale_threshold() -> None:
+    """An old coarse fix must stop naming a city that is hours out of date.
+
+    Same rule as the gate itself uses, no second time constant. Its two
+    neighbours in the module are bounded the same way: the round-trip anchor has
+    a TTL, the last-good fix a retention predicate.
+    """
+    display = {
+        "latitude": HOME[0],
+        "longitude": HOME[1],
+        "accuracy": 20.0,
+        "last_seen": _now() - 60,
+    }
+    fresh = {
+        "latitude": FAR[0],
+        "longitude": FAR[1],
+        "accuracy": 1600.0,
+        "last_seen": _now() - 60,
+    }
+    stale = dict(fresh)
+    stale["last_seen"] = _now() - (DEFAULT_STALE_THRESHOLD + 600)
+
+    assert (
+        "coarse_latitude"
+        in _tracker_entity(fresh, display)._attr_extra_state_attributes
+    )
+    assert (
+        "coarse_latitude"
+        not in _tracker_entity(stale, display)._attr_extra_state_attributes
+    )

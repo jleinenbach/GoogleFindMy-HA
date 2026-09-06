@@ -123,6 +123,7 @@ from .const import (
     DATA_AUTH_METHOD,
     DATA_SECRET_BUNDLE,
     DATA_SUBENTRY_KEY,
+    DEFAULT_ACCURACY_GATE_ENABLED,
     DEFAULT_CONTRIBUTOR_MODE,
     DEFAULT_DELETE_CACHES_ON_REMOVE,
     DEFAULT_DEVICE_POLL_DELAY,
@@ -141,6 +142,7 @@ from .const import (
     LITERAL_CORE_KEY_OWNER,
     NON_DEVICE_SUBENTRY_KEYS,
     NON_DEVICE_SUBENTRY_TYPES,
+    OPT_ACCURACY_GATE_ENABLED,
     OPT_CONTRIBUTOR_MODE,
     OPT_DELETE_CACHES_ON_REMOVE,
     OPT_DEVICE_POLL_DELAY,
@@ -9038,6 +9040,9 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin, _ContainerLoginMixi
             OPT_ROUNDTRIP_CONFIRM: _get(
                 OPT_ROUNDTRIP_CONFIRM, DEFAULT_ROUNDTRIP_CONFIRM
             ),
+            OPT_ACCURACY_GATE_ENABLED: _get(
+                OPT_ACCURACY_GATE_ENABLED, DEFAULT_ACCURACY_GATE_ENABLED
+            ),
             # Advanced override (F3): additional secrets.json watch paths, one per
             # line. Empty by default; the zero-config container-data path is
             # watched automatically without this option. Rendered as a text block
@@ -9170,6 +9175,7 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin, _ContainerLoginMixi
         _register(vol.Optional(OPT_SHOW_LOCATION_AGE), bool)
         _register(vol.Optional(OPT_SPEED_GATE_ENABLED), bool)
         _register(vol.Optional(OPT_ROUNDTRIP_CONFIRM), bool)
+        _register(vol.Optional(OPT_ACCURACY_GATE_ENABLED), bool)
         # Advanced override (F3): extra secrets.json watch paths (one per line).
         if selector is not None:
             _register(

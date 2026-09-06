@@ -26,10 +26,12 @@ from typing import Any
 from ..const import (
     _EID_REFRESH_DEBOUNCE_S,
     DATA_EID_RESOLVER,
+    DEFAULT_ACCURACY_GATE_ENABLED,
     DEFAULT_MAX_PLAUSIBLE_SPEED_MPS,
     DEFAULT_ROUNDTRIP_CONFIRM,
     DEFAULT_SPEED_GATE_ENABLED,
     DOMAIN,
+    OPT_ACCURACY_GATE_ENABLED,
     OPT_ROUNDTRIP_CONFIRM,
     OPT_SPEED_GATE_ENABLED,
     ROUND_TRIP_ANCHOR_RADIUS_M,
@@ -49,16 +51,27 @@ from .helpers.cache import (
     should_clear_metadata_only_flag as _should_clear_metadata_only_flag_impl,
 )
 from .helpers.geo import (
+    ACCURACY_BUCKET_STATS,
+    ACCURACY_GATE_MIN_M,
+    ACCURACY_GATE_RATIO,
     DEFAULT_ACCURACY_FALLBACK_M,
     MIN_PHYSICAL_ACCURACY_M,
     is_reliable_fix,
+    location_age_seconds,
+    resolve_stale_threshold,
     select_display_row,
+)
+from .helpers.geo import (
+    accuracy_bucket as _accuracy_bucket_impl,
 )
 from .helpers.geo import (
     coerce_float as _coerce_float_impl,
 )
 from .helpers.geo import (
     haversine_distance as _haversine_distance_impl,
+)
+from .helpers.geo import (
+    is_valid_accuracy as _is_valid_accuracy,
 )
 from .helpers.subentry import normalize_epoch_seconds as _normalize_epoch_seconds
 
@@ -194,6 +207,75 @@ class CacheOperations(_MixinBase):
             cache[device_id] = dict(row)
         elif device_id not in cache:
             cache[device_id] = dict(row)
+
+    def _record_coarse_fix(self, device_id: str, row: Mapping[str, Any]) -> None:
+        """Remember a fix the accuracy gate discarded, as side information (#216).
+
+        A coarse fix is discarded as a *position* because publishing it would
+        move the tracker and, via the accuracy radius Home Assistant uses as the
+        zone tolerance, could report it as home. Its coarse information (the
+        city, roughly) is still the only thing we would have if no better fix
+        existed, so it is kept here and surfaced as ``coarse_*`` attributes
+        rather than thrown away. Deliberately NOT written into
+        ``_device_location_data``: nothing downstream may mistake it for the
+        published position.
+
+        Must be called BEFORE the gate returns False: the caller aborts the
+        whole payload on a False return (see the fusion call site), so a write
+        placed after it would never run. Lazily initialized via ``getattr``,
+        mirroring ``_record_last_good_location`` so coordinators built through
+        ``__new__`` (or partial test doubles) need no extra wiring. RAM-only.
+        """
+        store = getattr(self, "_device_coarse_fix", None)
+        if store is None:
+            store = {}
+            self._device_coarse_fix = store
+        store[device_id] = {
+            "latitude": row.get("latitude"),
+            "longitude": row.get("longitude"),
+            "accuracy": row.get("accuracy"),
+            "last_seen": row.get("last_seen"),
+        }
+
+    def count_accuracy_class(self, row: Mapping[str, Any]) -> None:
+        """Tally the REPORTED accuracy class of an incoming fix (#216).
+
+        The reject counter answers "how often did the gate fire"; it does not
+        answer "do 200 m and factor 4 sit in the right place". Only the
+        distribution answers that, and it has to be collected BEFORE the gate -
+        otherwise it never sees the discarded fixes, which are the interesting
+        half.
+
+        MUST be called on every path that feeds a fix into the fusion, and
+        exactly once per fix. There are three such entry points (the poll loop,
+        the manual locate and the FCM push through ``update_device_cache``);
+        the first two run the fusion themselves and mark the payload
+        ``_fusion_preapplied``, so ``update_device_cache`` deliberately counts
+        only when that marker is absent. ``tests/test_cache_accuracy_gate.py``
+        pins that every caller of ``_apply_weighted_location_fusion`` also
+        calls this, so a fourth entry point cannot silently skip it.
+
+        A fix whose accuracy is missing, non-numeric or carries Android's
+        no-accuracy sentinel (0.0, i.e. below ``MIN_PHYSICAL_ACCURACY_M``) is
+        NOT counted. ``accuracy_bucket`` alone would file the sentinel under
+        ``<10`` and skew the distribution towards precision - the exact opposite
+        of what this measurement is for. Those fixes are counted by
+        ``accuracy_sanitized_count`` instead.
+        """
+        raw = _coerce_float_impl(row.get("accuracy"))
+        if not _is_valid_accuracy(raw):
+            return
+        bucket = _accuracy_bucket_impl(raw)
+        if bucket is not None:
+            self.increment_stat(ACCURACY_BUCKET_STATS[bucket])
+
+    def get_coarse_fix(self, device_id: str) -> dict[str, Any] | None:
+        """Return the last fix the accuracy gate discarded, or ``None`` (#216)."""
+        store = getattr(self, "_device_coarse_fix", None)
+        if not store:
+            return None
+        row = store.get(device_id)
+        return dict(row) if row is not None else None
 
     def prime_device_location_cache(self, device_id: str, data: dict[str, Any]) -> None:
         """Prime the internal location cache with externally-provided data.
@@ -466,7 +548,13 @@ class CacheOperations(_MixinBase):
         report_hint = slot.get("_report_hint")
         fusion_preapplied = bool(slot.pop("_fusion_preapplied", False))
 
-        # Apply weighted fusion if not already done
+        # Apply weighted fusion if not already done. The accuracy class is
+        # tallied immediately before it (#216) and only on this path, because a
+        # payload that arrives pre-fused was already counted by whoever ran the
+        # fusion (poll loop, manual locate) - counting again here would double
+        # every fix from those two paths.
+        if not fusion_preapplied:
+            self.count_accuracy_class(slot)
         if not fusion_preapplied and not self._apply_weighted_location_fusion(
             device_id, slot
         ):
@@ -967,6 +1055,15 @@ class CacheOperations(_MixinBase):
             return DEFAULT_ROUNDTRIP_CONFIRM
         return bool(entry.options.get(OPT_ROUNDTRIP_CONFIRM, DEFAULT_ROUNDTRIP_CONFIRM))
 
+    def _accuracy_gate_enabled(self) -> bool:
+        """Return whether the comparative accuracy gate is active (#216)."""
+        entry = getattr(self, "config_entry", None)
+        if entry is None or getattr(entry, "options", None) is None:
+            return DEFAULT_ACCURACY_GATE_ENABLED
+        return bool(
+            entry.options.get(OPT_ACCURACY_GATE_ENABLED, DEFAULT_ACCURACY_GATE_ENABLED)
+        )
+
     def _apply_weighted_location_fusion(
         self,
         device_id: str,
@@ -1208,6 +1305,24 @@ class CacheOperations(_MixinBase):
                                         # then have burnt the anchor. Mark the intent
                                         # on new_data and pop the anchor only AFTER
                                         # the commit (mirrors _supersede handling).
+                                        # DECLARED LIMIT (#216): this return
+                                        # leaves the fusion above the accuracy
+                                        # gate, so a recovered fix is published
+                                        # with whatever radius it carries - a
+                                        # coarse one included. That is deliberate
+                                        # and not an oversight: the recovery has
+                                        # an INDEPENDENT confirmation of the
+                                        # place (the fix landed within
+                                        # ROUND_TRIP_ANCHOR_RADIUS_M of a
+                                        # remembered anchor), which is exactly
+                                        # what the accuracy gate lacks and
+                                        # substitutes with a comparison. Gating
+                                        # here would also burn the one-shot
+                                        # anchor for nothing and strand the
+                                        # tracker at the far position - the
+                                        # failure this hatch exists to prevent.
+                                        # Pinned by
+                                        # test_round_trip_recovery_outranks_the_accuracy_gate.
                                         new_data["_round_trip_anchor_consume"] = True
                                         self.increment_stat("round_trip_recoveries")
                                         _LOGGER.debug(
@@ -1300,6 +1415,82 @@ class CacheOperations(_MixinBase):
                                 "lon": existing_lon,
                                 "ts": new_ts,
                             }
+
+            # Comparative accuracy gate (#216, and the core of #211). The speed
+            # gate above asks whether the jump is physically possible; this one
+            # asks whether the incoming fix is good enough to displace what we
+            # already have. Both live in the clear-jump branch because only an
+            # overlap-free pair is a real displacement - where the circles
+            # overlap the inverse-square weighting already pulls a coarse fix
+            # down to near-zero influence (200**2/20**2 = 100x less weight).
+            #
+            # It is a COMPARISON, never an absolute cut-off. Its removed
+            # predecessor (``min_accuracy_threshold``, const default 100 m)
+            # discarded on the incoming radius alone and froze trackers; a fix
+            # with a wide radius still tells us the city, and without any fix we
+            # would not even know that. So nothing is discarded unless a better,
+            # reliable and still-fresh alternative is actually present.
+            #
+            # Deliberately NO own-report bypass, unlike the speed gate (its
+            # bypass is about cryptographic provenance, i.e. whether the report
+            # can be trusted). This gate is about physical uncertainty, and a
+            # phone reports ITS OWN position, not the tracker's: an own fix with
+            # a 1600 m radius is exactly as coarse as a foreign one.
+            #
+            # Staleness is read from the shared ``stale_threshold`` option, not
+            # from a second time constant, and it is the age against the wall
+            # clock - not the distance between the two report timestamps the
+            # speed gate uses. An unknown age counts as not-trustworthy, so the
+            # incoming fix wins.
+            #
+            # No round-trip anchor is seeded or consumed here (F-CODEX-6 keeps
+            # anchor provenance bound to the speed gate's one-shot semantics).
+            if (
+                self._accuracy_gate_enabled()
+                and new_acc_measured
+                and new_acc >= ACCURACY_GATE_MIN_M
+                and new_acc >= ACCURACY_GATE_RATIO * existing_acc
+                and is_reliable_fix(existing)
+            ):
+                existing_age = location_age_seconds(existing, time.time())
+                if existing_age is not None and existing_age <= resolve_stale_threshold(
+                    self
+                ):
+                    # Drop any round-trip anchor INTENT the branches above
+                    # pencilled onto this payload. Both are deferred markers
+                    # (F-CODEX-7): they are popped and applied only after the
+                    # payload commits, and this payload never commits - the
+                    # caller aborts on a False return - so leaving them behind
+                    # has no effect today. They are cleared anyway, because a
+                    # rejected payload carrying a live anchor intent is a trap
+                    # for the next person to touch this ordering, and because
+                    # E7 ("no anchor contact") should be true of the data, not
+                    # just of its consequences. ``_supersede_...`` can be set
+                    # here (an own clear jump this gate rejects); ``..._seed``
+                    # can be set by the speed gate's accept path just above.
+                    # ``..._consume`` is unreachable from here (that branch
+                    # returns True inside the speed gate) and is cleared only so
+                    # the statement covers every marker rather than a subset.
+                    new_data.pop("_supersede_round_trip_anchor", None)
+                    new_data.pop("_round_trip_anchor_seed", None)
+                    new_data.pop("_round_trip_anchor_consume", None)
+                    # Keep the coarse information before dropping the payload:
+                    # the caller aborts on False, so this must happen first.
+                    self._record_coarse_fix(device_id, new_data)
+                    self.increment_stat("accuracy_gate_rejects")
+                    _LOGGER.debug(
+                        "Accuracy gate rejected coarse fix %s: %.0fm vs cached "
+                        "%.0fm (>= %.0fx), %.0fm away, cached fix %.0fs old "
+                        "(<= %ss stale threshold)",
+                        device_id,
+                        new_acc,
+                        existing_acc,
+                        ACCURACY_GATE_RATIO,
+                        dist,
+                        existing_age,
+                        resolve_stale_threshold(self),
+                    )
+                    return False
             return True
 
         # Overlapping accuracy circles: fuse with inverse-square weighting

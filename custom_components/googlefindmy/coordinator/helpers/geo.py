@@ -48,6 +48,103 @@ DEFAULT_ACCURACY_FALLBACK = PRIVACY_ACCURACY_FALLBACK
 MIN_PHYSICAL_ACCURACY_M = MIN_VALID_ACCURACY
 DEFAULT_ACCURACY_FALLBACK_M = DEFAULT_ACCURACY_FALLBACK
 
+# ---------------------------------------------------------------------------
+# Accuracy gate thresholds (#216, core of #211)
+# ---------------------------------------------------------------------------
+# A coarse fix is discarded ONLY in comparison to a better, still-fresh one -
+# never on its own. Without any fix we would not even know the city, so an
+# absolute cut-off is the wrong shape (that was the removed predecessor
+# ``min_accuracy_threshold``).
+
+# Lower bound below which the gate never fires, in meters.
+#
+# Numerically equal to PRIVACY_ACCURACY_FALLBACK but deliberately NOT an alias:
+# the two answer different questions. PRIVACY_ACCURACY_FALLBACK answers "what
+# radius do we assume when none was reported"; this constant answers "above
+# which radius may a fix be discarded at all". Aliasing would silently move one
+# meaning whenever the other is tuned.
+#
+# Two independent groundings meet at the same magnitude:
+#   - House physics (see PRIVACY_ACCURACY_FALLBACK above): max Bluetooth range
+#     (~100 m) + GPS error margin.
+#   - Field measurement: the median REPORTED FMDN accuracy is 94-148 m and the
+#     mean 122-187 m (Boettger et al., "Okay Google, Where's My Tracker?",
+#     PoPETs 2025(4), Tab. 5+6), so 200 m sits above the normal case and leaves
+#     genuine reports untouched. Confirmed on this integration's own Home
+#     Assistant instance (10.4 days, ~30k fixes): no owner report exceeded
+#     176.5 m, so at 200 m the gate discarded none of them, while 100 m - the
+#     predecessor's default - would have discarded seven.
+ACCURACY_GATE_MIN_M = 200.0  # 200 meters
+
+# How much worse the incoming fix must be before it loses against the cached
+# one. Ratio, not an absolute delta: the reported radius is optimistic (the
+# mean TRUE deviation exceeded the reported one by an order of magnitude on one
+# measured route), and a comparison of two values from the same source stays
+# meaningful even when both are optimistic.
+#
+# Anchor: Google's own FMDN re-upload rule treats an accuracy improvement of
+# 50 % - i.e. factor 2 - as "notably better" (Boettger et al., sec. 4.2.1).
+# We deliberately double that, so we only discard on a difference twice as
+# pronounced as the one the vendor already considers remarkable. At factor 4
+# the inverse-square fusion weight of the incoming fix is already 16x lower.
+# Checked at its boundary against real data: the worst measured incident (an
+# 18.3 km jump) sits at ratio 4.3 - factor 4 catches it, factor 6 does not.
+ACCURACY_GATE_RATIO = 4.0
+
+
+# ---------------------------------------------------------------------------
+# Accuracy classification (privacy-hardened) and its counter names
+# ---------------------------------------------------------------------------
+# Lives here rather than in coordinator/main.py because both the diagnostics
+# list (main.py) and the cache write path (cache.py) classify, and main.py
+# imports cache.py - the reverse import would be a cycle. This is the SINGLE
+# classification site; nothing else may define accuracy classes.
+
+# Class name -> flat stats counter key. One table, so classes and counters
+# cannot drift apart: the counters are DERIVED from this mapping, never listed
+# a second time by hand.
+ACCURACY_BUCKET_STATS = {
+    "<10": "accuracy_bucket_lt10",
+    "10-50": "accuracy_bucket_10_50",
+    "50-200": "accuracy_bucket_50_200",
+    "200-500": "accuracy_bucket_200_500",
+    "500-2000": "accuracy_bucket_500_2000",
+    ">2000": "accuracy_bucket_gt2000",
+}
+
+
+def accuracy_bucket(accuracy_m: Any) -> str | None:
+    """Bucket a raw accuracy radius into a coarse, non-correlating class.
+
+    Half-open intervals: ``<10`` = [0,10), ``10-50`` = [10,50), ``50-200`` =
+    [50,200), ``200-500`` = [200,500), ``500-2000`` = [500,2000), ``>2000`` =
+    [2000, inf). ``None`` or a negative/non-numeric value collapses to ``None``
+    (a raw float would be re-identifying, POPETS'25).
+
+    The top class used to be a single ``>200`` covering everything from the
+    accuracy gate's lower bound to infinity, which hid exactly the range the
+    gate acts on. It is split at 500 m (the immediate tail of the measured
+    distribution; the maintainer's own 10-day sample tops out at 481 m) and at
+    2000 m (the point the fallback comment above already calls useless for
+    actually finding a tracker). ``BSkando#216`` reports 1600 m radii, i.e. in
+    the middle class - invisible under the old single bucket.
+    """
+    if not isinstance(accuracy_m, (int, float)) or isinstance(accuracy_m, bool):
+        return None
+    if accuracy_m < 0 or not math.isfinite(accuracy_m):
+        return None
+    if accuracy_m < 10:
+        return "<10"
+    if accuracy_m < 50:
+        return "10-50"
+    if accuracy_m < 200:
+        return "50-200"
+    if accuracy_m < 500:
+        return "200-500"
+    if accuracy_m < 2000:
+        return "500-2000"
+    return ">2000"
+
 
 # ---------------------------------------------------------------------------
 # Value Clamping

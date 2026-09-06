@@ -137,6 +137,11 @@ TO_REDACT: list[str] = [
     "latitude",
     "longitude",
     "altitude",
+    # The accuracy gate's coarse fix (#216) lives on the entity, never in this
+    # dump. Listed for the same defensive reason as the three above: no path
+    # writes it here today, and the net is spanned for tomorrow.
+    "coarse_latitude",
+    "coarse_longitude",
 ]
 
 # ---------------------------------------------------------------------------
@@ -719,8 +724,12 @@ async def async_get_config_entry_diagnostics(
         if reauth_reason_block is not None:
             coordinator_block["reauth_reason"] = reauth_reason_block
 
-        # Anonymized per-device telemetry (P1-3): opaque index plus seven coarse
-        # fields, no names/IDs/coordinates/keys. Resilient: [] on any failure.
+        # Anonymized per-device telemetry (P1-3): an opaque index plus coarse
+        # fields only, no names/IDs/coordinates/keys. The exact field set is
+        # owned by ``build_per_device_diagnostics`` and pinned by
+        # ``tests/test_diagnostics_p1_per_device.py``; deliberately not
+        # restated as a number here, because that number rots.
+        # Resilient: [] on any failure.
         try:
             builder = getattr(coordinator, "build_per_device_diagnostics", None)
             coordinator_block["devices"] = builder() if callable(builder) else []
