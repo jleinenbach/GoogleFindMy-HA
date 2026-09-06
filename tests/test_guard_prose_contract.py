@@ -27,9 +27,9 @@ drift; the regexes are the cheap half.
 Why extraction instead of a raw grep over the file: foreign-language text is legitimate
 *data* here. ``tests/test_translation_placeholders.py`` asserts against the German
 address form, and ``translations/*.json`` is multilingual by contract. Only separating
-prose from literals makes the rule machine-checkable at all. Measured over the 486
-Python files of the sweep set, this file excluded (see the counting unit further down):
-the prose arm flags 12 of 29625 prose units, while the same word list over raw file text additionally hits 11 occurrences in three further
+prose from literals makes the rule machine-checkable at all. Measured over the 500
+Python sources of the sweep set, this file excluded (see the counting unit further
+down): the prose arm flags 12 of 29932 prose units, while the same word list over raw text additionally hits 11 occurrences in three further
 files (``map_i18n.py``, ``test_map_i18n.py``, ``test_map_view_blocking_io.py``), every
 one of them translation data in a string literal.
 
@@ -39,8 +39,8 @@ Scope of the language arm: Python prose across the whole repository, not narrowe
 (measured), so there is no retrofit debate to avoid.
 
 Scope of the evidence arm: Python prose plus Markdown and workflow files, because a
-source is cited in documentation at least as often as in code. Measured over 535 files
-(486 Python, 49 Markdown and workflow): zero hits.
+source is cited in documentation at least as often as in code. Measured over 550 files
+(500 Python sources including type stubs, 50 Markdown and workflow): zero hits.
 
 Markdown is deliberately **out** of scope for the language arm, although the contract
 covers "documentation updates" too. ``AGENTS.md`` itself quotes the German Home
@@ -92,8 +92,15 @@ from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 
-# Directories the walk never descends into, mirroring [tool.ruff] extend-exclude in
-# pyproject.toml plus the usual generated and vendored trees. Pruning during the walk
+# Directories the walk never descends into: version control, environments and caches.
+#
+# Deliberately NOT here: ProtoDecoders and Auth/firebase_messaging/proto, although
+# [tool.ruff] extend-exclude lists both. Those directories hold generated bindings next
+# to hand-written modules (decoder.py, two __init__.py), and pruning the directory would
+# take the hand-written ones out of the sweep as well. The generated files are excluded
+# individually by suffix instead, see _GENERATED_SUFFIXES.
+#
+# Pruning during the walk
 # rather than filtering afterwards: the unpruned walk visits roughly 75k entries, nearly
 # all of them in .venv and the tool caches. Order of magnitude, not a pinned figure: the
 # number moves with every test run.
@@ -107,8 +114,6 @@ _EXCLUDED_DIRS = frozenset(
         "node_modules",
         "site-packages",
         "vendor",
-        "ProtoDecoders",
-        "proto",
         # build and tool caches; .pytest_cache/README.md was measured in the sweep
         # set before these were added, an untracked file the runner itself writes
         "__pycache__",
@@ -203,7 +208,7 @@ _GERMAN_MARKERS = frozenset(
 #
 # Counting unit for every number in this file: a PROSE UNIT is one docstring or one
 # comment token, and a hit is a unit containing the word. Measured with the project
-# interpreter over the sweep set MINUS THIS FILE (486 Python files, 29625 prose units
+# interpreter over the sweep set MINUS THIS FILE (500 Python sources, 29932 prose units
 # without it). Excluding this file is not cosmetic: its own comments name the words
 # below, so a figure that included it would move every time somebody edits this very
 # list, and a number that cannot survive its own file being touched is not a
@@ -214,10 +219,10 @@ _HOMOGRAPH_EXCLUSIONS = frozenset(
         # measured, ordinary English in this tree
         "also",  # 231
         "falls",  # 127, "falls back" / "falls through"
-        "probe",  # 109, plus script/connectivity_probe.py
+        "probe",  # 121, plus script/connectivity_probe.py
         "dies",  # 23, the English verb
         "der",  # 12, the DER encoding in the credential tests
-        "mit",  # 4, the MIT licence header
+        "mit",  # 5, the MIT licence header
         "wichtig",  # 1, the WICHTIG-2 ticket label, an identifier
         # measured at 0 today, kept out pre-emptively: each collides with an acronym
         # this domain really uses, exactly like der/DER above
@@ -286,7 +291,14 @@ LEGACY_ALLOWLIST: set[str] = {
 # source that a reader cannot open is not a source.
 AGENT_LOCAL_PATH_ALLOWLIST: set[str] = set()
 
-_PY_SUFFIXES = (".py",)
+# Python sources the language rule covers. Type stubs are Python sources too: eleven of
+# the nineteen tracked .pyi files are hand-written (gpsoauth.pyi, protobuf_typing.pyi and
+# the google/protobuf stubs), so leaving them out would be a silent hole.
+_PY_SUFFIXES = (".py", ".pyi")
+
+# Generated protobuf output, excluded by file rather than by directory so that the
+# hand-written modules beside it stay in the sweep.
+_GENERATED_SUFFIXES = ("_pb2.py", "_pb2.pyi")
 _TEXT_SUFFIXES = (".md", ".yml", ".yaml")
 
 Offenders = dict[str, list[tuple[int, list[str]]]]
@@ -298,7 +310,7 @@ def _iter_files(root: Path, suffixes: tuple[str, ...]) -> list[tuple[Path, str]]
     for dirpath, dirnames, filenames in os.walk(root):
         dirnames[:] = sorted(d for d in dirnames if d not in _EXCLUDED_DIRS)
         for name in sorted(filenames):
-            if not name.endswith(suffixes) or name.endswith("_pb2.py"):
+            if not name.endswith(suffixes) or name.endswith(_GENERATED_SUFFIXES):
                 continue
             path = Path(dirpath) / name
             found.append((path, path.relative_to(root).as_posix()))
@@ -788,10 +800,34 @@ def test_sweep_finds_a_planted_agent_path_in_a_comment(tmp_path: Path) -> None:
 
 
 def test_sweep_skips_generated_protobuf_bindings(tmp_path: Path) -> None:
-    """Generated bindings are excluded by suffix, and that exclusion is load-bearing."""
-    generated = tmp_path / "x_pb2.py"
-    generated.write_text(_GERMAN_DOCSTRING_SAMPLE, encoding="utf-8")
+    """Generated bindings are excluded by suffix, both source and stub."""
+    (tmp_path / "x_pb2.py").write_text(_GERMAN_DOCSTRING_SAMPLE, encoding="utf-8")
+    (tmp_path / "x_pb2.pyi").write_text(_GERMAN_DOCSTRING_SAMPLE, encoding="utf-8")
     assert not scan_tree(tmp_path)[0]
+
+
+def test_sweep_covers_hand_written_files_beside_generated_ones(tmp_path: Path) -> None:
+    """Excluding by file, not by directory, keeps the hand-written neighbours in.
+
+    ProtoDecoders holds decoder.py and two __init__.py next to its generated bindings.
+    Pruning the directory, as [tool.ruff] extend-exclude does, would take those out of
+    the sweep and leave an active production module unguarded.
+    """
+    proto_dir = tmp_path / "ProtoDecoders"
+    proto_dir.mkdir()
+    (proto_dir / "generated_pb2.py").write_text(
+        _GERMAN_DOCSTRING_SAMPLE, encoding="utf-8"
+    )
+    (proto_dir / "decoder.py").write_text(_GERMAN_DOCSTRING_SAMPLE, encoding="utf-8")
+    offenders = scan_tree(tmp_path)[0]
+    assert "ProtoDecoders/decoder.py" in offenders
+    assert "ProtoDecoders/generated_pb2.py" not in offenders
+
+
+def test_sweep_covers_hand_written_type_stubs(tmp_path: Path) -> None:
+    """Type stubs are Python sources and carry prose the contract governs."""
+    (tmp_path / "vendorlib.pyi").write_text(_GERMAN_DOCSTRING_SAMPLE, encoding="utf-8")
+    assert "vendorlib.pyi" in scan_tree(tmp_path)[0]
 
 
 def test_excluded_words_do_not_flag_english_prose() -> None:
