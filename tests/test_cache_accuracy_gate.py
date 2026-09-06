@@ -23,10 +23,11 @@ lookup through ``resolve_stale_threshold``.
 PROVENANCE OF THE NUMBERS in ``FIELD_CASES``: these are not invented. They are
 the eleven fixes the planned rule would have discarded on the maintainer's own
 production Home Assistant instance, extracted from the recorder database over
-10.4 days and ~30k deduplicated tracker events on 2026-09-06. Erhebungsweg,
-Vorbehalte und Rohwerte:
-``memory/projects/googlefindmy-upstream-issues/quellen/ha_feldmessung_2026-09-06.md``.
-Without that pointer these are just numbers again in six months.
+10.4 days and ~30k deduplicated tracker events on 2026-09-06. Collection method,
+caveats and the raw rows are committed alongside them in
+``docs/ACCURACY_GATE_FIELD_DATA.md``, in redacted form (stable device labels, no
+absolute coordinates). Without that record these are just numbers again in six
+months.
 """
 
 from __future__ import annotations
