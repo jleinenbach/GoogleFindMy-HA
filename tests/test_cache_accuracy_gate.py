@@ -1096,17 +1096,45 @@ def test_the_push_fallback_write_strips_the_marker() -> None:
         def __init__(self) -> None:
             self._device_location_data: dict[str, Any] = {}
 
+    from types import SimpleNamespace
+
+    class _Filter:
+        @staticmethod
+        def should_filter_detection(_dev: str, _name: str) -> tuple[bool, dict]:
+            return False, {"latitude": HOME[0], "longitude": HOME[1], "radius": 400.0}
+
     receiver = FcmReceiverHA.__new__(FcmReceiverHA)
     coordinator = _Bare()
-    payload = {"accuracy": 400.0, "_accuracy_substituted": True}
+    # The payload comes from the real prepare step, so every marker that step
+    # sets is in play - including ones added later.
+    prep_coordinator = SimpleNamespace(
+        count_accuracy_class=lambda _row: None,
+        config_entry=SimpleNamespace(
+            runtime_data=SimpleNamespace(google_home_filter=_Filter())
+        ),
+    )
+    payload = FcmReceiverHA._prepare_coordinator_payload(
+        receiver,
+        prep_coordinator,
+        ("acct", "device-id"),
+        {"accuracy": 1600.0, "semantic_name": "Home", "latitude": FAR[0]},
+    )
+    assert payload is not None
+    assert payload["_accuracy_counted"] is True
+    assert payload["_accuracy_substituted"] is True
 
     FcmReceiverHA._write_coordinator_payload(
         receiver, coordinator, "device-id", payload
     )
 
     cached = coordinator._device_location_data["device-id"]
-    assert "_accuracy_substituted" not in cached
     assert cached["accuracy"] == 400.0
+    # Not "the two markers we know today": any transient key that survives here
+    # becomes an entity attribute. Written as a property so the next marker is
+    # covered by construction - the previous version named the keys and missed
+    # ``_accuracy_counted`` when it was added one commit earlier.
+    leaked = [key for key in cached if key.startswith("_")]
+    assert not leaked, f"transient markers reached the cached row: {leaked}"
 
 
 def test_a_substituted_home_radius_is_not_weighed_as_a_measurement() -> None:
