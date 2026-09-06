@@ -1313,7 +1313,7 @@ def test_dockerignore_behaviourally_excludes_files_dropped_under_docker_login() 
     # Discriminating control: the previous rules (bare `!docker-login`, only
     # `docker-login/data` re-excluded) LEAK a file dropped directly under
     # docker-login/. This proves the matcher -- and thus the assertions above --
-    # actually detect the regression the fix removes (mutation gegenprobe baked in).
+    # actually detect the regression the fix removes (mutation counter-check baked in).
     old_rules = ["*", "!requirements.txt", "!docker-login", "docker-login/data"]
     assert not _docker_context_excluded(old_rules, "docker-login/secrets.json"), (
         "sanity: the old denylist rules must (wrongly) keep docker-login/secrets.json "

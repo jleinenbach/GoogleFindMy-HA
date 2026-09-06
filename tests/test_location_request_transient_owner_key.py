@@ -118,10 +118,10 @@ async def test_transient_owner_key_error_reaches_ctx_error_at_debug(
 
     await _drive_callback(ctx)
 
-    # SOLL (RED today): the transient type survives to the awaiting coroutine.
+    # EXPECTED (RED today): the transient type survives to the awaiting coroutine.
     assert isinstance(ctx.error, OwnerKeyLookupTransientError)
 
-    # SOLL (RED today): no ERROR record for a transient; severity is DEBUG.
+    # EXPECTED (RED today): no ERROR record for a transient; severity is DEBUG.
     error_records = [rec for rec in caplog.records if rec.levelno >= logging.ERROR]
     assert not error_records, (
         "transient owner-key failure must not be logged at ERROR; "

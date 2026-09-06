@@ -525,7 +525,7 @@ class TestIsPollCycleDue:
         min_poll_interval floor (hard_limit_passed=True) but below the chosen
         cadence, so the poll must NOT fire. Reverting the fix
         (dropping ``and elapsed >= effective_interval``) flips this to True,
-        which keeps the mutation gegenprobe sharp.
+        which keeps the mutation counter-check sharp.
         """
         result = is_poll_cycle_due(
             elapsed=100.0,
