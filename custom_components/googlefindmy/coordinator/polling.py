@@ -73,7 +73,11 @@ from ..SpotApi.GetEidInfoForE2eeDevices.get_eid_info_request import (
 )
 from ..SpotApi.spot_request import SpotAuthPermanentError
 from ._mixin_typing import _MixinBase
-from .helpers.cache import carry_reused_accuracy, substitute_zone_accuracy
+from .helpers.cache import (
+    carry_reused_accuracy,
+    strip_transient_keys,
+    substitute_zone_accuracy,
+)
 from .helpers.cache import sanitize_decoder_row as _sanitize_decoder_row
 from .helpers.stats import ApiStatus, CryptoStatus, FcmStatus, StatusSnapshot
 from .helpers.subentry import normalize_epoch_seconds as _normalize_epoch_seconds
@@ -2196,24 +2200,17 @@ class PollingOperations(_MixinBase):
                         if helper is _CoordinatorClass.update_device_cache:
                             self.update_device_cache(dev_id, location, source="poll")
                         else:
-                            location.pop("_fusion_preapplied", None)
-                            # F-1: strip the supersede marker so it can never leak
-                            # into the cached row. This test-double fallback commits
-                            # directly and does NOT run the post-commit supersede
-                            # action; production always routes through
-                            # update_device_cache, which does.
-                            location.pop("_supersede_round_trip_anchor", None)
-                            # Fund A: same hygiene for the deferred round-trip anchor
-                            # consume/seed markers. Semantic divergence vs. the real
-                            # update_device_cache path: production pops AND applies
-                            # these post-commit (consume/seed the anchor); this
-                            # test-double fallback only strips them so they cannot
-                            # leak into the cached row, and intentionally performs no
-                            # anchor mutation.
-                            location.pop("_round_trip_anchor_seed", None)
-                            location.pop("_round_trip_anchor_consume", None)
-                            location.pop("_accuracy_substituted", None)
-                            location.pop("_report_hint", None)
+                            # Strip EVERY transient marker, not a list of the
+                            # ones that exist today: F-1 (supersede), Fund A
+                            # (the deferred anchor seed/consume) and the two
+                            # accuracy markers all arrived one at a time, and
+                            # each time the list here was correct until the next
+                            # one was added. Semantic divergence vs. the real
+                            # update_device_cache path stays as documented:
+                            # production pops AND applies the anchor intents
+                            # post-commit, this test-double fallback only strips
+                            # them and intentionally performs no anchor mutation.
+                            strip_transient_keys(location)
                             location.setdefault("last_updated", wall_now)
                             merged_location = self._merge_with_existing_cache_row(
                                 dev_id, location

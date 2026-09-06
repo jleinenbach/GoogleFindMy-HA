@@ -86,6 +86,7 @@ from custom_components.googlefindmy.Auth.firebase_messaging.fcmregister import (
     FcmRegisterHTTPError,
 )
 from custom_components.googlefindmy.coordinator.helpers.cache import (
+    strip_transient_keys,
     substitute_zone_accuracy,
 )
 from custom_components.googlefindmy.exceptions import FatalRegistrationError
@@ -2824,18 +2825,9 @@ class FcmReceiverHA:
             return True
 
         try:
-            # Strip EVERY transient marker, not the two that exist today.
-            # ``_prepare_coordinator_payload`` adds ``_accuracy_counted`` and
-            # ``_accuracy_substituted``; the normal path pops each one in
-            # ``update_device_cache`` because it USES the value, this fallback
-            # only has to make sure none of them is persisted. Naming them
-            # individually here means the next marker leaks into the cached row
-            # and from there into the entity attributes - which is exactly how
-            # ``_accuracy_counted`` slipped through when the second marker was
-            # added. The underscore prefix is the project's own convention for
-            # "transient", so it is the right predicate.
-            for key in [k for k in payload if k.startswith("_")]:
-                payload.pop(key, None)
+            # Shared with the poll cycle's direct-write fallback, which had the
+            # same leak: rationale in ``strip_transient_keys``.
+            strip_transient_keys(payload)
             coordinator._device_location_data[device_id] = payload  # noqa: SLF001
             _LOGGER.debug(
                 "Fallback: wrote to coordinator._device_location_data directly"

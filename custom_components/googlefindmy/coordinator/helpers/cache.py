@@ -367,6 +367,24 @@ def normalize_location_fields(
     return result
 
 
+def strip_transient_keys(row: dict[str, Any]) -> None:
+    """Remove every transient marker from a row about to be cached.
+
+    Two direct-write fallbacks exist (the poll cycle's test-double branch and
+    the push receiver's), and neither CONSUMES a marker the way
+    ``update_device_cache`` does - they only have to keep them out of the cache,
+    from where they would surface as entity attributes.
+
+    Naming the markers individually is what failed twice: each list was correct
+    when it was written and wrong as soon as a marker was added
+    (``_accuracy_counted`` leaked through both fallbacks that way). The leading
+    underscore is this project's own convention for a transient row key, so it
+    is the predicate rather than a list that has to be maintained.
+    """
+    for key in [k for k in row if k.startswith("_")]:
+        row.pop(key, None)
+
+
 def substitute_zone_accuracy(row: dict[str, Any], radius: float) -> None:
     """Put a ZONE radius into ``accuracy`` and say that it is one.
 
