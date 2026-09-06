@@ -1099,9 +1099,9 @@ First, the guard reads **prose units**, not raw file text: module, class and fun
 docstrings via `ast.get_docstring`, comments via `tokenize`. String literals are out of
 scope on purpose, because foreign language is legitimate data here
 (`tests/test_translation_placeholders.py` asserts against the German address form,
-`translations/*.json` is multilingual by contract). Measured over the 500 Python sources
+`translations/*.json` is multilingual by contract). Measured over the 503 Python sources
 of the sweep set (`.py` and `.pyi`), counting the guard file itself out because its own
-comments name the words: the prose arm flags 12 of 29932 prose units, while the same word list over raw
+comments name the words: the prose arm flags 12 of 29992 prose units, while the same word list over raw
 file text additionally hits 11 occurrences in three further files, every one of them
 translation data in a string literal.
 
@@ -1124,14 +1124,16 @@ positive control because three nouns of one concrete incident had been added to 
 The evidence arm covers Python prose plus Markdown and workflow files and matches paths
 under an agent's private memory or home configuration. `/app/` is deliberately not part
 of the pattern: both measured occurrences were `/app/requirements.txt`, this project's
-own container path. Measured over 550 files (500 Python sources, 50
+own container path. Measured over 553 files (503 Python sources, 50
 Markdown and workflow): zero hits, so `AGENT_LOCAL_PATH_ALLOWLIST` is empty and should
 stay so.
 
-Excluded by file, not by directory: `ProtoDecoders` and `Auth/firebase_messaging/proto`
-hold hand-written modules next to their generated bindings, and `[tool.ruff]
-extend-exclude` prunes the whole directory. The sweep drops `*_pb2.py` and `*_pb2.pyi`
-instead, so `decoder.py` and the two `__init__.py` stay covered.
+Excluded by file, not by directory: `ProtoDecoders`, `Auth/firebase_messaging/proto` and
+`vendor` all hold tracked, hand-written Python next to generated or imported code, and
+pruning those directories hid one such file per review round. The sweep drops `*_pb2.py`
+and `*_pb2.pyi` by suffix instead, and `test_every_tracked_python_source_is_swept` holds
+the sweep set against `git ls-files` so the next hidden file fails a test rather than
+waiting for a reviewer.
 
 The language arm, by contrast, stops at Python. `AGENTS.md` itself quotes the German
 translation guideline and would need an allowlist entry from day one, and an allowlist

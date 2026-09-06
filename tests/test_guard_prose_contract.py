@@ -27,9 +27,9 @@ drift; the regexes are the cheap half.
 Why extraction instead of a raw grep over the file: foreign-language text is legitimate
 *data* here. ``tests/test_translation_placeholders.py`` asserts against the German
 address form, and ``translations/*.json`` is multilingual by contract. Only separating
-prose from literals makes the rule machine-checkable at all. Measured over the 500
+prose from literals makes the rule machine-checkable at all. Measured over the 503
 Python sources of the sweep set, this file excluded (see the counting unit further
-down): the prose arm flags 12 of 29932 prose units, while the same word list over raw text additionally hits 11 occurrences in three further
+down): the prose arm flags 12 of 29992 prose units, while the same word list over raw text additionally hits 11 occurrences in three further
 files (``map_i18n.py``, ``test_map_i18n.py``, ``test_map_view_blocking_io.py``), every
 one of them translation data in a string literal.
 
@@ -39,8 +39,8 @@ Scope of the language arm: Python prose across the whole repository, not narrowe
 (measured), so there is no retrofit debate to avoid.
 
 Scope of the evidence arm: Python prose plus Markdown and workflow files, because a
-source is cited in documentation at least as often as in code. Measured over 550 files
-(500 Python sources including type stubs, 50 Markdown and workflow): zero hits.
+source is cited in documentation at least as often as in code. Measured over 553 files
+(503 Python sources including type stubs, 50 Markdown and workflow): zero hits.
 
 Markdown is deliberately **out** of scope for the language arm, although the contract
 covers "documentation updates" too. ``AGENTS.md`` itself quotes the German Home
@@ -87,6 +87,7 @@ import functools
 import io
 import os
 import re
+import subprocess
 import tokenize
 from pathlib import Path
 
@@ -94,11 +95,14 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 
 # Directories the walk never descends into: version control, environments and caches.
 #
-# Deliberately NOT here: ProtoDecoders and Auth/firebase_messaging/proto, although
-# [tool.ruff] extend-exclude lists both. Those directories hold generated bindings next
-# to hand-written modules (decoder.py, two __init__.py), and pruning the directory would
-# take the hand-written ones out of the sweep as well. The generated files are excluded
-# individually by suffix instead, see _GENERATED_SUFFIXES.
+# Deliberately NOT here: ProtoDecoders, Auth/firebase_messaging/proto and vendor,
+# although [tool.ruff] extend-exclude lists the first two. All three hold hand-written,
+# tracked Python next to generated or imported code: decoder.py and two __init__.py in
+# ProtoDecoders, and vendor/openlocationcode/openlocationcode.py, which this repository
+# modifies in tree. Pruning by directory took them out of the sweep three times in a
+# row during review, which is why the exclusion is by file suffix now and why
+# test_every_tracked_python_source_is_swept holds the whole thing to git ls-files
+# rather than to anybody's judgement about which directory is "generated".
 #
 # Pruning during the walk
 # rather than filtering afterwards: the unpruned walk visits roughly 75k entries, nearly
@@ -113,7 +117,6 @@ _EXCLUDED_DIRS = frozenset(
         "env",
         "node_modules",
         "site-packages",
-        "vendor",
         # build and tool caches; .pytest_cache/README.md was measured in the sweep
         # set before these were added, an untracked file the runner itself writes
         "__pycache__",
@@ -208,7 +211,7 @@ _GERMAN_MARKERS = frozenset(
 #
 # Counting unit for every number in this file: a PROSE UNIT is one docstring or one
 # comment token, and a hit is a unit containing the word. Measured with the project
-# interpreter over the sweep set MINUS THIS FILE (500 Python sources, 29932 prose units
+# interpreter over the sweep set MINUS THIS FILE (503 Python sources, 29992 prose units
 # without it). Excluding this file is not cosmetic: its own comments name the words
 # below, so a figure that included it would move every time somebody edits this very
 # list, and a number that cannot survive its own file being touched is not a
@@ -476,6 +479,40 @@ def test_every_swept_file_parses() -> None:
 
 
 # --- allowlist hygiene ------------------------------------------------------
+
+
+def test_every_tracked_python_source_is_swept() -> None:
+    """The sweep must cover every tracked Python source except generated bindings.
+
+    Three review rounds each found one more hand-written file hidden behind a directory
+    exclusion (decoder.py, the vendor __init__, then openlocationcode.py). Fixing them
+    one at a time invites a fourth, so the coverage itself is asserted here: whatever is
+    tracked and not generated has to be in the sweep set. This is the structural answer
+    to that class, not another special case.
+    """
+    result = subprocess.run(
+        ["git", "ls-files", "-z", "*.py", "*.pyi"],
+        cwd=_REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise AssertionError(
+            "git ls-files failed, so this test measured nothing. A silent skip here "
+            f"would look identical to full coverage: {result.stderr.strip()}"
+        )
+    tracked = {name for name in result.stdout.split("\0") if name}
+    assert tracked, "git ls-files returned no Python sources, which cannot be right"
+    swept = {rel for _, rel in _iter_files(_REPO_ROOT, _PY_SUFFIXES)}
+    unswept = sorted(
+        name for name in tracked - swept if not name.endswith(_GENERATED_SUFFIXES)
+    )
+    assert not unswept, (
+        "Tracked, hand-written Python sources outside the sweep. Prose in them can "
+        "violate the contract with this guard green; exclude generated files by suffix "
+        f"rather than pruning their directory: {unswept}"
+    )
 
 
 def test_language_allowlist_has_no_stale_entries() -> None:
@@ -853,8 +890,12 @@ def test_subtraction_survives_a_word_in_both_lists() -> None:
 
 
 def test_sweep_skips_excluded_directories(tmp_path: Path) -> None:
-    """A violation inside an excluded tree must not be reported."""
-    hidden = tmp_path / "vendor" / "mod.py"
+    """A violation inside an excluded tree must not be reported.
+
+    Uses .venv rather than vendor: vendor was removed from the exclusion list because it
+    holds tracked, hand-written Python in this repository.
+    """
+    hidden = tmp_path / ".venv" / "mod.py"
     hidden.parent.mkdir(parents=True)
     hidden.write_text(_GERMAN_DOCSTRING_SAMPLE, encoding="utf-8")
     assert not scan_tree(tmp_path)[0]
