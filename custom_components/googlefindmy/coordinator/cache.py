@@ -365,6 +365,31 @@ class CacheOperations(_MixinBase):
                 row.get("last_seen"),
             )
             return
+        # The same forward-order rule against the PUBLISHED row. The store check
+        # below only compares with an earlier coarse fix, so on the very first
+        # rejection a delayed report older than the currently published precise
+        # position would be retained and shown as current side information until
+        # it aged out. ``_is_significant_update`` would have dropped it; a
+        # rejected payload never reaches it, so the rule is restated here.
+        # A published stamp in the future is skipped for the same reason as
+        # below: it is corrupt, not authoritative.
+        published = (getattr(self, "_device_location_data", None) or {}).get(device_id)
+        if published:
+            published_seen = _normalize_epoch_seconds(published.get("last_seen"))
+            if (
+                published_seen is not None
+                and published_seen <= time.time()
+                and seen < published_seen
+            ):
+                _LOGGER.debug(
+                    "Not retaining coarse fix for %s: timestamp %s predates the "
+                    "published row at %s",
+                    device_id,
+                    seen,
+                    published_seen,
+                )
+                return
+
         store = getattr(self, "_device_coarse_fix", None)
         # Never let an older report replace a newer one. ``_is_significant_update``
         # enforces forward order for the published row, but a rejected payload

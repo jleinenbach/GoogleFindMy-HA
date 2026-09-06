@@ -367,6 +367,14 @@ class LocateOperations(_MixinBase):
                         is_replay = True
 
                 location_data["is_replayed"] = is_replay
+
+                # Tally the REPORTED accuracy class here (#216); see the identical
+                # call in the poll loop for the full reasoning. Same position for
+                # the same two reasons: before the fusion, which may reject and
+                # return, and before any substitution of the value (semantic
+                # mapping, Google-Home filter, semantic-only preserve).
+                self.count_accuracy_class(location_data)
+
                 mapping_applied = self._apply_semantic_mapping(location_data)
 
                 # --- Parity with polling path: Google Home semantic spam filter --------
@@ -485,10 +493,6 @@ class LocateOperations(_MixinBase):
 
                 # Sanitize invariants + derive labels before significance gating
                 slot = _sanitize_decoder_row(slot)
-
-                # Tally the accuracy class BEFORE the fusion (#216); see the
-                # identical call in the poll loop for the reasoning.
-                self.count_accuracy_class(slot)
 
                 if not self._apply_weighted_location_fusion(device_id, slot):
                     return {}

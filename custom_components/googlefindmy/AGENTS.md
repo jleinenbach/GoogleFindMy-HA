@@ -93,7 +93,11 @@ Two situations look alike in the poll loop and must not be merged.
 
 *Semantic-only responses* (no coordinates, but a `semantic_name`) preserve the previous coordinates and accuracy via
 `should_preserve_previous_coordinates` and `carry_reused_accuracy`, and they do commit the new `last_seen`. This keeps map pins
-stable while reflecting that the device recently reported.
+stable while reflecting that the device recently reported. Because the reused value is indistinguishable from a fresh one
+downstream, `count_accuracy_class` must run BEFORE this and before every other accuracy substitution (`_apply_semantic_mapping`,
+the Google-Home filter); its distribution answers "what do incoming fixes report", and a response reporting no accuracy of its own
+does not belong in it. Order pinned by
+`tests/test_cache_accuracy_gate.py::test_the_tally_runs_before_any_accuracy_substitution`.
 
 *Coarse fixes* are decided by the accuracy gate, `coordinator/cache.py::_accuracy_gate_rejects` (#216). It fires only where the
 two accuracy circles do NOT overlap (`dist > radius_sum`) and only when all of these hold: the option is on, the incoming accuracy

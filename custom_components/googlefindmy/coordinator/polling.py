@@ -2008,6 +2008,23 @@ class PollingOperations(_MixinBase):
                                 is_replay = True
 
                         location["is_replayed"] = is_replay
+
+                        # Tally the REPORTED accuracy class here (#216), which is
+                        # before the fusion AND before anything can substitute the
+                        # value. Before the fusion because the gate may reject and
+                        # this loop then skips to the next device, so a counter
+                        # after it would miss exactly the coarse fixes the
+                        # distribution is for. Before the substitutions because
+                        # ``_apply_semantic_mapping`` writes an anchor radius and
+                        # the two preserve-sites below reuse the CACHED accuracy
+                        # via ``carry_reused_accuracy``: counted after either, a
+                        # semantic-only response would enter the distribution as a
+                        # freshly reported measurement and pull it towards whatever
+                        # happened to be cached. This distribution answers "what do
+                        # incoming fixes report", so a response that reports no
+                        # accuracy of its own must not appear in it at all.
+                        self.count_accuracy_class(location)
+
                         mapping_applied = self._apply_semantic_mapping(location)
 
                         # --- Apply Google Home filter (keep parity with FCM push path) ---
@@ -2142,12 +2159,6 @@ class PollingOperations(_MixinBase):
 
                         # Sanitize invariants + enrich fields (label, utc-string)
                         location = _sanitize_decoder_row(location)
-
-                        # Tally the accuracy class BEFORE the fusion (#216): the
-                        # gate may reject below and this loop then skips straight
-                        # to the next device, so a counter after it would miss
-                        # exactly the coarse fixes the distribution is for.
-                        self.count_accuracy_class(location)
 
                         if not self._apply_weighted_location_fusion(dev_id, location):
                             continue

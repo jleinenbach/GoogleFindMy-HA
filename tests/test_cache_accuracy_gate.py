@@ -1037,8 +1037,10 @@ def test_coarse_fix_never_moves_backwards_in_time() -> None:
     kept = coord.get_coarse_fix("dev")
     assert kept is not None
 
+    # Older than the retained one, but still NEWER than the published row, so
+    # this case measures the store ordering and not the published-row guard.
     delayed = _incoming(acc=1600.0, lat=FAR[0] + 0.01)
-    delayed["last_seen"] = now - 5000
+    delayed["last_seen"] = now - 200
     assert _fuse(coord, delayed) is False
     still = coord.get_coarse_fix("dev")
     assert still is not None
@@ -1298,3 +1300,67 @@ def test_a_precise_fix_still_leaves_a_trusted_anchor() -> None:
     coord = _coord(_trusted())
     assert _fuse(coord, _incoming(acc=20.0)) is True
     assert _rejects(coord) == 0
+
+
+def test_a_report_older_than_the_published_row_is_not_retained() -> None:
+    """A delayed coarse report must not pose as current side information.
+
+    The store ordering next door only compares with an EARLIER coarse fix, so on
+    the very first rejection there is nothing to compare against. Without this
+    guard a report predating the published precise position would be shown as
+    the current city until it aged out - and ``_is_significant_update``, which
+    would have dropped it, is exactly what a rejected payload never reaches.
+    """
+    coord = _coord(_existing(acc=20.0, age_s=60))
+    delayed = _incoming(acc=1600.0)
+    delayed["last_seen"] = _now() - 600  # older than the published row
+
+    assert _fuse(coord, delayed) is False
+    # The gate still fired and still counted - only the retention is refused.
+    assert _rejects(coord) == 1
+    assert coord.get_coarse_fix("dev") is None
+
+    # A report NEWER than the published row is retained, so the guard is not
+    # simply refusing everything.
+    fresh = _incoming(acc=1600.0)
+    assert _fuse(coord, fresh) is False
+    assert coord.get_coarse_fix("dev") is not None
+
+
+def test_the_tally_runs_before_any_accuracy_substitution() -> None:
+    """Structural guard: nothing may rewrite ``accuracy`` before it is counted.
+
+    Three sites overwrite the reported accuracy on the way in - the semantic
+    mapping (an anchor radius), the Google-Home filter and the semantic-only
+    preserve (both reuse the CACHED value via ``carry_reused_accuracy``).
+    Counted after any of them, a response that reports no accuracy of its own
+    enters the distribution as a freshly reported measurement and pulls it
+    towards whatever happened to be cached - and this distribution is what the
+    gate's thresholds will later be re-tuned against.
+
+    A source-order check, and named as such: it cannot prove the values, only
+    that no substitution precedes the tally in the two files that own an entry
+    point. The behavioural half is
+    ``test_sentinel_accuracy_is_not_counted_as_the_finest_class``.
+    """
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent / "custom_components" / "googlefindmy"
+    substitutions = (
+        "carry_reused_accuracy(",
+        "_apply_semantic_mapping(",
+    )
+    checked = 0
+    for rel in ("coordinator/polling.py", "coordinator/locate.py"):
+        text = (root / rel).read_text(encoding="utf-8")
+        tally = text.index("count_accuracy_class(")
+        for needle in substitutions:
+            first = text.find(needle)
+            if first == -1:
+                continue
+            checked += 1
+            assert tally < first, (
+                f"{rel}: {needle} runs at {first} before the tally at {tally}; "
+                "the distribution would count a substituted accuracy as reported"
+            )
+    assert checked >= 3, f"guard would be vacuous, only {checked} sites compared"
