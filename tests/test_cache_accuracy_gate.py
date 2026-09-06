@@ -1434,3 +1434,64 @@ def test_the_tally_runs_before_any_accuracy_substitution() -> None:
                 "the distribution would count a substituted accuracy as reported"
             )
     assert checked >= 4, f"guard would be vacuous, only {checked} sites compared"
+
+
+def test_the_push_path_counts_before_the_filter_substitutes() -> None:
+    """The push tally sees the REPORTED radius, not the filter's.
+
+    The source-order guard above only proves the call sits ahead of the
+    substitution; this proves it is reached and what it is handed. The Google
+    Home filter replaces the accuracy with its configured radius before the
+    coordinator is ever entered, so a class counted downstream would describe
+    the filter's geometry.
+    """
+    from custom_components.googlefindmy.Auth.fcm_receiver_ha import FcmReceiverHA
+
+    seen: list[Any] = []
+
+    class _Coord:
+        def count_accuracy_class(self, row: dict[str, Any]) -> None:
+            seen.append(row.get("accuracy"))
+
+    class _Filter:
+        @staticmethod
+        def should_filter_detection(_dev: str, _name: str) -> tuple[bool, dict]:
+            return False, {"latitude": HOME[0], "longitude": HOME[1], "radius": 50.0}
+
+    # The filter is resolved as coordinator.config_entry.runtime_data
+    # .google_home_filter, so the double has to carry that whole chain.
+    from types import SimpleNamespace
+
+    receiver = FcmReceiverHA.__new__(FcmReceiverHA)
+    coordinator = _Coord()
+    coordinator.config_entry = SimpleNamespace(  # type: ignore[attr-defined]
+        runtime_data=SimpleNamespace(google_home_filter=_Filter())
+    )
+
+    out = FcmReceiverHA._prepare_coordinator_payload(
+        receiver,
+        coordinator,
+        ("acct", "device-id"),
+        {"accuracy": 1600.0, "semantic_name": "Home", "latitude": FAR[0]},
+    )
+
+    assert out is not None
+    assert seen == [1600.0], "the tally must see the reported radius"
+    assert out["accuracy"] == 50.0, "the substitution must still happen"
+    assert out["_accuracy_counted"] is True
+
+
+def test_the_push_path_survives_a_coordinator_without_the_tally() -> None:
+    """An older or partial coordinator must not break the push path."""
+    from custom_components.googlefindmy.Auth.fcm_receiver_ha import FcmReceiverHA
+
+    receiver = FcmReceiverHA.__new__(FcmReceiverHA)
+
+    class _Bare:
+        pass
+
+    out = FcmReceiverHA._prepare_coordinator_payload(
+        receiver, _Bare(), ("acct", "device-id"), {"accuracy": 1600.0}
+    )
+    assert out is not None
+    assert "_accuracy_counted" not in out
