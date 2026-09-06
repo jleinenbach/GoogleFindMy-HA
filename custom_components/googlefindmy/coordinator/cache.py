@@ -167,6 +167,103 @@ class _GateMetrics(NamedTuple):
     dist: float
 
 
+def _accuracy_gate_rejects(
+    coord: Any,
+    device_id: str,
+    new_data: dict[str, Any],
+    existing: Mapping[str, Any],
+    metrics: _GateMetrics,
+) -> bool:
+    """Return ``True`` when a coarse fix must not displace the cached one (#216).
+
+    The comparative half of the fusion's rejection logic, extracted so the two
+    overlap-free situations share ONE rule instead of two that drift apart: a
+    clear jump away from an ordinary cached fix, and a clear jump away from a
+    trusted semantic anchor. On rejection this also retains the coarse fix as
+    side information and counts the rejection, so the caller only has to honour
+    the boolean.
+
+    It is a COMPARISON, never an absolute cut-off. Its removed predecessor
+    (``min_accuracy_threshold``, const default 100 m) discarded on the incoming
+    radius alone and froze trackers; a fix with a wide radius still tells us the
+    city, and without any fix we would not even know that. So nothing is
+    discarded unless a better, reliable and still-fresh alternative is actually
+    present.
+
+    Deliberately NO own-report bypass, unlike the speed gate (whose bypass is
+    about cryptographic provenance, i.e. whether the report can be trusted).
+    This gate is about physical uncertainty, and a phone reports ITS OWN
+    position, not the tracker's: an own fix with a 1600 m radius is exactly as
+    coarse as a foreign one.
+
+    Staleness is read from the shared ``stale_threshold`` option, not from a
+    second time constant, and it is the age against the wall clock - not the
+    distance between the two report timestamps the speed gate uses. An unknown
+    age counts as not-trustworthy, so the incoming fix wins.
+
+    No round-trip anchor is seeded or consumed here (F-CODEX-6 keeps anchor
+    provenance bound to the speed gate's one-shot semantics).
+
+    WHY A MODULE FUNCTION AND NOT A METHOD: every fusion suite builds its
+    coordinator double as ``MagicMock(spec=CacheOperations)``. A method of that
+    class is auto-mocked there and returns a truthy ``Mock``, so the gate would
+    silently reject EVERY payload in eight existing suites - measured: nine
+    round-trip cases went red on exactly that. A module-level function cannot be
+    shadowed by the spec, so those doubles keep exercising the real rule, which
+    is what they did while this code was still inline.
+    """
+    if not coord._accuracy_gate_enabled():
+        return False
+    # Mirrors the speed gate's incoming-side check: a missing, non-finite or
+    # sentinel accuracy is not a measurement, and an unmeasured radius must
+    # never be the reason to discard a fix.
+    new_acc_measured = (
+        metrics.new_acc_raw is not None
+        and math.isfinite(metrics.new_acc_raw)
+        and metrics.new_acc_raw >= MIN_PHYSICAL_ACCURACY_M
+    )
+    if not (
+        new_acc_measured
+        and metrics.new_acc >= ACCURACY_GATE_MIN_M
+        and metrics.new_acc >= ACCURACY_GATE_RATIO * metrics.existing_acc
+        and is_reliable_fix(existing)
+    ):
+        return False
+    existing_age = location_age_seconds(existing, time.time())
+    threshold = resolve_stale_threshold(coord)
+    if existing_age is None or existing_age > threshold:
+        return False
+    # Drop any round-trip anchor INTENT the branches above pencilled onto this
+    # payload. Both are deferred markers (F-CODEX-7): they are popped and
+    # applied only after the payload commits, and this payload never commits -
+    # the caller aborts on a False return - so leaving them behind has no
+    # effect today. They are cleared anyway, because a rejected payload
+    # carrying a live anchor intent is a trap for the next person to touch this
+    # ordering, and because E7 ("no anchor contact") should be true of the data,
+    # not just of its consequences. On the trusted-anchor call site no marker
+    # can be set yet (that branch runs before the speed gate), so the pops are
+    # no-ops there rather than a second semantics.
+    new_data.pop("_supersede_round_trip_anchor", None)
+    new_data.pop("_round_trip_anchor_seed", None)
+    new_data.pop("_round_trip_anchor_consume", None)
+    # Keep the coarse information before dropping the payload: the caller
+    # aborts on False, so this must happen first.
+    coord._record_coarse_fix(device_id, new_data)
+    coord.increment_stat("accuracy_gate_rejects")
+    _LOGGER.debug(
+        "Accuracy gate rejected coarse fix %s: %.0fm vs cached %.0fm "
+        "(>= %.0fx), %.0fm away, cached fix %.0fs old (<= %ss stale threshold)",
+        device_id,
+        metrics.new_acc,
+        metrics.existing_acc,
+        ACCURACY_GATE_RATIO,
+        metrics.dist,
+        existing_age,
+        threshold,
+    )
+    return True
+
+
 class CacheOperations(_MixinBase):
     """Cache operations mixin for GoogleFindMyCoordinator.
 
@@ -1137,94 +1234,6 @@ class CacheOperations(_MixinBase):
             entry.options.get(OPT_ACCURACY_GATE_ENABLED, DEFAULT_ACCURACY_GATE_ENABLED)
         )
 
-    def _accuracy_gate_rejects(
-        self,
-        device_id: str,
-        new_data: dict[str, Any],
-        existing: Mapping[str, Any],
-        metrics: _GateMetrics,
-    ) -> bool:
-        """Return ``True`` when a coarse fix must not displace the cached one (#216).
-
-        The comparative half of the fusion's rejection logic, extracted so the two
-        overlap-free situations share ONE rule instead of two that drift apart: a
-        clear jump away from an ordinary cached fix, and a clear jump away from a
-        trusted semantic anchor. On rejection this also retains the coarse fix as
-        side information and counts the rejection, so the caller only has to honour
-        the boolean.
-
-        It is a COMPARISON, never an absolute cut-off. Its removed predecessor
-        (``min_accuracy_threshold``, const default 100 m) discarded on the incoming
-        radius alone and froze trackers; a fix with a wide radius still tells us the
-        city, and without any fix we would not even know that. So nothing is
-        discarded unless a better, reliable and still-fresh alternative is actually
-        present.
-
-        Deliberately NO own-report bypass, unlike the speed gate (whose bypass is
-        about cryptographic provenance, i.e. whether the report can be trusted).
-        This gate is about physical uncertainty, and a phone reports ITS OWN
-        position, not the tracker's: an own fix with a 1600 m radius is exactly as
-        coarse as a foreign one.
-
-        Staleness is read from the shared ``stale_threshold`` option, not from a
-        second time constant, and it is the age against the wall clock - not the
-        distance between the two report timestamps the speed gate uses. An unknown
-        age counts as not-trustworthy, so the incoming fix wins.
-
-        No round-trip anchor is seeded or consumed here (F-CODEX-6 keeps anchor
-        provenance bound to the speed gate's one-shot semantics).
-        """
-        if not self._accuracy_gate_enabled():
-            return False
-        # Mirrors the speed gate's incoming-side check: a missing, non-finite or
-        # sentinel accuracy is not a measurement, and an unmeasured radius must
-        # never be the reason to discard a fix.
-        new_acc_measured = (
-            metrics.new_acc_raw is not None
-            and math.isfinite(metrics.new_acc_raw)
-            and metrics.new_acc_raw >= MIN_PHYSICAL_ACCURACY_M
-        )
-        if not (
-            new_acc_measured
-            and metrics.new_acc >= ACCURACY_GATE_MIN_M
-            and metrics.new_acc >= ACCURACY_GATE_RATIO * metrics.existing_acc
-            and is_reliable_fix(existing)
-        ):
-            return False
-        existing_age = location_age_seconds(existing, time.time())
-        threshold = resolve_stale_threshold(self)
-        if existing_age is None or existing_age > threshold:
-            return False
-        # Drop any round-trip anchor INTENT the branches above pencilled onto this
-        # payload. Both are deferred markers (F-CODEX-7): they are popped and
-        # applied only after the payload commits, and this payload never commits -
-        # the caller aborts on a False return - so leaving them behind has no
-        # effect today. They are cleared anyway, because a rejected payload
-        # carrying a live anchor intent is a trap for the next person to touch this
-        # ordering, and because E7 ("no anchor contact") should be true of the data,
-        # not just of its consequences. On the trusted-anchor call site no marker
-        # can be set yet (that branch runs before the speed gate), so the pops are
-        # no-ops there rather than a second semantics.
-        new_data.pop("_supersede_round_trip_anchor", None)
-        new_data.pop("_round_trip_anchor_seed", None)
-        new_data.pop("_round_trip_anchor_consume", None)
-        # Keep the coarse information before dropping the payload: the caller
-        # aborts on False, so this must happen first.
-        self._record_coarse_fix(device_id, new_data)
-        self.increment_stat("accuracy_gate_rejects")
-        _LOGGER.debug(
-            "Accuracy gate rejected coarse fix %s: %.0fm vs cached %.0fm "
-            "(>= %.0fx), %.0fm away, cached fix %.0fs old (<= %ss stale threshold)",
-            device_id,
-            metrics.new_acc,
-            metrics.existing_acc,
-            ACCURACY_GATE_RATIO,
-            metrics.dist,
-            existing_age,
-            threshold,
-        )
-        return True
-
     def _apply_weighted_location_fusion(
         self,
         device_id: str,
@@ -1322,7 +1331,8 @@ class CacheOperations(_MixinBase):
             # 50 m anchor could still be displaced by a 1600 m fix, which is the
             # false zone transition this whole change is about. The speed gate
             # stays out; only the comparative accuracy check runs.
-            if self._accuracy_gate_rejects(
+            if _accuracy_gate_rejects(
+                self,
                 device_id,
                 new_data,
                 existing,
@@ -1606,7 +1616,8 @@ class CacheOperations(_MixinBase):
             # Rule, rationale and the deliberate absence of an own-report
             # bypass live in ``_accuracy_gate_rejects``; not restated here, so
             # the two call sites cannot document it differently.
-            if self._accuracy_gate_rejects(
+            if _accuracy_gate_rejects(
+                self,
                 device_id,
                 new_data,
                 existing,

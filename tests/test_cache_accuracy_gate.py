@@ -85,14 +85,6 @@ def _coord(
         coord, dev, row
     )
     coord.get_coarse_fix = lambda dev: CacheOperations.get_coarse_fix(coord, dev)
-    # The gate itself, for the same reason: a spec mock would return a truthy
-    # Mock and the fusion would "reject" without recording or counting anything,
-    # i.e. every assertion about the counter would measure the mock.
-    coord._accuracy_gate_rejects = lambda dev, new_data, existing_row, metrics: (
-        CacheOperations._accuracy_gate_rejects(
-            coord, dev, new_data, existing_row, metrics
-        )
-    )
     coord._device_coarse_fix = {}
     if entry is not None:
         coord.config_entry = entry
@@ -444,11 +436,6 @@ def _cache_coord() -> MagicMock:
     )
     coord.count_accuracy_class = lambda row: CacheOperations.count_accuracy_class(
         coord, row
-    )
-    coord._accuracy_gate_rejects = lambda dev, new_data, existing_row, metrics: (
-        CacheOperations._accuracy_gate_rejects(
-            coord, dev, new_data, existing_row, metrics
-        )
     )
     # Route the fusion through the real implementation: with the plain spec mock
     # the gate would never run and this suite would measure nothing.
