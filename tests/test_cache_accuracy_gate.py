@@ -1627,6 +1627,44 @@ def test_the_tally_runs_before_any_accuracy_substitution() -> None:
     assert checked >= 4, f"guard would be vacuous, only {checked} sites compared"
 
 
+def test_every_zone_substitution_site_goes_through_the_helper() -> None:
+    """Structural guard: the marker must not be forgotten at a fourth site.
+
+    Two of the three sites sit deep inside ``_async_start_poll_cycle`` and
+    ``async_locate_device``, whose success paths this suite does not drive
+    (``tests/test_coordinator_locate_basics.py`` names the Google Home filter as
+    out of scope), so their call lines carry no line coverage. What matters
+    there is not the line but the invariant: a zone radius never reaches
+    ``accuracy`` without the marker that tells the gate what it is. A raw
+    assignment would silently restore the bug this change fixed.
+    """
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent / "custom_components" / "googlefindmy"
+    raw_forms = ('["accuracy"] = radius', '["accuracy"] = replacement_attrs')
+    sites = 0
+    for rel in (
+        "coordinator/polling.py",
+        "coordinator/locate.py",
+        "Auth/fcm_receiver_ha.py",
+    ):
+        text = (root / rel).read_text(encoding="utf-8")
+        if "replacement_attrs" not in text:
+            continue
+        sites += 1
+        assert "substitute_zone_accuracy(" in text, (
+            f"{rel} consumes the Google Home filter's replacement but does not "
+            "route the radius through substitute_zone_accuracy, so the accuracy "
+            "gate would weigh a zone radius as a measurement"
+        )
+        for raw in raw_forms:
+            assert raw not in text, (
+                f"{rel} assigns the substituted radius directly ({raw}); the "
+                "marker would be missing"
+            )
+    assert sites == 3, f"guard would be vacuous, only {sites} sites found"
+
+
 def test_the_push_path_counts_before_the_filter_substitutes() -> None:
     """The push tally sees the REPORTED radius, not the filter's.
 
