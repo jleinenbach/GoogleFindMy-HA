@@ -73,7 +73,7 @@ from ..SpotApi.GetEidInfoForE2eeDevices.get_eid_info_request import (
 )
 from ..SpotApi.spot_request import SpotAuthPermanentError
 from ._mixin_typing import _MixinBase
-from .helpers.cache import carry_reused_accuracy
+from .helpers.cache import carry_reused_accuracy, substitute_zone_accuracy
 from .helpers.cache import sanitize_decoder_row as _sanitize_decoder_row
 from .helpers.stats import ApiStatus, CryptoStatus, FcmStatus, StatusSnapshot
 from .helpers.subentry import normalize_epoch_seconds as _normalize_epoch_seconds
@@ -2106,16 +2106,10 @@ class PollingOperations(_MixinBase):
                                             and replacement_attrs.get("radius")
                                             is not None
                                         ):
-                                            location["accuracy"] = (
-                                                replacement_attrs.get("radius")
+                                            substitute_zone_accuracy(
+                                                location,
+                                                replacement_attrs["radius"],
                                             )
-                                            # This radius is the HOME ZONE's, not
-                                            # a measurement of the device. The
-                                            # accuracy gate must not weigh it
-                                            # against the cached precision and
-                                            # refuse this deliberate move home;
-                                            # transient, popped before commit.
-                                            location["_accuracy_substituted"] = True
                                     # Clear semantic name so HA Core's zone engine determines the final state.
                                     location["semantic_name"] = None
                                     semantic_replaced = True

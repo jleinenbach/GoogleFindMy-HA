@@ -1070,6 +1070,45 @@ def test_reader_rejects_a_negative_coarse_age() -> None:
     assert "coarse_latitude" not in attrs
 
 
+def test_substitute_zone_accuracy_writes_the_value_and_the_marker() -> None:
+    """The rule lives in one helper because three sites need it identically."""
+    from custom_components.googlefindmy.coordinator.helpers.cache import (
+        substitute_zone_accuracy,
+    )
+
+    row: dict[str, Any] = {"accuracy": 1600.0}
+    substitute_zone_accuracy(row, 400.0)
+    assert row["accuracy"] == 400.0
+    assert row["_accuracy_substituted"] is True
+
+
+def test_the_push_fallback_write_strips_the_marker() -> None:
+    """A coordinator without update_device_cache still must not cache it.
+
+    ``_write_coordinator_payload`` falls back to writing ``_device_location_data``
+    directly when the coordinator has no ``update_device_cache``. That path skips
+    every marker pop the normal path performs, so the transient marker would end
+    up in the cached row - and from there in the entity attributes.
+    """
+    from custom_components.googlefindmy.Auth.fcm_receiver_ha import FcmReceiverHA
+
+    class _Bare:
+        def __init__(self) -> None:
+            self._device_location_data: dict[str, Any] = {}
+
+    receiver = FcmReceiverHA.__new__(FcmReceiverHA)
+    coordinator = _Bare()
+    payload = {"accuracy": 400.0, "_accuracy_substituted": True}
+
+    FcmReceiverHA._write_coordinator_payload(
+        receiver, coordinator, "device-id", payload
+    )
+
+    cached = coordinator._device_location_data["device-id"]
+    assert "_accuracy_substituted" not in cached
+    assert cached["accuracy"] == 400.0
+
+
 def test_a_substituted_home_radius_is_not_weighed_as_a_measurement() -> None:
     """The Google Home filter's decision must survive this gate.
 

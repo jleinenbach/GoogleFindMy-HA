@@ -53,6 +53,7 @@ from .helpers.cache import (
     SOUND_UUID_MAX_AGE_S,
     carry_reused_accuracy,
     is_sound_uuid_expired,
+    substitute_zone_accuracy,
 )
 from .helpers.geo import MIN_PHYSICAL_ACCURACY_M
 
@@ -444,14 +445,10 @@ class LocateOperations(_MixinBase):
                                     "radius" in replacement_attrs
                                     and replacement_attrs.get("radius") is not None
                                 ):
-                                    location_data["accuracy"] = replacement_attrs.get(
-                                        "radius"
+                                    substitute_zone_accuracy(
+                                        location_data,
+                                        replacement_attrs["radius"],
                                     )
-                                    # Home ZONE radius, not a measurement: the
-                                    # accuracy gate must not refuse this
-                                    # deliberate move home. Transient marker,
-                                    # popped in update_device_cache.
-                                    location_data["_accuracy_substituted"] = True
                             # Clear semantic name so HA Core's zone engine determines the final state.
                             location_data["semantic_name"] = None
                 location_data.pop("is_replayed", None)

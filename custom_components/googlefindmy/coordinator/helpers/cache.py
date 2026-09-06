@@ -367,6 +367,25 @@ def normalize_location_fields(
     return result
 
 
+def substitute_zone_accuracy(row: dict[str, Any], radius: float) -> None:
+    """Put a ZONE radius into ``accuracy`` and say that it is one.
+
+    The Google Home filter replaces a detection at a Home speaker with the home
+    zone's coordinates and its radius. That radius describes a zone; it is not a
+    measurement of the device, and downstream it is byte-for-byte the same
+    number as a genuinely coarse fix - which is why the accuracy gate would
+    otherwise weigh it against the cached precision and refuse the filter's
+    deliberate move home (a home zone of 200 m or more is enough).
+
+    Only the substituting site knows the provenance, and there are three of them
+    (poll, manual locate, push), so the rule lives here rather than three times
+    over - the same reasoning as ``carry_reused_accuracy`` next door. The marker
+    is transient: every write path pops it before the row reaches the cache.
+    """
+    row["accuracy"] = radius
+    row["_accuracy_substituted"] = True
+
+
 def carry_reused_accuracy(
     target: dict[str, Any],
     source: Mapping[str, Any],

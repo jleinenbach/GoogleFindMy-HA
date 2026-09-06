@@ -85,6 +85,9 @@ from custom_components.googlefindmy._reauth_reason import ReauthReasonCode
 from custom_components.googlefindmy.Auth.firebase_messaging.fcmregister import (
     FcmRegisterHTTPError,
 )
+from custom_components.googlefindmy.coordinator.helpers.cache import (
+    substitute_zone_accuracy,
+)
 from custom_components.googlefindmy.exceptions import FatalRegistrationError
 from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker.decrypt_locations import (
     DecryptionError,
@@ -2806,11 +2809,7 @@ class FcmReceiverHA:
                     )
                 radius = replacement_attrs.get("radius")
                 if radius is not None:
-                    coordinator_payload["accuracy"] = radius
-                    # Home ZONE radius, not a measurement: the accuracy gate
-                    # must not refuse this deliberate move home. Transient
-                    # marker, popped in update_device_cache.
-                    coordinator_payload["_accuracy_substituted"] = True
+                    substitute_zone_accuracy(coordinator_payload, radius)
                 coordinator_payload["semantic_name"] = None
 
         return coordinator_payload
