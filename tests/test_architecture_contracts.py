@@ -127,3 +127,43 @@ def test_readme_options_table_mirrors_option_keys() -> None:
         f"does not list: {missing}. Add a row (option, default, units, "
         "description) for each, in OPTION_KEYS order."
     )
+
+
+def test_auth_does_not_import_the_coordinator_package() -> None:
+    """The push receiver must not pull the coordinator package into its imports.
+
+    ``coordinator/__init__`` imports ``main`` and ``polling``, and ``polling``
+    imports ``CRASH_LOOP_FATAL_PREFIX`` from ``Auth.fcm_receiver_ha``. An import
+    of any coordinator module from ``Auth`` therefore closes a cycle whose
+    outcome depends on which module is imported first - it works until the order
+    changes. ``Auth/AGENTS.md`` asks for the remedy this pins: put the shared
+    utility in a dependency-light module and import that.
+    """
+    from pathlib import Path
+
+    auth_dir = (
+        Path(__file__).resolve().parents[1]
+        / "custom_components"
+        / "googlefindmy"
+        / "Auth"
+    )
+    offenders: list[str] = []
+    for path in sorted(auth_dir.rglob("*.py")):
+        for lineno, line in enumerate(
+            path.read_text(encoding="utf-8").splitlines(), start=1
+        ):
+            stripped = line.strip()
+            if not stripped.startswith(("import ", "from ")):
+                continue
+            if "TYPE_CHECKING" in stripped:
+                continue
+            if "googlefindmy.coordinator" in stripped or stripped.startswith(
+                "from ..coordinator"
+            ):
+                offenders.append(f"{path.name}:{lineno}: {stripped}")
+
+    assert not offenders, (
+        "Auth modules import the coordinator package, which imports polling, "
+        "which imports a constant back from Auth.fcm_receiver_ha:\n"
+        + "\n".join(offenders)
+    )

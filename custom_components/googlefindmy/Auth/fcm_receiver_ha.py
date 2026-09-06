@@ -85,11 +85,11 @@ from custom_components.googlefindmy._reauth_reason import ReauthReasonCode
 from custom_components.googlefindmy.Auth.firebase_messaging.fcmregister import (
     FcmRegisterHTTPError,
 )
-from custom_components.googlefindmy.coordinator.helpers.cache import (
+from custom_components.googlefindmy.exceptions import FatalRegistrationError
+from custom_components.googlefindmy.location_row_markers import (
     strip_transient_keys,
     substitute_zone_accuracy,
 )
-from custom_components.googlefindmy.exceptions import FatalRegistrationError
 from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker.decrypt_locations import (
     DecryptionError,
     OwnerKeyLookupTransientError,

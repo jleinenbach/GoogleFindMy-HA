@@ -33,6 +33,10 @@ from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from typing import Any
 
+# Re-exported for the coordinator-side callers that have always imported them
+# from here; the definitions live outside this package so ``Auth`` can use them
+# without dragging the coordinator package into its import graph.
+from ...location_row_markers import strip_transient_keys, substitute_zone_accuracy
 from .geo import haversine_distance, safe_accuracy
 from .subentry import format_epoch_utc, normalize_epoch_seconds
 
@@ -63,6 +67,8 @@ __all__ = [
     "select_best_location_source",
     "should_allow_location_update",
     "should_clear_metadata_only_flag",
+    "strip_transient_keys",
+    "substitute_zone_accuracy",
 ]
 
 # ---------------------------------------------------------------------------
@@ -365,43 +371,6 @@ def normalize_location_fields(
                 result[field] = None
 
     return result
-
-
-def strip_transient_keys(row: dict[str, Any]) -> None:
-    """Remove every transient marker from a row about to be cached.
-
-    Two direct-write fallbacks exist (the poll cycle's test-double branch and
-    the push receiver's), and neither CONSUMES a marker the way
-    ``update_device_cache`` does - they only have to keep them out of the cache,
-    from where they would surface as entity attributes.
-
-    Naming the markers individually is what failed twice: each list was correct
-    when it was written and wrong as soon as a marker was added
-    (``_accuracy_counted`` leaked through both fallbacks that way). The leading
-    underscore is this project's own convention for a transient row key, so it
-    is the predicate rather than a list that has to be maintained.
-    """
-    for key in [k for k in row if k.startswith("_")]:
-        row.pop(key, None)
-
-
-def substitute_zone_accuracy(row: dict[str, Any], radius: float) -> None:
-    """Put a ZONE radius into ``accuracy`` and say that it is one.
-
-    The Google Home filter replaces a detection at a Home speaker with the home
-    zone's coordinates and its radius. That radius describes a zone; it is not a
-    measurement of the device, and downstream it is byte-for-byte the same
-    number as a genuinely coarse fix - which is why the accuracy gate would
-    otherwise weigh it against the cached precision and refuse the filter's
-    deliberate move home (a home zone of 200 m or more is enough).
-
-    Only the substituting site knows the provenance, and there are three of them
-    (poll, manual locate, push), so the rule lives here rather than three times
-    over - the same reasoning as ``carry_reused_accuracy`` next door. The marker
-    is transient: every write path pops it before the row reaches the cache.
-    """
-    row["accuracy"] = radius
-    row["_accuracy_substituted"] = True
 
 
 def carry_reused_accuracy(
