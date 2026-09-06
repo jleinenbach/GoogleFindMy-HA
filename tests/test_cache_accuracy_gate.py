@@ -1769,7 +1769,6 @@ def test_the_poll_cycle_substitutes_the_home_zone_and_marks_it(
     coordinator and runs one cycle.
     """
     import asyncio
-    from types import SimpleNamespace
     from unittest.mock import AsyncMock
 
     from custom_components.googlefindmy.coordinator import GoogleFindMyCoordinator
