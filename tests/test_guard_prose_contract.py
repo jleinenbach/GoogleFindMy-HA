@@ -1,0 +1,824 @@
+# tests/test_guard_prose_contract.py
+"""Guard for the two prose rules of the repository contract.
+
+``AGENTS.md`` states two rules about the prose a contributor writes, and until now
+neither had a mechanism behind it:
+
+* **English-only prose.** The "Language reminder" and "Language policy" paragraphs of
+  ``AGENTS.md`` require inline comments, docstrings and documentation to stay English.
+  Translation payloads are explicitly exempt ("Translation files remain multilingual").
+  Referenced by their headings rather than by line number: this branch shifts those
+  lines itself, and a line number in prose is exactly the kind of claim this guard
+  otherwise asks people to ground.
+* **Verifiable evidence.** ``AGENTS.md`` section "2. Mandatory evidence" requires every
+  claim to cite a source *inside the project reality*. A pointer into an agent's private
+  memory tree is unreachable for every human reader and is therefore not such a source.
+
+Both are plain text rules with no linter behind them, so violations pass ``ruff``,
+``mypy``, ``codespell`` and the whole test suite silently and only surface in review.
+That is the gap ``test_guard_path_header`` was written for, and this guard follows its
+shape: a sweep, a ``LEGACY_ALLOWLIST`` with a measured reason per entry, and a stale
+test that goes red once an entry stops violating.
+
+Why one file for two rules: both arms need the same prose extraction, which is the
+non-trivial part. Two files would mean two copies of ``_prose_units`` and guaranteed
+drift; the regexes are the cheap half.
+
+Why extraction instead of a raw grep over the file: foreign-language text is legitimate
+*data* here. ``tests/test_translation_placeholders.py`` asserts against the German
+address form, and ``translations/*.json`` is multilingual by contract. Only separating
+prose from literals makes the rule machine-checkable at all. Measured over the 486
+Python files of the sweep set, this file excluded (see the counting unit further down):
+the prose arm flags 12 of 29625 prose units, while the same word list over raw file text additionally hits 11 occurrences in three further
+files (``map_i18n.py``, ``test_map_i18n.py``, ``test_map_view_blocking_io.py``), every
+one of them translation data in a string literal.
+
+Scope of the language arm: Python prose across the whole repository, not narrowed to
+``tests/**`` like the path-header guard. That narrowing exists there because
+``custom_components/**`` carries pre-existing offenders; here it carries zero
+(measured), so there is no retrofit debate to avoid.
+
+Scope of the evidence arm: Python prose plus Markdown and workflow files, because a
+source is cited in documentation at least as often as in code. Measured over 535 files
+(486 Python, 49 Markdown and workflow): zero hits.
+
+Markdown is deliberately **out** of scope for the language arm, although the contract
+covers "documentation updates" too. ``AGENTS.md`` itself quotes the German Home
+Assistant translation guideline and would need an allowlist entry from day one, which
+is the shape that erodes. The gap is named here rather than left for a reader to
+discover.
+
+Detection limits, stated rather than implied. The language arm keys on German function
+words that have no English homograph, so German prose built only from words outside
+that set passes. That is deliberate. The wider variants were measured and rejected: an
+umlaut character class flags the proper name in every copyright header and misses
+umlaut-free German entirely, and a two-distinct-words threshold only passed its positive
+control because the three nouns of one concrete incident had been added to the list. A
+guard that cries wolf gets switched off rather than obeyed, as ``tests/AGENTS.md`` puts
+it, so the arm is tuned for precision and says so.
+
+A second note, on `codespell`: the word list below trips it ten times, because German
+function words look like English typos to a dictionary checker. That is the same state
+``tests/test_translation_placeholders.py`` has lived in for a long time (16 hits), and it
+is left as is on purpose. The CI job is non-blocking (``continue-on-error: true``), but
+the pre-commit hook is not, so a local ``pre-commit run`` flags this file exactly as it
+flags its sibling. Widening ``[tool.codespell] ignore-words-list`` would hide the
+real English typos that several of those words shadow, across the whole tree, which is a
+worse trade than ten lines in a report the CI does not gate on.
+
+Note this paragraph cannot name those typo pairs: this guard reads its own docstring, so
+writing the German half of such a pair here turns the file red. The same reflex applies
+to every explanation added below.
+
+What would make this guard obsolete: a linter with real language detection in the
+pre-commit chain, or a ``ruff`` rule for prose language. Until one exists, a word list
+with measured exclusions is the cheapest thing that fails loudly.
+
+One environment note that cost a measurement: this tree uses PEP 695 syntax, which only
+parses on Python 3.12 and newer. Under an older interpreter seven modules fail to parse
+and the language arm would be blind to them. ``test_every_swept_file_parses`` turns that
+into a red test instead of a silent gap.
+"""
+
+from __future__ import annotations
+
+import ast
+import functools
+import io
+import os
+import re
+import tokenize
+from pathlib import Path
+
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+
+# Directories the walk never descends into, mirroring [tool.ruff] extend-exclude in
+# pyproject.toml plus the usual generated and vendored trees. Pruning during the walk
+# rather than filtering afterwards: the unpruned walk visits roughly 75k entries, nearly
+# all of them in .venv and the tool caches. Order of magnitude, not a pinned figure: the
+# number moves with every test run.
+_EXCLUDED_DIRS = frozenset(
+    {
+        # version control, environments, generated and vendored trees
+        ".git",
+        ".venv",
+        "venv",
+        "env",
+        "node_modules",
+        "site-packages",
+        "vendor",
+        "ProtoDecoders",
+        "proto",
+        # build and tool caches; .pytest_cache/README.md was measured in the sweep
+        # set before these were added, an untracked file the runner itself writes
+        "__pycache__",
+        ".pytest_cache",
+        ".mypy_cache",
+        ".ruff_cache",
+        ".hypothesis",
+        "htmlcov",
+        "build",
+        "dist",
+    }
+)
+
+# German function words with no English homograph in this tree.
+_GERMAN_MARKERS = frozenset(
+    {
+        "aber",
+        "auch",
+        "auf",
+        "bei",
+        "beim",
+        "damit",
+        "dann",
+        "das",
+        "dass",
+        "diese",
+        "dieser",
+        "dieses",
+        "dort",
+        "durch",
+        "eine",
+        "einem",
+        "einen",
+        "einer",
+        "einige",
+        "etwa",
+        "fuer",
+        "f\u00fcr",
+        "gegen",
+        "gegenprobe",
+        "hatte",
+        "hier",
+        "ich",
+        "ihre",
+        "immer",
+        "jede",
+        "jeder",
+        "kein",
+        "keine",
+        "koennen",
+        "k\u00f6nnen",
+        "muessen",
+        "m\u00fcssen",
+        "nach",
+        "nicht",
+        "noch",
+        "ohne",
+        "oder",
+        "schon",
+        "sehr",
+        "sein",
+        "seine",
+        "sich",
+        "sie",
+        "sind",
+        "soll",
+        "ueber",
+        "\u00fcber",
+        "und",
+        "unser",
+        "unter",
+        "vom",
+        "von",
+        "werde",
+        "werden",
+        "wie",
+        "wenn",
+        "weil",
+        "wir",
+        "wird",
+        "wurde",
+        "wurden",
+        "zum",
+        "zur",
+        "zwar",
+        "zwischen",
+    }
+)
+
+# Words that look German but are ordinary English, established identifiers, or
+# acronyms this domain uses. Subtracted from the marker set in _german_markers_in.
+#
+# Counting unit for every number in this file: a PROSE UNIT is one docstring or one
+# comment token, and a hit is a unit containing the word. Measured with the project
+# interpreter over the sweep set MINUS THIS FILE (486 Python files, 29625 prose units
+# without it). Excluding this file is not cosmetic: its own comments name the words
+# below, so a figure that included it would move every time somebody edits this very
+# list, and a number that cannot survive its own file being touched is not a
+# measurement. Without these counts the list gets tidied up later and the guard starts
+# crying wolf, so each measured entry carries one.
+_HOMOGRAPH_EXCLUSIONS = frozenset(
+    {
+        # measured, ordinary English in this tree
+        "also",  # 231
+        "falls",  # 127, "falls back" / "falls through"
+        "probe",  # 109, plus script/connectivity_probe.py
+        "dies",  # 23, the English verb
+        "der",  # 12, the DER encoding in the credential tests
+        "mit",  # 4, the MIT licence header
+        "wichtig",  # 1, the WICHTIG-2 ticket label, an identifier
+        # measured at 0 today, kept out pre-emptively: each collides with an acronym
+        # this domain really uses, exactly like der/DER above
+        "des",  # DES cipher, next to FMDNCrypto/ and KeyBackup/
+        "ist",  # IST timezone, in a location integration
+        "dem",  # DEM, digital elevation model, in a geo context
+        "aus",  # AUS country code
+        "als",  # ALS, ambient light sensor, in a Home Assistant integration
+        "vor",  # VOR, VHF omnidirectional range, in a location integration
+        # ordinary English, never measured because they were never candidates
+        "die",
+        "war",
+        "man",
+        "bald",
+        "gift",
+        "rat",
+        "fast",
+        "kind",
+        "not",
+        "rot",
+        "tag",
+        "den",
+        "list",
+        "band",
+        "arm",
+        "art",
+        "hand",
+    }
+)
+
+# Word boundary for the language arm. The umlaut range and the four umlaut markers above
+# are written as escapes so that this file stays pure ASCII: it is the one file in the
+# tree whose data is German, and keeping it ASCII means no tool, terminal or diff view
+# has to agree on an encoding to render it. The escapes are semantically identical to
+# the literal characters, which test_umlaut_escapes_match_their_literal_form pins.
+_WORD_RE = re.compile("[A-Za-z\u00c4\u00d6\u00dc\u00e4\u00f6\u00fc\u00df]+")
+
+# Paths inside an agent's private memory tree or home configuration. No reader of this
+# repository can open one, so it is never a "verifiable source inside the project
+# reality". "/app/" is deliberately absent: both of its measured occurrences were
+# "/app/requirements.txt", the container path this project itself uses.
+_AGENT_LOCAL_PATH = re.compile(
+    r"(?<![\w/])("
+    # any second level under memory/, not an enumeration: the scopes an agent memory
+    # grows are not knowable from here, and an enumeration silently misses new ones
+    r"memory/[\w-]+/[\w./-]+"
+    # the agent home, with or without the tilde, and for root as well as a named user,
+    # because containers commonly run as root
+    r"|~?/?\.claude/[\w./-]+"
+    r"|/(?:home/[\w.-]+|root)/\.claude/[\w./-]+"
+    r")"
+)
+
+# Files whose prose legitimately carries non-English words. One entry, with its reason.
+#   tests/test_translation_placeholders.py -- that guard asserts that German UI text
+#   uses the informal address form, so its prose has to name the formal pronouns it
+#   rejects and quote the upstream translation guideline verbatim (12 prose units,
+#   measured).
+# Do not add new entries; translate the prose instead. The stale test below turns red
+# once an entry stops violating, so the list keeps telling the truth about the tree.
+LEGACY_ALLOWLIST: set[str] = {
+    "tests/test_translation_placeholders.py",
+}
+
+# Measured baseline is zero, so this list starts empty and should stay that way: a
+# source that a reader cannot open is not a source.
+AGENT_LOCAL_PATH_ALLOWLIST: set[str] = set()
+
+_PY_SUFFIXES = (".py",)
+_TEXT_SUFFIXES = (".md", ".yml", ".yaml")
+
+Offenders = dict[str, list[tuple[int, list[str]]]]
+
+
+def _iter_files(root: Path, suffixes: tuple[str, ...]) -> list[tuple[Path, str]]:
+    """Return (path, root-relative posix path) for every swept file under *root*."""
+    found: list[tuple[Path, str]] = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = sorted(d for d in dirnames if d not in _EXCLUDED_DIRS)
+        for name in sorted(filenames):
+            if not name.endswith(suffixes) or name.endswith("_pb2.py"):
+                continue
+            path = Path(dirpath) / name
+            found.append((path, path.relative_to(root).as_posix()))
+    return found
+
+
+_DEFINITION = (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)
+
+
+def _definition_nodes(tree: ast.Module) -> list[ast.AST]:
+    """Return every node that can carry a docstring, without walking expressions.
+
+    ``ast.walk`` visits every node: measured 978084 visits costing 1.96 s of the 12 s
+    the sweep spends, against 0.51 s here. The bigger items are ``ast.parse`` at 8.7 s
+    and ``tokenize`` at 2.9 s, which this does not touch, so the honest claim is a
+    modest saving, not a rewrite. Docstrings only live on modules, classes and functions, and those
+    are only ever reachable through statements, so the descent stops at expression
+    boundaries. Nested definitions inside if/for/while/with/try are still reached,
+    which is why the descent follows statements rather than only definition bodies;
+    test_extraction_reaches_a_deeply_nested_docstring pins that.
+    """
+    found: list[ast.AST] = []
+    stack: list[ast.AST] = [tree]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, _DEFINITION):
+            found.append(node)
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, (ast.stmt, ast.excepthandler, ast.match_case)):
+                stack.append(child)
+    return found
+
+
+def _prose_units(source: str) -> list[tuple[int, str]]:
+    """Return (line, text) for every docstring and comment in *source*.
+
+    String literals are excluded on purpose: foreign language inside a literal is test
+    data or a translation payload, both of which the contract allows.
+    """
+    units: list[tuple[int, str]] = []
+    for node in _definition_nodes(ast.parse(source)):
+        doc = ast.get_docstring(node, clean=False)
+        if doc:
+            units.append((getattr(node, "lineno", 1), doc))
+    try:
+        for token in tokenize.generate_tokens(io.StringIO(source).readline):
+            if token.type == tokenize.COMMENT:
+                units.append((token.start[0], token.string))
+    except tokenize.TokenError:  # pragma: no cover - no such file in this tree
+        units.append((1, "<untokenizable>"))
+    return units
+
+
+def _german_markers_in(
+    text: str, markers: frozenset[str] = _GERMAN_MARKERS
+) -> set[str]:
+    """Return the German marker words found in *text*.
+
+    The exclusions are subtracted here **and** kept out of the marker set, which is
+    redundant on purpose. Two ways to state the same rule, so that adding a measured
+    homograph to the marker list by accident cannot resurrect it, and so that the
+    prose about "excluded homographs" describes something the code actually does.
+    test_subtraction_survives_a_word_in_both_lists pins the subtraction itself; without
+    it, emptying the exclusion set is a no-op and the claim is decoration.
+    """
+    words = {word.lower() for word in _WORD_RE.findall(text)}
+    return words & (markers - _HOMOGRAPH_EXCLUSIONS)
+
+
+def _agent_local_paths_in(text: str) -> list[str]:
+    """Return every agent-local path cited in *text*."""
+    return [match.group(1) for match in _AGENT_LOCAL_PATH.finditer(text)]
+
+
+def scan_tree(root: Path) -> tuple[Offenders, Offenders, list[str]]:
+    """Sweep *root* once and return (language hits, path hits, unparsable files).
+
+    The root is a parameter, not the module-level constant, so the polarity probes can
+    sweep a synthetic tree without touching the working copy. That is the one deliberate
+    deviation from the sibling guards, and it is what lets the red probes exercise the
+    wiring of extraction, iteration and exclusion rather than the regex alone.
+    """
+    language: Offenders = {}
+    paths: Offenders = {}
+    unparsable: list[str] = []
+    for path, rel in _iter_files(root, _PY_SUFFIXES):
+        source = path.read_text(encoding="utf-8", errors="replace")
+        try:
+            units = _prose_units(source)
+        except SyntaxError:
+            unparsable.append(rel)
+            continue
+        for line, text in units:
+            found = sorted(_german_markers_in(text))
+            if found:
+                language.setdefault(rel, []).append((line, found))
+            cited = _agent_local_paths_in(text)
+            if cited:
+                paths.setdefault(rel, []).append((line, cited))
+    for path, rel in _iter_files(root, _TEXT_SUFFIXES):
+        for lineno, line_text in enumerate(
+            path.read_text(encoding="utf-8", errors="replace").splitlines(), start=1
+        ):
+            cited = _agent_local_paths_in(line_text)
+            if cited:
+                paths.setdefault(rel, []).append((lineno, cited))
+    return language, paths, unparsable
+
+
+@functools.cache
+def _repo_scan() -> tuple[Offenders, Offenders, list[str]]:
+    """Sweep the repository once and share the result across all tests here."""
+    return scan_tree(_REPO_ROOT)
+
+
+def _unallowlisted(offenders: Offenders, allowlist: set[str]) -> Offenders:
+    """Drop the allowlisted files from *offenders*, keep everything else.
+
+    Extracted rather than inlined into the two sweep tests so that the filter itself is
+    testable. Inline, a mutation that drops every entry (an always-false condition) left
+    both sweep tests green, because at a clean tree an empty result is the expected
+    result. See test_allowlist_filter_only_removes_listed_files.
+    """
+    return {rel: hits for rel, hits in offenders.items() if rel not in allowlist}
+
+
+# --- sweep arms -------------------------------------------------------------
+
+
+def test_prose_is_english_only() -> None:
+    """No German prose in a docstring or comment (AGENTS.md, the language paragraphs)."""
+    language, _, _ = _repo_scan()
+    offenders = _unallowlisted(language, LEGACY_ALLOWLIST)
+    assert not offenders, (
+        "German words found in docstrings or comments; AGENTS.md requires English "
+        "prose. Translate the text, or, if the word is ordinary English here, add it "
+        f"to _HOMOGRAPH_EXCLUSIONS with its measured hit count: {offenders}"
+    )
+
+
+def test_prose_cites_no_agent_local_paths() -> None:
+    """Evidence must be openable by a reader of this repository (AGENTS.md, section 2)."""
+    _, paths, _ = _repo_scan()
+    offenders = _unallowlisted(paths, AGENT_LOCAL_PATH_ALLOWLIST)
+    assert not offenders, (
+        "Prose cites a path inside an agent's private memory tree. No reader can open "
+        "it, so it is not a verifiable source. Commit a redacted artefact under docs/ "
+        f"and cite that instead: {offenders}"
+    )
+
+
+def test_every_swept_file_parses() -> None:
+    """A file the sweep cannot parse is an unmeasured file, not a clean one.
+
+    This is the interpreter guard: under Python 3.11 the PEP 695 modules of this tree
+    fail to parse and the language arm would go silently blind on them.
+    """
+    _, _, unparsable = _repo_scan()
+    assert not unparsable, (
+        "Files the guard could not parse, so they were never checked. Run the suite on "
+        f"the interpreter pinned by the project (PEP 695 needs 3.12+): {unparsable}"
+    )
+
+
+# --- allowlist hygiene ------------------------------------------------------
+
+
+def test_language_allowlist_has_no_stale_entries() -> None:
+    """An allowlisted file that stopped violating, or vanished, must leave the list."""
+    language, _, _ = _repo_scan()
+    known = {rel for _, rel in _iter_files(_REPO_ROOT, _PY_SUFFIXES)}
+    stale = sorted(
+        rel for rel in LEGACY_ALLOWLIST if rel not in known or rel not in language
+    )
+    assert not stale, (
+        "Stale LEGACY_ALLOWLIST entries (the file is clean now, or gone); remove them "
+        f"so the list keeps telling the truth about the tree: {stale}"
+    )
+
+
+def test_allowlist_filter_only_removes_listed_files() -> None:
+    """The filter must remove the listed file and nothing else.
+
+    At a clean tree both sweep tests expect an empty result, so a filter that drops
+    everything is indistinguishable from a filter that works. This probe supplies its
+    own offenders and therefore does discriminate.
+    """
+    sample: Offenders = {"a.py": [(1, ["und"])], "b.py": [(2, ["nicht"])]}
+    assert _unallowlisted(sample, {"a.py"}) == {"b.py": [(2, ["nicht"])]}
+    assert _unallowlisted(sample, set()) == sample
+    assert _unallowlisted(sample, {"a.py", "b.py"}) == {}
+
+
+def test_homograph_exclusions_stay_out_of_the_marker_set() -> None:
+    """The measured English homographs must never re-enter the marker set."""
+    collision = sorted(_GERMAN_MARKERS & _HOMOGRAPH_EXCLUSIONS)
+    assert not collision, (
+        "These words were measured as ordinary English in this tree and would make the "
+        f"guard cry wolf: {collision}"
+    )
+
+
+def test_guard_file_is_itself_swept() -> None:
+    """No self-exemption: this file is in the sweep set like any other."""
+    swept = {rel for _, rel in _iter_files(_REPO_ROOT, _PY_SUFFIXES)}
+    assert "tests/test_guard_prose_contract.py" in swept
+    assert "tests/test_guard_prose_contract.py" not in LEGACY_ALLOWLIST
+
+
+# --- polarity probes --------------------------------------------------------
+#
+# Every probe keeps its offending text in a string literal or under tmp_path. A
+# violation planted in the working tree would not be reproducible and could be
+# committed by accident.
+
+_GERMAN_DOCSTRING_SAMPLE = '''"""Behavioral tests for something.
+
+PROVENANCE: extracted from the recorder database. Erhebungsweg, Vorbehalte und
+Rohwerte are documented elsewhere.
+"""
+'''
+
+# Comment-only. Four of the five markers this guard was written for lived in comments,
+# not docstrings, so the comment arm needs a probe that fails without it. Sharing one
+# sample between both arms hid that: tokenize could be removed and everything stayed
+# green.
+_GERMAN_COMMENT_SAMPLE = '''"""Plain English module docstring."""
+
+# Kurz notiert: dieser Kommentar gehoert nicht in ein englisches Repository.
+VALUE = 1
+'''
+
+# Nested one level down inside a conditional, to pin that the descent follows
+# statements and not only definition bodies.
+_GERMAN_NESTED_SAMPLE = '''"""Plain English module docstring."""
+
+if True:
+    def helper() -> None:
+        """Diese Erklaerung ist auf Deutsch und gehoert uebersetzt."""
+'''
+
+_AGENT_PATH_SAMPLE = (
+    '"""Behavioral tests for something.\n\n'
+    "Source: memory/projects/some-project/quellen/measurement.md\n"
+    '"""\n'
+)
+
+_AGENT_PATH_COMMENT_SAMPLE = '''"""Plain English module docstring."""
+
+# Raw values: ~/.claude/projects/notes.md
+VALUE = 1
+'''
+
+_CLEAN_SAMPLE = '''"""Behavioral tests for something.
+
+Collection method, caveats and raw values: docs/ACCURACY_GATE_FIELD_DATA.md
+"""
+
+# Nothing to see here, plain English only.
+VALUE = 1
+'''
+
+
+def test_language_detector_flags_the_incident_phrasing() -> None:
+    """Red probe, detector level: the phrasing that caused this guard must trip."""
+    found = {
+        word
+        for _, text in _prose_units(_GERMAN_DOCSTRING_SAMPLE)
+        for word in _german_markers_in(text)
+    }
+    assert found, "the incident docstring must produce at least one German marker"
+
+
+def test_language_detector_does_not_depend_on_incident_specific_nouns() -> None:
+    """The detector must not be overfitted to the one incident it came from.
+
+    An earlier draft only passed its positive control because the three nouns of the
+    incident had been added to the marker set. Strip any such noun and the phrase must
+    still trip, here through a function word.
+    """
+    incident_nouns = {"erhebungsweg", "vorbehalte", "rohwerte"}
+    assert not (_GERMAN_MARKERS & incident_nouns), (
+        "the incident nouns must never enter the marker set; with them in it, the probe "
+        "below passes for the wrong reason and the guard only recognises its own origin"
+    )
+    lean = _GERMAN_MARKERS - incident_nouns
+    found = {
+        word
+        for _, text in _prose_units(_GERMAN_DOCSTRING_SAMPLE)
+        for word in _german_markers_in(text, lean)
+    }
+    assert found, "the phrase must trip on function words alone, not on incident nouns"
+
+
+def test_language_detector_passes_clean_prose() -> None:
+    """Green probe, detector level: English prose must not trip."""
+    found = {
+        word
+        for _, text in _prose_units(_CLEAN_SAMPLE)
+        for word in _german_markers_in(text)
+    }
+    assert not found, f"clean English prose must not trip, but got {found}"
+
+
+def test_umlaut_escapes_match_their_literal_form() -> None:
+    """The escaped markers must be the words they stand for, byte differences aside.
+
+    The file is kept pure ASCII, so a typo in an escape sequence would silently remove a
+    marker instead of failing loudly. This compares each escape against the character it
+    encodes, built from code points rather than from a literal.
+    """
+    expected = {
+        "f" + chr(0x00FC) + "r",
+        "k" + chr(0x00F6) + "nnen",
+        "m" + chr(0x00FC) + "ssen",
+        chr(0x00FC) + "ber",
+    }
+    assert expected <= _GERMAN_MARKERS, sorted(expected - _GERMAN_MARKERS)
+    assert _german_markers_in("wir m" + chr(0x00FC) + "ssen das pruefen")
+
+
+def _non_ascii_offsets(path: Path) -> list[int]:
+    """Return the byte offsets of every non-ASCII byte in *path*.
+
+    Extracted so the ratchet below can be proved to work on a file that does violate.
+    Inline, emptying its condition left every test green: at a clean file an empty
+    result is the expected result either way.
+    """
+    return [i for i, byte in enumerate(path.read_bytes()) if byte > 0x7F]
+
+
+def test_file_stays_pure_ascii() -> None:
+    """The escapes only help while nobody pastes a literal umlaut back in."""
+    offenders = _non_ascii_offsets(Path(__file__))
+    assert not offenders, f"non-ASCII bytes at offsets {offenders[:5]}"
+
+
+def test_the_ascii_check_detects_a_literal_umlaut(tmp_path: Path) -> None:
+    """The ratchet must fire on a file that does carry one."""
+    offender = tmp_path / "with_umlaut.py"
+    offender.write_text("# f" + chr(0x00FC) + "r\n", encoding="utf-8")
+    assert _non_ascii_offsets(offender)
+    clean = tmp_path / "plain.py"
+    clean.write_text("# for\n", encoding="utf-8")
+    assert not _non_ascii_offsets(clean)
+
+
+def test_path_detector_flags_an_agent_local_source() -> None:
+    """Red probe, detector level: a memory-tree pointer must trip."""
+    found = [
+        p
+        for _, text in _prose_units(_AGENT_PATH_SAMPLE)
+        for p in _agent_local_paths_in(text)
+    ]
+    assert found, "a memory-tree source pointer must be detected"
+
+
+def test_path_detector_passes_a_committed_source() -> None:
+    """Green probe, detector level: a committed docs/ source must not trip."""
+    found = [
+        p
+        for _, text in _prose_units(_CLEAN_SAMPLE)
+        for p in _agent_local_paths_in(text)
+    ]
+    assert not found, f"a committed source must not trip, but got {found}"
+
+
+def test_path_detector_passes_the_project_container_path() -> None:
+    """Negative control: /app/ is this project's container path, not an agent path."""
+    assert not _agent_local_paths_in("see /app/requirements.txt for the pinned set")
+
+
+def test_documented_placeholder_form_does_not_trip() -> None:
+    """The contract documents the forbidden shape with a placeholder, which must pass.
+
+    Written out literally, the rule text would make its own guard red. The placeholder
+    form is pinned here so nobody reverts it while improving the wording.
+    """
+    assert not _agent_local_paths_in("never cite memory/<scope>/<file>.md as a source")
+    assert not _agent_local_paths_in("nor ~/.claude/<file>, for the same reason")
+    assert _agent_local_paths_in("memory/projects/x/quellen/y.md")
+    assert _agent_local_paths_in("~/.claude/real/file.md")
+
+
+def test_sweep_finds_a_planted_german_docstring(tmp_path: Path) -> None:
+    """Red probe, sweep level: extraction, iteration and filters must be wired up."""
+    module = tmp_path / "pkg" / "mod.py"
+    module.parent.mkdir(parents=True)
+    module.write_text(_GERMAN_DOCSTRING_SAMPLE, encoding="utf-8")
+    assert "pkg/mod.py" in scan_tree(tmp_path)[0]
+    module.write_text(_CLEAN_SAMPLE, encoding="utf-8")
+    assert not scan_tree(tmp_path)[0]
+
+
+def test_sweep_finds_a_planted_agent_local_path(tmp_path: Path) -> None:
+    """Red probe, sweep level, second arm, including the Markdown reader."""
+    module = tmp_path / "pkg" / "mod.py"
+    module.parent.mkdir(parents=True)
+    module.write_text(_AGENT_PATH_SAMPLE, encoding="utf-8")
+    assert "pkg/mod.py" in scan_tree(tmp_path)[1]
+    module.write_text(_CLEAN_SAMPLE, encoding="utf-8")
+    assert not scan_tree(tmp_path)[1]
+    (tmp_path / "notes.md").write_text(
+        "Source: memory/_store/some_note.md\n", encoding="utf-8"
+    )
+    assert "notes.md" in scan_tree(tmp_path)[1]
+
+
+def test_sweep_reports_an_unparsable_file_instead_of_skipping_it(
+    tmp_path: Path,
+) -> None:
+    """Red probe for the interpreter guard: a broken file must be named, not ignored."""
+    broken = tmp_path / "broken.py"
+    broken.write_text("def (:\n", encoding="utf-8")
+    assert scan_tree(tmp_path)[2] == ["broken.py"]
+
+
+def test_language_detector_flags_a_german_comment() -> None:
+    """Red probe for the comment arm, which the incident actually lived in.
+
+    Four of the five markers translated on this branch were comments. With only
+    docstring probes the whole tokenize path could be removed and every test stayed
+    green, so this probe carries no docstring German at all.
+    """
+    found = {
+        word
+        for _, text in _prose_units(_GERMAN_COMMENT_SAMPLE)
+        for word in _german_markers_in(text)
+    }
+    assert found, "a German comment must produce at least one marker"
+
+
+def test_extraction_reaches_a_deeply_nested_docstring() -> None:
+    """The descent must follow statements, not just definition bodies."""
+    found = {
+        word
+        for _, text in _prose_units(_GERMAN_NESTED_SAMPLE)
+        for word in _german_markers_in(text)
+    }
+    assert found, "a docstring nested inside a conditional must still be extracted"
+
+
+def test_path_detector_flags_every_documented_scope() -> None:
+    """Each alternative of the pattern needs its own positive case.
+
+    Measured before adding this: neutralising the two dot-claude branches, or reducing
+    the memory scopes to the first one, left every test green. An untested alternative
+    can vanish in a refactor without anything going red.
+    """
+    cases = [
+        "memory/projects/x/y.md",
+        "memory/_store/note.md",
+        "memory/plans/active/PLAN_X.md",
+        "memory/briefings/INDEX.md",
+        "memory/wings/tech/x.md",
+        "memory/erfahrungen/x.md",
+        "~/.claude/settings.json",
+        "/home/someone/.claude/projects/x.md",
+    ]
+    missed = [case for case in cases if not _agent_local_paths_in(case)]
+    assert not missed, f"pattern alternatives without a match: {missed}"
+
+
+def test_path_detector_respects_the_word_boundary() -> None:
+    """A path that merely ends in one of the scopes must not trip.
+
+    Pins the lookbehind: without it, any longer path containing the scope name would
+    match, which would flag legitimate documentation directories.
+    """
+    assert not _agent_local_paths_in("see docs/memory/plans/rollout.md for the plan")
+
+
+def test_sweep_finds_a_planted_german_comment(tmp_path: Path) -> None:
+    """Red probe, sweep level, comment arm."""
+    module = tmp_path / "pkg" / "mod.py"
+    module.parent.mkdir(parents=True)
+    module.write_text(_GERMAN_COMMENT_SAMPLE, encoding="utf-8")
+    assert "pkg/mod.py" in scan_tree(tmp_path)[0]
+
+
+def test_sweep_finds_a_planted_agent_path_in_a_comment(tmp_path: Path) -> None:
+    """Red probe, sweep level, second arm, comment rather than docstring."""
+    module = tmp_path / "pkg" / "mod.py"
+    module.parent.mkdir(parents=True)
+    module.write_text(_AGENT_PATH_COMMENT_SAMPLE, encoding="utf-8")
+    assert "pkg/mod.py" in scan_tree(tmp_path)[1]
+
+
+def test_sweep_skips_generated_protobuf_bindings(tmp_path: Path) -> None:
+    """Generated bindings are excluded by suffix, and that exclusion is load-bearing."""
+    generated = tmp_path / "x_pb2.py"
+    generated.write_text(_GERMAN_DOCSTRING_SAMPLE, encoding="utf-8")
+    assert not scan_tree(tmp_path)[0]
+
+
+def test_excluded_words_do_not_flag_english_prose() -> None:
+    """English prose built from the measured homographs must stay clean.
+
+    A behaviour assertion, not a mutation probe: the words are absent from the marker
+    set as well, so this stays green even if the subtraction is removed. The probe
+    below is the one that pins the subtraction.
+    """
+    english = "the retry falls through, so the probe is also skipped and the value dies"
+    assert not _german_markers_in(english)
+
+
+def test_subtraction_survives_a_word_in_both_lists() -> None:
+    """The subtraction must win over a marker set that wrongly contains an exclusion.
+
+    This is the probe that makes _HOMOGRAPH_EXCLUSIONS load-bearing rather than
+    decorative: remove the subtraction in _german_markers_in and this goes red, while
+    every other test stays green because the marker set does not carry those words.
+    """
+    contaminated = _GERMAN_MARKERS | {"falls", "probe"}
+    assert not _german_markers_in("the retry falls through the probe", contaminated)
+
+
+def test_sweep_skips_excluded_directories(tmp_path: Path) -> None:
+    """A violation inside an excluded tree must not be reported."""
+    hidden = tmp_path / "vendor" / "mod.py"
+    hidden.parent.mkdir(parents=True)
+    hidden.write_text(_GERMAN_DOCSTRING_SAMPLE, encoding="utf-8")
+    assert not scan_tree(tmp_path)[0]
