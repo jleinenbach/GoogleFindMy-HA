@@ -10,5 +10,5 @@ node_modules/
 .hypothesis/
 jscpd-report/
 coverage.xml
-.venv/
+.venv
 .plans/
