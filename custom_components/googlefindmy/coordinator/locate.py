@@ -447,6 +447,11 @@ class LocateOperations(_MixinBase):
                                     location_data["accuracy"] = replacement_attrs.get(
                                         "radius"
                                     )
+                                    # Home ZONE radius, not a measurement: the
+                                    # accuracy gate must not refuse this
+                                    # deliberate move home. Transient marker,
+                                    # popped in update_device_cache.
+                                    location_data["_accuracy_substituted"] = True
                             # Clear semantic name so HA Core's zone engine determines the final state.
                             location_data["semantic_name"] = None
                 location_data.pop("is_replayed", None)

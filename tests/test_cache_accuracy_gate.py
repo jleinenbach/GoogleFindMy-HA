@@ -1070,6 +1070,104 @@ def test_reader_rejects_a_negative_coarse_age() -> None:
     assert "coarse_latitude" not in attrs
 
 
+def test_a_substituted_home_radius_is_not_weighed_as_a_measurement() -> None:
+    """The Google Home filter's decision must survive this gate.
+
+    On all three inbound paths the filter replaces the coordinates with the home
+    zone's and ``accuracy`` with that zone's RADIUS, before fusion. That number
+    describes a zone, not a measurement of the device. Weighed against the
+    cached precision it looks exactly like a coarse fix, so with a home zone of
+    200 m or more this gate would refuse the deliberate move home and leave the
+    tracker away. The substituting site marks the payload; only it can know.
+    """
+    coord = _coord(_existing(acc=20.0, age_s=300))
+    substituted = _incoming(acc=400.0)  # a 400 m home zone
+    substituted["_accuracy_substituted"] = True
+
+    assert _fuse(coord, substituted) is True
+    assert _rejects(coord) == 0
+    assert coord.get_coarse_fix("dev") is None
+
+    # Non-vacuous: the identical payload without the marker IS rejected, so the
+    # exemption is what lets it through, not the numbers.
+    coord2 = _coord(_existing(acc=20.0, age_s=300))
+    assert _fuse(coord2, _incoming(acc=400.0)) is False
+    assert _rejects(coord2) == 1
+
+
+def test_the_substitution_marker_never_reaches_the_cached_row() -> None:
+    """A transient marker in the cache would be published as an attribute."""
+    from custom_components.googlefindmy.coordinator import GoogleFindMyCoordinator
+
+    coord = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
+    coord._device_location_data = {
+        "dev": {
+            "latitude": HOME[0],
+            "longitude": HOME[1],
+            "accuracy": 20.0,
+            "last_seen": _now() - 300,
+            "status": "coordinate",
+        }
+    }
+    coord._device_names = {}
+    coord._device_update_history = {}
+    coord.increment_stat = lambda *_a, **_k: None
+    coord._apply_report_type_cooldown = lambda *_a, **_k: None
+    coord._is_on_hass_loop = lambda: True
+    coord._run_on_hass_loop = lambda *_a, **_k: None
+
+    payload = {
+        "latitude": FAR[0],
+        "longitude": FAR[1],
+        "accuracy": 400.0,
+        "last_seen": _now(),
+        "status": "coordinate",
+        "_accuracy_substituted": True,
+    }
+    coord.update_device_cache("dev", payload)
+
+    cached = coord._device_location_data["dev"]
+    assert "_accuracy_substituted" not in cached
+    # The payload did commit - otherwise the assertion above would hold for the
+    # wrong reason (nothing written at all).
+    assert cached["accuracy"] == 400.0
+
+
+def test_a_payload_without_a_timestamp_stays_this_gate_s_case() -> None:
+    """A missing stamp is the one temporal class this gate must keep claiming.
+
+    The gate hands the three classes ``_is_significant_update`` rejects on, so
+    that gate can classify them. A missing or unparseable ``last_seen`` is NOT
+    one of them: normalization returns None there and all three timestamp checks
+    are skipped, so the payload is accepted. Handing it on would let a coarse fix
+    through the very gate it was measured against - the distance-based merge
+    could then put the coarse coordinates in place of fresh precise ones. Found
+    by review of the previous commit, which had exactly that hole.
+    """
+    coord = _coord(_existing(acc=20.0, age_s=300))
+    payload = _incoming(acc=1600.0)
+    payload.pop("last_seen")
+
+    assert _fuse(coord, payload) is False
+    assert _rejects(coord) == 1
+    # Still not retained: no stamp means no age, and the reader needs one.
+    assert coord.get_coarse_fix("dev") is None
+
+    # The reason, pinned rather than asserted in prose: the significance gate
+    # accepts a stampless payload, so nobody else would have stopped it.
+    probe = MagicMock(spec=CacheOperations)
+    probe._device_location_data = {}
+    probe.increment_stat = MagicMock()
+    stampless = {
+        "latitude": FAR[0],
+        "longitude": FAR[1],
+        "accuracy": 1600.0,
+    }
+    assert (
+        CacheOperations._is_significant_update(probe, "dev", stampless) is True
+    )
+
+
 def test_record_coarse_fix_refuses_an_implausible_stamp_on_its_own() -> None:
     """The retention guard must hold even though the gate no longer feeds it.
 

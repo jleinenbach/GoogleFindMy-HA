@@ -2807,6 +2807,10 @@ class FcmReceiverHA:
                 radius = replacement_attrs.get("radius")
                 if radius is not None:
                     coordinator_payload["accuracy"] = radius
+                    # Home ZONE radius, not a measurement: the accuracy gate
+                    # must not refuse this deliberate move home. Transient
+                    # marker, popped in update_device_cache.
+                    coordinator_payload["_accuracy_substituted"] = True
                 coordinator_payload["semantic_name"] = None
 
         return coordinator_payload
@@ -2821,6 +2825,7 @@ class FcmReceiverHA:
             return True
 
         try:
+            payload.pop("_accuracy_substituted", None)
             coordinator._device_location_data[device_id] = payload  # noqa: SLF001
             _LOGGER.debug(
                 "Fallback: wrote to coordinator._device_location_data directly"

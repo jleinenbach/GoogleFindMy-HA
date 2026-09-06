@@ -232,6 +232,9 @@ Accessible via the ⚙️ cogwheel button on the main Google Find My Device Inte
 | `contributor_mode` | in_all_areas | selection | Chooses whether Google shares aggregated network-only data (`high_traffic`) or participates in full crowdsourced reporting (`in_all_areas`). |
 | `stale_threshold` | 3900 | seconds | After this many seconds (default: 65 minutes) without a location update, the tracker state becomes `unknown`. Use the "Last Location" entity to always see the last known position. |
 | `show_location_age` | true | toggle | Adds a `location_age` attribute (in seconds, rounded to 60s) to each tracker entity. Excluded from Recorder history to keep DB size predictable. |
+| `speed_gate_enabled` | true | toggle | Discards a far jump that would require an implausible speed, so a single stray crowd report cannot teleport a tracker. |
+| `roundtrip_confirm_enabled` | true | toggle | Requires a second, independent report before a device that returned to a previous position is moved back there. |
+| `accuracy_gate_enabled` | true | toggle | Discards a coarse fix (200 m or more, and at least 4x worse than the cached one) when a better, still-fresh position is already known. The coarse position stays visible as `coarse_*` attributes; turning the gate off restores the previous behaviour. |
 
 ### Map View link expiry (`map_view_token_expiration`)
 

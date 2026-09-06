@@ -167,36 +167,56 @@ class _GateMetrics(NamedTuple):
     dist: float
 
 
-def _implausible_timestamp_reason(
+class _StampVerdict(NamedTuple):
+    """Verdict on a payload's ``last_seen``, for the two callers that need it.
+
+    ``reason`` is None when the stamp is usable. ``rejected_downstream`` says
+    whether ``_is_significant_update`` would reject this class on its own - the
+    distinction the accuracy gate needs, and the one a plain boolean lost.
+    ``seen`` is the normalized stamp, handed back so the retention path does not
+    parse ``last_seen`` twice and so the type checker sees the narrowing.
+    """
+
+    reason: str | None
+    rejected_downstream: bool
+    seen: float | None
+
+
+def _stamp_verdict(
     coord: Any,
     device_id: str,
     row: Mapping[str, Any],
-) -> tuple[str | None, float | None]:
-    """Say why a payload's ``last_seen`` must not be treated as authoritative.
+) -> _StampVerdict:
+    """Judge a payload's ``last_seen`` for retention and for gate ownership.
 
-    Returns ``(None, stamp)`` when the stamp is usable, otherwise
-    ``(reason, None)``. The normalized stamp is handed back so the caller that
-    needs it does not parse ``last_seen`` a second time - and so the type
-    checker sees the narrowing this check performs. Three classes, the same three ``_is_significant_update``
-    rejects: pre-Y2K, too far in the future, or older than the published row.
+    TWO CALLERS, TWO QUESTIONS, ONE RULE. ``_record_coarse_fix`` must not RETAIN
+    a fix with any unusable stamp (one hours ahead yields a negative age, which
+    its freshness test reads as "very fresh"). ``_accuracy_gate_rejects`` asks
+    something narrower: may it CLAIM this drop? It may not, for the three
+    classes ``_is_significant_update`` rejects by itself (pre-Y2K, too far in
+    the future, older than the published row) - those are dropped one step later
+    anyway, and only there are they sorted into ``invalid_ts_drop_count`` /
+    ``future_ts_drop_count``. Booking them as ``accuracy_gate_rejects`` would
+    silence those counters and fill the one counter that exists to judge this
+    gate's thresholds with drops that say nothing about accuracy.
 
-    TWO CALLERS, ONE ANSWER. ``_record_coarse_fix`` must not RETAIN such a fix
-    (a stamp hours ahead yields a negative age, which its freshness test reads
-    as "very fresh"). ``_accuracy_gate_rejects`` must not CLAIM such a payload:
-    it is dropped one step later by ``_is_significant_update`` anyway, and that
-    is the only place which sorts the three classes into
-    ``invalid_ts_drop_count`` / ``future_ts_drop_count``. A gate that returned
-    True here would book the drop as ``accuracy_gate_rejects``, those counters
-    would never fire, and the diagnostics that exist to judge this gate's two
-    thresholds would carry drops that had nothing to do with accuracy.
+    A MISSING OR UNPARSEABLE STAMP IS THE EXCEPTION, and it is the reason this
+    returns a verdict rather than a bool. ``_is_significant_update`` normalizes
+    to None there and then skips all three timestamp checks, so it does NOT
+    reject the payload. Handing such a payload on would let the coarse fix
+    through the very gate it was measured against. It therefore stays this
+    gate's case: rejected and counted here, retention still refused.
     """
     seen = _normalize_epoch_seconds(row.get("last_seen"))
+    if seen is None:
+        return _StampVerdict(
+            f"no usable timestamp {row.get('last_seen')!r}", False, None
+        )
     if (
-        seen is None
-        or seen < _Y2K_EPOCH_SECONDS
+        seen < _Y2K_EPOCH_SECONDS
         or seen > time.time() + MAX_ACCEPTED_LOCATION_FUTURE_DRIFT_S
     ):
-        return f"implausible timestamp {row.get('last_seen')!r}", None
+        return _StampVerdict(f"implausible timestamp {seen}", True, None)
     # The forward-order rule against the PUBLISHED row. A stamp in the future is
     # skipped as authority for the same reason as above: it is corrupt, not
     # newer.
@@ -208,11 +228,12 @@ def _implausible_timestamp_reason(
             and published_seen <= time.time()
             and seen < published_seen
         ):
-            return (
+            return _StampVerdict(
                 f"timestamp {seen} predates the published row at {published_seen}",
+                True,
                 None,
             )
-    return None, seen
+    return _StampVerdict(None, False, seen)
 
 
 def _accuracy_gate_rejects(
@@ -262,6 +283,16 @@ def _accuracy_gate_rejects(
     """
     if not coord._accuracy_gate_enabled():
         return False
+    # The Google Home filter substitutes the HOME ZONE's radius for the reported
+    # accuracy before fusion, on all three inbound paths (poll, manual locate,
+    # push). That number is not a measurement of the device, so comparing it
+    # against the cached precision asks the wrong question: with a home zone of
+    # 200 m or more the gate would refuse the filter's deliberate decision and
+    # leave a tracker away from home instead of moving it there. The marker is
+    # transient and popped before commit; it says "this radius was substituted",
+    # which only the substituting site can know.
+    if new_data.get("_accuracy_substituted"):
+        return False
     # Mirrors the speed gate's incoming-side check: a missing, non-finite or
     # sentinel accuracy is not a measurement, and an unmeasured radius must
     # never be the reason to discard a fix.
@@ -290,13 +321,13 @@ def _accuracy_gate_rejects(
     # with drops that say nothing about the two thresholds this counter exists
     # to judge. Returning False costs nothing: the payload cannot commit, since
     # ``_is_significant_update`` rejects exactly these three classes.
-    temporal_reason, _ = _implausible_timestamp_reason(coord, device_id, new_data)
-    if temporal_reason is not None:
+    verdict = _stamp_verdict(coord, device_id, new_data)
+    if verdict.rejected_downstream:
         _LOGGER.debug(
             "Accuracy gate not claiming coarse fix %s (%s); leaving the drop "
             "to the significance gate, which classifies it",
             device_id,
-            temporal_reason,
+            verdict.reason,
         )
         return False
     # Drop any round-trip anchor INTENT the branches above pencilled onto this
@@ -419,9 +450,12 @@ class CacheOperations(_MixinBase):
         # The rule itself lives in ``_implausible_timestamp_reason`` because the
         # accuracy gate needs the same answer for a different purpose, and two
         # copies of "plausible" would drift apart.
-        reason, seen = _implausible_timestamp_reason(self, device_id, row)
-        if reason is not None or seen is None:
-            _LOGGER.debug("Not retaining coarse fix for %s: %s", device_id, reason)
+        verdict = _stamp_verdict(self, device_id, row)
+        seen = verdict.seen
+        if verdict.reason is not None or seen is None:
+            _LOGGER.debug(
+                "Not retaining coarse fix for %s: %s", device_id, verdict.reason
+            )
             return
 
         store = getattr(self, "_device_coarse_fix", None)
@@ -814,6 +848,9 @@ class CacheOperations(_MixinBase):
         # thus never consumes or seeds an anchor - the ordering fix (Fund A).
         anchor_seed = slot.pop("_round_trip_anchor_seed", None)
         anchor_consume = bool(slot.pop("_round_trip_anchor_consume", False))
+        # Read by the accuracy gate during fusion above; must never reach the
+        # cached row.
+        slot.pop("_accuracy_substituted", None)
 
         status = slot.get("status")
 

@@ -2109,6 +2109,13 @@ class PollingOperations(_MixinBase):
                                             location["accuracy"] = (
                                                 replacement_attrs.get("radius")
                                             )
+                                            # This radius is the HOME ZONE's, not
+                                            # a measurement of the device. The
+                                            # accuracy gate must not weigh it
+                                            # against the cached precision and
+                                            # refuse this deliberate move home;
+                                            # transient, popped before commit.
+                                            location["_accuracy_substituted"] = True
                                     # Clear semantic name so HA Core's zone engine determines the final state.
                                     location["semantic_name"] = None
                                     semantic_replaced = True
@@ -2211,6 +2218,7 @@ class PollingOperations(_MixinBase):
                             # anchor mutation.
                             location.pop("_round_trip_anchor_seed", None)
                             location.pop("_round_trip_anchor_consume", None)
+                            location.pop("_accuracy_substituted", None)
                             location.pop("_report_hint", None)
                             location.setdefault("last_updated", wall_now)
                             merged_location = self._merge_with_existing_cache_row(
