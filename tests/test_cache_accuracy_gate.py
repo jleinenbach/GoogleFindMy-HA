@@ -1201,6 +1201,30 @@ def test_the_substitution_marker_never_reaches_the_cached_row() -> None:
     assert cached["accuracy"] == 400.0
 
 
+def test_a_future_dated_cached_fix_may_not_veto_anything() -> None:
+    """The reference has to be trustworthy in both directions, not just one.
+
+    The freshness test asked only whether the cached fix is too OLD. A row
+    stamped in the future - clock skew on the reporting device, tolerated up to
+    ``MAX_ACCEPTED_LOCATION_FUTURE_DRIFT_S`` elsewhere in this file - yields a
+    NEGATIVE age and read as maximally fresh. It would then veto every coarse
+    update until wall time caught up and the stale interval elapsed on top,
+    pinning the tracker for hours. ``_record_coarse_fix`` already refuses a
+    future stamp as an ordering authority; this is the same rule for the
+    reference the gate compares against.
+    """
+    future_cached = _existing(acc=20.0, age_s=-1800)  # stamped 30 min ahead
+    coord = _coord(future_cached)
+
+    assert _fuse(coord, _incoming(acc=1600.0)) is True
+    assert _rejects(coord) == 0
+
+    # Non-vacuous: the same cached fix with a plausible stamp DOES veto.
+    coord2 = _coord(_existing(acc=20.0, age_s=1800))
+    assert _fuse(coord2, _incoming(acc=1600.0)) is False
+    assert _rejects(coord2) == 1
+
+
 def test_a_payload_without_a_timestamp_stays_this_gate_s_case() -> None:
     """A missing stamp is the one temporal class this gate must keep claiming.
 

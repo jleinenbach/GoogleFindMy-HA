@@ -310,7 +310,15 @@ def _accuracy_gate_rejects(
         return False
     existing_age = location_age_seconds(existing, time.time())
     threshold = resolve_stale_threshold(coord)
-    if existing_age is None or existing_age > threshold:
+    # A NEGATIVE age means the cached row is stamped in the future - clock skew
+    # on the reporting device, tolerated up to
+    # MAX_ACCEPTED_LOCATION_FUTURE_DRIFT_S elsewhere. Only checking ``> threshold``
+    # would read such a row as maximally fresh and let it veto every coarse
+    # update until wall time catches up AND the stale interval then elapses,
+    # pinning the tracker for hours. The reference this gate compares against
+    # has to be trustworthy in BOTH directions; ``_record_coarse_fix`` already
+    # refuses a future stamp as an ordering authority for the same reason.
+    if existing_age is None or existing_age < 0 or existing_age > threshold:
         return False
     # Temporal validity decides WHO may claim this drop, and it is checked
     # before the payload is classified as an accuracy rejection. A payload with
