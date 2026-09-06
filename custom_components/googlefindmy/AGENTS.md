@@ -87,11 +87,25 @@ Normalize FCM canonic IDs before validation (for example, compare `response_cano
 `canonic_device_id.lower()` and store the lowercase string on decrypted payloads) so tracker updates are not discarded due
 to server-provided hex casing differences.
 
-### Hybrid Low-Accuracy Polling
+### Semantic-only responses and coarse fixes
 
-When a poll response fails the accuracy threshold, `coordinator.py` preserves the previous coordinates and accuracy but still
-updates the new `last_seen` timestamp. This keeps map pins stable (no "jumping" to poor fixes) while reflecting that the device
-recently reported. The cold-start drop path (no cached coordinates available) strips `_report_hint` before returning; mirror that
+Two situations look alike in the poll loop and must not be merged.
+
+*Semantic-only responses* (no coordinates, but a `semantic_name`) preserve the previous coordinates and accuracy via
+`should_preserve_previous_coordinates` and `carry_reused_accuracy`, and they do commit the new `last_seen`. This keeps map pins
+stable while reflecting that the device recently reported.
+
+*Coarse fixes* are decided by the accuracy gate in `coordinator/cache.py::_apply_weighted_location_fusion` (#216). It rejects an
+incoming fix only when a cached position is reliable, at least `ACCURACY_GATE_RATIO` times more precise and still inside
+`stale_threshold`. All three callers (poll loop, manual locate, `update_device_cache`) then abort, so the location row is **not**
+committed - not even its new `last_seen`. That is deliberate and load-bearing: the cached row's age is the gate's own release
+condition, so committing the new timestamp on a rejection would keep the cached fix permanently fresh, the gate would never stop
+rejecting, and the tracker would sit frozen on an old position while reporting status `current`. That freeze is why the
+predecessor filter (`min_accuracy_threshold`, removed upstream in September 2025) had to go. The release boundary is pinned by
+`tests/test_cache_accuracy_gate.py::test_gate_stops_rejecting_once_the_cached_fix_goes_stale`; do not "fix" the aging row by
+committing a timestamp behind the gate.
+
+The cold-start drop path (no coordinates and no semantic name) strips `_report_hint` before returning; mirror that
 hint-stripping step in any new helpers that short-circuit low-quality updates so internal metadata never leaks into entity
 state.
 
