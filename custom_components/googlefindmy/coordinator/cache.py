@@ -167,6 +167,54 @@ class _GateMetrics(NamedTuple):
     dist: float
 
 
+def _implausible_timestamp_reason(
+    coord: Any,
+    device_id: str,
+    row: Mapping[str, Any],
+) -> tuple[str | None, float | None]:
+    """Say why a payload's ``last_seen`` must not be treated as authoritative.
+
+    Returns ``(None, stamp)`` when the stamp is usable, otherwise
+    ``(reason, None)``. The normalized stamp is handed back so the caller that
+    needs it does not parse ``last_seen`` a second time - and so the type
+    checker sees the narrowing this check performs. Three classes, the same three ``_is_significant_update``
+    rejects: pre-Y2K, too far in the future, or older than the published row.
+
+    TWO CALLERS, ONE ANSWER. ``_record_coarse_fix`` must not RETAIN such a fix
+    (a stamp hours ahead yields a negative age, which its freshness test reads
+    as "very fresh"). ``_accuracy_gate_rejects`` must not CLAIM such a payload:
+    it is dropped one step later by ``_is_significant_update`` anyway, and that
+    is the only place which sorts the three classes into
+    ``invalid_ts_drop_count`` / ``future_ts_drop_count``. A gate that returned
+    True here would book the drop as ``accuracy_gate_rejects``, those counters
+    would never fire, and the diagnostics that exist to judge this gate's two
+    thresholds would carry drops that had nothing to do with accuracy.
+    """
+    seen = _normalize_epoch_seconds(row.get("last_seen"))
+    if (
+        seen is None
+        or seen < _Y2K_EPOCH_SECONDS
+        or seen > time.time() + MAX_ACCEPTED_LOCATION_FUTURE_DRIFT_S
+    ):
+        return f"implausible timestamp {row.get('last_seen')!r}", None
+    # The forward-order rule against the PUBLISHED row. A stamp in the future is
+    # skipped as authority for the same reason as above: it is corrupt, not
+    # newer.
+    published = (getattr(coord, "_device_location_data", None) or {}).get(device_id)
+    if published:
+        published_seen = _normalize_epoch_seconds(published.get("last_seen"))
+        if (
+            published_seen is not None
+            and published_seen <= time.time()
+            and seen < published_seen
+        ):
+            return (
+                f"timestamp {seen} predates the published row at {published_seen}",
+                None,
+            )
+    return None, seen
+
+
 def _accuracy_gate_rejects(
     coord: Any,
     device_id: str,
@@ -232,6 +280,24 @@ def _accuracy_gate_rejects(
     existing_age = location_age_seconds(existing, time.time())
     threshold = resolve_stale_threshold(coord)
     if existing_age is None or existing_age > threshold:
+        return False
+    # Temporal validity decides WHO may claim this drop, and it is checked
+    # before the payload is classified as an accuracy rejection. A payload with
+    # a corrupt or regressed stamp is dropped either way - but by the
+    # significance gate one step later, which is the only place that sorts it
+    # into ``invalid_ts_drop_count`` / ``future_ts_drop_count``. Claiming it
+    # here would silence those counters and inflate ``accuracy_gate_rejects``
+    # with drops that say nothing about the two thresholds this counter exists
+    # to judge. Returning False costs nothing: the payload cannot commit, since
+    # ``_is_significant_update`` rejects exactly these three classes.
+    temporal_reason, _ = _implausible_timestamp_reason(coord, device_id, new_data)
+    if temporal_reason is not None:
+        _LOGGER.debug(
+            "Accuracy gate not claiming coarse fix %s (%s); leaving the drop "
+            "to the significance gate, which classifies it",
+            device_id,
+            temporal_reason,
+        )
         return False
     # Drop any round-trip anchor INTENT the branches above pencilled onto this
     # payload. Both are deferred markers (F-CODEX-7): they are popped and
@@ -346,49 +412,17 @@ class CacheOperations(_MixinBase):
         ``__new__`` (or partial test doubles) need no extra wiring. RAM-only.
         """
         # A rejected payload never reaches ``_is_significant_update``, where a
-        # corrupt future timestamp would normally be dropped
-        # (``future_ts_drop_count``). Without this check a fix stamped hours
-        # ahead would be retained here, and the age computed against the wall
-        # clock would come out NEGATIVE - which the freshness test below reads
-        # as "very fresh". The entity would then show an invalid coarse
-        # position until wall time caught up. Same bound as that guard, from
-        # the shared constant, so there is only one answer to "plausible".
-        seen = _normalize_epoch_seconds(row.get("last_seen"))
-        if (
-            seen is None
-            or seen < _Y2K_EPOCH_SECONDS
-            or seen > time.time() + MAX_ACCEPTED_LOCATION_FUTURE_DRIFT_S
-        ):
-            _LOGGER.debug(
-                "Not retaining coarse fix for %s: implausible timestamp %s",
-                device_id,
-                row.get("last_seen"),
-            )
+        # corrupt, future or regressed timestamp would normally be dropped and
+        # counted. Without this check a fix stamped hours ahead would be
+        # retained here, and the age computed against the wall clock would come
+        # out NEGATIVE - which the freshness test below reads as "very fresh".
+        # The rule itself lives in ``_implausible_timestamp_reason`` because the
+        # accuracy gate needs the same answer for a different purpose, and two
+        # copies of "plausible" would drift apart.
+        reason, seen = _implausible_timestamp_reason(self, device_id, row)
+        if reason is not None or seen is None:
+            _LOGGER.debug("Not retaining coarse fix for %s: %s", device_id, reason)
             return
-        # The same forward-order rule against the PUBLISHED row. The store check
-        # below only compares with an earlier coarse fix, so on the very first
-        # rejection a delayed report older than the currently published precise
-        # position would be retained and shown as current side information until
-        # it aged out. ``_is_significant_update`` would have dropped it; a
-        # rejected payload never reaches it, so the rule is restated here.
-        # A published stamp in the future is skipped for the same reason as
-        # below: it is corrupt, not authoritative.
-        published = (getattr(self, "_device_location_data", None) or {}).get(device_id)
-        if published:
-            published_seen = _normalize_epoch_seconds(published.get("last_seen"))
-            if (
-                published_seen is not None
-                and published_seen <= time.time()
-                and seen < published_seen
-            ):
-                _LOGGER.debug(
-                    "Not retaining coarse fix for %s: timestamp %s predates the "
-                    "published row at %s",
-                    device_id,
-                    seen,
-                    published_seen,
-                )
-                return
 
         store = getattr(self, "_device_coarse_fix", None)
         # Never let an older report replace a newer one. ``_is_significant_update``

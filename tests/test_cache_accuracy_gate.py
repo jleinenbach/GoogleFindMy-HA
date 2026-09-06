@@ -45,6 +45,7 @@ from custom_components.googlefindmy.const import (
     OPT_STALE_THRESHOLD,
 )
 from custom_components.googlefindmy.coordinator.cache import (
+    MAX_ACCEPTED_LOCATION_FUTURE_DRIFT_S,
     CacheOperations,
     _haversine_distance_impl,
 )
@@ -1034,9 +1035,13 @@ def test_coarse_fix_with_a_future_timestamp_is_not_retained() -> None:
     payload = _incoming(acc=1600.0)
     payload["last_seen"] = _now() + MAX_ACCEPTED_LOCATION_FUTURE_DRIFT_S + 3600
 
-    # Still rejected as a position - only the retention is refused.
-    assert _fuse(coord, payload) is False
-    assert _rejects(coord) == 1
+    # The gate does not CLAIM this drop: it hands the payload on, because only
+    # ``_is_significant_update`` sorts a corrupt stamp into
+    # ``future_ts_drop_count`` (pinned in tests/test_coordinator_invalid_ts_split.py).
+    # Counting it here as an accuracy rejection would silence that counter and
+    # inflate this one with a drop that says nothing about the thresholds.
+    assert _fuse(coord, payload) is True
+    assert _rejects(coord) == 0
     assert coord.get_coarse_fix("dev") is None
 
     # A stamp inside the tolerance is retained, so the guard is not vacuous.
@@ -1065,6 +1070,45 @@ def test_reader_rejects_a_negative_coarse_age() -> None:
     assert "coarse_latitude" not in attrs
 
 
+def test_record_coarse_fix_refuses_an_implausible_stamp_on_its_own() -> None:
+    """The retention guard must hold even though the gate no longer feeds it.
+
+    Since the gate hands temporally invalid payloads on instead of claiming
+    them, ``_record_coarse_fix`` is no longer reached with such a stamp through
+    the fusion path - measured: removing its guard broke no test. That makes the
+    guard unreachable, not unnecessary: it is the second caller's protection,
+    and an unguarded invariant is the one that rots. Exercised directly here,
+    for both bounds and for the published-row order.
+    """
+    now = _now()
+
+    for label, stamp in (
+        ("future", now + MAX_ACCEPTED_LOCATION_FUTURE_DRIFT_S + 3600),
+        ("pre-Y2K", 100_000.0),
+        ("missing", None),
+    ):
+        coord = _coord(_existing(acc=20.0, age_s=300))
+        row = _incoming(acc=1600.0)
+        if stamp is None:
+            row.pop("last_seen")
+        else:
+            row["last_seen"] = stamp
+        coord._record_coarse_fix("dev", row)
+        assert coord.get_coarse_fix("dev") is None, label
+
+    # Older than the published row: same refusal, different reason.
+    coord = _coord(_existing(acc=20.0, age_s=60))
+    delayed = _incoming(acc=1600.0)
+    delayed["last_seen"] = now - 600
+    coord._record_coarse_fix("dev", delayed)
+    assert coord.get_coarse_fix("dev") is None
+
+    # Non-vacuous: a plausible stamp IS retained by the same call.
+    coord = _coord(_existing(acc=20.0, age_s=300))
+    coord._record_coarse_fix("dev", _incoming(acc=1600.0))
+    assert coord.get_coarse_fix("dev") is not None
+
+
 def test_pre_y2k_timestamp_is_not_retained() -> None:
     """A corrupt pre-Y2K stamp must not become a coarse fix either.
 
@@ -1079,9 +1123,17 @@ def test_pre_y2k_timestamp_is_not_retained() -> None:
     coord = _coord(_existing(acc=20.0, age_s=300))
     payload = _incoming(acc=1600.0)
     payload["last_seen"] = 100_000.0  # 1970
-    assert _fuse(coord, payload) is False
-    assert _rejects(coord) == 1
+    # Same division of labour as the future-stamp case: not retained, and not
+    # booked as an accuracy rejection either - ``_is_significant_update`` drops
+    # it into ``invalid_ts_drop_warn``.
+    assert _fuse(coord, payload) is True
+    assert _rejects(coord) == 0
     assert coord.get_coarse_fix("dev") is None
+
+    # Non-vacuous: a plausible stamp of the same payload IS claimed and counted.
+    coord2 = _coord(_existing(acc=20.0, age_s=300))
+    assert _fuse(coord2, _incoming(acc=1600.0)) is False
+    assert _rejects(coord2) == 1
 
 
 def test_coarse_fix_never_moves_backwards_in_time() -> None:
@@ -1378,9 +1430,10 @@ def test_a_report_older_than_the_published_row_is_not_retained() -> None:
     delayed = _incoming(acc=1600.0)
     delayed["last_seen"] = _now() - 600  # older than the published row
 
-    assert _fuse(coord, delayed) is False
-    # The gate still fired and still counted - only the retention is refused.
-    assert _rejects(coord) == 1
+    assert _fuse(coord, delayed) is True
+    # Not retained, and not booked: a regressed stamp is the significance
+    # gate's case (``invalid_ts_drop_benign``), not this gate's.
+    assert _rejects(coord) == 0
     assert coord.get_coarse_fix("dev") is None
 
     # A report NEWER than the published row is retained, so the guard is not
