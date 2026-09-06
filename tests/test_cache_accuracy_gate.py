@@ -1000,3 +1000,71 @@ def test_reader_rejects_a_negative_coarse_age() -> None:
     }
     attrs = _tracker_entity(future, display)._attr_extra_state_attributes
     assert "coarse_latitude" not in attrs
+
+
+def test_pre_y2k_timestamp_is_not_retained() -> None:
+    """A corrupt pre-Y2K stamp must not become a coarse fix either.
+
+    Same reasoning as the future-stamp guard: the rejected payload never reaches
+    ``_is_significant_update``, which drops such stamps into
+    ``invalid_ts_drop_warn``. Bounded by the same ``_Y2K_EPOCH_SECONDS``
+    constant that guard uses, so there is one answer to "plausible", not two.
+    """
+    coord = _coord(_existing(acc=20.0, age_s=300))
+    payload = _incoming(acc=1600.0)
+    payload["last_seen"] = 100_000.0  # 1970
+    assert _fuse(coord, payload) is False
+    assert _rejects(coord) == 1
+    assert coord.get_coarse_fix("dev") is None
+
+
+def test_coarse_fix_never_moves_backwards_in_time() -> None:
+    """An out-of-order report must not replace a newer coarse fix.
+
+    ``_is_significant_update`` enforces forward order for the PUBLISHED row, but
+    a payload this gate rejects never gets there. Without this guard a delayed
+    crowd report would overwrite more recent side information with older data.
+    """
+    now = _now()
+    coord = _coord(_existing(acc=20.0, age_s=300))
+
+    recent = _incoming(acc=1600.0)
+    recent["last_seen"] = now
+    assert _fuse(coord, recent) is False
+    kept = coord.get_coarse_fix("dev")
+    assert kept is not None
+
+    delayed = _incoming(acc=1600.0, lat=FAR[0] + 0.01)
+    delayed["last_seen"] = now - 5000
+    assert _fuse(coord, delayed) is False
+    still = coord.get_coarse_fix("dev")
+    assert still is not None
+    assert still["last_seen"] == kept["last_seen"]
+    assert still["latitude"] == kept["latitude"]
+
+    # A NEWER one does replace it, so the guard is not simply freezing the slot.
+    newer = _incoming(acc=1600.0, lat=FAR[0] + 0.02)
+    newer["last_seen"] = now + 60
+    assert _fuse(coord, newer) is False
+    assert coord.get_coarse_fix("dev")["latitude"] == FAR[0] + 0.02
+
+
+def test_gate_stops_rejecting_once_the_cached_fix_goes_stale() -> None:
+    """The self-healing property, pinned at its boundary.
+
+    This is what separates the gate from the filter that was removed in 2025:
+    it cannot freeze a tracker, because the moment the cached fix crosses
+    ``stale_threshold`` the gate stops rejecting and the coarse fix wins. Any
+    change that keeps the cached timestamp fresh across a rejection would
+    destroy exactly this property - the threshold would never be reached.
+    """
+    payload = lambda: _incoming(acc=1600.0)  # noqa: E731
+    assert _fuse(_coord(_existing(acc=20.0, age_s=300)), payload()) is False
+    assert (
+        _fuse(_coord(_existing(acc=20.0, age_s=DEFAULT_STALE_THRESHOLD - 1)), payload())
+        is False
+    )
+    assert (
+        _fuse(_coord(_existing(acc=20.0, age_s=DEFAULT_STALE_THRESHOLD + 1)), payload())
+        is True
+    )

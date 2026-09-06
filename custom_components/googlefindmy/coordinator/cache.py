@@ -242,7 +242,11 @@ class CacheOperations(_MixinBase):
         # position until wall time caught up. Same bound as that guard, from
         # the shared constant, so there is only one answer to "plausible".
         seen = _normalize_epoch_seconds(row.get("last_seen"))
-        if seen is None or seen > time.time() + MAX_ACCEPTED_LOCATION_FUTURE_DRIFT_S:
+        if (
+            seen is None
+            or seen < _Y2K_EPOCH_SECONDS
+            or seen > time.time() + MAX_ACCEPTED_LOCATION_FUTURE_DRIFT_S
+        ):
             _LOGGER.debug(
                 "Not retaining coarse fix for %s: implausible timestamp %s",
                 device_id,
@@ -250,6 +254,24 @@ class CacheOperations(_MixinBase):
             )
             return
         store = getattr(self, "_device_coarse_fix", None)
+        # Never let an older report replace a newer one. ``_is_significant_update``
+        # enforces forward order for the published row, but a rejected payload
+        # never gets there, so an out-of-order crowd report would otherwise
+        # overwrite a more recent coarse fix and make the side information go
+        # backwards in time.
+        if store is not None:
+            previous = store.get(device_id)
+            if previous is not None:
+                previous_seen = _normalize_epoch_seconds(previous.get("last_seen"))
+                if previous_seen is not None and seen < previous_seen:
+                    _LOGGER.debug(
+                        "Not retaining coarse fix for %s: timestamp %s regresses "
+                        "behind the retained %s",
+                        device_id,
+                        seen,
+                        previous_seen,
+                    )
+                    return
         if store is None:
             store = {}
             self._device_coarse_fix = store
