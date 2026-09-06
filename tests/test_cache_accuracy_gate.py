@@ -1005,10 +1005,13 @@ def test_reader_rejects_a_negative_coarse_age() -> None:
 def test_pre_y2k_timestamp_is_not_retained() -> None:
     """A corrupt pre-Y2K stamp must not become a coarse fix either.
 
-    Same reasoning as the future-stamp guard: the rejected payload never reaches
-    ``_is_significant_update``, which drops such stamps into
-    ``invalid_ts_drop_warn``. Bounded by the same ``_Y2K_EPOCH_SECONDS``
-    constant that guard uses, so there is one answer to "plausible", not two.
+    Same *source* as the future-stamp guard - the rejected payload never reaches
+    ``_is_significant_update``, so both of its bounds have to be restated here -
+    but a different damage. A future stamp reads as negative age, i.e. as
+    extremely fresh; a 1970 stamp reads as roughly fifty-five years old, so the
+    reader would discard it anyway. What this guard buys is that the store and
+    the diagnostics never carry a row that is worthless by construction. Bounded
+    by the same ``_Y2K_EPOCH_SECONDS`` constant, so "plausible" has one answer.
     """
     coord = _coord(_existing(acc=20.0, age_s=300))
     payload = _incoming(acc=1600.0)
@@ -1181,3 +1184,45 @@ def test_reader_publishes_only_the_coarse_fields_it_actually_has() -> None:
     )._attr_extra_state_attributes
     assert attrs["coarse_latitude"] == FAR[0]
     assert "coarse_accuracy" not in attrs
+
+
+def test_a_millisecond_stamp_is_stored_in_seconds() -> None:
+    """The store must hold the normalized stamp, not the raw field.
+
+    ``_record_coarse_fix`` judges the NORMALIZED value (millisecond-tolerant),
+    but every reader computes the age with ``location_age_seconds``, which does
+    a plain ``float()``. Storing the raw field would let a millisecond stamp
+    pass the guard and then read as decades in the future: the entity would hide
+    the fix entirely (negative age) and the diagnostics would clamp the age to
+    ``0``, i.e. claim "just now" for a stamp they could not interpret.
+    """
+    coord = _coord(_existing(acc=20.0, age_s=300))
+    payload = _incoming(acc=1600.0)
+    payload["last_seen"] = _now() * 1000.0  # milliseconds, as the seed path sends
+
+    assert _fuse(coord, payload) is False
+    stored = coord.get_coarse_fix("dev")
+    assert stored is not None
+    # Seconds, not milliseconds: an age a human would recognise, not ~55 years.
+    assert abs(_now() - float(stored["last_seen"])) < 60
+
+
+def test_a_future_stamp_does_not_block_later_coarse_fixes() -> None:
+    """A retained future stamp must not win the ordering test against reality.
+
+    The plausibility bound tolerates clock skew up to
+    ``MAX_ACCEPTED_LOCATION_FUTURE_DRIFT_S``, so a stamp an hour ahead is
+    retained. The reader discards it (negative age), so it is invisible - and
+    without this carve-out it would still outrank every real fix for that whole
+    hour, suppressing the coarse attributes exactly when they are wanted.
+    """
+    coord = _coord(_existing(acc=20.0, age_s=300))
+
+    ahead = _incoming(acc=1600.0, lat=FAR[0] + 0.03)
+    ahead["last_seen"] = _now() + 3600
+    assert _fuse(coord, ahead) is False
+    assert coord.get_coarse_fix("dev")["latitude"] == FAR[0] + 0.03
+
+    honest = _incoming(acc=1600.0, lat=FAR[0] + 0.04)
+    assert _fuse(coord, honest) is False
+    assert coord.get_coarse_fix("dev")["latitude"] == FAR[0] + 0.04

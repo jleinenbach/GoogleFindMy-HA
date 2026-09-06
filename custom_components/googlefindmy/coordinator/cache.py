@@ -263,6 +263,14 @@ class CacheOperations(_MixinBase):
             previous = store.get(device_id)
             if previous is not None:
                 previous_seen = _normalize_epoch_seconds(previous.get("last_seen"))
+                # A retained stamp that lies in the future must not block its own
+                # replacement. The bound above tolerates up to
+                # MAX_ACCEPTED_LOCATION_FUTURE_DRIFT_S of clock skew, but the
+                # reader discards a future stamp outright (negative age), so such
+                # an entry is invisible anyway - letting it win the ordering test
+                # would suppress every real coarse fix until wall time caught up.
+                if previous_seen is not None and previous_seen > time.time():
+                    previous_seen = None
                 if previous_seen is not None and seen < previous_seen:
                     _LOGGER.debug(
                         "Not retaining coarse fix for %s: timestamp %s regresses "
@@ -279,7 +287,15 @@ class CacheOperations(_MixinBase):
             "latitude": row.get("latitude"),
             "longitude": row.get("longitude"),
             "accuracy": row.get("accuracy"),
-            "last_seen": row.get("last_seen"),
+            # The NORMALIZED stamp, not the raw field. The guards above judge
+            # ``seen``, but every reader of this store computes the age with
+            # ``location_age_seconds``, which does a plain ``float()`` and is
+            # NOT millisecond-tolerant. Storing the raw value would let a
+            # millisecond stamp pass the guards here and then read as ~55 years
+            # in the future downstream: the entity would hide the fix
+            # (negative age) and the diagnostics would clamp it to ``0``, i.e.
+            # report "just now" for a stamp it could not interpret.
+            "last_seen": seen,
         }
 
     def count_accuracy_class(self, row: Mapping[str, Any]) -> None:
