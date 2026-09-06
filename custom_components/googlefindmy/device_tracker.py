@@ -1528,8 +1528,12 @@ class GoogleFindMyDeviceTracker(GoogleFindMyDeviceEntity, TrackerEntity, Restore
                 attributes["coarse_longitude"] = coarse_lon
             if coarse.get("accuracy") is not None:
                 attributes["coarse_accuracy"] = coarse["accuracy"]
-            if coarse.get("last_seen") is not None:
-                attributes["coarse_last_seen"] = coarse["last_seen"]
+            # No guard on ``last_seen``: reaching this point already proves it is
+            # present and float-coercible, because ``location_age_seconds``
+            # returns ``None`` otherwise and the expiry check above then drops
+            # the fix. A second check here would be an unreachable branch that
+            # reads like a real one.
+            attributes["coarse_last_seen"] = coarse["last_seen"]
 
         self._attr_extra_state_attributes = attributes
 

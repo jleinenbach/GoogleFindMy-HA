@@ -1068,3 +1068,116 @@ def test_gate_stops_rejecting_once_the_cached_fix_goes_stale() -> None:
         _fuse(_coord(_existing(acc=20.0, age_s=DEFAULT_STALE_THRESHOLD + 1)), payload())
         is True
     )
+
+
+# ------------------------------------------------- defensive branches, pinned
+
+# Codecov flagged one uncovered line and five half-taken branches in this
+# change. Each is a defensive guard, i.e. a branch that today's callers cannot
+# reach - which is exactly the kind that rots unnoticed. They are pinned here
+# rather than excluded, because "unreachable" is a claim about the callers, and
+# the callers change.
+
+
+def test_the_mixin_declaration_stays_a_declaration() -> None:
+    """``_MixinBase.count_accuracy_class`` must raise, not silently do nothing.
+
+    The stub exists so mypy can type the two mixins that call the method across
+    class boundaries; the implementation lives in ``CacheOperations``. If a
+    future edit gave the stub a body, an MRO mistake would stop being loud and
+    the tally would vanish without a failure anywhere.
+    """
+    from custom_components.googlefindmy.coordinator._mixin_typing import _MixinBase
+
+    with pytest.raises(NotImplementedError):
+        _MixinBase.count_accuracy_class(object(), {"accuracy": 5.0})
+
+
+def test_an_unmapped_bucket_counts_nothing_instead_of_raising(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A class without a counter must be dropped, never crash the write path.
+
+    ``count_accuracy_class`` looks its key up in ``ACCURACY_BUCKET_STATS``. The
+    two tables are kept in one module precisely so they cannot drift, but the
+    lookup is inside the cache commit path: if they ever did drift, a ``None``
+    bucket must fall through quietly rather than take a location update down
+    with it. Forced here because no real accuracy value reaches this branch.
+    """
+    from custom_components.googlefindmy.coordinator import cache as cache_mod
+
+    coord = _cache_coord()
+    monkeypatch.setattr(cache_mod, "_accuracy_bucket_impl", lambda _v: None)
+    coord.count_accuracy_class({"accuracy": 5.0})
+    assert _bucket_calls(coord) == []
+
+
+def test_diagnostics_omits_the_coarse_age_when_the_stamp_is_unusable() -> None:
+    """A coarse fix without a numeric stamp yields ``None``, not a wrong age.
+
+    The producer refuses to retain such a fix, so this is the reader's second
+    line. It matters because ``coarse_fix_age_s`` is read by humans triaging an
+    issue: a fabricated ``0`` would read as "just now".
+    """
+    from tests.helpers.main_coordinator_stub import MainCoordinatorStub
+
+    coord = MainCoordinatorStub(config_entry=make_config_entry(entry_id="coarse-nots"))
+    coord.data = [
+        {
+            "device_id": "dev",
+            "accuracy": 20.0,
+            "last_seen": _now() - 60,
+            "is_own_report": False,
+        }
+    ]
+    coord._device_location_data = {"dev": {"device_type": 1}}
+    coord._present_last_seen = {}
+    coord._device_coarse_fix = {
+        "dev": {
+            "latitude": FAR[0],
+            "longitude": FAR[1],
+            "accuracy": 1600.0,
+            "last_seen": "not-a-number",
+        }
+    }
+
+    entry = coord.build_per_device_diagnostics()[0]
+    assert entry["coarse_fix_accuracy_bucket"] == "500-2000"
+    assert entry["coarse_fix_age_s"] is None
+
+
+def test_reader_publishes_only_the_coarse_fields_it_actually_has() -> None:
+    """A partial coarse fix must not produce half-empty attributes.
+
+    Each of the three reader guards is taken in both directions here. Without
+    this, a fix missing its coordinates would still be truthy and the entity
+    would publish ``coarse_accuracy`` alone - a radius around nothing.
+    """
+    display = {
+        "latitude": HOME[0],
+        "longitude": HOME[1],
+        "accuracy": 20.0,
+        "last_seen": _now() - 60,
+    }
+
+    # Coordinates missing: no coarse_latitude/-longitude, but the rest survives.
+    attrs = _tracker_entity(
+        {"accuracy": 1600.0, "last_seen": _now() - 30}, display
+    )._attr_extra_state_attributes
+    assert "coarse_latitude" not in attrs
+    assert "coarse_longitude" not in attrs
+    assert attrs["coarse_accuracy"] == 1600.0
+    assert "coarse_last_seen" in attrs
+
+    # Only one half of the pair: still nothing, a lone coordinate is not a place.
+    attrs = _tracker_entity(
+        {"latitude": FAR[0], "accuracy": 1600.0, "last_seen": _now() - 30}, display
+    )._attr_extra_state_attributes
+    assert "coarse_latitude" not in attrs
+
+    # Accuracy missing: the position is still worth showing.
+    attrs = _tracker_entity(
+        {"latitude": FAR[0], "longitude": FAR[1], "last_seen": _now() - 30}, display
+    )._attr_extra_state_attributes
+    assert attrs["coarse_latitude"] == FAR[0]
+    assert "coarse_accuracy" not in attrs
