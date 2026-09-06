@@ -951,3 +951,52 @@ def test_coarse_fix_expires_with_the_stale_threshold() -> None:
         "coarse_latitude"
         not in _tracker_entity(stale, display)._attr_extra_state_attributes
     )
+
+
+def test_coarse_fix_with_a_future_timestamp_is_not_retained() -> None:
+    """A corrupt future stamp must not be retained as a "very fresh" coarse fix.
+
+    A rejected payload never reaches ``_is_significant_update``, where a stamp
+    more than ``MAX_ACCEPTED_LOCATION_FUTURE_DRIFT_S`` ahead is normally dropped
+    (``future_ts_drop_count``). Retained here, its age against the wall clock
+    would be NEGATIVE, which the freshness test reads as very fresh - so the
+    entity would show an invalid coarse position until wall time caught up.
+    Found by an independent review of the pushed diff, not by this suite.
+    """
+    from custom_components.googlefindmy.coordinator.cache import (
+        MAX_ACCEPTED_LOCATION_FUTURE_DRIFT_S,
+    )
+
+    coord = _coord(_existing(acc=20.0, age_s=300))
+    payload = _incoming(acc=1600.0)
+    payload["last_seen"] = _now() + MAX_ACCEPTED_LOCATION_FUTURE_DRIFT_S + 3600
+
+    # Still rejected as a position - only the retention is refused.
+    assert _fuse(coord, payload) is False
+    assert _rejects(coord) == 1
+    assert coord.get_coarse_fix("dev") is None
+
+    # A stamp inside the tolerance is retained, so the guard is not vacuous.
+    coord2 = _coord(_existing(acc=20.0, age_s=300))
+    ok = _incoming(acc=1600.0)
+    ok["last_seen"] = _now() + 60
+    assert _fuse(coord2, ok) is False
+    assert coord2.get_coarse_fix("dev") is not None
+
+
+def test_reader_rejects_a_negative_coarse_age() -> None:
+    """Second line: a future-stamped fix that got in anyway is not displayed."""
+    display = {
+        "latitude": HOME[0],
+        "longitude": HOME[1],
+        "accuracy": 20.0,
+        "last_seen": _now() - 60,
+    }
+    future = {
+        "latitude": FAR[0],
+        "longitude": FAR[1],
+        "accuracy": 1600.0,
+        "last_seen": _now() + 3 * 3600,
+    }
+    attrs = _tracker_entity(future, display)._attr_extra_state_attributes
+    assert "coarse_latitude" not in attrs

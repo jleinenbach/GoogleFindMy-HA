@@ -77,6 +77,13 @@ from .helpers.subentry import normalize_epoch_seconds as _normalize_epoch_second
 
 _LOGGER = logging.getLogger(__name__)
 
+# Maximum accepted future drift of a report timestamp, in seconds (2 hours).
+# Module level rather than local to ``_is_significant_update`` because the
+# accuracy gate needs the same bound: it retains a rejected fix BEFORE that
+# method runs, so without a shared constant there would be two answers to the
+# question "is this timestamp plausible".
+MAX_ACCEPTED_LOCATION_FUTURE_DRIFT_S = 7200
+
 # Metadata keys to preserve across cache updates
 _METADATA_KEYS = (
     "pair_date",
@@ -226,6 +233,22 @@ class CacheOperations(_MixinBase):
         mirroring ``_record_last_good_location`` so coordinators built through
         ``__new__`` (or partial test doubles) need no extra wiring. RAM-only.
         """
+        # A rejected payload never reaches ``_is_significant_update``, where a
+        # corrupt future timestamp would normally be dropped
+        # (``future_ts_drop_count``). Without this check a fix stamped hours
+        # ahead would be retained here, and the age computed against the wall
+        # clock would come out NEGATIVE - which the freshness test below reads
+        # as "very fresh". The entity would then show an invalid coarse
+        # position until wall time caught up. Same bound as that guard, from
+        # the shared constant, so there is only one answer to "plausible".
+        seen = _normalize_epoch_seconds(row.get("last_seen"))
+        if seen is None or seen > time.time() + MAX_ACCEPTED_LOCATION_FUTURE_DRIFT_S:
+            _LOGGER.debug(
+                "Not retaining coarse fix for %s: implausible timestamp %s",
+                device_id,
+                row.get("last_seen"),
+            )
+            return
         store = getattr(self, "_device_coarse_fix", None)
         if store is None:
             store = {}
@@ -887,9 +910,6 @@ class CacheOperations(_MixinBase):
         """
         # Use centralized constant from helpers/geo.py
         # MIN_PHYSICAL_ACCURACY_M = 0.001m (only error code 0.0 is filtered)
-
-        # Maximum accepted future drift in seconds (2 hours)
-        MAX_ACCEPTED_LOCATION_FUTURE_DRIFT_S = 7200
 
         if not isinstance(new_data, dict):
             _LOGGER.debug("Rejecting update for %s: payload is not a dict", device_id)

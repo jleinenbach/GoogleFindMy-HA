@@ -1514,7 +1514,11 @@ class GoogleFindMyDeviceTracker(GoogleFindMyDeviceEntity, TrackerEntity, Restore
             # ``stale_threshold`` option decides here as well.
             coarse_age = location_age_seconds(coarse, time.time())
             threshold = resolve_stale_threshold(self.coordinator)
-            if coarse_age is None or coarse_age > threshold:
+            # A NEGATIVE age means the stamp lies in the future, i.e. it is
+            # corrupt - not "extremely fresh". The producer already refuses to
+            # retain such a fix; this is the second line, because reading a
+            # position is where the damage would show.
+            if coarse_age is None or coarse_age < 0 or coarse_age > threshold:
                 coarse = None
         if coarse:
             coarse_lat = coarse.get("latitude")
