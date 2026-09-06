@@ -1230,9 +1230,7 @@ def test_a_payload_without_a_timestamp_stays_this_gate_s_case() -> None:
         "longitude": FAR[1],
         "accuracy": 1600.0,
     }
-    assert (
-        CacheOperations._is_significant_update(probe, "dev", stampless) is True
-    )
+    assert CacheOperations._is_significant_update(probe, "dev", stampless) is True
 
 
 def test_record_coarse_fix_refuses_an_implausible_stamp_on_its_own() -> None:
