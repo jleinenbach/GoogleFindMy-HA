@@ -1822,9 +1822,11 @@ def test_the_poll_cycle_substitutes_the_home_zone_and_marks_it(
     devices = [{"id": "dev-home", "name": "Home Tag"}]
     hass = _Hass(loop)
     coordinator = GoogleFindMyCoordinator(hass, cache=_Cache())
-    coordinator.config_entry = SimpleNamespace(
-        entry_id="entry-id", options={}, data={}, title="Test Entry"
-    )
+    # The canonical factory, not an ad-hoc SimpleNamespace: tests/AGENTS.md
+    # requires it, and tests/test_guard_config_entry_stub.py enforces it against
+    # a frozen baseline. The harness this was modelled on predates that rule and
+    # sits in the legacy allowlist, so copying it verbatim tripped the guard.
+    coordinator.config_entry = make_config_entry(entry_id="entry-id")
     coordinator.api = _Api()
     home_filter = _Filter()
     coordinator._get_google_home_filter = lambda: home_filter
