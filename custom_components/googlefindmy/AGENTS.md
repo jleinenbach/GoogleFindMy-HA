@@ -95,8 +95,12 @@ Two situations look alike in the poll loop and must not be merged.
 `should_preserve_previous_coordinates` and `carry_reused_accuracy`, and they do commit the new `last_seen`. This keeps map pins
 stable while reflecting that the device recently reported. Because the reused value is indistinguishable from a fresh one
 downstream, `count_accuracy_class` must run BEFORE this and before every other accuracy substitution (`_apply_semantic_mapping`,
-the Google-Home filter); its distribution answers "what do incoming fixes report", and a response reporting no accuracy of its own
-does not belong in it. Order pinned by
+the Google-Home filter on both the poll and the push path); its distribution answers "what do incoming fixes report", and a
+response reporting no accuracy of its own does not belong in it. All **three** entry points count for themselves and set
+`_accuracy_counted`; `update_device_cache` counts only when that marker is absent and pops it, so it never reaches entity state.
+The marker is deliberately not derived from `_fusion_preapplied`: on the push path the accuracy is substituted in
+`FcmReceiverHA._prepare_coordinator_payload`, i.e. before the coordinator is entered at all, so "was fused" and "was counted" are
+not the same question. Order pinned by
 `tests/test_cache_accuracy_gate.py::test_the_tally_runs_before_any_accuracy_substitution`.
 
 *Coarse fixes* are decided by the accuracy gate, `coordinator/cache.py::_accuracy_gate_rejects` (#216). It fires only where the

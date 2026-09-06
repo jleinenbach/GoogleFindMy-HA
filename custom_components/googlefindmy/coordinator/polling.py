@@ -2024,6 +2024,7 @@ class PollingOperations(_MixinBase):
                         # incoming fixes report", so a response that reports no
                         # accuracy of its own must not appear in it at all.
                         self.count_accuracy_class(location)
+                        location["_accuracy_counted"] = True
 
                         mapping_applied = self._apply_semantic_mapping(location)
 

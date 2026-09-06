@@ -374,6 +374,7 @@ class LocateOperations(_MixinBase):
                 # return, and before any substitution of the value (semantic
                 # mapping, Google-Home filter, semantic-only preserve).
                 self.count_accuracy_class(location_data)
+                location_data["_accuracy_counted"] = True
 
                 mapping_applied = self._apply_semantic_mapping(location_data)
 

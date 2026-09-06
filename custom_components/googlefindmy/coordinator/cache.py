@@ -736,6 +736,17 @@ class CacheOperations(_MixinBase):
 
         slot["is_replayed"] = is_replay
 
+        # Tally the REPORTED accuracy class (#216) BEFORE the semantic mapping
+        # below can replace the value with an anchor radius, and only if nobody
+        # upstream has counted this payload already. The marker is explicit
+        # rather than derived from ``_fusion_preapplied``: deriving it coupled
+        # "was fused" to "was counted", and the push path is exactly the case
+        # where those two come apart - its accuracy is substituted in
+        # ``FcmReceiverHA._prepare_coordinator_payload``, i.e. before this
+        # method is ever entered, so it has to count there and say so here.
+        if not slot.pop("_accuracy_counted", False):
+            self.count_accuracy_class(slot)
+
         # Apply semantic location mapping
         apply_mapping = getattr(self, "_apply_semantic_mapping", None)
         if callable(apply_mapping):
@@ -746,13 +757,6 @@ class CacheOperations(_MixinBase):
         report_hint = slot.get("_report_hint")
         fusion_preapplied = bool(slot.pop("_fusion_preapplied", False))
 
-        # Apply weighted fusion if not already done. The accuracy class is
-        # tallied immediately before it (#216) and only on this path, because a
-        # payload that arrives pre-fused was already counted by whoever ran the
-        # fusion (poll loop, manual locate) - counting again here would double
-        # every fix from those two paths.
-        if not fusion_preapplied:
-            self.count_accuracy_class(slot)
         if not fusion_preapplied and not self._apply_weighted_location_fusion(
             device_id, slot
         ):

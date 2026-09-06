@@ -808,11 +808,34 @@ def test_sentinel_accuracy_is_not_counted_as_the_finest_class() -> None:
     assert _bucket_calls(coord) == [ACCURACY_BUCKET_STATS["<10"]]
 
 
-def test_prefused_payload_is_not_counted_twice() -> None:
-    """A payload the poll loop already fused must not be tallied again."""
-    coord = _cache_coord()
+def test_an_already_counted_payload_is_not_counted_twice() -> None:
+    """The tally hangs on ``_accuracy_counted``, not on ``_fusion_preapplied``.
+
+    Deriving it from the fusion marker coupled "was fused" to "was counted", and
+    the push path is exactly where those come apart: its accuracy is substituted
+    before the coordinator sees the payload, so it must count upstream and say
+    so. Both directions are pinned here, because only the second one shows the
+    two markers really are independent now.
+    """
+    counted = _cache_coord()
     CacheOperations.update_device_cache(
-        coord,
+        counted,
+        "dev",
+        {
+            "latitude": HOME[0],
+            "longitude": HOME[1],
+            "accuracy": 25.0,
+            "last_seen": _now(),
+            "_fusion_preapplied": True,
+            "_accuracy_counted": True,
+        },
+    )
+    assert _bucket_calls(counted) == []
+
+    # Fused but NOT counted: still tallied, which the old derived rule could not do.
+    uncounted = _cache_coord()
+    CacheOperations.update_device_cache(
+        uncounted,
         "dev",
         {
             "latitude": HOME[0],
@@ -822,7 +845,46 @@ def test_prefused_payload_is_not_counted_twice() -> None:
             "_fusion_preapplied": True,
         },
     )
-    assert _bucket_calls(coord) == []
+    assert _bucket_calls(uncounted) == [ACCURACY_BUCKET_STATS["10-50"]]
+
+
+def test_the_counted_marker_never_reaches_the_commit_stage() -> None:
+    """The marker must be POPPED, not read, so it cannot travel any further.
+
+    Asserted at the commit stage, not on the cached row and not on the payload
+    that was handed in. Both of those were tried and both were vacuums: the spec
+    double never writes the row, and ``update_device_cache`` works on a shallow
+    COPY, so the caller's dict keeps its marker no matter what. Only the stage
+    that receives the working copy can see whether the marker survived. Same
+    discipline as ``_report_hint``: an internal marker must not reach entity
+    state.
+    """
+    coord = _cache_coord()
+    CacheOperations.update_device_cache(
+        coord,
+        "dev",
+        {
+            "latitude": HOME[0],
+            "longitude": HOME[1],
+            "accuracy": 25.0,
+            "last_seen": _now(),
+            "_accuracy_counted": True,
+        },
+    )
+    # ``_merge_with_existing_cache_row`` is the last stage before the commit and
+    # the first one that still receives the working copy, so what it sees is
+    # what the cached row would carry.
+    calls = coord._merge_with_existing_cache_row.call_args_list
+    assert calls, "the commit stage was never reached - the guard would be vacuous"
+    rows = [
+        a
+        for call in calls
+        for a in list(call.args) + list(call.kwargs.values())
+        if isinstance(a, dict) and "latitude" in a
+    ]
+    assert rows, "no payload seen at the commit stage"
+    for row in rows:
+        assert "_accuracy_counted" not in row
 
 
 def test_overlapping_coarse_fix_never_reaches_the_gate() -> None:
@@ -1349,11 +1411,19 @@ def test_the_tally_runs_before_any_accuracy_substitution() -> None:
     substitutions = (
         "carry_reused_accuracy(",
         "_apply_semantic_mapping(",
+        '["accuracy"] = radius',
     )
     checked = 0
-    for rel in ("coordinator/polling.py", "coordinator/locate.py"):
+    for rel in (
+        "coordinator/polling.py",
+        "coordinator/locate.py",
+        "Auth/fcm_receiver_ha.py",
+    ):
         text = (root / rel).read_text(encoding="utf-8")
-        tally = text.index("count_accuracy_class(")
+        # Not "count_accuracy_class(": the push path resolves it through
+        # ``getattr(coordinator, "count_accuracy_class", None)``, so the bare
+        # name is the only spelling all three sites share.
+        tally = text.index("count_accuracy_class")
         for needle in substitutions:
             first = text.find(needle)
             if first == -1:
@@ -1363,4 +1433,4 @@ def test_the_tally_runs_before_any_accuracy_substitution() -> None:
                 f"{rel}: {needle} runs at {first} before the tally at {tally}; "
                 "the distribution would count a substituted accuracy as reported"
             )
-    assert checked >= 3, f"guard would be vacuous, only {checked} sites compared"
+    assert checked >= 4, f"guard would be vacuous, only {checked} sites compared"
