@@ -55,6 +55,7 @@ from custom_components.googlefindmy.coordinator.helpers.geo import (
     ACCURACY_GATE_RATIO,
     accuracy_bucket,
 )
+from tests.helpers import drain_loop
 from tests.helpers.config_entries_stub import make_config_entry
 
 # ~5.5 km apart: far beyond any accuracy sum used here, so the clear-jump branch
@@ -1750,3 +1751,111 @@ def test_the_push_path_survives_a_coordinator_without_the_tally() -> None:
     )
     assert out is not None
     assert "_accuracy_counted" not in out
+
+
+# --------------------------------------------------- end-to-end substitution
+
+
+def test_the_poll_cycle_substitutes_the_home_zone_and_marks_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Drive the real poll cycle through the Google Home branch.
+
+    The two remaining call sites of ``substitute_zone_accuracy`` sit inside
+    ``_async_start_poll_cycle`` and ``async_locate_device``; the structural guard
+    above proves they use the helper, this proves the poll one is actually
+    reached and what comes out of it. Harness mirrors
+    ``tests/test_transient_owner_key_propagation.py``, which builds a real
+    coordinator and runs one cycle.
+    """
+    import asyncio
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from custom_components.googlefindmy.coordinator import GoogleFindMyCoordinator
+
+    class _Cache:
+        async def async_get_cached_value(self, _key: str) -> None:
+            return None
+
+        async def async_set_cached_value(self, _key: str, _value: Any) -> None:
+            return None
+
+    class _Hass:
+        def __init__(self, loop: asyncio.AbstractEventLoop) -> None:
+            self.loop = loop
+            self.data: dict[str, Any] = {}
+
+        def async_create_task(self, coro: Any, *, name: str | None = None) -> Any:
+            return self.loop.create_task(coro)
+
+    class _Api:
+        async def async_get_device_location(
+            self, _dev_id: str, _dev_name: str
+        ) -> dict[str, Any]:
+            # A Google Home detection: semantic name, own far-away coordinates.
+            return {
+                "latitude": FAR[0],
+                "longitude": FAR[1],
+                "accuracy": 25.0,
+                "last_seen": _now(),
+                "semantic_name": "Living Room speaker",
+                "status": "coordinate",
+            }
+
+    class _Filter:
+        @staticmethod
+        def should_filter_detection(_dev: str, _name: str) -> tuple[bool, dict]:
+            return False, {
+                "latitude": HOME[0],
+                "longitude": HOME[1],
+                "radius": 400.0,
+            }
+
+    monkeypatch.setattr(
+        "custom_components.googlefindmy.coordinator."
+        "GoogleFindMyCoordinator._async_load_stats",
+        AsyncMock(return_value=None),
+    )
+
+    loop = asyncio.new_event_loop()
+    devices = [{"id": "dev-home", "name": "Home Tag"}]
+    hass = _Hass(loop)
+    coordinator = GoogleFindMyCoordinator(hass, cache=_Cache())
+    coordinator.config_entry = SimpleNamespace(
+        entry_id="entry-id", options={}, data={}, title="Test Entry"
+    )
+    coordinator.api = _Api()
+    home_filter = _Filter()
+    coordinator._get_google_home_filter = lambda: home_filter
+    coordinator._is_fcm_ready_soft = lambda: True
+    coordinator._get_ignored_set = set
+    coordinator._last_device_list = list(devices)
+    coordinator.data = []
+    coordinator.last_update_success = True
+    coordinator.last_exception = None
+    coordinator.async_set_update_error = lambda _exc: None
+    coordinator.async_set_updated_data = lambda _data: None
+
+    # A precise cached fix far from home, so the substituted 400 m radius meets
+    # every condition the accuracy gate rejects on - except the exemption.
+    coordinator._device_location_data["dev-home"] = {
+        "latitude": FAR[0],
+        "longitude": FAR[1],
+        "accuracy": 20.0,
+        "last_seen": _now() - 300,
+        "status": "coordinate",
+    }
+
+    try:
+        loop.run_until_complete(
+            coordinator._async_start_poll_cycle(devices, force=True)
+        )
+    finally:
+        drain_loop(loop)
+        loop.close()
+
+    cached = coordinator._device_location_data["dev-home"]
+    assert cached["accuracy"] == 400.0, "the substitution must reach the cache"
+    assert cached["latitude"] == pytest.approx(HOME[0])
+    assert "_accuracy_substituted" not in cached, "transient marker leaked"
