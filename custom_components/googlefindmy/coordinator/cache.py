@@ -1133,6 +1133,13 @@ class CacheOperations(_MixinBase):
             merged["last_updated"] = time.time()
 
             self._device_location_data[target_id] = merged
+            # Same rule as after a direct commit: this target just received a
+            # newer position, so any coarse fix it retained is obsolete. The
+            # propagation writes the row itself instead of going through
+            # ``update_device_cache``, so the expiry has to be repeated here -
+            # a sibling would otherwise keep showing an old city next to the
+            # propagated position.
+            self._expire_coarse_fix(target_id, merged)
             # Coordinator last-good for the shared target, same non-poison gate.
             self._record_last_good_location(target_id, merged)
 

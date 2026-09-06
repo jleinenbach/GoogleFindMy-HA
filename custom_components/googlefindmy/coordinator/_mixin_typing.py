@@ -413,6 +413,13 @@ class _MixinBase:
     ) -> dict[str, Any]:
         raise NotImplementedError
 
+    def _expire_coarse_fix(
+        self,
+        device_id: str,
+        committed: Mapping[str, Any],
+    ) -> None:
+        raise NotImplementedError
+
     def _persist_anchor_metadata(
         self,
         device_id: str,

@@ -2216,6 +2216,9 @@ class PollingOperations(_MixinBase):
                                 dev_id, location
                             )
                             self._device_location_data[dev_id] = merged_location
+                            # Third commit site, same rule: a newer position
+                            # makes a retained coarse fix obsolete.
+                            self._expire_coarse_fix(dev_id, merged_location)
 
                         self.increment_stat("polled_updates")
                         self._consecutive_timeouts = 0

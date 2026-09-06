@@ -2829,6 +2829,13 @@ class FcmReceiverHA:
             # same leak: rationale in ``strip_transient_keys``.
             strip_transient_keys(payload)
             coordinator._device_location_data[device_id] = payload  # noqa: SLF001
+            # Fourth commit site, same rule as the others: a newer position
+            # makes a retained coarse fix obsolete. Duck-typed because this
+            # fallback exists precisely for coordinators that do not carry the
+            # full surface.
+            expire = getattr(coordinator, "_expire_coarse_fix", None)
+            if callable(expire):
+                expire(device_id, payload)
             _LOGGER.debug(
                 "Fallback: wrote to coordinator._device_location_data directly"
             )

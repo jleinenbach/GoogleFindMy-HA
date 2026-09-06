@@ -1266,6 +1266,61 @@ def test_a_committed_fix_expires_the_retained_coarse_one() -> None:
     assert coord.get_coarse_fix("dev") is not None
 
 
+def test_a_propagated_sibling_also_loses_its_coarse_fix() -> None:
+    """Every commit site needs the rule, not just the one that was reported.
+
+    Devices sharing an identity key receive the newer position through
+    ``_propagate_location_to_shared_devices``, which writes
+    ``_device_location_data`` itself instead of going through
+    ``update_device_cache``. A sibling would otherwise keep showing an old city
+    next to the propagated position, which is the same defect one commit site
+    over. The two direct-write fallbacks (poll and push) carry the rule as well.
+    """
+    from custom_components.googlefindmy.coordinator import GoogleFindMyCoordinator
+
+    coord = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
+    coord._device_location_data = {
+        "sibling": {
+            "latitude": FAR[0],
+            "longitude": FAR[1],
+            "accuracy": 20.0,
+            "last_seen": _now() - 600,
+            # Hex: _normalize_identity_key runs bytes.fromhex over a string and
+            # returns None for anything else, so a plain label would silently
+            # abort the propagation and make this test pass for no reason.
+            "identity_key": "a1b2c3",
+        }
+    }
+    coord._identity_key_to_devices = {bytes.fromhex("a1b2c3"): {"source", "sibling"}}
+    coord._device_coarse_fix = {
+        "sibling": {
+            "latitude": FAR[0],
+            "longitude": FAR[1],
+            "accuracy": 1600.0,
+            "last_seen": _now() - 300,
+        }
+    }
+    coord._device_last_good_location = {}
+    coord.increment_stat = lambda *_a, **_k: None
+    coord._round_trip_confirm_enabled = lambda: False
+
+    coord._propagate_location_to_shared_devices(
+        "source",
+        {
+            "latitude": HOME[0],
+            "longitude": HOME[1],
+            "accuracy": 20.0,
+            "last_seen": _now(),
+            "identity_key": "a1b2c3",
+        },
+    )
+
+    assert coord._device_location_data["sibling"]["latitude"] == pytest.approx(
+        HOME[0]
+    ), "the propagation must have happened, or the assertion below is vacuous"
+    assert coord.get_coarse_fix("sibling") is None
+
+
 def test_a_future_dated_cached_fix_may_not_veto_anything() -> None:
     """The reference has to be trustworthy in both directions, not just one.
 
