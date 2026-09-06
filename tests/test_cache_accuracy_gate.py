@@ -1201,6 +1201,71 @@ def test_the_substitution_marker_never_reaches_the_cached_row() -> None:
     assert cached["accuracy"] == 400.0
 
 
+def test_a_committed_fix_expires_the_retained_coarse_one() -> None:
+    """Side information must not outlive the reason it exists.
+
+    The coarse fix is kept for the case that nothing better exists. Once a
+    position with an equal or newer stamp is published, it is obsolete by
+    definition - but the reader only knows the coarse row's OWN age, so without
+    a producer-side rule the tracker would show a city from the rejected report
+    next to the fresh position for up to the whole stale threshold, and the
+    diagnostics builder would carry it too.
+    """
+    from custom_components.googlefindmy.coordinator import GoogleFindMyCoordinator
+
+    coord = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
+    coord._device_location_data = {}
+    coord._device_names = {}
+    coord._device_update_history = {}
+    coord._device_coarse_fix = {
+        "dev": {
+            "latitude": FAR[0],
+            "longitude": FAR[1],
+            "accuracy": 1600.0,
+            "last_seen": _now() - 120,
+        }
+    }
+    coord.increment_stat = lambda *_a, **_k: None
+    coord._apply_report_type_cooldown = lambda *_a, **_k: None
+    coord._is_on_hass_loop = lambda: True
+    coord._run_on_hass_loop = lambda *_a, **_k: None
+
+    # A newer precise fix commits.
+    coord.update_device_cache(
+        "dev",
+        {
+            "latitude": HOME[0],
+            "longitude": HOME[1],
+            "accuracy": 20.0,
+            "last_seen": _now(),
+            "status": "coordinate",
+        },
+    )
+    assert coord.get_coarse_fix("dev") is None
+
+    # Non-vacuous, and the boundary that matters: a committed fix OLDER than the
+    # coarse one leaves it alone - it is still the newest thing known about that
+    # direction.
+    coord._device_coarse_fix["dev"] = {
+        "latitude": FAR[0],
+        "longitude": FAR[1],
+        "accuracy": 1600.0,
+        "last_seen": _now(),
+    }
+    coord._device_location_data = {}
+    coord.update_device_cache(
+        "dev",
+        {
+            "latitude": HOME[0],
+            "longitude": HOME[1],
+            "accuracy": 20.0,
+            "last_seen": _now() - 600,
+            "status": "coordinate",
+        },
+    )
+    assert coord.get_coarse_fix("dev") is not None
+
+
 def test_a_future_dated_cached_fix_may_not_veto_anything() -> None:
     """The reference has to be trustworthy in both directions, not just one.
 

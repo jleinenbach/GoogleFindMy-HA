@@ -543,6 +543,32 @@ class CacheOperations(_MixinBase):
         if bucket is not None:
             self.increment_stat(ACCURACY_BUCKET_STATS[bucket])
 
+    def _expire_coarse_fix(self, device_id: str, committed: Mapping[str, Any]) -> None:
+        """Drop a retained coarse fix that the just-committed row supersedes.
+
+        Called after a payload commits. The coarse fix is side information for
+        the case that nothing better exists; once a fix with an equal or newer
+        timestamp is published, it is stale by definition, no matter how young
+        its own stamp still looks to the reader's age rule.
+
+        A committed row without a usable stamp expires nothing: it cannot be
+        shown to be newer, and dropping side information on an unprovable claim
+        would lose the only coarse position we have.
+        """
+        store = getattr(self, "_device_coarse_fix", None)
+        if not store or device_id not in store:
+            return
+        committed_seen = _normalize_epoch_seconds(committed.get("last_seen"))
+        if committed_seen is None:
+            return
+        coarse_seen = _normalize_epoch_seconds(store[device_id].get("last_seen"))
+        if coarse_seen is None or coarse_seen <= committed_seen:
+            store.pop(device_id, None)
+            _LOGGER.debug(
+                "Dropped coarse fix for %s: a newer position was published",
+                device_id,
+            )
+
     def get_coarse_fix(self, device_id: str) -> dict[str, Any] | None:
         """Return the last fix the accuracy gate discarded, or ``None`` (#216)."""
         store = getattr(self, "_device_coarse_fix", None)
@@ -956,6 +982,15 @@ class CacheOperations(_MixinBase):
                 name_cache[device_id] = name
 
         self._device_location_data[device_id] = slot
+        # A committed fix makes any retained coarse fix that is not newer than it
+        # obsolete: the coarse row exists as side information for as long as we
+        # have nothing better, and now we do. Without this it would keep naming a
+        # city from an earlier report next to the fresh position for up to the
+        # whole stale threshold - the reader's age rule alone cannot see that,
+        # because it only knows the coarse row's own age. Producer-side on
+        # purpose, so the tracker attributes and the diagnostics builder are both
+        # covered by one rule rather than each growing its own.
+        self._expire_coarse_fix(device_id, slot)
         # Coordinator last-good: advance only for reliable (non-estimated) fixes
         # so a sanitized accuracy-less update never overwrites the last reliable
         # position the Plus Code display accessors fall back to (non-poison).
