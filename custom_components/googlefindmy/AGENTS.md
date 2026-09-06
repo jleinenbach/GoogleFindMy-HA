@@ -95,10 +95,15 @@ Two situations look alike in the poll loop and must not be merged.
 `should_preserve_previous_coordinates` and `carry_reused_accuracy`, and they do commit the new `last_seen`. This keeps map pins
 stable while reflecting that the device recently reported.
 
-*Coarse fixes* are decided by the accuracy gate in `coordinator/cache.py::_apply_weighted_location_fusion` (#216). It fires only
-in the clear-jump branch (`dist > radius_sum`) and only when all of these hold: the option is on, the incoming accuracy is a real
-measurement, it is at least `ACCURACY_GATE_MIN_M` (an absolute floor, so a merely relative degradation is never enough), it is at
-least `ACCURACY_GATE_RATIO` times worse than the cached one, and the cached fix is reliable and younger than `stale_threshold`.
+*Coarse fixes* are decided by the accuracy gate, `coordinator/cache.py::_accuracy_gate_rejects` (#216). It fires only where the
+two accuracy circles do NOT overlap (`dist > radius_sum`) and only when all of these hold: the option is on, the incoming accuracy
+is a real measurement, it is at least `ACCURACY_GATE_MIN_M` (an absolute floor, so a merely relative degradation is never enough),
+it is at least `ACCURACY_GATE_RATIO` times worse than the cached one, and the cached fix is reliable and younger than
+`stale_threshold`. There are **two** call sites and they must stay in step: the ordinary clear-jump branch, and the
+trusted-anchor branch for a fix that does not overlap the anchor. The second one matters most - a trusted semantic anchor is the
+best reference the integration has, so exempting it would exempt exactly the case the gate exists for. The placement rationale F3
+that keeps the *speed* gate out of the trusted branch does not transfer: it rests on a semantic anchor having no kinematics, and
+this gate compares radii, not motion.
 
 On a rejection all three callers (poll loop, manual locate, `update_device_cache`) abort, so **the location row is not committed -
 not even its new `last_seen`** (side effects already applied before the fusion, such as anchor metadata, do persist). That is
@@ -107,12 +112,13 @@ gate would keep the cached fix permanently fresh and the gate would never releas
 pinned by `tests/test_cache_accuracy_gate.py::test_gate_stops_rejecting_once_the_cached_fix_goes_stale`.
 
 The release condition is the age of the *row*, not of the *measurement*, and two existing paths refresh that age while reusing the
-previous coordinates: the semantic-only preserve above, and the trusted-anchor snap-back in the fusion itself
-(`status = "Stationary (at Anchor)"`). While either keeps firing, the gate keeps rejecting. That is intended rather than the
+previous coordinates: the semantic-only preserve above, and the trusted-anchor snap-back (`status = "Stationary (at Anchor)"`,
+which only happens on an overlap). While either keeps firing, the gate keeps rejecting. That is intended rather than the
 predecessor's failure mode: in both cases the cached position is a trusted or genuinely measured one that the integration has
 decided to hold, so a fix an order of magnitude coarser must not displace it. The predecessor (`min_accuracy_threshold`, removed
 upstream in September 2025) froze trackers for the opposite reason - it discarded on the incoming radius alone, with no cached
-reference at all.
+reference at all. Both refresh paths stop as soon as the device really leaves, because neither fires without an overlap; the
+anchor then ages out and the coarse fix wins.
 
 The drop path taken when `_normalize_coords` fails (no usable coordinate pair and nothing cached to preserve) strips
 `_report_hint` before returning; mirror that hint-stripping step in any new helpers that short-circuit low-quality updates so

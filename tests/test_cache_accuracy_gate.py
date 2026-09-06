@@ -85,6 +85,14 @@ def _coord(
         coord, dev, row
     )
     coord.get_coarse_fix = lambda dev: CacheOperations.get_coarse_fix(coord, dev)
+    # The gate itself, for the same reason: a spec mock would return a truthy
+    # Mock and the fusion would "reject" without recording or counting anything,
+    # i.e. every assertion about the counter would measure the mock.
+    coord._accuracy_gate_rejects = lambda dev, new_data, existing_row, metrics: (
+        CacheOperations._accuracy_gate_rejects(
+            coord, dev, new_data, existing_row, metrics
+        )
+    )
     coord._device_coarse_fix = {}
     if entry is not None:
         coord.config_entry = entry
@@ -436,6 +444,11 @@ def _cache_coord() -> MagicMock:
     )
     coord.count_accuracy_class = lambda row: CacheOperations.count_accuracy_class(
         coord, row
+    )
+    coord._accuracy_gate_rejects = lambda dev, new_data, existing_row, metrics: (
+        CacheOperations._accuracy_gate_rejects(
+            coord, dev, new_data, existing_row, metrics
+        )
     )
     # Route the fusion through the real implementation: with the plain spec mock
     # the gate would never run and this suite would measure nothing.
@@ -1226,3 +1239,75 @@ def test_a_future_stamp_does_not_block_later_coarse_fixes() -> None:
     honest = _incoming(acc=1600.0, lat=FAR[0] + 0.04)
     assert _fuse(coord, honest) is False
     assert coord.get_coarse_fix("dev")["latitude"] == FAR[0] + 0.04
+
+
+# ------------------------------------------------- trusted anchors (Codex #1271)
+
+# The gate originally sat only in the clear-jump branch, which the trusted-anchor
+# branch returns before ever reaching. That exempted the single best cached
+# reference the gate exists to protect. The placement rationale F3, which keeps
+# the SPEED gate out of that branch, does not transfer: it rests on a semantic
+# anchor having no kinematics, and this gate compares radii, not motion.
+
+
+def _trusted(*, age_s: float = 300.0, acc: float = 50.0) -> dict[str, Any]:
+    """A cached trusted anchor, i.e. a user-configured semantic location.
+
+    ``50.0`` is ``DEFAULT_SEMANTIC_DETECTION_RADIUS``, the soft floor such an
+    anchor gets in ``coordinator/main.py``; no ``accuracy_estimated`` flag, so
+    ``is_reliable_fix`` accepts it.
+    """
+    fix = _existing(age_s=age_s, acc=acc)
+    fix["location_type"] = "trusted"
+    return fix
+
+
+def test_gate_also_guards_a_fresh_trusted_anchor() -> None:
+    """A 1600 m fix must not roll a fresh 50 m semantic anchor off its place.
+
+    This is the false zone transition the whole change is about, in its worst
+    form: the anchor is the most trustworthy position the integration has.
+    """
+    coord = _coord(_trusted())
+    assert _fuse(coord, _incoming(acc=1600.0)) is False
+    assert _rejects(coord) == 1
+    assert coord.get_coarse_fix("dev") is not None
+
+
+def test_trusted_anchor_snap_back_is_untouched() -> None:
+    """An OVERLAPPING fix still snaps to the anchor and commits - unchanged.
+
+    The gate must not reach into the overlap case: there the anchor wins by
+    snap-back, not by rejection, and the payload has to commit so the device
+    keeps reporting.
+    """
+    coord = _coord(_trusted(acc=200.0))
+    # ~110 m from the anchor, so the circles overlap and this is not a jump.
+    near = _incoming(acc=1600.0, lat=HOME[0] + 0.001, lon=HOME[1])
+    assert _fuse(coord, near) is True
+    assert _rejects(coord) == 0
+    assert near["latitude"] == HOME[0]
+    assert near["status"] == "Stationary (at Anchor)"
+
+
+def test_a_stale_trusted_anchor_releases_the_coarse_fix() -> None:
+    """Once the anchor ages out, the coarse fix wins - no freeze at an anchor.
+
+    Same release condition as everywhere else in this gate. Without it the
+    tracker could never leave a trusted anchor while only coarse fixes arrive,
+    which would be the predecessor's failure mode with extra steps.
+    """
+    coord = _coord(_trusted(age_s=DEFAULT_STALE_THRESHOLD + 1))
+    assert _fuse(coord, _incoming(acc=1600.0)) is True
+    assert _rejects(coord) == 0
+
+
+def test_a_precise_fix_still_leaves_a_trusted_anchor() -> None:
+    """A good fix far from the anchor is published - the device did move.
+
+    The gate is comparative: it only blocks a fix that is much WORSE than the
+    anchor. A 20 m fix five kilometres away is not, so the tracker follows it.
+    """
+    coord = _coord(_trusted())
+    assert _fuse(coord, _incoming(acc=20.0)) is True
+    assert _rejects(coord) == 0
