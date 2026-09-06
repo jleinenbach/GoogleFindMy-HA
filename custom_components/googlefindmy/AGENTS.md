@@ -95,19 +95,28 @@ Two situations look alike in the poll loop and must not be merged.
 `should_preserve_previous_coordinates` and `carry_reused_accuracy`, and they do commit the new `last_seen`. This keeps map pins
 stable while reflecting that the device recently reported.
 
-*Coarse fixes* are decided by the accuracy gate in `coordinator/cache.py::_apply_weighted_location_fusion` (#216). It rejects an
-incoming fix only when a cached position is reliable, at least `ACCURACY_GATE_RATIO` times more precise and still inside
-`stale_threshold`. All three callers (poll loop, manual locate, `update_device_cache`) then abort, so the location row is **not**
-committed - not even its new `last_seen`. That is deliberate and load-bearing: the cached row's age is the gate's own release
-condition, so committing the new timestamp on a rejection would keep the cached fix permanently fresh, the gate would never stop
-rejecting, and the tracker would sit frozen on an old position while reporting status `current`. That freeze is why the
-predecessor filter (`min_accuracy_threshold`, removed upstream in September 2025) had to go. The release boundary is pinned by
-`tests/test_cache_accuracy_gate.py::test_gate_stops_rejecting_once_the_cached_fix_goes_stale`; do not "fix" the aging row by
-committing a timestamp behind the gate.
+*Coarse fixes* are decided by the accuracy gate in `coordinator/cache.py::_apply_weighted_location_fusion` (#216). It fires only
+in the clear-jump branch (`dist > radius_sum`) and only when all of these hold: the option is on, the incoming accuracy is a real
+measurement, it is at least `ACCURACY_GATE_MIN_M` (an absolute floor, so a merely relative degradation is never enough), it is at
+least `ACCURACY_GATE_RATIO` times worse than the cached one, and the cached fix is reliable and younger than `stale_threshold`.
 
-The cold-start drop path (no coordinates and no semantic name) strips `_report_hint` before returning; mirror that
-hint-stripping step in any new helpers that short-circuit low-quality updates so internal metadata never leaks into entity
-state.
+On a rejection all three callers (poll loop, manual locate, `update_device_cache`) abort, so **the location row is not committed -
+not even its new `last_seen`** (side effects already applied before the fusion, such as anchor metadata, do persist). That is
+deliberate and load-bearing: the age of the cached row is the gate's release condition, so committing a fresh timestamp behind the
+gate would keep the cached fix permanently fresh and the gate would never release. Do not "fix" an aging row that way. Boundary
+pinned by `tests/test_cache_accuracy_gate.py::test_gate_stops_rejecting_once_the_cached_fix_goes_stale`.
+
+The release condition is the age of the *row*, not of the *measurement*, and two existing paths refresh that age while reusing the
+previous coordinates: the semantic-only preserve above, and the trusted-anchor snap-back in the fusion itself
+(`status = "Stationary (at Anchor)"`). While either keeps firing, the gate keeps rejecting. That is intended rather than the
+predecessor's failure mode: in both cases the cached position is a trusted or genuinely measured one that the integration has
+decided to hold, so a fix an order of magnitude coarser must not displace it. The predecessor (`min_accuracy_threshold`, removed
+upstream in September 2025) froze trackers for the opposite reason - it discarded on the incoming radius alone, with no cached
+reference at all.
+
+The drop path taken when `_normalize_coords` fails (no usable coordinate pair and nothing cached to preserve) strips
+`_report_hint` before returning; mirror that hint-stripping step in any new helpers that short-circuit low-quality updates so
+internal metadata never leaks into entity state.
 
 ### Authentication failure propagation
 
