@@ -1083,3 +1083,168 @@ Use this pattern in one of exactly two situations, and keep four properties:
    stable across a release, for case (b) that the named upstream report has
    closed. A guard with no stated exit turns documentation into a permanent
    fixture and outlives the reason it was written.
+
+## Prose contract guard (`tests/test_guard_prose_contract.py`)
+
+`AGENTS.md` carries two rules about the prose a contributor writes: keep comments and
+docstrings English (the "Language reminder" and "Language policy" paragraphs), and cite
+only evidence a reader of this repository can open (section 2, "Mandatory evidence").
+Both were plain text with no mechanism behind them, so a violation passed `ruff`,
+`mypy`, `codespell` and the whole suite and only surfaced in review. That is the same gap `test_guard_path_header.py` was written
+for, and the guard follows its shape.
+
+Two narrowings, both measured, both load-bearing.
+
+First, the guard reads **prose units**, not raw file text: module, class and function
+docstrings via `ast.get_docstring`, comments via `tokenize`. String literals are out of
+scope on purpose, because foreign language is legitimate data here
+(`tests/test_translation_placeholders.py` asserts against the German address form,
+`translations/*.json` is multilingual by contract). Measured over the 503 Python sources
+of the sweep set (`.py` and `.pyi`), counting the guard file itself out because its own
+comments name the words: the prose arm flags 12 of 29992 prose units, while the same word list over raw
+file text additionally hits 11 occurrences in three further files, every one of them
+translation data in a string literal.
+
+Second, the German word list subtracts measured English homographs, each carrying its
+hit count in the source. Counting unit throughout: a prose unit is one docstring or one
+comment token, and a hit is a unit containing the word. Measured at the tip of the
+branch, guard file excluded: `also` 231, `falls` 127, `probe` 121, `dies` 23, `der` 12
+(the DER encoding in the credential tests), `mit` 5 (the MIT licence header), `wichtig` 1
+(the `WICHTIG-2` ticket label). Six further words sit at zero today and are kept out
+pre-emptively because each collides with an acronym this domain really uses: `des` (DES),
+`ist` (IST), `dem` (DEM), `aus` (AUS), `als` (ambient light sensor) and `vor` (VHF
+omnidirectional range). The subtraction happens in `_german_markers_in`, not merely in the comment: an
+earlier draft documented the exclusion without performing it. Without those numbers the list gets tidied up later and the
+guard starts crying wolf, which gets it switched off rather than obeyed. The cost is
+stated rather than hidden: German prose built only from words outside the list passes.
+The wider variants were tried and rejected, an umlaut character class flags the proper
+name in every copyright header, and a two-distinct-words threshold only passed its
+positive control because three nouns of one concrete incident had been added to the list.
+
+The evidence arm covers Python prose plus Markdown and workflow files and matches paths
+under an agent's private memory or home configuration. The private directories are a
+named set (`_AGENT_PRIVATE_DIRS`, currently `.claude` and `.codex`) and this one is an
+enumeration by necessity: no property of a directory name marks it as an assistant's
+private tree, and matching any dot-directory under a home would swallow legitimate
+documentation of a user's own configuration. Add a member when an assistant keeps its
+notes, plans or instructions there; each member carries its own positive case, and a
+member the pattern never reaches fails a test.
+
+The directory ITSELF is a citation, not only a file under it. A home prefix followed by
+one of those directories, with or without a trailing separator, names something no reader
+can open, and requiring a non-empty tail let every such spelling through in silence. The
+tail was doing two jobs at once, boundary and content, so the boundary is now explicit
+(`_DIR_BOUNDARY`). It has to be, because the widening must not reach a bare mention of a
+directory name in running prose - this contract and the guard's own comments are full of
+those. Hence two shapes and no third: behind a home or path prefix the directory counts
+on its own, and without a prefix a separator is still required. The boundary also
+excludes the opening angle bracket, so the placeholder spelling this repository writes
+for a file name stays quiet, and the percent sign, because an escape immediately after
+the directory means the path continues in encoded form and the decoded pass is the one
+that should read it.
+
+Prose is normalised before the pattern sees it, because two spellings would otherwise be
+judged by what they look like rather than by what they are. A public URL is openable by
+any reader whatever its path component contains, so a link into someone else's
+repository is a source, not a private citation; the scheme is what makes it public, so
+this is a property and not a list of sites. A `file:` URI is the opposite case, a local
+path in a different spelling, and its extra slashes hid it from the pattern entirely.
+Both are replaced by spaces of the same length, so a citation next to a URL on the same
+line survives. The URL body stops at the delimiters that close a link in prose, not
+merely at whitespace: two Markdown links written back to back have no space between them,
+and a run to the next space swallowed the second one whole, taking a private citation
+with it. In exchange, a URL carrying a closing parenthesis is cut short there and its
+tail can read as a citation; that direction fails loudly rather than silently, which is
+the direction this guard should fail in.
+
+Two properties make a URL openable, and both are checked. Its scheme is read by its
+grammar (RFC 3986 3.1: a letter followed by letters, digits, plus, minus or dot) rather
+than by a list of names: a list of four was written once, and each review round after it
+found a spelling the list did not carry, first an uppercase scheme, then `git://`. But
+the grammar alone is not enough, and getting that wrong cost a round of its own. Reading
+*any* scheme as public blanked an editor URI naming a local file, and the citation
+vanished in silence. The authority must therefore be a network host as well: a bracketed
+IPv6 literal, a dotted name, or `localhost`. An unregistered scheme over a real host is
+public; any scheme over something that is not a host is not.
+
+A URI that fails the host test is not simply left alone either. Only its scheme and
+authority are blanked, so the local path behind them is judged as what it is. Without
+that step the path pattern cannot even see such a path: its own left boundary refuses to
+start a match directly after a word character, and the last letter of the authority sits
+exactly there.
+
+The bracketed alternative in the host is not decoration. `]` is one of the delimiters
+that close a link in prose, so without it an IPv6 literal cut the URL after its scheme
+and the path of an openable source was reported as a private citation. The local schemes are a named set, `_LOCAL_URI_SCHEMES`, and
+they are normalised first for exactly that reason: a rule that accepts any scheme would
+otherwise swallow the one spelling that means a local path. The `file:` prefix consumes
+an optional authority component, so `file:/path`, `file:///path` and
+`file://localhost/path` are read alike; accepting only the middle one left the other two
+with their scheme intact and reported nothing at all.
+
+Percent escapes are decoded before the pattern judges a path. `%2Ecodex` is `.codex` to
+every reader, and reading it literally let an unopenable citation through in silence.
+The unit is matched twice, once as written and once decoded, and the second result is
+appended to the first rather than replacing it, so a path the raw text already showed
+cannot be lost and a path written twice is still reported twice. Decoding in place is
+deliberately not done: it would shorten the text and move every later citation, which is
+the property the space-padded blanking exists to protect.
+
+Every shape the detector has been wrong about lives in `_DETECTOR_CORPUS` with its
+expected result. Four review rounds went the same way, a narrowing leaving a gap and the
+widening that closed it producing a false positive elsewhere, so a change to the pattern
+is diffed against that table rather than against the cases its author happened to think
+of. The home prefix is generic over
+both path separators and does not have to be absolute, because a relative reference is
+just as unopenable for a reader; the directory has to start a path segment, so a name
+that merely ends in those letters does not trip. `/app/` is deliberately not part
+of the pattern: both measured occurrences were `/app/requirements.txt`, this project's
+own container path. Measured over 553 files (503 Python sources, 50
+Markdown and workflow): zero hits, so `AGENT_LOCAL_PATH_ALLOWLIST` is empty and should
+stay so.
+
+The repository sweep is restricted to tracked files. Walking the working copy instead
+made the result depend on whatever a developer happened to have lying around:
+`.gitignore` reserves `.plans/`, `.bootstrap/` and `.wheelhouse/`, and an agent-local
+citation in one of those would fail this suite for its author alone, over a file that
+can never enter a commit. Pruning those three names would be the same enumeration this
+guard has already lost several rounds to; asking `git` is not. The synthetic polarity
+probes pass no restriction, because a temporary directory has no index to ask.
+
+Excluded by file, not by directory: `ProtoDecoders`, `Auth/firebase_messaging/proto` and
+`vendor` all hold tracked, hand-written Python next to generated or imported code, and
+pruning those directories hid one such file per review round. The sweep drops `*_pb2.py`
+and `*_pb2.pyi` by suffix instead, and `test_every_tracked_python_source_is_swept`
+holds the sweep set against `git ls-files` so the next hidden file fails a test rather
+than waiting for a reviewer. `test_every_tracked_text_source_is_swept` makes the same
+claim for the Markdown and workflow half: asserting coverage for the Python half alone
+would have left the original shape of the finding intact for prose files.
+
+The language arm, by contrast, stops at Python. `AGENTS.md` itself quotes the German
+translation guideline and would need an allowlist entry from day one, and an allowlist
+that starts populated is the shape that erodes. The gap is stated rather than papered
+over.
+
+Polarity is proved in both directions and at two levels. At detector level a synthetic
+docstring must trip and a clean one must not; at sweep level the same texts are written
+under `tmp_path` so that extraction, iteration and the exclusion filter are exercised,
+not just the regex. Every offending sample lives in a string literal or under `tmp_path`,
+never planted in the working tree. One probe is explicitly anti-overfitting: the incident
+phrase must still trip once the three incident nouns are stripped from the word list.
+
+`test_every_swept_file_parses` is the interpreter guard. This tree uses PEP 695 syntax,
+which needs Python 3.12 or newer; under 3.11 seven modules fail to parse and the language
+arm would go silently blind on them. An unparsable file is reported by name instead of
+counting as clean.
+
+`LEGACY_ALLOWLIST` holds one entry, `tests/test_translation_placeholders.py`, because
+that guard has to name the formal pronouns it rejects and quote the upstream translation
+guideline verbatim. Do not add entries; translate the prose instead. The stale test turns
+red once an entry stops violating.
+
+One thing to know when editing the contract itself: writing the forbidden path shape out
+literally in `AGENTS.md` would make this guard red, since the evidence arm reads
+Markdown. The rule text therefore uses a placeholder, and both placeholder forms are
+pinned by `test_documented_placeholder_form_does_not_trip`. The same reflex applies to
+the guard's own docstring, which cannot spell out the German half of a typo pair for
+the same reason.

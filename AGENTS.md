@@ -99,6 +99,13 @@
 
 > **Language reminder:** Keep all inline comments, docstrings, and documentation updates in English. When user-provided snippets
 > include other languages, translate or adapt them so the committed code remains English-only.
+> Enforced by `tests/test_guard_prose_contract.py`, which sweeps docstrings and comments of Python
+> files (not string literals, so translation payloads and assertion data stay exempt) for German
+> function words. Two limits, stated rather than implied: the detection keys on a measured word list
+> from which the measured English homographs and domain acronyms are subtracted, so it catches ordinary
+> German prose and not every
+> fragment; and Markdown is out of its scope, because this file itself quotes a German translation
+> guideline.
 
 > **Environment reset reminder:** After a container or virtualenv reset, rerun `make test-stubs` so the Home Assistant and
 > pytest stubs are reinstalled before invoking linting or pytest commands.
@@ -126,6 +133,7 @@
 Always keep any `from __future__` imports immediately after the module docstring, even when the file starts with the repository-relative path header described above. This ordering prevents pytest's import hook from rejecting the file during rewrites.
 > **Precedence:** (1) Official **Home Assistant Developer Docs** → (2) this AGENTS.md → (3) repository conventions. This file never overrides security/legal policies.
 > **Language policy:** Keep the project consistently in English for documentation, inline code comments, and docstrings. (Translation files remain multilingual.)
+> Guard: `tests/test_guard_prose_contract.py` (see the Language reminder above for its scope and limits).
 > **Non-blocking:** Missing optional artifacts (README sections, `quality_scale.yaml`, CODEOWNERS, CI files) **must not block** urgent fixes. The agent proposes a minimal stub or follow-up task instead.
 > **References:** This contract relies on the sources listed below; for a curated, extended list of links, see [BOOKMARKS.md](custom_components/googlefindmy/BOOKMARKS.md).
 > **Upstream documentation hierarchy:** When consulting external guidance, prioritize Home Assistant's canonical domains in this order: developer portal (`https://developers.home-assistant.io`), user documentation (`https://www.home-assistant.io`), and the alerts/service bulletins site (`https://alerts.home-assistant.io`). If a required host is unreachable while the connectivity probe still confirms general internet access, pause implementation, request manual approval for that domain, and document the escalation before proceeding.
@@ -994,6 +1002,11 @@ Confidence is < 90 % whenever, for example:
 ### 2. Mandatory evidence
 
 Every recommendation—code, architecture, migration, best practice—must reference a verifiable source inside the project reality.
+
+*Verifiable* means a reader of this repository can open it. A path inside an agent's private memory or
+home configuration (`memory/<scope>/<file>.md`, `~/.claude/<file>`) is not a source, however real the
+underlying measurement was: commit a redacted artefact under `docs/` and cite that instead. Enforced by
+`tests/test_guard_prose_contract.py` over Python prose, Markdown and workflow files.
 
 Acceptable sources include:
 
