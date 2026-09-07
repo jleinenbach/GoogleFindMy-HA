@@ -2149,6 +2149,63 @@ def test_a_retried_report_that_reaches_no_cache_is_counted_once() -> None:
     assert coord.claim_report_for_tally("dev", {}) is True
 
 
+def test_every_counting_site_claims_the_report_first() -> None:
+    """Whoever counts a report must first claim it, measured rather than enumerated.
+
+    The contract used to name three entry points. There is a fourth - the cache fallback
+    that a device-list seed reaches - and it was found one review round at a time, which
+    is what this test replaces: the set of counting sites is derived from the sources, so
+    a fifth one arrives red instead of arriving silently.
+
+    An unclaimed count is not a cosmetic issue. It is the whole defect this line of fixes
+    is about: a report nobody can recognise gets added to the persisted histogram on every
+    delivery, and the histogram is the evidence the accuracy gate is judged on.
+
+    Deliberately coarse: the check is "the enclosing function mentions both names", not a
+    dataflow proof. It cannot show that the claim guards the count, and the tests above do
+    that for each path. What it can show is the absence of a site that never claims at
+    all, which is exactly how the fourth one hid.
+    """
+    import ast
+    from pathlib import Path
+
+    package = Path(__file__).resolve().parents[1] / "custom_components"
+    assert package.is_dir(), f"package root not found: {package}"
+
+    def mentioned(node: ast.AST) -> set[str]:
+        found: set[str] = set()
+        for child in ast.walk(node):
+            if isinstance(child, ast.Name):
+                found.add(child.id)
+            elif isinstance(child, ast.Attribute):
+                found.add(child.attr)
+            elif isinstance(child, ast.Constant) and isinstance(child.value, str):
+                found.add(child.value)
+        return found
+
+    sites: dict[str, bool] = {}
+    for source in sorted(package.rglob("*.py")):
+        # A parse failure must not look like "no counting sites here": that is the
+        # silent-green shape every finding in this file has had.
+        tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            if node.name == "count_accuracy_class":
+                continue
+            names = mentioned(node)
+            if "count_accuracy_class" in names:
+                key = f"{source.relative_to(package)}::{node.name}"
+                sites[key] = "claim_report_for_tally" in names
+
+    assert sites, "no counting site found at all, so nothing was measured"
+    unclaimed = sorted(key for key, claimed in sites.items() if not claimed)
+    assert not unclaimed, (
+        f"counting sites that never claim the report: {unclaimed} "
+        f"(of {len(sites)} sites found)"
+    )
+
+
 def test_a_stampless_report_is_counted_once_however_often_it_arrives() -> None:
     """The one report that no store can hold, delivered again and again.
 

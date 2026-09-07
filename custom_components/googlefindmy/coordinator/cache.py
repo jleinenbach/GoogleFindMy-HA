@@ -958,7 +958,16 @@ class CacheOperations(_MixinBase):
         # where those two come apart - its accuracy is substituted in
         # ``FcmReceiverHA._prepare_coordinator_payload``, i.e. before this
         # method is ever entered, so it has to count there and say so here.
-        if not slot.pop("_accuracy_counted", False):
+        # ... and claim it here too. This is the FOURTH counting site, not one of the
+        # three entry points: a device-list seed reaches this fallback with nobody
+        # upstream having counted it. A seed row carries coordinates and a radius but
+        # frequently no parseable ``last_seen``, and the freshness check above then
+        # compares ``None`` with ``None`` and skips nothing, so every refresh added the
+        # same radius again and the persisted histogram measured polling frequency. The
+        # claim is what recognises that repetition; nothing else here can.
+        if not slot.pop("_accuracy_counted", False) and self.claim_report_for_tally(
+            device_id, slot
+        ):
             self.count_accuracy_class(slot)
 
         # Apply semantic location mapping

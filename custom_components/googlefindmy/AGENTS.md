@@ -103,8 +103,13 @@ The marker is deliberately not derived from `_fusion_preapplied`: on the push pa
 not the same question. Order pinned by
 `tests/test_cache_accuracy_gate.py::test_the_tally_runs_before_any_accuracy_substitution`.
 
-All three entry points claim through `claim_report_for_tally`, which counts a report once
-and then recognises its retries. Identity is the report timestamp where there is one; a
+Every site that counts claims first, through `claim_report_for_tally`, which counts a
+report once and then recognises its retries. That is four sites, not three: besides the
+entry points, the `update_device_cache` fallback counts a device-list seed that nobody
+upstream has counted, and it was found one review round after the others. The set is
+therefore derived from the sources rather than listed here, by
+`tests/test_cache_accuracy_gate.py::test_every_counting_site_claims_the_report_first`, so
+a fifth site arrives red instead of arriving silently. Identity is the report timestamp where there is one; a
 payload with no parseable `last_seen` is keyed on its position and radius instead, because
 such a report is rejected by the gate, retained nowhere and therefore delivered again on
 every poll - counting it each time would make the persisted distribution measure retry
