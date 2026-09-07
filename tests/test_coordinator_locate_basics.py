@@ -271,6 +271,66 @@ class TestAsyncLocateDeviceGating:
         result = await coord.async_locate_device("dev-1")
         assert result == {}
 
+    async def test_a_refused_fix_still_notifies_the_listeners(
+        self, coord: LocateStub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A fix refused by the fusion gate still reaches the entities.
+
+        The gate refuses the report as a POSITION but retains it as side
+        information, which the tracker publishes as its ``coarse_*``
+        attributes. Those attributes are recomputed in
+        ``_handle_coordinator_update``, so something has to notify the
+        listeners or the user presses the button and sees nothing until an
+        unrelated poll arrives.
+
+        Nothing on the refusal path does that explicitly - the notification
+        comes from the ``finally`` block that closes ``async_locate_device``
+        for every exit, refused or not, via
+        ``async_set_updated_data(self.data)``. That is a load-bearing
+        property of an unconditional cleanup block roughly 350 lines below
+        the refusal, i.e. exactly the kind of thing a later edit removes
+        without noticing. Measured before this test existed: dropping that
+        one line left every suite that drives a locate green.
+
+        The ORDER is what carries the property, not the count. A locate
+        notifies twice: once on entry, when the device goes in-flight and the
+        button turns unavailable, and once on the way out. Only the second one
+        can show a coarse fix, because at entry the report has not been
+        fetched yet, let alone refused and retained.
+
+        See ``custom_components/googlefindmy/AGENTS.md``, "A refusal is not
+        silence".
+        """
+        monkeypatch.setattr(
+            "custom_components.googlefindmy.coordinator.locate.time.monotonic",
+            lambda: 1000.0,
+        )
+        coord.api.async_get_device_location.return_value = {
+            "latitude": 50.0,
+            "longitude": 12.0,
+            "accuracy": 1600.0,
+            "last_seen": 1234567890,
+        }
+        coord._apply_weighted_location_fusion.return_value = False
+
+        order = MagicMock()
+        order.attach_mock(coord._apply_weighted_location_fusion, "refuse")
+        order.attach_mock(coord.async_set_updated_data, "notify")
+
+        result = await coord.async_locate_device("dev-1")
+
+        # The refusal branch really was the one taken, and it committed nothing.
+        assert result == {}
+        coord.update_device_cache.assert_not_called()
+        coord.push_updated.assert_not_called()
+
+        # ... and a notification followed the refusal.
+        assert [call[0] for call in order.mock_calls] == [
+            "notify",
+            "refuse",
+            "notify",
+        ]
+
 
 class TestAsyncLocateDeviceDecryptFailure:
     """Codex P2: manual locate must handle stale/missing shared-key failures the

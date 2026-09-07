@@ -201,6 +201,22 @@ deliberate and load-bearing: the age of the cached row is the gate's release con
 gate would keep the cached fix permanently fresh and the gate would never release. Do not "fix" an aging row that way. Boundary
 pinned by `tests/test_cache_accuracy_gate.py::test_gate_stops_rejecting_once_the_cached_fix_goes_stale`.
 
+**A refusal is not silence.** The refused fix is retained as side information and the tracker publishes it as its `coarse_*`
+attributes, so every one of the three callers has to notify the listeners even when nothing was committed - and all three already
+do, from a place far enough from the rejection that a reader looking only at the branch will miss it. The poll cycle publishes
+`end_snapshot` from the `finally` of `_async_start_poll_cycle`; `async_locate_device` calls `async_set_updated_data(self.data)`
+from the `finally` that closes its whole body, roughly 350 lines below the `return {}`; and the push fan-out reaches
+`_notify_coordinator` because `_write_coordinator_payload` reports success whenever `update_device_cache` was callable, which it
+was, refusal or not. In Home Assistant `async_set_updated_data` ends in `async_update_listeners`, and every branch of the
+tracker's `_handle_coordinator_update` ends in `async_write_ha_state` after re-reading `get_fresh_coarse_fix`.
+
+So do NOT add a notification next to the rejection: it would fire a second, identical entity update, and at a worse moment, since
+the device is still in `_locate_inflight` there and the locate button would be written unavailable and available one statement
+apart. What the distance does justify is a pin, and there was none: removing the `finally` line left every suite that drives a
+locate green. `tests/test_coordinator_locate_basics.py::TestAsyncLocateDeviceGating::test_a_refused_fix_still_notifies_the_listeners`
+now asserts the ORDER (notify, refuse, notify) rather than a count, because the entry-side notification cannot carry a coarse fix
+that has not been fetched yet.
+
 The release condition is the age of the *row*, not of the *measurement*, and two existing paths refresh that age while reusing the
 previous coordinates: the semantic-only preserve above, and the trusted-anchor snap-back (`status = "Stationary (at Anchor)"`,
 which only happens on an overlap). While either keeps firing, the gate keeps rejecting. That is intended rather than the
