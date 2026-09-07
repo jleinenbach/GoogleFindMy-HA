@@ -1122,7 +1122,10 @@ name in every copyright header, and a two-distinct-words threshold only passed i
 positive control because three nouns of one concrete incident had been added to the list.
 
 The evidence arm covers Python prose plus Markdown and workflow files and matches paths
-under an agent's private memory or home configuration. `/app/` is deliberately not part
+under an agent's private memory or home configuration. The home prefix is generic over
+both path separators and does not have to be absolute, because a relative reference is
+just as unopenable for a reader; the directory has to start a path segment, so a name
+that merely ends in those letters does not trip. `/app/` is deliberately not part
 of the pattern: both measured occurrences were `/app/requirements.txt`, this project's
 own container path. Measured over 553 files (503 Python sources, 50
 Markdown and workflow): zero hits, so `AGENT_LOCAL_PATH_ALLOWLIST` is empty and should
@@ -1131,9 +1134,11 @@ stay so.
 Excluded by file, not by directory: `ProtoDecoders`, `Auth/firebase_messaging/proto` and
 `vendor` all hold tracked, hand-written Python next to generated or imported code, and
 pruning those directories hid one such file per review round. The sweep drops `*_pb2.py`
-and `*_pb2.pyi` by suffix instead, and `test_every_tracked_python_source_is_swept` holds
-the sweep set against `git ls-files` so the next hidden file fails a test rather than
-waiting for a reviewer.
+and `*_pb2.pyi` by suffix instead, and `test_every_tracked_python_source_is_swept`
+holds the sweep set against `git ls-files` so the next hidden file fails a test rather
+than waiting for a reviewer. `test_every_tracked_text_source_is_swept` makes the same
+claim for the Markdown and workflow half: asserting coverage for the Python half alone
+would have left the original shape of the finding intact for prose files.
 
 The language arm, by contrast, stops at Python. `AGENTS.md` itself quotes the German
 translation guideline and would need an allowlist entry from day one, and an allowlist

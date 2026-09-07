@@ -101,16 +101,17 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 # ProtoDecoders, and vendor/openlocationcode/openlocationcode.py, which this repository
 # modifies in tree. Pruning by directory took them out of the sweep three times in a
 # row during review, which is why the exclusion is by file suffix now and why
-# test_every_tracked_python_source_is_swept holds the whole thing to git ls-files
+# test_every_tracked_python_source_is_swept and its prose sibling hold the whole
+# thing to git ls-files
 # rather than to anybody's judgement about which directory is "generated".
 #
-# Pruning during the walk
-# rather than filtering afterwards: the unpruned walk visits roughly 75k entries, nearly
+# Pruning during the walk rather than filtering afterwards: the unpruned walk visits
+# roughly 75k entries, nearly
 # all of them in .venv and the tool caches. Order of magnitude, not a pinned figure: the
 # number moves with every test run.
 _EXCLUDED_DIRS = frozenset(
     {
-        # version control, environments, generated and vendored trees
+        # version control, environments and dependency trees
         ".git",
         ".venv",
         "venv",
@@ -272,12 +273,19 @@ _AGENT_LOCAL_PATH = re.compile(
     # any second level under memory/, not an enumeration: the scopes an agent memory
     # grows are not knowable from here, and an enumeration silently misses new ones
     r"memory/[\w-]+/[\w./-]+"
-    # anything ending in a .claude directory, whatever the home spelling in front of it.
+    # anything under a .claude directory, whatever the home spelling in front of it.
     # Enumerating home directories was tried and failed twice in review: first /home/
-    # only, then /home/ plus /root/, and macOS (/Users/), Windows (C:/Users/) and $HOME
-    # were still missing. The generic form takes any prefix, and the lookbehind plus the
-    # required trailing slash keep .claudeignore and not.claude/ out.
-    r"|(?:~|\$HOME|/[\w.$-]+(?:/[\w.$-]+)*)?/?\.claude/[\w./-]+"
+    # only, then /home/ plus /root/, and macOS, Windows and $HOME were still missing.
+    # The prefix is therefore generic, over both separators, and it does not have to be
+    # absolute: a relative reference is just as unopenable for a reader.
+    #
+    # The second lookbehind is what makes it a path segment rather than a suffix. A
+    # prefix class that admits dots can otherwise be split so that the tail of a
+    # directory name becomes the match, which flagged two innocent shapes (a temp
+    # directory and an unrelated dotted name) before this was pinned. Requiring a
+    # separator after the directory keeps the ignore-file spelling out.
+    r"|(?:(?:~|\$HOME|[\w.$:-]*(?:[\\/][\w.$-]+)*)[\\/])?"
+    r"(?<![\w.$-])\.claude[\\/][\w.$\\/-]+"
     r")"
 )
 
@@ -483,6 +491,46 @@ def test_every_swept_file_parses() -> None:
 # --- allowlist hygiene ------------------------------------------------------
 
 
+def _assert_tracked_files_are_swept(suffixes: tuple[str, ...], label: str) -> None:
+    """Fail unless every tracked, non-generated file with *suffixes* is in the sweep.
+
+    Every failure mode of the measurement is fail-closed on purpose. A missing git, a
+    non-zero exit, an empty result or an undecodable name all raise, because a silent
+    skip here would look exactly like full coverage, which is the shape of every
+    finding in this file's history. The timeout is part of that: without it a hung
+    index lock stalls the suite instead of reporting anything.
+    """
+    patterns = [f"*{suffix}" for suffix in suffixes]
+    result = subprocess.run(  # noqa: S603
+        ["git", "ls-files", "-z", *patterns],
+        cwd=_REPO_ROOT,
+        capture_output=True,
+        check=False,
+        timeout=120,
+    )
+    if result.returncode != 0:
+        stderr = result.stderr.decode("utf-8", "replace").strip()
+        raise AssertionError(
+            f"git ls-files failed, so this test measured nothing about {label}. A "
+            f"silent skip here would look identical to full coverage: {stderr}"
+        )
+    # Bytes, not text=True: universal newlines would rewrite a carriage return inside a
+    # file name and the comparison below would miss a file that is in fact swept. -z
+    # already removes the quoting question for names with spaces.
+    raw = result.stdout.decode("utf-8", "surrogateescape")
+    tracked = {name for name in raw.split("\0") if name}
+    assert tracked, f"git ls-files returned no {label}, which cannot be right"
+    swept = {rel for _, rel in _iter_files(_REPO_ROOT, suffixes)}
+    unswept = sorted(
+        name for name in tracked - swept if not name.endswith(_GENERATED_SUFFIXES)
+    )
+    assert not unswept, (
+        f"Tracked, hand-written {label} outside the sweep. Prose in them can violate "
+        "the contract with this guard green; exclude generated files by suffix rather "
+        f"than pruning their directory: {unswept}"
+    )
+
+
 def test_every_tracked_python_source_is_swept() -> None:
     """The sweep must cover every tracked Python source except generated bindings.
 
@@ -492,28 +540,37 @@ def test_every_tracked_python_source_is_swept() -> None:
     tracked and not generated has to be in the sweep set. This is the structural answer
     to that class, not another special case.
     """
-    result = subprocess.run(
-        ["git", "ls-files", "-z", "*.py", "*.pyi"],
-        cwd=_REPO_ROOT,
-        capture_output=True,
-        text=True,
-        check=False,
+    _assert_tracked_files_are_swept(_PY_SUFFIXES, "Python sources")
+
+
+def test_every_tracked_text_source_is_swept() -> None:
+    """The same coverage claim for the prose half of the sweep.
+
+    Holding only the Python half to git ls-files would have left the shape of the
+    original finding intact for Markdown and workflow files: a tracked file behind a
+    directory exclusion, prose in it free to violate the contract, and the guard green.
+    The two halves use different suffix sets, so they need two measurements.
+    """
+    _assert_tracked_files_are_swept(_TEXT_SUFFIXES, "prose sources")
+
+
+def test_path_allowlist_has_no_stale_entries() -> None:
+    """Symmetry with the language allowlist: an entry that stopped violating must go.
+
+    The list is empty today, which is exactly when the check is cheap to add. Without
+    it a future entry could outlive its reason and quietly exempt a file forever.
+    """
+    _, paths, _ = _repo_scan()
+    known = {rel for _, rel in _iter_files(_REPO_ROOT, _PY_SUFFIXES)}
+    known |= {rel for _, rel in _iter_files(_REPO_ROOT, _TEXT_SUFFIXES)}
+    stale = sorted(
+        rel
+        for rel in AGENT_LOCAL_PATH_ALLOWLIST
+        if rel not in known or rel not in paths
     )
-    if result.returncode != 0:
-        raise AssertionError(
-            "git ls-files failed, so this test measured nothing. A silent skip here "
-            f"would look identical to full coverage: {result.stderr.strip()}"
-        )
-    tracked = {name for name in result.stdout.split("\0") if name}
-    assert tracked, "git ls-files returned no Python sources, which cannot be right"
-    swept = {rel for _, rel in _iter_files(_REPO_ROOT, _PY_SUFFIXES)}
-    unswept = sorted(
-        name for name in tracked - swept if not name.endswith(_GENERATED_SUFFIXES)
-    )
-    assert not unswept, (
-        "Tracked, hand-written Python sources outside the sweep. Prose in them can "
-        "violate the contract with this guard green; exclude generated files by suffix "
-        f"rather than pruning their directory: {unswept}"
+    assert not stale, (
+        "Stale AGENT_LOCAL_PATH_ALLOWLIST entries (the file cites no agent-local path "
+        f"now, or is gone); remove them so the list stays truthful: {stale}"
     )
 
 
@@ -793,11 +850,16 @@ def test_extraction_reaches_a_deeply_nested_docstring() -> None:
 
 
 def test_path_detector_flags_every_documented_scope() -> None:
-    """Each alternative of the pattern needs its own positive case.
+    """Each alternative of the pattern needs its own positive case, captured in full.
 
-    Measured before adding this: neutralising the two dot-claude branches, or reducing
+    Measured before adding this: neutralising the dot-claude branch, or reducing
     the memory scopes to the first one, left every test green. An untested alternative
     can vanish in a refactor without anything going red.
+
+    The cases assert the captured text, not merely that something matched. A review
+    round found the drive letter of a Windows path being dropped while the case still
+    passed, so the test documented coverage the pattern did not have. What the guard
+    reports is what a reader has to act on, so the report is what gets pinned.
     """
     cases = [
         # memory scopes, generic rather than enumerated
@@ -816,9 +878,17 @@ def test_path_detector_flags_every_documented_scope() -> None:
         "/root/.claude/x.md",
         "/Users/alice/.claude/projects/x.md",
         "C:/Users/alice/.claude/x.md",
+        # native Windows separators, and a relative reference that never starts at root
+        "C:\\Users\\alice\\.claude\\x.md",
+        ".claude\\settings.json",
+        "project/.claude/settings.json",
     ]
-    missed = [case for case in cases if not _agent_local_paths_in(case)]
-    assert not missed, f"pattern alternatives without a match: {missed}"
+    wrong = [
+        (case, _agent_local_paths_in(case))
+        for case in cases
+        if _agent_local_paths_in(case) != [case]
+    ]
+    assert not wrong, f"alternatives not matched, or not captured in full: {wrong}"
 
 
 def test_path_detector_respects_the_word_boundary() -> None:
@@ -832,6 +902,11 @@ def test_path_detector_respects_the_word_boundary() -> None:
         "see /app/requirements.txt for the pinned set",
         "the .claudeignore file lists them",
         "tests/fixtures/not.claude/file.md is a fixture",
+        # absolute siblings of the line above: a dotted directory name whose tail
+        # happens to read .claude. An earlier prefix class could be split here, so
+        # both shapes are pinned rather than only the relative one.
+        "/tmp/not.claude/file.md is a fixture",
+        "/etc/app.claude/config.json is unrelated",
     ]
     tripped = [text for text in benign if _agent_local_paths_in(text)]
     assert not tripped, f"benign text flagged: {tripped}"
