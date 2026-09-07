@@ -107,6 +107,11 @@ class LocateStub(LocateOperations):
         # The manual locate tallies the accuracy class right before the fusion
         # (#216); without this the stub raises AttributeError there.
         self.count_accuracy_class = MagicMock(return_value=None)
+        # ... and asks first whether the report may be counted at all, so that a
+        # repeated locate without a new report does not enter the distribution
+        # twice. Default True: this stub exists to exercise the locate gating,
+        # not the tally, so it must not suppress the call under test.
+        self.claim_report_for_tally = MagicMock(return_value=True)
         self.note_error = MagicMock(return_value=None)
         self.push_updated = MagicMock(return_value=None)
         self._short_error_message = MagicMock(return_value="short-err")
