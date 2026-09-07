@@ -197,7 +197,7 @@ otherwise hangs on the pop having found something: it has not, by definition, wh
 stored record still lists the device, so the durable half would stay stale until some later
 ordinary write and a hard kill before that would bring the deleted ring back on restart. Pinned by `::test_a_purge_during_the_load_survives_the_merge` (which also
 asserts that a sibling device's ring is NOT dropped) and
-`::test_a_purge_after_the_load_needs_no_bookkeeping`.
+`::test_a_purge_after_the_load_is_carried_by_the_pop_alone`.
 
 Two properties of the persisted claim identity are load-bearing. The identity of a report with no
 timestamp is a **digest** of its position and radius, never the values themselves: this
