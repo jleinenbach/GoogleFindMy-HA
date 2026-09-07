@@ -88,8 +88,11 @@ import io
 import os
 import re
 import subprocess
+import sys
 import tokenize
 from pathlib import Path
+
+import pytest
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -264,6 +267,14 @@ _HOMOGRAPH_EXCLUSIONS = frozenset(
 # the literal characters, which test_umlaut_escapes_match_their_literal_form pins.
 _WORD_RE = re.compile("[A-Za-z\u00c4\u00d6\u00dc\u00e4\u00f6\u00fc\u00df]+")
 
+# The private trees of the agent tools used on this repository. This one IS an
+# enumeration and cannot be anything else: no property of a directory name marks it as
+# an agent's private tree, and a generic "any dot-directory under a home" would swallow
+# legitimate documentation of a user's own configuration. The criterion for adding a
+# member is therefore stated rather than guessed: a directory that holds an assistant's
+# own notes, plans or instructions, which no reader of this repository can open.
+_AGENT_PRIVATE_DIRS = ("claude", "codex")
+
 # Paths inside an agent's private memory tree or home configuration. No reader of this
 # repository can open one, so it is never a "verifiable source inside the project
 # reality". "/app/" is deliberately absent: both of its measured occurrences were
@@ -273,7 +284,8 @@ _AGENT_LOCAL_PATH = re.compile(
     # any second level under memory/, not an enumeration: the scopes an agent memory
     # grows are not knowable from here, and an enumeration silently misses new ones
     r"memory/[\w-]+/[\w./-]+"
-    # anything under a .claude directory, whatever the home spelling in front of it.
+    # anything under one of the agent-private directories, whatever the home spelling
+    # in front of it.
     # Enumerating home directories was tried and failed twice in review: first /home/
     # only, then /home/ plus /root/, and macOS, Windows and $HOME were still missing.
     # The prefix is therefore generic, over both separators, and it does not have to be
@@ -285,7 +297,7 @@ _AGENT_LOCAL_PATH = re.compile(
     # directory and an unrelated dotted name) before this was pinned. Requiring a
     # separator after the directory keeps the ignore-file spelling out.
     r"|(?:(?:~|\$HOME|[\w.$:-]*(?:[\\/][\w.$-]+)*)[\\/])?"
-    r"(?<![\w.$-])\.claude[\\/][\w.$\\/-]+"
+    r"(?<![\w.$-])\.(?:" + "|".join(_AGENT_PRIVATE_DIRS) + r")[\\/][\w.$\\/-]+"
     r")"
 )
 
@@ -398,18 +410,26 @@ def _agent_local_paths_in(text: str) -> list[str]:
     return [match.group(1) for match in _AGENT_LOCAL_PATH.finditer(text)]
 
 
-def scan_tree(root: Path) -> tuple[Offenders, Offenders, list[str]]:
+def scan_tree(
+    root: Path, only: frozenset[str] | None = None
+) -> tuple[Offenders, Offenders, list[str]]:
     """Sweep *root* once and return (language hits, path hits, unparsable files).
 
     The root is a parameter, not the module-level constant, so the polarity probes can
     sweep a synthetic tree without touching the working copy. That is the one deliberate
     deviation from the sibling guards, and it is what lets the red probes exercise the
     wiring of extraction, iteration and exclusion rather than the regex alone.
+
+    *only* restricts the sweep to a set of root-relative paths. The repository scan
+    passes the tracked set; the synthetic probes pass nothing, because a temporary
+    directory has no index to ask.
     """
     language: Offenders = {}
     paths: Offenders = {}
     unparsable: list[str] = []
     for path, rel in _iter_files(root, _PY_SUFFIXES):
+        if only is not None and rel not in only:
+            continue
         source = path.read_text(encoding="utf-8", errors="replace")
         try:
             units = _prose_units(source)
@@ -424,6 +444,8 @@ def scan_tree(root: Path) -> tuple[Offenders, Offenders, list[str]]:
             if cited:
                 paths.setdefault(rel, []).append((line, cited))
     for path, rel in _iter_files(root, _TEXT_SUFFIXES):
+        if only is not None and rel not in only:
+            continue
         for lineno, line_text in enumerate(
             path.read_text(encoding="utf-8", errors="replace").splitlines(), start=1
         ):
@@ -436,7 +458,7 @@ def scan_tree(root: Path) -> tuple[Offenders, Offenders, list[str]]:
 @functools.cache
 def _repo_scan() -> tuple[Offenders, Offenders, list[str]]:
     """Sweep the repository once and share the result across all tests here."""
-    return scan_tree(_REPO_ROOT)
+    return scan_tree(_REPO_ROOT, _tracked_paths())
 
 
 def _unallowlisted(offenders: Offenders, allowlist: set[str]) -> Offenders:
@@ -491,16 +513,15 @@ def test_every_swept_file_parses() -> None:
 # --- allowlist hygiene ------------------------------------------------------
 
 
-def _assert_tracked_files_are_swept(suffixes: tuple[str, ...], label: str) -> None:
-    """Fail unless every tracked, non-generated file with *suffixes* is in the sweep.
+def _git_ls_files(patterns: list[str], label: str) -> set[str]:
+    """Return the tracked paths matching *patterns*, or raise.
 
-    Every failure mode of the measurement is fail-closed on purpose. A missing git, a
-    non-zero exit, an empty result or an undecodable name all raise, because a silent
-    skip here would look exactly like full coverage, which is the shape of every
-    finding in this file's history. The timeout is part of that: without it a hung
-    index lock stalls the suite instead of reporting anything.
+    Every failure mode is fail-closed on purpose. A missing git, a non-zero exit, an
+    empty result or an undecodable name all raise, because a silent skip here would look
+    exactly like full coverage, which is the shape of every finding in this file's
+    history. The timeout is part of that: without it a hung index lock stalls the suite
+    instead of reporting anything.
     """
-    patterns = [f"*{suffix}" for suffix in suffixes]
     result = subprocess.run(  # noqa: S603
         ["git", "ls-files", "-z", *patterns],
         cwd=_REPO_ROOT,
@@ -511,15 +532,42 @@ def _assert_tracked_files_are_swept(suffixes: tuple[str, ...], label: str) -> No
     if result.returncode != 0:
         stderr = result.stderr.decode("utf-8", "replace").strip()
         raise AssertionError(
-            f"git ls-files failed, so this test measured nothing about {label}. A "
-            f"silent skip here would look identical to full coverage: {stderr}"
+            f"git ls-files failed, so nothing was measured about {label}. A silent "
+            f"fallback here would look identical to full coverage: {stderr}"
         )
     # Bytes, not text=True: universal newlines would rewrite a carriage return inside a
-    # file name and the comparison below would miss a file that is in fact swept. -z
-    # already removes the quoting question for names with spaces.
+    # file name and every comparison against the walk would then miss a file that is in
+    # fact swept. -z already removes the quoting question for names with spaces.
     raw = result.stdout.decode("utf-8", "surrogateescape")
     tracked = {name for name in raw.split("\0") if name}
     assert tracked, f"git ls-files returned no {label}, which cannot be right"
+    return tracked
+
+
+@functools.cache
+def _tracked_paths() -> frozenset[str]:
+    """Every tracked path in the repository, as root-relative posix strings.
+
+    The repository sweep is restricted to these. Walking the working copy instead would
+    make the result depend on whatever a developer happens to have lying around:
+    .gitignore reserves .plans/, .bootstrap/ and .wheelhouse/, and an agent-local
+    citation in one of those would fail this suite for its author alone, over a file
+    that can never enter a commit. Pruning those three names would be the same
+    enumeration this file has already lost four rounds to; asking git is not.
+    """
+    return frozenset(_git_ls_files([], "tracked files"))
+
+
+def _assert_tracked_files_are_swept(suffixes: tuple[str, ...], label: str) -> None:
+    """Fail unless every tracked, non-generated file with *suffixes* is in the sweep.
+
+    Every failure mode of the measurement is fail-closed on purpose. A missing git, a
+    non-zero exit, an empty result or an undecodable name all raise, because a silent
+    skip here would look exactly like full coverage, which is the shape of every
+    finding in this file's history. The timeout is part of that: without it a hung
+    index lock stalls the suite instead of reporting anything.
+    """
+    tracked = _git_ls_files([f"*{suffix}" for suffix in suffixes], label)
     swept = {rel for _, rel in _iter_files(_REPO_ROOT, suffixes)}
     unswept = sorted(
         name for name in tracked - swept if not name.endswith(_GENERATED_SUFFIXES)
@@ -882,6 +930,11 @@ def test_path_detector_flags_every_documented_scope() -> None:
         "C:\\Users\\alice\\.claude\\x.md",
         ".claude\\settings.json",
         "project/.claude/settings.json",
+        # every member of _AGENT_PRIVATE_DIRS needs its own case: the set is an
+        # enumeration by necessity, so nothing else would notice a member going missing
+        "~/.codex/skills/example/SKILL.md",
+        "/root/.codex/instructions.md",
+        ".codex/config.toml",
     ]
     wrong = [
         (case, _agent_local_paths_in(case))
@@ -889,6 +942,80 @@ def test_path_detector_flags_every_documented_scope() -> None:
         if _agent_local_paths_in(case) != [case]
     ]
     assert not wrong, f"alternatives not matched, or not captured in full: {wrong}"
+
+
+def test_every_private_directory_is_wired_into_the_pattern() -> None:
+    """The named set and the compiled pattern must not drift apart.
+
+    The positive cases above name the members as literals. This asserts the other
+    direction: a member added to the constant but never reached by the pattern, or a
+    pattern that stopped consuming the constant, fails here rather than passing silently
+    while the guard stops looking for one of the trees.
+    """
+    unreached = [
+        name
+        for name in _AGENT_PRIVATE_DIRS
+        if _agent_local_paths_in(f"~/.{name}/notes.md") != [f"~/.{name}/notes.md"]
+    ]
+    assert not unreached, (
+        f"members of _AGENT_PRIVATE_DIRS the pattern never matches: {unreached}"
+    )
+
+
+def test_scan_honours_the_restriction_to_known_paths(tmp_path: Path) -> None:
+    """A file outside the restriction is not swept, one inside it still is.
+
+    The repository scan passes the tracked set, so that an ignored local tree cannot
+    fail this suite for the developer who happens to have one. Pinned on a synthetic
+    tree rather than on the working copy: writing an untracked offender into the
+    repository to observe the effect would be the wrong kind of test.
+    """
+    for name in ("tracked.py", "ignored.py"):
+        (tmp_path / name).write_text(_GERMAN_COMMENT_SAMPLE, encoding="utf-8")
+
+    unrestricted, _, _ = scan_tree(tmp_path)
+    assert set(unrestricted) == {"tracked.py", "ignored.py"}
+
+    restricted, _, _ = scan_tree(tmp_path, frozenset({"tracked.py"}))
+    assert set(restricted) == {"tracked.py"}
+
+
+def test_repository_scan_restricts_itself_to_tracked_files(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The repository scan has to hand the tracked set down, not just be inside it.
+
+    The assertion below that the reported files are tracked cannot see this: at a clean
+    tree it holds either way, so removing the restriction leaves it green. This calls
+    the uncached body with a stand-in for the sweep and reads what it was given, which
+    is the only observation that distinguishes the two.
+    """
+    captured: dict[str, object] = {}
+
+    def spy(
+        root: Path, only: frozenset[str] | None = None
+    ) -> tuple[Offenders, Offenders, list[str]]:
+        captured["root"], captured["only"] = root, only
+        return {}, {}, []
+
+    monkeypatch.setattr(sys.modules[__name__], "scan_tree", spy)
+    _repo_scan.__wrapped__()
+    assert captured["root"] == _REPO_ROOT
+    assert captured["only"] == _tracked_paths(), (
+        "The repository sweep did not restrict itself to tracked files. An ignored "
+        "local tree would then fail this suite for whoever happens to have one."
+    )
+
+
+def test_repository_scan_stays_inside_the_tracked_set() -> None:
+    """Whatever the repository sweep reports has to be a file a reader can fetch."""
+    language, paths, unparsable = _repo_scan()
+    tracked = _tracked_paths()
+    outside = sorted((set(language) | set(paths) | set(unparsable)) - tracked)
+    assert not outside, (
+        "The repository sweep reported untracked files. Their contents depend on the "
+        f"developer's working copy, so the result would not be reproducible: {outside}"
+    )
 
 
 def test_path_detector_respects_the_word_boundary() -> None:
@@ -907,6 +1034,8 @@ def test_path_detector_respects_the_word_boundary() -> None:
         # both shapes are pinned rather than only the relative one.
         "/tmp/not.claude/file.md is a fixture",
         "/etc/app.claude/config.json is unrelated",
+        "the .codexignore file lists them",
+        "tests/fixtures/not.codex/file.md is a fixture",
     ]
     tripped = [text for text in benign if _agent_local_paths_in(text)]
     assert not tripped, f"benign text flagged: {tripped}"

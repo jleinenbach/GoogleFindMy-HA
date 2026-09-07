@@ -1122,7 +1122,13 @@ name in every copyright header, and a two-distinct-words threshold only passed i
 positive control because three nouns of one concrete incident had been added to the list.
 
 The evidence arm covers Python prose plus Markdown and workflow files and matches paths
-under an agent's private memory or home configuration. The home prefix is generic over
+under an agent's private memory or home configuration. The private directories are a
+named set (`_AGENT_PRIVATE_DIRS`, currently `.claude` and `.codex`) and this one is an
+enumeration by necessity: no property of a directory name marks it as an assistant's
+private tree, and matching any dot-directory under a home would swallow legitimate
+documentation of a user's own configuration. Add a member when an assistant keeps its
+notes, plans or instructions there; each member carries its own positive case, and a
+member the pattern never reaches fails a test. The home prefix is generic over
 both path separators and does not have to be absolute, because a relative reference is
 just as unopenable for a reader; the directory has to start a path segment, so a name
 that merely ends in those letters does not trip. `/app/` is deliberately not part
@@ -1130,6 +1136,14 @@ of the pattern: both measured occurrences were `/app/requirements.txt`, this pro
 own container path. Measured over 553 files (503 Python sources, 50
 Markdown and workflow): zero hits, so `AGENT_LOCAL_PATH_ALLOWLIST` is empty and should
 stay so.
+
+The repository sweep is restricted to tracked files. Walking the working copy instead
+made the result depend on whatever a developer happened to have lying around:
+`.gitignore` reserves `.plans/`, `.bootstrap/` and `.wheelhouse/`, and an agent-local
+citation in one of those would fail this suite for its author alone, over a file that
+can never enter a commit. Pruning those three names would be the same enumeration this
+guard has already lost several rounds to; asking `git` is not. The synthetic polarity
+probes pass no restriction, because a temporary directory has no index to ask.
 
 Excluded by file, not by directory: `ProtoDecoders`, `Auth/firebase_messaging/proto` and
 `vendor` all hold tracked, hand-written Python next to generated or imported code, and
