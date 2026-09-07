@@ -383,6 +383,22 @@ def _finite_or_none(value: Any) -> float | None:
     return number if math.isfinite(number) else None
 
 
+def _has_countable_accuracy(row: Mapping[str, Any]) -> bool:
+    """Say whether ``count_accuracy_class`` would actually tally this row.
+
+    The claim and the tally have to agree on which reports they are about. A
+    semantic-only response carries a timestamp but no usable accuracy, so nothing is
+    counted for it - and a claim recorded anyway would later suppress the same report
+    arriving through another path WITH its accuracy, silencing a measurement that was
+    never taken. Same predicate as the tally, read from the same helpers rather than
+    restated, so the two cannot drift apart.
+    """
+    raw = _coerce_float_impl(row.get("accuracy"))
+    if not _is_valid_accuracy(raw):
+        return False
+    return _accuracy_bucket_impl(raw) is not None
+
+
 def _tally_identity(row: Mapping[str, Any]) -> tuple[Any, ...] | None:
     """Return what identifies *row* for tally deduplication, or ``None``.
 
@@ -564,8 +580,11 @@ class CacheOperations(_MixinBase):
         half.
 
         MUST be called on every path that feeds a fix into the fusion, and
-        exactly once per fix. There are three such entry points (the poll loop,
-        the manual locate and the FCM push through ``update_device_cache``);
+        exactly once per fix. There are three entry points (the poll loop, the
+        manual locate and the FCM push) plus the ``update_device_cache``
+        fallback that a device-list seed reaches, which makes four counting
+        sites; ``test_every_counting_site_claims_the_report_first`` derives that
+        set from the sources rather than trusting this sentence;
         the first two run the fusion themselves and mark the payload
         ``_fusion_preapplied``, so ``update_device_cache`` deliberately counts
         only when that marker is absent. ``tests/test_cache_accuracy_gate.py``
@@ -644,15 +663,25 @@ class CacheOperations(_MixinBase):
         between two rejected timestamps would still be counted twice, which is
         a bounded and known limit rather than an unbounded store.
         """
+        if not _has_countable_accuracy(row):
+            # Nothing to claim, because nothing will be counted. Returning False here
+            # costs nothing - the caller would tally zero either way - and it keeps the
+            # slot free for the delivery that does carry an accuracy.
+            return False
         if self.is_replayed_report(device_id, row):
             return False
         identity = _tally_identity(row)
-        if identity is not None:
-            tallied = getattr(self, "_last_tallied_report_id", None)
-            if tallied is None:
-                tallied = {}
-                self._last_tallied_report_id = tallied
-            tallied[device_id] = identity
+        if identity is None:  # pragma: no cover - unreachable
+            # A countable accuracy is itself part of the fallback identity, so passing
+            # the check above guarantees one. Kept as a typed guard rather than an
+            # assertion, which would vanish under -O, and marked because a branch that
+            # cannot be entered must not look like one that merely lacks a test.
+            return True
+        tallied = getattr(self, "_last_tallied_report_id", None)
+        if tallied is None:
+            tallied = {}
+            self._last_tallied_report_id = tallied
+        tallied[device_id] = identity
         return True
 
     def _expire_coarse_fix(self, device_id: str, committed: Mapping[str, Any]) -> None:

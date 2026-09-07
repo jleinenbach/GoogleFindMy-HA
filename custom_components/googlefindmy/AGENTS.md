@@ -104,7 +104,11 @@ not the same question. Order pinned by
 `tests/test_cache_accuracy_gate.py::test_the_tally_runs_before_any_accuracy_substitution`.
 
 Every site that counts claims first, through `claim_report_for_tally`, which counts a
-report once and then recognises its retries. That is four sites, not three: besides the
+report once and then recognises its retries. It claims only what would actually be
+tallied: a semantic-only response carries a timestamp but no usable accuracy, and a claim
+recorded for it would later suppress the same report arriving with its accuracy through
+another path - silencing a measurement that was never taken. The predicate is read from
+the same helpers the tally uses, so the two cannot drift apart. That is four sites, not three: besides the
 entry points, the `update_device_cache` fallback counts a device-list seed that nobody
 upstream has counted, and it was found one review round after the others. The set is
 therefore derived from the sources rather than listed here, by

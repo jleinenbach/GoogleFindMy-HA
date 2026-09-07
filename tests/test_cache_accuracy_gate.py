@@ -2134,7 +2134,16 @@ def test_a_retried_report_that_reaches_no_cache_is_counted_once() -> None:
 
     # A genuinely different report is still claimed, so the memory does not
     # simply block everything after the first.
-    assert coord.claim_report_for_tally("dev", {"last_seen": published + 60}) is True
+    assert (
+        coord.claim_report_for_tally(
+            "dev", {"accuracy": 120.0, "last_seen": published + 60}
+        )
+        is True
+    )
+    # The same stamp WITHOUT a usable accuracy is not claimed at all: nothing would be
+    # counted for it, and a claim recorded here would later suppress the same report
+    # arriving with its accuracy through another path.
+    assert coord.claim_report_for_tally("dev", {"last_seen": published + 120}) is False
 
     # A report without a stamp is still identifiable by its position and radius,
     # and it has to be: retried, it used to be counted once per delivery, so the
@@ -2144,10 +2153,45 @@ def test_a_retried_report_that_reaches_no_cache_is_counted_once() -> None:
     assert coord.claim_report_for_tally("dev", {"accuracy": 50.0}) is False
     # A different stampless report is a different measurement.
     assert coord.claim_report_for_tally("dev", {"accuracy": 800.0}) is True
-    # Nothing at all to recognise it by: claimed every time, because refusing to
-    # count a fix is the worse of the two errors.
-    assert coord.claim_report_for_tally("dev", {}) is True
-    assert coord.claim_report_for_tally("dev", {}) is True
+    # Neither a stamp nor an accuracy: nothing to count and nothing to recognise, so
+    # the claim is refused rather than recorded against an empty identity.
+    assert coord.claim_report_for_tally("dev", {}) is False
+    assert coord.claim_report_for_tally("dev", {}) is False
+
+
+def test_a_report_with_no_countable_accuracy_is_never_claimed() -> None:
+    """The claim and the tally must be about the same set of reports.
+
+    A semantic-only response carries a timestamp but no usable accuracy. The entry paths
+    claim before they count, so such a report used to record a claim while nothing was
+    counted for it - and when the same report later arrived through polling or the push
+    path WITH its accuracy, the claim recognised the timestamp and suppressed it. A
+    measurement that was never taken was then silenced by its own absence.
+
+    The three shapes that reach ``count_accuracy_class`` and leave without incrementing
+    anything are each checked here, because the predicate is shared with the tally and a
+    future change to one of them must move both.
+    """
+    from custom_components.googlefindmy.coordinator import GoogleFindMyCoordinator
+
+    coord = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
+    coord._device_location_data = {}
+    coord._device_coarse_fix = {}
+    stamp = _now()
+
+    # missing, sentinel (Android's "no accuracy") and non-numeric
+    for payload in (
+        {"last_seen": stamp},
+        {"last_seen": stamp, "accuracy": 0.0},
+        {"last_seen": stamp, "accuracy": "n/a"},
+    ):
+        assert coord.claim_report_for_tally("dev", dict(payload)) is False, payload
+
+    assert getattr(coord, "_last_tallied_report_id", None) in (None, {})
+
+    # The same stamp arriving with a real accuracy is claimed, which is the whole point:
+    # the earlier deliveries must not have used up its slot.
+    assert coord.claim_report_for_tally("dev", {"last_seen": stamp, "accuracy": 45.0})
 
 
 @pytest.mark.asyncio
