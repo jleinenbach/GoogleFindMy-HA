@@ -309,9 +309,12 @@ def test_increment_stat_persists_stats(monkeypatch: pytest.MonkeyPatch) -> None:
             coordinator.increment_stat("background_updates")
             await asyncio.wait_for(stats_persisted.wait(), timeout=0.1)
             assert cache.saved_calls
-            key, value = cache.saved_calls[-1]
-            assert key == "integration_stats"
-            assert value["background_updates"] == 1
+            # By key rather than by position: the stats writer also persists the
+            # tally claim that protects the accuracy histogram, and which of the two
+            # lands last is an ordering this test has no stake in.
+            persisted = {key: value for key, value in cache.saved_calls}
+            assert "integration_stats" in persisted, sorted(persisted)
+            assert persisted["integration_stats"]["background_updates"] == 1
 
         loop.run_until_complete(_exercise())
     finally:

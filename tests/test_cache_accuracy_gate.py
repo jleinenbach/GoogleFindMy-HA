@@ -2150,6 +2150,7 @@ def test_a_retried_report_that_reaches_no_cache_is_counted_once() -> None:
     assert coord.claim_report_for_tally("dev", {}) is True
 
 
+@pytest.mark.asyncio
 async def test_the_tally_claim_survives_a_restart() -> None:
     """The histogram outlives a restart, so the claim that protects it has to as well.
 
@@ -2208,6 +2209,7 @@ async def test_the_tally_claim_survives_a_restart() -> None:
     assert reader.claim_report_for_tally("dev", dict(coarse, accuracy=80.0)) is True
 
 
+@pytest.mark.asyncio
 async def test_a_cache_written_before_claims_existed_loads_without_error() -> None:
     """No stored key means the old behaviour, not a failure.
 
@@ -2231,6 +2233,7 @@ async def test_a_cache_written_before_claims_existed_loads_without_error() -> No
     assert coord.claim_report_for_tally("dev", {"accuracy": 42.0}) is True
 
 
+@pytest.mark.asyncio
 async def test_a_damaged_claim_entry_is_dropped_rather_than_trusted() -> None:
     """A stored shape the loader cannot read leaves the pair as it was before.
 
