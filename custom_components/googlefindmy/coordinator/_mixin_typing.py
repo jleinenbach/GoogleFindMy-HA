@@ -122,6 +122,15 @@ class _MixinBase:
     stats: dict[str, int]
     performance_metrics: dict[str, float]
     _propagating_location: bool
+    # Stats persistence. The load runs as a task created in the constructor, and the
+    # unload waits for it before flushing, so the handle has to be visible here too.
+    # The three flags around it travel with the same record: the load window, the
+    # deferral it hands to the load's `finally`, and the generation a reset starts.
+    _stats_load_task: asyncio.Task[None] | None
+    _stats_save_task: asyncio.Task[None] | None
+    _stats_loaded: bool
+    _save_after_stats_load: bool
+    _stats_epoch: int
 
     # Service device tracking
     _service_device_ready: bool

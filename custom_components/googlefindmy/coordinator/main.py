@@ -252,6 +252,11 @@ _ALTITUDE_SIGNIFICANT_DELTA_M = 1.0
 # Predictive polling buffer to avoid requesting data before it is available server-side.
 _PREDICTION_BUFFER_S = 45
 
+# How long an unload waits for the startup stats load before flushing anyway. The load
+# reads two keys from an in-memory cache, so the ordinary case is sub-millisecond; the
+# bound exists so a cache that cannot answer delays the unload instead of hanging it.
+_STATS_LOAD_SHUTDOWN_WAIT_S = 5.0
+
 # Fields consumed by get_active_device_identities from cached payloads/anchors.
 _PERSISTED_METADATA_KEYS: tuple[str, ...] = (
     "battery_level",
@@ -935,8 +940,11 @@ class GoogleFindMyCoordinator(
         # persist live state that is still missing everything the load carries.
         self._save_after_stats_load: bool = False
 
-        # Load persistent statistics asynchronously (name the task for better debugging)
-        self.hass.async_create_task(
+        # Load persistent statistics asynchronously (name the task for better debugging).
+        # The handle is kept because `async_shutdown` waits for it: its flush writes the
+        # whole record from live state, which inside this window is missing everything
+        # the load has not merged yet.
+        self._stats_load_task: asyncio.Task[None] | None = self.hass.async_create_task(
             self._async_load_stats(), name=f"{DOMAIN}.load_stats"
         )
 
@@ -1201,18 +1209,47 @@ class GoogleFindMyCoordinator(
         # persisted record, and a device re-added under the same id would have its first
         # matching measurement suppressed by a claim from its previous life.
         #
-        # The write is therefore UNCONDITIONAL. Gating it on a pending debounced task was
-        # the first attempt and it missed exactly the case that matters most: the purge
-        # writes through a task this attribute never holds, so when only that one is in
-        # flight there is nothing here to find and the whole block was skipped. A
-        # condition that cannot see the more important of the two writers is not a
-        # condition, and the cost of dropping it is one write per unload.
+        # The write is therefore unconditional IN THAT RESPECT: it does not ask whether a
+        # debounced task is pending. Gating it on one was the first attempt and it missed
+        # exactly the case that matters most: the purge writes through a task this
+        # attribute never holds, so when only that one is in flight there is nothing here
+        # to find and the whole block was skipped. A condition that cannot see the more
+        # important of the two writers is not a condition, and the cost of dropping it is
+        # one write per unload.
+        #
+        # One condition does apply, and it lives in the writer rather than here: while the
+        # stats load is still in flight, `_async_save_stats` defers instead of writing,
+        # because inside that window live state is missing everything the load has not
+        # merged yet and a write would replace the stored record with it. That is a
+        # different axis from the one this comment is about.
         #
         # The pending task is still cancelled first, so its coroutine stops waiting out
         # its sleep. `_debounced_save_stats` swallows the cancellation and returns, so
         # the await settles it; if it was already past the sleep and inside the write,
         # the repeated write is the same record and costs nothing. Failures are swallowed
         # like the other shutdown steps: an unload must not raise.
+        # Let the startup load finish first, so the flush below is outside its window and
+        # writes the merged record rather than deferring. Waiting is what makes the write
+        # possible at all here: the entry-scoped cache is closed immediately after this
+        # method returns, so a write deferred to the load's `finally` would reach a closed
+        # store and be swallowed. Waited WITHOUT cancelling and with a bound, so a load
+        # that cannot finish delays the unload by seconds rather than hanging it; if the
+        # bound is hit the window is still open, the flush defers, and the record stays as
+        # it was on disk.
+        load_task = getattr(self, "_stats_load_task", None)
+        if load_task is not None:
+            # The whole probe is inside the try, not just the wait: `done()` is the first
+            # thing touched on an attribute read with `getattr`, and a value that is not a
+            # task fails there rather than in `asyncio.wait`. An unload must not raise, and
+            # this wait is an optimisation of WHEN the flush writes - never a reason for
+            # the unload to fail. Falling through leaves the window open, so the flush
+            # below defers and the stored record stays as it was.
+            try:
+                if not load_task.done():
+                    await asyncio.wait({load_task}, timeout=_STATS_LOAD_SHUTDOWN_WAIT_S)
+            except Exception as err:
+                _LOGGER.debug("Could not wait for the stats load on unload: %s", err)
+
         stats_save_task = getattr(self, "_stats_save_task", None)
         if stats_save_task and not stats_save_task.done():
             stats_save_task.cancel()
@@ -1891,8 +1928,19 @@ class GoogleFindMyCoordinator(
                 # than debounced, for the reason the purge path states: a reload or
                 # shutdown inside the debounce window cancels a pending write without
                 # flushing it.
-                self._save_after_stats_load = False
-                self.hass.async_create_task(self._async_save_stats())
+                # Cleared only once the task exists, so the flag is never cleared for
+                # a write that did not get scheduled. Nothing reads it again after this
+                # line - this is its only reader - so a stuck True has no effect; the
+                # point is that the exception does not escape this ``finally`` and abort
+                # the sound-UUID load below.
+                try:
+                    self.hass.async_create_task(self._async_save_stats())
+                except Exception as err:
+                    _LOGGER.debug(
+                        "Deferred stats write could not be scheduled: %s", err
+                    )
+                else:
+                    self._save_after_stats_load = False
 
         try:
             sound_request_uuids = await self._cache.async_get_cached_value(
@@ -2029,10 +2077,41 @@ class GoogleFindMyCoordinator(
         The claims travel under a reserved sub-key. The loader only copies keys it
         already knows into ``self.stats``, so the extra entry cannot become a phantom
         counter, and the name is asserted not to collide with a real one.
+
+        Nothing is written while the stats load is still in flight. This method
+        serialises the WHOLE record from live state, and inside that window live state
+        is missing everything the load has not merged yet - so a write there does not
+        add to the stored record, it REPLACES the persisted totals and every claim ring
+        with pre-load values, and the load then reads back what the write left. The
+        guard belongs here rather than at the call sites: of the four callers, one is
+        the load's own ``finally`` (by construction outside the window), one is
+        ``purge_device``, which had to learn the rule for itself, and two - the debounced
+        writer and the flush in ``async_shutdown`` - used to reach the window with
+        nothing to stop them. A rule that only one of its callers knows is not a rule.
+
+        The write is deferred, not dropped: the load's ``finally`` performs it once live
+        state carries the merged record, and that ``finally`` runs on the success path,
+        on the read-failure path and on the epoch-discard path alike.
+
+        Deferral only works while there is still somewhere to write. On an unload there
+        is not: the entry-scoped cache is closed right after ``async_shutdown`` returns,
+        and a write reaching it afterwards raises and is swallowed below. That is why
+        ``async_shutdown`` WAITS for the load task before it flushes, rather than relying
+        on the deferral - the wait closes the window, and the flush then writes the merged
+        record for real. Deferring is the answer for writers that have a future; for the
+        one that does not, the window is closed instead.
+
+        ``_stats_loaded`` defaults to True when absent, so a coordinator built without it
+        writes as before; defaulting to False would silence every such writer instead,
+        which is the mistake this direction is easy to make.
         """
         assert TALLY_CLAIMS_KEY not in self.stats, (
             f"{TALLY_CLAIMS_KEY} collides with a real counter"
         )
+        if not getattr(self, "_stats_loaded", True):
+            self._save_after_stats_load = True
+            _LOGGER.debug("Deferred a stats write issued inside the load window")
+            return
         claims = getattr(self, "_last_tallied_report_id", None) or {}
         record: dict[str, Any] = self.stats.copy()
         record[TALLY_CLAIMS_KEY] = {
