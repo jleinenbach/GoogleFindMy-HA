@@ -3694,3 +3694,48 @@ async def test_the_constructor_hands_the_load_task_to_the_unload() -> None:
     assert task.get_coro().__qualname__.endswith("_async_load_stats")
 
     await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_a_load_that_cannot_schedule_its_deferred_write_still_finishes() -> None:
+    """The teardown branch, tested rather than excluded from coverage.
+
+    Scheduling the deferred write fails when the loop is going away. That must not
+    escape the load's ``finally`` - the sound-UUID load runs after it - and must not
+    clear the flag for a write that was never scheduled.
+    """
+    coord = _windowed_writer({"background_updates": 10, "_tally_claims": {}})
+    coord._save_after_stats_load = True
+
+    def _refuse(coro: Any, **_k: Any) -> Any:
+        coro.close()
+        raise RuntimeError("event loop is closed")
+
+    coord.hass.async_create_task = _refuse
+
+    await coord._async_load_stats()  # must not raise
+
+    assert coord._stats_loaded is True, "the window must still close"
+    assert coord._save_after_stats_load is True, (
+        "the flag was cleared for a write that never got scheduled"
+    )
+
+
+@pytest.mark.asyncio
+async def test_an_unusable_load_handle_does_not_break_the_unload() -> None:
+    """An unload must not raise, and waiting is not worth breaking that rule for.
+
+    ``_stats_load_task`` is read with ``getattr`` and can be anything a test double or
+    an older object left there; ``asyncio.wait`` rejects a non-awaitable with a
+    ``TypeError``. The wait is an optimisation of WHEN the flush writes, never a reason
+    for the unload to fail, so the failure falls through to the flush - which then
+    defers, because the window is still open.
+    """
+    stored = {"background_updates": 10, "_tally_claims": {}}
+    coord = _shutdownable(_windowed_writer(dict(stored)))
+    coord._stats_load_task = object()  # not awaitable
+
+    await coord.async_shutdown()  # must not raise
+
+    assert coord._cache.store["integration_stats"] == stored
+    assert coord._save_after_stats_load is True

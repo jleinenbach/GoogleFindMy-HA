@@ -1237,11 +1237,18 @@ class GoogleFindMyCoordinator(
         # bound is hit the window is still open, the flush defers, and the record stays as
         # it was on disk.
         load_task = getattr(self, "_stats_load_task", None)
-        if load_task is not None and not load_task.done():
+        if load_task is not None:
+            # The whole probe is inside the try, not just the wait: `done()` is the first
+            # thing touched on an attribute read with `getattr`, and a value that is not a
+            # task fails there rather than in `asyncio.wait`. An unload must not raise, and
+            # this wait is an optimisation of WHEN the flush writes - never a reason for
+            # the unload to fail. Falling through leaves the window open, so the flush
+            # below defers and the stored record stays as it was.
             try:
-                await asyncio.wait({load_task}, timeout=_STATS_LOAD_SHUTDOWN_WAIT_S)
-            except Exception:
-                pass
+                if not load_task.done():
+                    await asyncio.wait({load_task}, timeout=_STATS_LOAD_SHUTDOWN_WAIT_S)
+            except Exception as err:
+                _LOGGER.debug("Could not wait for the stats load on unload: %s", err)
 
         stats_save_task = getattr(self, "_stats_save_task", None)
         if stats_save_task and not stats_save_task.done():
@@ -1928,7 +1935,7 @@ class GoogleFindMyCoordinator(
                 # the sound-UUID load below.
                 try:
                     self.hass.async_create_task(self._async_save_stats())
-                except Exception as err:  # pragma: no cover - loop teardown only
+                except Exception as err:
                     _LOGGER.debug(
                         "Deferred stats write could not be scheduled: %s", err
                     )

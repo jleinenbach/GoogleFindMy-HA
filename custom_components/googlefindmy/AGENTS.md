@@ -223,6 +223,12 @@ task - kept on `_stats_load_task` for that purpose, waited without cancelling an
 bounded by `_STATS_LOAD_SHUTDOWN_WAIT_S` - and only then flushes, at which point live
 state carries the merged record. If the bound is hit the flush defers as any other
 writer would and the stored record simply stays as it was, which is the safe direction.
+The whole probe sits inside a `try`, `done()` included, because an unload must not raise
+and the wait is only an optimisation of WHEN the flush writes
+(`::test_an_unusable_load_handle_does_not_break_the_unload`); the same holds for the
+scheduling of the deferred write in the load's `finally`, which must not abort the
+sound-UUID load that follows it
+(`::test_a_load_that_cannot_schedule_its_deferred_write_still_finishes`).
 Pinned by `::test_a_write_inside_the_load_window_leaves_the_stored_record_alone` and
 `::test_the_deferred_write_reaches_the_store_after_the_merge`; the counter-cases that
 keep the guard from swallowing the ordinary path are
