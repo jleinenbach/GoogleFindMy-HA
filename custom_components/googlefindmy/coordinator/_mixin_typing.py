@@ -420,6 +420,13 @@ class _MixinBase:
     ) -> None:
         raise NotImplementedError
 
+    def is_replayed_report(
+        self,
+        device_id: str,
+        row: Mapping[str, Any],
+    ) -> bool:
+        raise NotImplementedError
+
     def _persist_anchor_metadata(
         self,
         device_id: str,

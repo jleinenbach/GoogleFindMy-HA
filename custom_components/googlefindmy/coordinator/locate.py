@@ -373,8 +373,11 @@ class LocateOperations(_MixinBase):
                 # call in the poll loop for the full reasoning. Same position for
                 # the same two reasons: before the fusion, which may reject and
                 # return, and before any substitution of the value (semantic
-                # mapping, Google-Home filter, semantic-only preserve).
-                self.count_accuracy_class(location_data)
+                # mapping, Google-Home filter, semantic-only preserve). And the
+                # same replay rule: repeated manual locates without a new report
+                # must not enter the distribution more than once.
+                if not self.is_replayed_report(device_id, location_data):
+                    self.count_accuracy_class(location_data)
                 location_data["_accuracy_counted"] = True
 
                 mapping_applied = self._apply_semantic_mapping(location_data)

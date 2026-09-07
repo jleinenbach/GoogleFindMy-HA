@@ -2007,6 +2007,78 @@ def test_the_poll_cycle_substitutes_the_home_zone_and_marks_it(
     assert not leaked, f"transient markers reached the cached row: {leaked}"
 
 
+def test_the_replay_predicate_also_knows_the_retained_coarse_fix() -> None:
+    """The reference the published row cannot provide.
+
+    A fix the gate rejects leaves the published row untouched on purpose and is
+    stored aside. Comparing against the published row alone therefore treats
+    every later poll of that same report as new - and it does so for exactly the
+    coarse fixes the distribution is collected for, which is the one place the
+    bias could not be afforded.
+    """
+    from custom_components.googlefindmy.coordinator import GoogleFindMyCoordinator
+
+    coord = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
+    stamp = _now() - 300
+    coord._device_location_data = {
+        "dev": {"latitude": HOME[0], "longitude": HOME[1], "last_seen": stamp - 900}
+    }
+    coord._device_coarse_fix = {
+        "dev": {"latitude": FAR[0], "longitude": FAR[1], "last_seen": stamp}
+    }
+
+    # Matches the retained coarse fix, not the published row.
+    assert coord.is_replayed_report("dev", {"last_seen": stamp}) is True
+    # Matches the published row.
+    assert coord.is_replayed_report("dev", {"last_seen": stamp - 900}) is True
+    # Matches neither: a genuinely new report.
+    assert coord.is_replayed_report("dev", {"last_seen": _now()}) is False
+    # No stamp is not a replay - it cannot be shown to be one.
+    assert coord.is_replayed_report("dev", {}) is False
+
+
+def test_the_push_path_does_not_count_a_replay() -> None:
+    """Second counting site, same rule, driven through the real prepare step.
+
+    A duplicate push delivery, or the same report arriving again after a poll,
+    would otherwise add the same measurement to the persisted distribution once
+    per delivery. The marker is set regardless, so the cache layer does not
+    tally it either.
+    """
+    from types import SimpleNamespace
+
+    from custom_components.googlefindmy.Auth.fcm_receiver_ha import FcmReceiverHA
+
+    stamp = _now() - 300
+    counted: list[Any] = []
+
+    class _Coord:
+        def __init__(self) -> None:
+            self._device_location_data = {"device-id": {"last_seen": stamp}}
+            self._device_coarse_fix: dict[str, Any] = {}
+            self.config_entry = SimpleNamespace(
+                runtime_data=SimpleNamespace(google_home_filter=None)
+            )
+
+        def count_accuracy_class(self, row: dict[str, Any]) -> None:
+            counted.append(row.get("accuracy"))
+
+        def is_replayed_report(self, device_id: str, row: dict[str, Any]) -> bool:
+            return CacheOperations.is_replayed_report(self, device_id, row)
+
+    receiver = FcmReceiverHA.__new__(FcmReceiverHA)
+    out = FcmReceiverHA._prepare_coordinator_payload(
+        receiver,
+        _Coord(),
+        ("acct", "device-id"),
+        {"accuracy": 1600.0, "last_seen": stamp, "latitude": FAR[0]},
+    )
+
+    assert out is not None
+    assert counted == [], f"a replayed push was counted: {counted}"
+    assert out["_accuracy_counted"] is True, "the cache layer must not retry it"
+
+
 def test_a_replayed_report_is_not_counted_again(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

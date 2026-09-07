@@ -2028,16 +2028,22 @@ class PollingOperations(_MixinBase):
                         # incoming fixes report", so a response that reports no
                         # accuracy of its own must not appear in it at all.
                         #
-                        # A REPLAY is not an incoming fix. The poll returned the
-                        # same report timestamp the cache already holds, so
-                        # counting it would let the distribution follow the poll
-                        # interval instead of the reports - a device that reports
-                        # once an hour and is polled every five minutes would
-                        # enter its class twelve times. The marker is set either
-                        # way, so ``update_device_cache`` does not tally it later:
-                        # the decision "not counted" belongs here, where the
-                        # replay is known.
-                        if not is_replay:
+                        # A REPLAY is not an incoming fix. The poll returned a
+                        # report timestamp we already hold, so counting it would
+                        # let the distribution follow the poll interval instead
+                        # of the reports - a device that reports once an hour and
+                        # is polled every five minutes would enter its class
+                        # twelve times. The marker is set either way, so
+                        # ``update_device_cache`` does not tally it later: the
+                        # decision "not counted" belongs here.
+                        #
+                        # ``is_replayed_report`` rather than the ``is_replay``
+                        # flag above: that flag compares against the PUBLISHED
+                        # row only, and a fix the accuracy gate rejected leaves
+                        # that row untouched by design. Its report is stored
+                        # aside, so every later poll of it would look new - for
+                        # exactly the coarse fixes this distribution is for.
+                        if not self.is_replayed_report(dev_id, location):
                             self.count_accuracy_class(location)
                         location["_accuracy_counted"] = True
 

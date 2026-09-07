@@ -2777,10 +2777,20 @@ class FcmReceiverHA:
         # describe the filter's geometry instead of what the push reported. The
         # marker tells the coordinator not to count it a second time; it is
         # popped there, so it never reaches the cached row.
+        # Same replay rule as the poll and locate paths: a push carrying a
+        # report timestamp we already hold (a duplicate delivery, or the same
+        # report after a poll) must not enter the distribution twice. Asked of
+        # the coordinator because only it holds both references, and duck-typed
+        # because this receiver runs against partial coordinators too.
         tally = getattr(coordinator, "count_accuracy_class", None)
         if callable(tally):
             try:
-                tally(coordinator_payload)
+                is_replay_fn = getattr(coordinator, "is_replayed_report", None)
+                replayed = bool(
+                    callable(is_replay_fn) and is_replay_fn(key[1], coordinator_payload)
+                )
+                if not replayed:
+                    tally(coordinator_payload)
                 coordinator_payload["_accuracy_counted"] = True
             except Exception as tally_err:  # pragma: no cover - diagnostics only
                 _LOGGER.debug("Accuracy tally failed for %s: %s", key[1][:8], tally_err)

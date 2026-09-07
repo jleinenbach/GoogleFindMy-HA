@@ -543,6 +543,39 @@ class CacheOperations(_MixinBase):
         if bucket is not None:
             self.increment_stat(ACCURACY_BUCKET_STATS[bucket])
 
+    def is_replayed_report(self, device_id: str, row: Mapping[str, Any]) -> bool:
+        """True when this report's timestamp is one we have already seen.
+
+        Used to keep replays out of the accuracy distribution, which exists to
+        re-tune the gate's thresholds against real reports. Counting a replay
+        would let that distribution follow the poll interval instead.
+
+        TWO REFERENCES, NOT ONE. The published row is the obvious one. The
+        retained coarse fix is the one that matters here: a fix the accuracy
+        gate rejects deliberately leaves the published row untouched and is
+        stored aside, so every later poll returning that same report would look
+        new - and it would look new for exactly the coarse fixes the
+        distribution is collected for.
+
+        Deliberately separate from the ``is_replayed`` flag the inbound paths
+        compute for the Google Home filter branch: that one compares against the
+        published row only, and widening it here would change a behaviour this
+        change never measured.
+        """
+        ts = _normalize_epoch_seconds(row.get("last_seen"))
+        if ts is None:
+            return False
+        store = getattr(self, "_device_coarse_fix", None) or {}
+        for reference in (
+            self._device_location_data.get(device_id),
+            store.get(device_id),
+        ):
+            if not isinstance(reference, Mapping):
+                continue
+            if _normalize_epoch_seconds(reference.get("last_seen")) == ts:
+                return True
+        return False
+
     def _expire_coarse_fix(self, device_id: str, committed: Mapping[str, Any]) -> None:
         """Drop a retained coarse fix that the just-committed row supersedes.
 

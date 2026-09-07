@@ -2069,3 +2069,36 @@ async def test_manual_locate_marks_a_substituted_zone_radius() -> None:
     assert result["accuracy"] == pytest.approx(400.0)
     assert result["latitude"] == pytest.approx(48.5)
     assert result["_accuracy_substituted"] is True
+
+
+@pytest.mark.asyncio
+async def test_manual_locate_does_not_count_a_replay() -> None:
+    """Third counting site of the accuracy distribution, same replay rule.
+
+    Repeated manual locates that return the report already cached would
+    otherwise enter one fix into the distribution once per button press, and
+    that distribution is what the accuracy gate's thresholds get re-tuned
+    against (#216).
+    """
+    import time
+
+    stamp = time.time() - 300
+    coordinator = _base_coordinator(
+        {},
+        _TrackingFilter(),
+        {
+            "latitude": 52.0,
+            "longitude": 13.0,
+            "accuracy": 25.0,
+            "last_seen": stamp,
+        },
+    )
+    coordinator._device_location_data["device-1"] = {"last_seen": stamp}
+
+    counted: list[object] = []
+    coordinator.count_accuracy_class = lambda row: counted.append(row.get("accuracy"))
+
+    result = await coordinator.async_locate_device("device-1")
+
+    assert result is not None, "the locate must have run, or this proves nothing"
+    assert counted == [], f"a replayed locate was counted: {counted}"
