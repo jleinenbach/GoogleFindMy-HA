@@ -2289,13 +2289,14 @@ async def test_the_tally_claim_survives_a_restart() -> None:
     await writer._async_save_stats()
     assert list(writer._cache.store) == ["integration_stats"], writer._cache.store
     record = writer._cache.store["integration_stats"]
-    # The persisted identity of a stampless report is a digest, not the position it was
-    # built from: this record is durable, and a position in a durable store is what the
-    # rest of this feature is careful not to keep. Checked by shape rather than by
-    # value, so the digest function can change without rewriting the test.
-    stored = record["_tally_claims"]["dev"]
-    assert stored[0] == "fix" and len(stored) == 2
-    assert isinstance(stored[1], str) and len(stored[1]) == 16
+    # A ring per device, and the persisted identity of a stampless report is a digest,
+    # not the position it was built from: this record is durable, and a position in a
+    # durable store is what the rest of this feature is careful not to keep. Checked by
+    # shape rather than by value, so the digest function can change without a rewrite.
+    ring = record["_tally_claims"]["dev"]
+    assert len(ring) == 1
+    assert ring[0][0] == "fix" and len(ring[0]) == 2
+    assert isinstance(ring[0][1], str) and len(ring[0][1]) == 16
     assert "49.9" not in json.dumps(record)
 
     reader = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
@@ -2354,7 +2355,7 @@ async def test_a_damaged_claim_entry_is_dropped_rather_than_trusted() -> None:
             return {
                 "background_updates": 3,
                 "_tally_claims": {
-                    "dev": ["fix", "0123456789abcdef"],
+                    "dev": [["fix", "0123456789abcdef"]],
                     "broken": "not-a-sequence",
                     7: [],
                 },
@@ -2367,7 +2368,7 @@ async def test_a_damaged_claim_entry_is_dropped_rather_than_trusted() -> None:
 
     coord.stats = {"background_updates": 0}
     await coord._async_load_stats()
-    assert coord._last_tallied_report_id == {"dev": ("fix", "0123456789abcdef")}
+    assert coord._last_tallied_report_id == {"dev": [("fix", "0123456789abcdef")]}
     # The counters in the same record still load: a damaged claim does not poison them.
     assert coord.stats["background_updates"] == 3
 
@@ -2375,7 +2376,7 @@ async def test_a_damaged_claim_entry_is_dropped_rather_than_trusted() -> None:
     # rather than installing an empty one, which is the same end state.
     class _AllBadCache:
         async def async_get_cached_value(self, key: str) -> Any:
-            return {"_tally_claims": {"broken": "not-a-sequence"}}
+            return {"_tally_claims": {"broken": "not-a-sequence", "empty": []}}
 
     fresh = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
     fresh._device_location_data = {}
@@ -2487,14 +2488,20 @@ def test_a_stampless_report_is_counted_once_however_often_it_arrives() -> None:
     assert coord.claim_report_for_tally("nan-dev", _nan_fix()) is False
 
 
-def test_the_replay_predicate_also_knows_the_retained_coarse_fix() -> None:
-    """The reference the published row cannot provide.
+def test_the_replay_predicate_asks_what_was_tallied_not_what_was_stored() -> None:
+    """A cache row proves a report was SEEN, not that a bucket was counted for it.
 
-    A fix the gate rejects leaves the published row untouched on purpose and is
-    stored aside. Comparing against the published row alone therefore treats
-    every later poll of that same report as new - and it does so for exactly the
-    coarse fixes the distribution is collected for, which is the one place the
-    bias could not be afforded.
+    Reviewed and rewritten. The predicate used to compare against the published row and
+    the retained coarse fix as well, and both are surrogates: a semantic-only response
+    commits its timestamp after copying the previous coordinates and accuracy, so the row
+    carries a timestamp for which nothing was ever counted. The same report arriving
+    later with its real accuracy was then suppressed - the very case the countability
+    check exists to preserve. The claim ring is the only record of what was actually
+    tallied, so it is the only reference.
+
+    Cost of the change, stated rather than hidden: on the very first start after this
+    update, a report already counted before it can be counted once more, because the
+    ring starts empty while the caches do not. One extra sample per device, once.
     """
     from custom_components.googlefindmy.coordinator import GoogleFindMyCoordinator
 
@@ -2507,14 +2514,49 @@ def test_the_replay_predicate_also_knows_the_retained_coarse_fix() -> None:
         "dev": {"latitude": FAR[0], "longitude": FAR[1], "last_seen": stamp}
     }
 
-    # Matches the retained coarse fix, not the published row.
+    # Stored but never tallied: not a replay, whichever store holds it.
+    assert coord.is_replayed_report("dev", {"last_seen": stamp}) is False
+    assert coord.is_replayed_report("dev", {"last_seen": stamp - 900}) is False
+
+    # Once claimed, it is - and a coarse fix the gate rejects is exactly the case this
+    # matters for, since it never reaches the published row at all.
+    assert coord.claim_report_for_tally("dev", {"last_seen": stamp, "accuracy": 1600.0})
     assert coord.is_replayed_report("dev", {"last_seen": stamp}) is True
-    # Matches the published row.
-    assert coord.is_replayed_report("dev", {"last_seen": stamp - 900}) is True
-    # Matches neither: a genuinely new report.
+
+    # A genuinely new report is not.
     assert coord.is_replayed_report("dev", {"last_seen": _now()}) is False
-    # No stamp is not a replay - it cannot be shown to be one.
+    # Nothing to identify it by is not a replay - it cannot be shown to be one.
     assert coord.is_replayed_report("dev", {}) is False
+
+
+def test_two_alternating_reports_are_each_counted_once() -> None:
+    """One slot per device let two stuck reports overwrite each other's claim.
+
+    T1, T2, T1, T2 was then counted on every delivery while the comment claimed it was
+    counted twice - a declared limit that was wrong about its own size. A bounded ring
+    holds the last few identities instead, so the alternating case is covered and the
+    memory still has a stated bound rather than an unbounded set in persisted state.
+    """
+    from custom_components.googlefindmy.coordinator import GoogleFindMyCoordinator
+
+    coord = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
+    coord._device_location_data = {}
+    coord._device_coarse_fix = {}
+    t1 = {"last_seen": _now() - 600, "accuracy": 300.0}
+    t2 = {"last_seen": _now() - 300, "accuracy": 900.0}
+
+    assert coord.claim_report_for_tally("dev", dict(t1)) is True
+    assert coord.claim_report_for_tally("dev", dict(t2)) is True
+    for _ in range(4):
+        assert coord.claim_report_for_tally("dev", dict(t1)) is False
+        assert coord.claim_report_for_tally("dev", dict(t2)) is False
+
+    # The bound is real: enough distinct reports push the oldest out again.
+    for offset in range(20):
+        coord.claim_report_for_tally(
+            "dev", {"last_seen": _now() + offset, "accuracy": 50.0}
+        )
+    assert coord.claim_report_for_tally("dev", dict(t1)) is True
 
 
 def test_the_push_path_does_not_count_a_replay() -> None:
@@ -2536,6 +2578,12 @@ def test_the_push_path_does_not_count_a_replay() -> None:
         def __init__(self) -> None:
             self._device_location_data = {"device-id": {"last_seen": stamp}}
             self._device_coarse_fix: dict[str, Any] = {}
+            # The report was already tallied once; that fact, not the cache row, is
+            # what makes the second delivery a replay. Seeded through the real claim
+            # so the double cannot drift from the production rule.
+            CacheOperations.claim_report_for_tally(
+                self, "device-id", {"accuracy": 1600.0, "last_seen": stamp}
+            )
             self.config_entry = SimpleNamespace(
                 runtime_data=SimpleNamespace(google_home_filter=None)
             )
@@ -2640,6 +2688,12 @@ def test_a_replayed_report_is_not_counted_again(
         "last_seen": stamp,
         "status": "coordinate",
     }
+    # The report was already tallied once. Seeded through the real claim rather than by
+    # setting the cache row alone, because a stored row is not proof that a bucket was
+    # counted - which is precisely the distinction this predicate had to learn.
+    assert coordinator.claim_report_for_tally(
+        "dev-replay", {"accuracy": 25.0, "last_seen": stamp}
+    )
 
     counted: list[Any] = []
     coordinator.count_accuracy_class = lambda row: counted.append(row.get("accuracy"))

@@ -1855,19 +1855,27 @@ class GoogleFindMyCoordinator(
     def _restore_tally_claims(self, stored: Any) -> None:
         """Restore the per-device tally claim from the stats record.
 
-        JSON has no tuples, so a stored identity comes back as a list and is turned back
-        into the tuple the comparison expects; a list never equals a tuple, and that
-        failure would be silent. A missing sub-key is a record written before this
+        JSON has no tuples, so each stored identity comes back as a list and is turned
+        back into the tuple the comparison expects; a list never equals a tuple, and that
+        failure would be silent. The value per device is a ring of identities, so the
+        conversion runs per element rather than once. A missing sub-key is a record written before this
         existed: the map stays empty, which is the old behaviour and not an error. An
         entry the loader cannot read is dropped rather than half-trusted, because a
         half-read claim would silence a report that was never counted.
         """
         if not isinstance(stored, dict):
             return
-        restored: dict[str, tuple[Any, ...]] = {}
-        for device_id, identity in stored.items():
-            if isinstance(device_id, str) and isinstance(identity, (list, tuple)):
-                restored[device_id] = tuple(identity)
+        restored: dict[str, list[tuple[Any, ...]]] = {}
+        for device_id, ring in stored.items():
+            if not isinstance(device_id, str) or not isinstance(ring, list):
+                continue
+            identities = [
+                tuple(identity)
+                for identity in ring
+                if isinstance(identity, (list, tuple))
+            ]
+            if identities:
+                restored[device_id] = identities
         if restored:
             self._last_tallied_report_id = restored
             _LOGGER.debug("Restored %d tally claim(s) from cache", len(restored))
@@ -1892,9 +1900,11 @@ class GoogleFindMyCoordinator(
         claims = getattr(self, "_last_tallied_report_id", None) or {}
         record: dict[str, Any] = self.stats.copy()
         record[TALLY_CLAIMS_KEY] = {
-            device_id: list(identity)
-            for device_id, identity in claims.items()
-            if isinstance(device_id, str) and isinstance(identity, tuple)
+            device_id: [
+                list(identity) for identity in ring if isinstance(identity, tuple)
+            ]
+            for device_id, ring in claims.items()
+            if isinstance(device_id, str) and isinstance(ring, list)
         }
         try:
             await self._cache.async_set_cached_value("integration_stats", record)

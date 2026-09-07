@@ -384,6 +384,13 @@ def _finite_or_none(value: Any) -> float | None:
     return number if math.isfinite(number) else None
 
 
+# How many tallied identities are remembered per device. The case is a report that keeps
+# coming back, and two such reports can alternate, so one slot is not enough; an unbounded
+# set is not an option in state that persists. Eight covers alternation between a handful
+# of stuck reports across a poll cycle and costs a few hundred bytes per device.
+_TALLY_MEMORY = 8
+
+
 def _has_countable_accuracy(row: Mapping[str, Any]) -> bool:
     """Say whether ``count_accuracy_class`` would actually tally this row.
 
@@ -613,48 +620,32 @@ class CacheOperations(_MixinBase):
             self.increment_stat(ACCURACY_BUCKET_STATS[bucket])
 
     def is_replayed_report(self, device_id: str, row: Mapping[str, Any]) -> bool:
-        """True when this report's timestamp is one we have already seen.
+        """True when this report has already entered the accuracy distribution.
 
-        Used to keep replays out of the accuracy distribution, which exists to
-        re-tune the gate's thresholds against real reports. Counting a replay
-        would let that distribution follow the poll interval instead.
+        ONE source of truth, deliberately: the identities this coordinator has actually
+        tallied. Earlier revisions also compared against the published row and the
+        retained coarse fix, and both were surrogates for the question rather than
+        answers to it. A semantic-only response commits its timestamp after copying the
+        previous coordinates and accuracy, so a cache row proves that a timestamp was
+        SEEN, not that a bucket was counted for it. The same report arriving later
+        through another path with its real accuracy was then suppressed - the very case
+        the countability check exists to preserve.
 
-        TWO REFERENCES, NOT ONE. The published row is the obvious one. The
-        retained coarse fix is the one that matters here: a fix the accuracy
-        gate rejects deliberately leaves the published row untouched and is
-        stored aside, so every later poll returning that same report would look
-        new - and it would look new for exactly the coarse fixes the
-        distribution is collected for.
+        A bounded RING per device, not one replaceable value. Two reports that both fail
+        to enter either cache and are delivered alternately overwrote each other's claim,
+        so T1, T2, T1, T2 was counted on every delivery while the comment claimed it was
+        counted twice. The ring holds the last ``_TALLY_MEMORY`` identities, which bounds
+        the memory without pretending the alternating case does not exist.
 
-        Deliberately separate from the ``is_replayed`` flag the inbound paths
-        compute for the Google Home filter branch: that one compares against the
-        published row only, and widening it here would change a behaviour this
-        change never measured.
+        Deliberately separate from the ``is_replayed`` flag the inbound paths compute for
+        the Google Home filter branch: that one compares against the published row only,
+        and widening it here would change a behaviour this change never measured.
         """
-        ts = _normalize_epoch_seconds(row.get("last_seen"))
-        if ts is None:
-            # No stamp means the two stores cannot be asked: they are keyed by
-            # ``last_seen``. The third reference below can be, because it keys on
-            # whatever identifies the report, so fall through to it rather than
-            # declaring the report new on every delivery.
-            tallied = getattr(self, "_last_tallied_report_id", None) or {}
-            identity = _tally_identity(row)
-            return identity is not None and tallied.get(device_id) == identity
-        store = getattr(self, "_device_coarse_fix", None) or {}
-        for reference in (
-            self._device_location_data.get(device_id),
-            store.get(device_id),
-        ):
-            if not isinstance(reference, Mapping):
-                continue
-            if _normalize_epoch_seconds(reference.get("last_seen")) == ts:
-                return True
-        # Third reference: a report that was presented for tallying but landed
-        # in NEITHER store - a delayed report older than the published row, for
-        # instance, which the significance gate drops afterwards. Retried, it
-        # matches nothing above and would be counted once per retry.
+        identity = _tally_identity(row)
+        if identity is None:
+            return False
         tallied = getattr(self, "_last_tallied_report_id", None) or {}
-        return bool(tallied.get(device_id) == _tally_identity(row))
+        return identity in (tallied.get(device_id) or ())
 
     def claim_report_for_tally(self, device_id: str, row: Mapping[str, Any]) -> bool:
         """Decide whether this report may enter the distribution, and claim it.
@@ -664,11 +655,11 @@ class CacheOperations(_MixinBase):
         timestamp it lets through, which is the only way to recognise the retry
         of a report that never reached either cache.
 
-        Deliberately one value per device rather than a set of seen timestamps:
-        the case is a report being returned again and again, and one value
-        catches every repetition of it at constant memory. An alternation
-        between two rejected timestamps would still be counted twice, which is
-        a bounded and known limit rather than an unbounded store.
+        A bounded ring of the last ``_TALLY_MEMORY`` identities per device, not a single
+        value: two reports delivered alternately used to overwrite each other's claim and
+        were then counted on every delivery. The ring is what bounds the memory; the
+        declared limit is now the ring length, a number one can raise, rather than "one",
+        a shape one could not.
         """
         if not _has_countable_accuracy(row):
             # Nothing to claim, because nothing will be counted. Returning False here
@@ -688,7 +679,9 @@ class CacheOperations(_MixinBase):
         if tallied is None:
             tallied = {}
             self._last_tallied_report_id = tallied
-        tallied[device_id] = identity
+        ring = list(tallied.get(device_id) or ())
+        ring.append(identity)
+        tallied[device_id] = ring[-_TALLY_MEMORY:]
         return True
 
     def _expire_coarse_fix(self, device_id: str, committed: Mapping[str, Any]) -> None:

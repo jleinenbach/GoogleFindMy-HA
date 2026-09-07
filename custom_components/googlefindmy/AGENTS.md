@@ -104,7 +104,17 @@ not the same question. Order pinned by
 `tests/test_cache_accuracy_gate.py::test_the_tally_runs_before_any_accuracy_substitution`.
 
 Every site that counts claims first, through `claim_report_for_tally`, which counts a
-report once and then recognises its retries. It claims only what would actually be
+report once and then recognises its retries. What makes a report a retry is the ring of
+identities this coordinator has actually tallied - not the published row and not the
+retained coarse fix. Both were surrogates: a semantic-only response commits its timestamp
+after copying the previous coordinates and accuracy, so a cache row proves a timestamp was
+seen, not that a bucket was counted for it, and the same report arriving later with its
+real accuracy was suppressed. The ring is bounded (`_TALLY_MEMORY`) because two reports
+that both fail to reach either cache can be delivered alternately and would otherwise
+overwrite each other's claim; the bound is a number that can be raised, where "one slot"
+was a shape that could not. Cost of that choice, stated: on the first start after this
+change a report counted before it can be counted once more, since the ring starts empty
+while the caches do not. It claims only what would actually be
 tallied: a semantic-only response carries a timestamp but no usable accuracy, and a claim
 recorded for it would later suppress the same report arriving with its accuracy through
 another path - silencing a measurement that was never taken. The predicate is read from
