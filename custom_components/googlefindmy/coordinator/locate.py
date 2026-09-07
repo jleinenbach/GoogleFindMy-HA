@@ -376,7 +376,7 @@ class LocateOperations(_MixinBase):
                 # mapping, Google-Home filter, semantic-only preserve). And the
                 # same replay rule: repeated manual locates without a new report
                 # must not enter the distribution more than once.
-                if not self.is_replayed_report(device_id, location_data):
+                if self.claim_report_for_tally(device_id, location_data):
                     self.count_accuracy_class(location_data)
                 location_data["_accuracy_counted"] = True
 

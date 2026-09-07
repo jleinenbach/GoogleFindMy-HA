@@ -2007,6 +2007,42 @@ def test_the_poll_cycle_substitutes_the_home_zone_and_marks_it(
     assert not leaked, f"transient markers reached the cached row: {leaked}"
 
 
+def test_a_retried_report_that_reaches_no_cache_is_counted_once() -> None:
+    """The third reference, and the reason it cannot be derived from the caches.
+
+    A delayed report older than the published row lands in NEITHER store: the
+    published row keeps its newer timestamp, and the coarse store only sees fixes
+    the accuracy gate rejected. Returned again by the next poll it matches
+    nothing, so it would enter the distribution once per retry - the bias this
+    whole line of fixes is about, one case further out.
+
+    ``claim_report_for_tally`` therefore records what it lets through. One value
+    per device, not a set: the case is one report coming back repeatedly.
+    """
+    from custom_components.googlefindmy.coordinator import GoogleFindMyCoordinator
+
+    coord = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
+    published = _now()
+    coord._device_location_data = {"dev": {"last_seen": published}}
+    coord._device_coarse_fix = {}
+
+    delayed = {"accuracy": 300.0, "last_seen": published - 600}
+
+    assert coord.claim_report_for_tally("dev", delayed) is True
+    # Same report, next poll: not claimed again.
+    assert coord.claim_report_for_tally("dev", dict(delayed)) is False
+    assert coord.claim_report_for_tally("dev", dict(delayed)) is False
+
+    # A genuinely different report is still claimed, so the memory does not
+    # simply block everything after the first.
+    assert coord.claim_report_for_tally("dev", {"last_seen": published + 60}) is True
+
+    # A report without a stamp is claimed every time: it cannot be recognised,
+    # and refusing it would drop measurements rather than duplicates.
+    assert coord.claim_report_for_tally("dev", {"accuracy": 50.0}) is True
+    assert coord.claim_report_for_tally("dev", {"accuracy": 50.0}) is True
+
+
 def test_the_replay_predicate_also_knows_the_retained_coarse_fix() -> None:
     """The reference the published row cannot provide.
 
@@ -2065,6 +2101,11 @@ def test_the_push_path_does_not_count_a_replay() -> None:
 
         def is_replayed_report(self, device_id: str, row: dict[str, Any]) -> bool:
             return CacheOperations.is_replayed_report(self, device_id, row)
+
+        def claim_report_for_tally(self, device_id: str, row: dict[str, Any]) -> bool:
+            # Both real implementations, so the double exercises the production
+            # rule rather than a restatement of it.
+            return CacheOperations.claim_report_for_tally(self, device_id, row)
 
     receiver = FcmReceiverHA.__new__(FcmReceiverHA)
     out = FcmReceiverHA._prepare_coordinator_payload(

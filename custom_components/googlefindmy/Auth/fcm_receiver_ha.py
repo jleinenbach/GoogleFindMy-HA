@@ -2785,11 +2785,11 @@ class FcmReceiverHA:
         tally = getattr(coordinator, "count_accuracy_class", None)
         if callable(tally):
             try:
-                is_replay_fn = getattr(coordinator, "is_replayed_report", None)
-                replayed = bool(
-                    callable(is_replay_fn) and is_replay_fn(key[1], coordinator_payload)
-                )
-                if not replayed:
+                claim = getattr(coordinator, "claim_report_for_tally", None)
+                # No claim method on a partial coordinator: count, as before.
+                # Losing a duplicate suppression is a smaller defect than losing
+                # the measurement itself.
+                if not callable(claim) or claim(key[1], coordinator_payload):
                     tally(coordinator_payload)
                 coordinator_payload["_accuracy_counted"] = True
             except Exception as tally_err:  # pragma: no cover - diagnostics only

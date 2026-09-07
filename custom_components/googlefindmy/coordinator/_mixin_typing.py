@@ -427,6 +427,13 @@ class _MixinBase:
     ) -> bool:
         raise NotImplementedError
 
+    def claim_report_for_tally(
+        self,
+        device_id: str,
+        row: Mapping[str, Any],
+    ) -> bool:
+        raise NotImplementedError
+
     def _persist_anchor_metadata(
         self,
         device_id: str,

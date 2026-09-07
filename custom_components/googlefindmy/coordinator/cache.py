@@ -574,7 +574,37 @@ class CacheOperations(_MixinBase):
                 continue
             if _normalize_epoch_seconds(reference.get("last_seen")) == ts:
                 return True
-        return False
+        # Third reference: a report that was presented for tallying but landed
+        # in NEITHER store - a delayed report older than the published row, for
+        # instance, which the significance gate drops afterwards. Retried, it
+        # matches nothing above and would be counted once per retry.
+        tallied = getattr(self, "_last_tallied_report_ts", None) or {}
+        return bool(tallied.get(device_id) == ts)
+
+    def claim_report_for_tally(self, device_id: str, row: Mapping[str, Any]) -> bool:
+        """Decide whether this report may enter the distribution, and claim it.
+
+        Returns True exactly once per distinct report timestamp per device. The
+        name says what it does: it is not a pure predicate, it RECORDS the
+        timestamp it lets through, which is the only way to recognise the retry
+        of a report that never reached either cache.
+
+        Deliberately one value per device rather than a set of seen timestamps:
+        the case is a report being returned again and again, and one value
+        catches every repetition of it at constant memory. An alternation
+        between two rejected timestamps would still be counted twice, which is
+        a bounded and known limit rather than an unbounded store.
+        """
+        if self.is_replayed_report(device_id, row):
+            return False
+        ts = _normalize_epoch_seconds(row.get("last_seen"))
+        if ts is not None:
+            tallied = getattr(self, "_last_tallied_report_ts", None)
+            if tallied is None:
+                tallied = {}
+                self._last_tallied_report_ts = tallied
+            tallied[device_id] = ts
+        return True
 
     def _expire_coarse_fix(self, device_id: str, committed: Mapping[str, Any]) -> None:
         """Drop a retained coarse fix that the just-committed row supersedes.

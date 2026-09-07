@@ -2043,7 +2043,7 @@ class PollingOperations(_MixinBase):
                         # that row untouched by design. Its report is stored
                         # aside, so every later poll of it would look new - for
                         # exactly the coarse fixes this distribution is for.
-                        if not self.is_replayed_report(dev_id, location):
+                        if self.claim_report_for_tally(dev_id, location):
                             self.count_accuracy_class(location)
                         location["_accuracy_counted"] = True
 
