@@ -2007,6 +2007,97 @@ def test_the_poll_cycle_substitutes_the_home_zone_and_marks_it(
     assert not leaked, f"transient markers reached the cached row: {leaked}"
 
 
+def test_a_replayed_report_is_not_counted_again(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The distribution must follow the reports, not the poll interval.
+
+    A poll that returns the same report timestamp the cache already holds is a
+    replay, not an incoming fix. Counted anyway, a device reporting once an hour
+    and polled every five minutes would enter its accuracy class twelve times,
+    and the distribution AP4a exists for - re-tuning the two thresholds against
+    real data - would measure our polling frequency instead.
+
+    The marker is still set, so ``update_device_cache`` does not tally it later:
+    "not counted" is a decision, and it is made where the replay is known.
+    """
+    import asyncio
+    from unittest.mock import AsyncMock
+
+    from custom_components.googlefindmy.coordinator import GoogleFindMyCoordinator
+
+    class _Cache:
+        async def async_get_cached_value(self, _key: str) -> None:
+            return None
+
+        async def async_set_cached_value(self, _key: str, _value: Any) -> None:
+            return None
+
+    class _Hass:
+        def __init__(self, loop: asyncio.AbstractEventLoop) -> None:
+            self.loop = loop
+            self.data: dict[str, Any] = {}
+
+        def async_create_task(self, coro: Any, *, name: str | None = None) -> Any:
+            return self.loop.create_task(coro)
+
+    stamp = _now() - 300
+
+    class _Api:
+        async def async_get_device_location(
+            self, _dev_id: str, _dev_name: str
+        ) -> dict[str, Any]:
+            # Same report timestamp as the cached row below: a replay.
+            return {
+                "latitude": HOME[0],
+                "longitude": HOME[1],
+                "accuracy": 25.0,
+                "last_seen": stamp,
+                "status": "coordinate",
+            }
+
+    monkeypatch.setattr(
+        "custom_components.googlefindmy.coordinator."
+        "GoogleFindMyCoordinator._async_load_stats",
+        AsyncMock(return_value=None),
+    )
+
+    loop = asyncio.new_event_loop()
+    devices = [{"id": "dev-replay", "name": "Replay Tag"}]
+    coordinator = GoogleFindMyCoordinator(_Hass(loop), cache=_Cache())
+    coordinator.config_entry = make_config_entry(entry_id="entry-id")
+    coordinator.api = _Api()
+    coordinator._get_google_home_filter = lambda: None
+    coordinator._is_fcm_ready_soft = lambda: True
+    coordinator._get_ignored_set = set
+    coordinator._last_device_list = list(devices)
+    coordinator.data = []
+    coordinator.last_update_success = True
+    coordinator.last_exception = None
+    coordinator.async_set_update_error = lambda _exc: None
+    coordinator.async_set_updated_data = lambda _data: None
+    coordinator._device_location_data["dev-replay"] = {
+        "latitude": HOME[0],
+        "longitude": HOME[1],
+        "accuracy": 25.0,
+        "last_seen": stamp,
+        "status": "coordinate",
+    }
+
+    counted: list[Any] = []
+    coordinator.count_accuracy_class = lambda row: counted.append(row.get("accuracy"))
+
+    try:
+        loop.run_until_complete(
+            coordinator._async_start_poll_cycle(devices, force=True)
+        )
+    finally:
+        drain_loop(loop)
+        loop.close()
+
+    assert counted == [], f"a replay was counted: {counted}"
+
+
 def test_the_poll_fallback_write_strips_every_transient_marker(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -2027,7 +2027,18 @@ class PollingOperations(_MixinBase):
                         # happened to be cached. This distribution answers "what do
                         # incoming fixes report", so a response that reports no
                         # accuracy of its own must not appear in it at all.
-                        self.count_accuracy_class(location)
+                        #
+                        # A REPLAY is not an incoming fix. The poll returned the
+                        # same report timestamp the cache already holds, so
+                        # counting it would let the distribution follow the poll
+                        # interval instead of the reports - a device that reports
+                        # once an hour and is polled every five minutes would
+                        # enter its class twelve times. The marker is set either
+                        # way, so ``update_device_cache`` does not tally it later:
+                        # the decision "not counted" belongs here, where the
+                        # replay is known.
+                        if not is_replay:
+                            self.count_accuracy_class(location)
                         location["_accuracy_counted"] = True
 
                         mapping_applied = self._apply_semantic_mapping(location)
