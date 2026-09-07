@@ -2419,11 +2419,49 @@ async def test_a_load_in_flight_does_not_undo_work_done_meanwhile() -> None:
 
     await coord._async_load_stats()
 
-    assert coord.stats["background_updates"] == 1, "a moved counter must not be reset"
+    # Added, not chosen: the live value is the increments since this read began, the
+    # stored one is the total before it. Keeping either alone loses the other.
+    assert coord.stats["background_updates"] == 6
     assert coord.stats["polled_updates"] == 7, "an untouched counter still restores"
     # Both claims survive: the live one belongs to the increment above, the stored one
-    # to an increment from before the restart.
-    assert coord._last_tallied_report_id == {"dev": [("ts", 222), ("ts", 111)]}
+    # to an increment from before the restart. Restored first, live last.
+    assert coord._last_tallied_report_id == {"dev": [("ts", 111), ("ts", 222)]}
+
+
+@pytest.mark.asyncio
+async def test_a_full_stored_ring_does_not_evict_the_claim_made_during_the_load() -> (
+    None
+):
+    """The ring keeps its tail, so merge order decides who is dropped.
+
+    With the live entries in front, a claim made during this very load would be trimmed
+    away by a full stored ring, and the report it belongs to counted a second time. The
+    oldest stored identity is the right thing to lose instead.
+    """
+    from custom_components.googlefindmy.coordinator import GoogleFindMyCoordinator
+    from custom_components.googlefindmy.coordinator.main import TALLY_RING_LIMIT
+
+    full = [["ts", n] for n in range(TALLY_RING_LIMIT)]
+
+    class _Cache:
+        async def async_get_cached_value(self, key: str) -> Any:
+            if key != "integration_stats":
+                return None
+            return {"_tally_claims": {"dev": full}}
+
+    coord = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
+    coord._device_location_data = {}
+    coord._device_coarse_fix = {}
+    coord._cache = _Cache()
+    coord.stats = {}
+    coord._last_tallied_report_id = {"dev": [("ts", 999)]}
+
+    await coord._async_load_stats()
+
+    ring = coord._last_tallied_report_id["dev"]
+    assert len(ring) == TALLY_RING_LIMIT
+    assert ring[-1] == ("ts", 999), "the live claim must survive a full stored ring"
+    assert ("ts", 0) not in ring, "the oldest stored identity is the one to lose"
 
 
 def test_the_ring_limit_is_the_same_number_on_both_sides() -> None:

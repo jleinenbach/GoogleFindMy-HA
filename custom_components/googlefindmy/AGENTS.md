@@ -135,8 +135,10 @@ sub-key is the state before this existed and is not an error; an entry the loade
 read is dropped rather than half-trusted.
 
 That load is scheduled rather than awaited, so it can land after a push has already
-counted something. It therefore restores a counter only while that counter is still at
-its initial value, and merges a restored ring into the live one instead of replacing it:
+counted something. The live counter is not a newer total but the increments since the
+read began, so the two are ADDED rather than one being chosen; and a restored ring is
+merged in FRONT of the live one, because the ring keeps its tail and a live claim must
+not be trimmed away by a full stored ring:
 otherwise an increment would be discarded while its claim survived, which is the one
 state the pair must never reach. A purge writes immediately rather than on the debounce,
 because a reload or shutdown inside that window cancels the pending write without

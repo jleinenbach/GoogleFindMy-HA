@@ -1779,14 +1779,17 @@ class GoogleFindMyCoordinator(
             cached = await self._cache.async_get_cached_value("integration_stats")
             if cached and isinstance(cached, dict):
                 # This load is scheduled, not awaited, so a push or the first poll can
-                # already have counted something by the time it resumes. Overwriting a
-                # counter that has moved would discard that increment while its claim
-                # survives, which is the one state the pair must never reach: a
-                # measurement suppressed for an increment that no longer exists. A
-                # counter that is still at its initial value has nothing to lose.
+                # already have counted something by the time it resumes. The live value
+                # is not a newer total, it is the increments that happened since this
+                # read began - so the two are ADDED. Keeping only one of them loses the
+                # other: the persisted total if the live value wins, and an increment
+                # whose claim survives if the persisted total does. Either way the pair
+                # would disagree, and a claim without its increment permanently
+                # suppresses a measurement.
                 for key, value in self.stats.items():
-                    if key in cached and not value:
-                        self.stats[key] = cached[key]
+                    stored = cached.get(key)
+                    if isinstance(stored, int) and isinstance(value, int):
+                        self.stats[key] = stored + value
                 _LOGGER.debug("Loaded statistics from cache: %s", self.stats)
                 self._restore_tally_claims(cached.get(TALLY_CLAIMS_KEY))
         except Exception as err:
@@ -1898,8 +1901,13 @@ class GoogleFindMyCoordinator(
             self._last_tallied_report_id = restored
         else:
             for device_id, identities in restored.items():
-                ring = list(live.get(device_id) or ())
-                ring.extend(i for i in identities if i not in ring)
+                current = list(live.get(device_id) or ())
+                # Restored first, live last. The ring keeps its TAIL, so the order
+                # decides who is dropped when both halves are full: with the live
+                # entries in front, a claim made during this very load would be trimmed
+                # away and the report it belongs to counted a second time. The oldest
+                # stored identity is the right thing to lose.
+                ring = [i for i in identities if i not in current] + current
                 live[device_id] = ring[-TALLY_RING_LIMIT:]
         _LOGGER.debug("Restored %d tally claim(s) from cache", len(restored))
 
