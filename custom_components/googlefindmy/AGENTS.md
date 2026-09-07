@@ -185,6 +185,20 @@ nothing to merge a discarded generation into. Both directions are pinned -
 `::test_a_load_that_predates_a_reset_is_discarded` and, as the counter-test that a guard
 must not swallow the ordinary path, `::test_an_undisturbed_load_still_adds_and_merges`.
 
+A PURGE inside the same window needs the opposite treatment, which is why the epoch cannot
+carry it: a reset discards a whole generation, a purge removes one device from a generation
+that stays valid. So `purge_device` remembers the id in `_purged_before_stats_load` until
+the load finishes and `_restore_tally_claims` skips it. Remembered UNCONDITIONALLY, not
+only when the in-memory pop found something: the claim may not have been loaded yet, which
+is exactly the case the pop cannot see. The set is cleared in the load's `finally`, so a
+failed read closes the window too, and from there on the purge's own pop is the whole
+mechanism. Inside the window the purge ALSO has to trigger the immediate save, which
+otherwise hangs on the pop having found something: it has not, by definition, while the
+stored record still lists the device, so the durable half would stay stale until some later
+ordinary write and a hard kill before that would bring the deleted ring back on restart. Pinned by `::test_a_purge_during_the_load_survives_the_merge` (which also
+asserts that a sibling device's ring is NOT dropped) and
+`::test_a_purge_after_the_load_needs_no_bookkeeping`.
+
 Two properties of the persisted claim identity are load-bearing. The identity of a report with no
 timestamp is a **digest** of its position and radius, never the values themselves: this
 record is durable, and a position in durable state is the one thing this feature is

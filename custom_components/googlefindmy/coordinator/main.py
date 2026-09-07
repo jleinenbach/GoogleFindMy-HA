@@ -925,6 +925,11 @@ class GoogleFindMyCoordinator(
         # reset, read by the load below across its await, so a load that started in the
         # previous generation cannot put it back. See ``begin_new_stats_epoch``.
         self._stats_epoch: int = 0
+        # Devices purged while the load below is still in flight. A reset discards the
+        # whole record, but a purge is per device and must not, so the epoch cannot
+        # carry this case. Collected only until the load finishes, then dropped.
+        self._purged_before_stats_load: set[str] = set()
+        self._stats_loaded: bool = False
 
         # Load persistent statistics asynchronously (name the task for better debugging)
         self.hass.async_create_task(
@@ -1869,6 +1874,13 @@ class GoogleFindMyCoordinator(
                 self._restore_tally_claims(cached.get(TALLY_CLAIMS_KEY))
         except Exception as err:
             _LOGGER.debug("Failed to load statistics from cache: %s", err)
+        finally:
+            # In a finally, so a failed read closes the window too: from here on a
+            # purge is the only writer of the claim store and needs no bookkeeping.
+            self._stats_loaded = True
+            purged = getattr(self, "_purged_before_stats_load", None)
+            if purged is not None:
+                purged.clear()
 
         try:
             sound_request_uuids = await self._cache.async_get_cached_value(
@@ -1954,9 +1966,15 @@ class GoogleFindMyCoordinator(
         """
         if not isinstance(stored, dict):
             return
+        purged = getattr(self, "_purged_before_stats_load", None) or set()
         restored: dict[str, list[tuple[Any, ...]]] = {}
         for device_id, ring in stored.items():
             if not isinstance(device_id, str) or not isinstance(ring, list):
+                continue
+            if device_id in purged:
+                # Deleted while this read was in flight. Restoring it would let a
+                # device re-added under the same id have its first matching
+                # measurement suppressed by a claim from its previous life.
                 continue
             identities = [
                 tuple(identity)
@@ -2315,11 +2333,30 @@ class GoogleFindMyCoordinator(
         # purge unless it is dropped here: a deleted device would keep an entry in the
         # store indefinitely, and one re-added under the same id would have its first
         # matching measurement suppressed by a claim from its previous life.
+        # A load that is still in flight will merge the STORED rings back in, and it
+        # cannot know about a device deleted after its read began. The epoch does not
+        # help here: it discards a whole generation, while a purge removes one device
+        # from one that stays valid. So the id is remembered until the load is done,
+        # and remembered unconditionally - the claim may not even be in memory yet,
+        # which is exactly the case the pop below cannot see.
+        noted = False
+        if not getattr(self, "_stats_loaded", True):
+            purged = getattr(self, "_purged_before_stats_load", None)
+            if purged is not None:
+                purged.add(device_id)
+                noted = True
         claims = getattr(self, "_last_tallied_report_id", None)
-        if claims is not None and claims.pop(device_id, None) is not None:
+        popped = claims is not None and claims.pop(device_id, None) is not None
+        if popped or noted:
             # Written now, not on the debounce: a reload or shutdown inside the debounce
             # window cancels the pending write without flushing it, and the purged
             # device's claim would then outlive the device it was deleted with.
+            #
+            # ``noted`` matters on its own: inside the load window the claim is by
+            # definition not in memory yet, so the pop finds nothing while the STORED
+            # record still lists the device. Without this the durable half would stay
+            # stale until some later ordinary write, and a hard kill before that would
+            # bring the deleted device's ring back on the next start.
             self.hass.async_create_task(self._async_save_stats())
         # Device-id-keyed timing caches follow the same lifecycle; drop them so a
         # re-added device with the same id starts with clean poll-interval state.

@@ -3226,3 +3226,137 @@ async def test_an_undisturbed_load_still_adds_and_merges() -> None:
 
     assert coord.stats[bucket] == 42, "the stored total must be ADDED, not chosen"
     assert coord._last_tallied_report_id.get("dev"), "the stored ring must be merged"
+
+
+# ------------------- a purge during the load is not undone by it (#216)
+
+# The epoch above discards a WHOLE generation, which is right for a reset and
+# wrong for a purge: a purge removes one device from a generation that stays
+# valid. So a device deleted while the stats read is in flight is remembered
+# until that read finishes, and the merge skips it. Remembered unconditionally,
+# because its claim may not even be in memory yet - which is precisely the case
+# the purge's own ``pop`` cannot see.
+
+
+def _purgeable_coord() -> Any:
+    """A coordinator with just enough state for ``purge_device``.
+
+    Same shape as ``test_purge_device_drops_last_good`` in
+    ``tests/test_plus_code_last_known.py``, which is the established harness for
+    this method.
+    """
+    from custom_components.googlefindmy.coordinator import GoogleFindMyCoordinator
+
+    coord = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
+    coord._device_location_data = {}
+    coord._device_last_good_location = {}
+    coord._round_trip_anchors = {}
+    coord._device_coarse_fix = {}
+    coord._device_update_history = {}
+    coord._device_interval_history = {}
+    coord._device_caps = {}
+    coord._locate_inflight = set()
+    coord._locate_cooldown_until = {}
+    coord._sound_request_uuids = {}
+    coord._sound_request_timestamps = {}
+    coord._device_poll_cooldown_until = {}
+    coord._present_device_ids = set()
+    coord._present_last_seen = {}
+    coord.data = []
+    coord._is_on_hass_loop = lambda: True
+    coord._ensure_device_name_cache = lambda: {}
+    coord._refresh_subentry_index = lambda *_a, **_k: None
+    coord._store_subentry_snapshots = lambda *_a, **_k: None
+    coord.async_set_updated_data = lambda *_a, **_k: None
+    coord._stats_loaded = False
+    coord._purged_before_stats_load = set()
+    # ``purge_device`` schedules an immediate save; count it instead of running it.
+    from types import SimpleNamespace
+
+    coord.scheduled_saves = []
+    coord.hass = SimpleNamespace(
+        async_create_task=lambda coro, **_k: (
+            coro.close(),
+            coord.scheduled_saves.append(1),
+        )
+    )
+    coord._async_save_stats = MagicMock()
+    return coord
+
+
+def test_a_purge_during_the_load_survives_the_merge() -> None:
+    """The deleted device's claim does not come back with the record."""
+    coord = _purgeable_coord()
+
+    coord.purge_device("dev-gone")
+    coord._restore_tally_claims(
+        {"dev-gone": [["ts-a", 1.0]], "dev-stays": [["ts-b", 2.0]]}
+    )
+
+    claims = getattr(coord, "_last_tallied_report_id", None) or {}
+    assert "dev-gone" not in claims, (
+        "the purged device's claim was restored; re-adding the same id would have "
+        "its first matching measurement suppressed by a claim from its previous life"
+    )
+    assert "dev-stays" in claims, "the purge must not discard the whole generation"
+    # The durable half too: inside this window the claim is not in memory yet, so the
+    # purge's own pop finds nothing while the STORED record still lists the device. A
+    # hard kill before the next ordinary write would bring the ring back on restart.
+    assert coord.scheduled_saves, "the purge must persist the removal immediately"
+
+
+def test_a_purge_after_the_load_is_carried_by_the_pop_alone() -> None:
+    """The window closes, and the OTHER side of the conditional still works.
+
+    Asserting only that the set stays empty would pass with the whole feature
+    deleted, so this asserts what the closed window means: the merge no longer
+    skips this device, because after the load there is nothing left to merge
+    against, and the purge's own pop is the entire mechanism.
+    """
+    coord = _purgeable_coord()
+    coord._stats_loaded = True
+
+    coord.purge_device("dev-gone")
+
+    assert not coord._purged_before_stats_load, (
+        "the set must only collect while a load can still merge stored rings back in"
+    )
+    coord._restore_tally_claims({"dev-gone": [["ts-a", 1.0]]})
+    assert "dev-gone" in (getattr(coord, "_last_tallied_report_id", None) or {}), (
+        "outside the window the skip must not fire; it would drop a legitimate ring"
+    )
+
+
+@pytest.mark.asyncio
+async def test_the_load_itself_opens_and_closes_the_purge_window() -> None:
+    """The ``finally`` is the single line the whole window hangs on.
+
+    Both tests above set ``_stats_loaded`` by hand, so moving that assignment out
+    of the load's ``finally`` to its first line would reintroduce the bug in full
+    and leave them green. This one drives the real load and purges inside the
+    awaited read.
+    """
+    from types import SimpleNamespace
+
+    coord = _purgeable_coord()
+    coord.stats = {}
+    coord._stats_epoch = 0
+    stored = {
+        "_tally_claims": {"dev-gone": [["ts-a", 1.0]], "dev-stays": [["ts-b", 2.0]]}
+    }
+
+    async def _get(key: str) -> Any:
+        if key != "integration_stats":
+            return None
+        coord.purge_device("dev-gone")
+        return stored
+
+    coord._cache = SimpleNamespace(async_get_cached_value=_get)
+
+    await coord._async_load_stats()
+
+    claims = getattr(coord, "_last_tallied_report_id", None) or {}
+    assert "dev-gone" not in claims
+    assert "dev-stays" in claims
+    assert coord._stats_loaded is True, "the window must close when the load ends"
+    assert not coord._purged_before_stats_load, "and the bookkeeping must be dropped"
