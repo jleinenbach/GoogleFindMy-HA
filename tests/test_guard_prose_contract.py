@@ -305,6 +305,10 @@ _AGENT_LOCAL_PATH = re.compile(
 # is a property rather than a list of sites. file: is deliberately absent: it names a
 # local path, and the next pattern turns it back into one.
 #
+# Scheme names are case-insensitive by definition (RFC 3986 3.1), so the match is too.
+# A case-sensitive spelling left HTTPS://host/... unrecognised, and the openable source
+# was then reported as a private citation.
+#
 # The body stops at the delimiters that close a link in prose, not merely at whitespace.
 # Two Markdown links written back to back have no space between them, so a run to the
 # next space swallowed the second one whole, and a private citation inside it disappeared
@@ -314,11 +318,18 @@ _AGENT_LOCAL_PATH = re.compile(
 # fails loudly, which is the direction a guard should fail in.
 _URL_TERMINATORS = ")]}>\"'`"
 _PUBLIC_URL = re.compile(
-    r"\b(?:https?|ftps?|git\+https?|ssh)://[^\s" + re.escape(_URL_TERMINATORS) + r"]+"
+    r"\b(?:https?|ftps?|git\+https?|ssh)://[^\s" + re.escape(_URL_TERMINATORS) + r"]+",
+    re.IGNORECASE,
 )
 
 # The prefix of a file URI, so that what follows is judged as the local path it is.
-_FILE_URI_PREFIX = re.compile(r"\bfile://(?=/)")
+#
+# The authority component is optional and is consumed with the prefix. Both spellings are
+# standard - file:///path with an empty authority and file://localhost/path with a named
+# one - and the lookahead alone accepted only the first, so the host-qualified form kept
+# its scheme, the path pattern found nothing, and an unreadable citation stayed silent.
+# That is the failure direction a guard must not have.
+_FILE_URI_PREFIX = re.compile(r"\bfile://[^/\s]*(?=/)", re.IGNORECASE)
 
 # Files whose prose legitimately carries non-English words. One entry, with its reason.
 #   tests/test_translation_placeholders.py -- that guard asserts that German UI text
@@ -1018,6 +1029,10 @@ _DETECTOR_CORPUS: dict[str, list[str]] = {
     "C:\\Users\\a\\.claude\\x.md": ["C:\\Users\\a\\.claude\\x.md"],
     ".codex/config.toml": [".codex/config.toml"],
     "file:///root/.codex/instructions.md": ["/root/.codex/instructions.md"],
+    "file://localhost/root/.codex/instructions.md": ["/root/.codex/instructions.md"],
+    "file://myhost/home/a/.claude/x.md": ["/home/a/.claude/x.md"],
+    "FILE:///root/.codex/instructions.md": ["/root/.codex/instructions.md"],
+    "[a](file://localhost/home/a/.claude/x.md)": ["/home/a/.claude/x.md"],
     "memory/_store/note.md": ["memory/_store/note.md"],
     # near misses: a name that merely ends in one of the directories, or a scope that is
     # part of a longer documentation path
@@ -1029,6 +1044,7 @@ _DETECTOR_CORPUS: dict[str, list[str]] = {
     "docs/memory/plans/rollout.md": [],
     "/app/requirements.txt": [],
     "tests/fixtures/not.codex/x.md": [],
+    "profile://h/y and /root/.codex/z.md": ["/root/.codex/z.md"],
     # public sources, whatever their path component contains
     "https://github.com/openai/codex/blob/main/.codex/config.toml": [],
     "see https://example.org/x/.claude/y.md for details": [],
@@ -1037,6 +1053,9 @@ _DETECTOR_CORPUS: dict[str, list[str]] = {
     "(see https://example.org/x/.claude/y.md)": [],
     'href="https://example.org/x/.claude/y.md"': [],
     "ssh://git@example.org/x/.claude/y.md": [],
+    "HTTPS://github.com/openai/codex/blob/main/.codex/config.toml": [],
+    "Https://example.org/x/.claude/y.md": [],
+    "SSH://git@example.org/x/.claude/y.md": [],
     # a public source and a private citation in the same line, in both orders and with
     # no whitespace between them
     "https://example.org/x/.claude/y.md and /home/a/.claude/x.md": [
@@ -1083,6 +1102,14 @@ def test_file_uris_are_read_as_the_local_paths_they_are() -> None:
     cases = {
         "file:///root/.codex/instructions.md": ["/root/.codex/instructions.md"],
         "file:///home/a/.claude/x.md": ["/home/a/.claude/x.md"],
+        # The host-qualified spelling is as standard as the empty-authority one, and it
+        # was the shape that stayed silent: the scheme survived normalisation, so the
+        # path pattern saw a run it does not accept and reported nothing.
+        "file://localhost/root/.codex/instructions.md": [
+            "/root/.codex/instructions.md"
+        ],
+        "file://myhost/home/a/.claude/x.md": ["/home/a/.claude/x.md"],
+        "FILE:///root/.codex/instructions.md": ["/root/.codex/instructions.md"],
     }
     wrong = {
         text: _agent_local_paths_in(text)
@@ -1090,6 +1117,27 @@ def test_file_uris_are_read_as_the_local_paths_they_are() -> None:
         if _agent_local_paths_in(text) != expected
     }
     assert not wrong, f"file URIs not resolved to their local path: {wrong}"
+
+
+def test_url_schemes_are_recognised_whatever_their_case() -> None:
+    """A scheme is case-insensitive, so an uppercase link stays a public source.
+
+    Matching the scheme case-sensitively did not hide a violation; it invented one. The
+    uppercase URL was never blanked, so the path component of somebody else's repository
+    was reported as a private citation and an openable source got rejected.
+    """
+    cases = {
+        "HTTPS://github.com/openai/codex/blob/main/.codex/config.toml": [],
+        "Https://example.org/x/.claude/y.md": [],
+        "SSH://git@example.org/x/.claude/y.md": [],
+        "HTTP://example.org/.codex/a, then ~/.claude/b.md": ["~/.claude/b.md"],
+    }
+    wrong = {
+        text: _agent_local_paths_in(text)
+        for text, expected in cases.items()
+        if _agent_local_paths_in(text) != expected
+    }
+    assert not wrong, f"case-sensitive scheme matching produced: {wrong}"
 
 
 def test_a_public_url_next_to_a_private_path_hides_neither() -> None:

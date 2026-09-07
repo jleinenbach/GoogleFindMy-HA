@@ -1142,7 +1142,12 @@ merely at whitespace: two Markdown links written back to back have no space betw
 and a run to the next space swallowed the second one whole, taking a private citation
 with it. In exchange, a URL carrying a closing parenthesis is cut short there and its
 tail can read as a citation; that direction fails loudly rather than silently, which is
-the direction this guard should fail in.
+the direction this guard should fail in. Both spellings are matched without regard to
+case, because a scheme name is case-insensitive by definition (RFC 3986 3.1), and the
+`file:` prefix consumes an optional authority component, so `file:///path` and
+`file://localhost/path` are read alike. Each of those two was a silent or a false
+verdict before it was measured: an uppercase link was reported as a private citation,
+and a host-qualified URI was reported as nothing at all.
 
 Every shape the detector has been wrong about lives in `_DETECTOR_CORPUS` with its
 expected result. Four review rounds went the same way, a narrowing leaving a gap and the
