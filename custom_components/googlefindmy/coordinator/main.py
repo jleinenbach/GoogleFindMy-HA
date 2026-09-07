@@ -1177,10 +1177,35 @@ class GoogleFindMyCoordinator(
                 pass
             finally:
                 self._short_retry_cancel = None
-        # Cancel pending debounced stats write
+        # End the pending debounced stats write by WRITING it, not by dropping it.
+        # Cancelling alone loses whatever the window was still coalescing, which is every
+        # increment of the last few seconds together with the claims recorded for them.
+        #
+        # It is also the backstop for the purge. `purge_device` writes immediately rather
+        # than on the debounce, but it does so by creating a task it does not await, and
+        # an unload can outrun that task. Its removal would then exist only in memory
+        # that is about to go away, the deleted device's claim would survive in the
+        # persisted record, and a device re-added under the same id would have its first
+        # matching measurement suppressed by a claim from its previous life. Writing here
+        # persists the purged state whichever of the two writes gets there first.
+        #
+        # Cancel first, so the coroutine stops waiting out its sleep, then write once
+        # here. `_debounced_save_stats` swallows the cancellation and returns, so the
+        # await settles it; if the task was already past the sleep and inside the write,
+        # the repeated write is the same record and costs nothing. Failures are
+        # swallowed like the other shutdown steps: an unload must not raise.
         stats_save_task = getattr(self, "_stats_save_task", None)
         if stats_save_task and not stats_save_task.done():
             stats_save_task.cancel()
+            try:
+                await stats_save_task
+            except (asyncio.CancelledError, Exception):
+                pass
+            try:
+                await self._async_save_stats()
+            except Exception:
+                pass
+        self._stats_save_task = None
 
         # Cancel pending EID-resolver refresh debounce timers so no
         # ``call_later`` callback fires (and creates a task) after unload.

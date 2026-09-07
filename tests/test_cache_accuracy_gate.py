@@ -32,6 +32,7 @@ months.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 from typing import Any
@@ -1408,7 +1409,7 @@ def test_a_payload_without_a_timestamp_stays_this_gate_s_case() -> None:
     """A missing stamp is the one temporal class this gate must keep claiming.
 
     The gate hands the three classes ``_is_significant_update`` rejects on, so
-    that gate can classify them. A missing or unparseable ``last_seen`` is NOT
+    that gate can classify them. A missing or unparsable ``last_seen`` is NOT
     one of them: normalization returns None there and all three timestamp checks
     are skipped, so the payload is accepted. Handing it on would let a coarse fix
     through the very gate it was measured against - the distance-based merge
@@ -2464,6 +2465,50 @@ async def test_a_full_stored_ring_does_not_evict_the_claim_made_during_the_load(
     assert ("ts", 0) not in ring, "the oldest stored identity is the one to lose"
 
 
+@pytest.mark.asyncio
+async def test_shutdown_writes_the_pending_stats_instead_of_dropping_them() -> None:
+    """An unload inside the debounce window must not lose what the window holds.
+
+    `purge_device` removes a deleted device's tally claim in memory and schedules the
+    save; `async_shutdown` used to cancel that write and nothing else. The claim then
+    survived in the persisted record, and a device re-added under the same id had its
+    first matching measurement suppressed by a claim from its previous life - the exact
+    failure the purge exists to prevent, reached through the door on the way out.
+
+    A real pending task rather than a stub, because the property under test is that the
+    coroutine stops waiting AND the record is written: a stub that only counts `cancel`
+    calls stays green when the write is missing, which is the state this test replaces.
+    """
+    from custom_components.googlefindmy.coordinator import GoogleFindMyCoordinator
+
+    coord = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
+    written: list[int] = []
+
+    async def _record() -> None:
+        written.append(1)
+
+    coord._async_save_stats = _record  # type: ignore[method-assign]
+    coord._stats_debounce_seconds = 30
+    coord._stats_save_task = asyncio.create_task(coord._debounced_save_stats())
+    await asyncio.sleep(0)  # let the task reach its sleep
+
+    coord._cancel_pending_subentry_repair = lambda: None  # type: ignore[method-assign]
+    coord._dr_unsub = None
+    coord._short_retry_cancel = None
+    coord._eid_refresh_debounce_handle = None
+    coord._eid_inline_refresh_debounce_handle = None
+
+    async def _unload() -> None:
+        return None
+
+    coord._async_unload = _unload  # type: ignore[method-assign]
+
+    await coord.async_shutdown()
+
+    assert written == [1], "the pending record must be written exactly once"
+    assert coord._stats_save_task is None
+
+
 def test_the_ring_limit_is_the_same_number_on_both_sides() -> None:
     """Two modules name the ring length; a divergence must not pass silently.
 
@@ -2546,9 +2591,13 @@ def test_a_stampless_report_is_counted_once_however_often_it_arrives() -> None:
     reach the same claim, so one bounded fingerprint per device closes it for all three.
 
     The declared limit is pinned in the same breath: two stampless reports that agree on
-    position and radius are indistinguishable by construction, and alternating between
-    two different ones defeats the single slot. Both are bounded and known, unlike an
-    unbounded set of every report ever seen.
+    position and radius are indistinguishable by construction. Alternating between two
+    different ones is NOT a limit any more - that was true of the single slot this claim
+    outlived, and ``test_two_alternating_reports_are_each_counted_once`` pins the ring
+    that closed it. What the ring costs instead is its length: more than
+    ``_TALLY_MEMORY`` distinct unretained reports before one repeats evicts the oldest
+    claim. Both limits are bounded and known, unlike an unbounded set of every report
+    ever seen.
     """
     from custom_components.googlefindmy.coordinator import GoogleFindMyCoordinator
 

@@ -150,7 +150,14 @@ record is durable, and a position in durable state is the one thing this feature
 careful not to keep. And the claim is dropped in `purge_device` along with the other
 device-keyed caches, with a persist scheduled - otherwise a deleted device keeps an
 entry indefinitely, and one re-added under the same id has its first matching
-measurement suppressed by a claim from its previous life.
+measurement suppressed by a claim from its previous life. That write is immediate rather
+than debounced, but it is a task nobody awaits, so `async_shutdown` FLUSHES the pending
+stats write instead of merely cancelling it. Two things ride on that: the increments the
+debounce window was still coalescing, and the purge itself, whose own task an unload can
+outrun. The failure would surface much later, when the id came back. Pinned by
+`tests/test_cache_accuracy_gate.py::test_shutdown_writes_the_pending_stats_instead_of_dropping_them`,
+which uses a real pending task: a stub that only counts `cancel` calls stays green with
+the flush deleted.
 
 A retained coarse fix is read for publication through `get_fresh_coarse_fix`, never
 through `get_coarse_fix`. Nothing removes a retained fix when time merely passes - the
@@ -161,10 +168,17 @@ lives in the reader. The device tracker keeps its own check as a second line. Id
 payload with no parseable `last_seen` is keyed on its position and radius instead, because
 such a report is rejected by the gate, retained nowhere and therefore delivered again on
 every poll - counting it each time would make the persisted distribution measure retry
-frequency rather than incoming fixes. Two bounded and deliberate limits: one slot per
-device, so alternating between two unrecognised reports counts both, and two stampless
-reports agreeing on position and radius are indistinguishable by construction. Pinned by
-`tests/test_cache_accuracy_gate.py::test_a_stampless_report_is_counted_once_however_often_it_arrives`.
+frequency rather than incoming fixes. What holds the claim is a bounded RING per device,
+`cache.py::_TALLY_MEMORY` identities long (8 today), not a single slot: a single slot was
+overwritten by the next unrecognised report, so two of them delivered alternately were
+counted on every delivery. Two bounded and deliberate limits remain: a device that sees
+more than `_TALLY_MEMORY` distinct unretained reports before one repeats loses the oldest
+claim and counts that report again, and two stampless reports agreeing on position and
+radius are indistinguishable by construction. The first limit is now a number one can
+raise rather than a shape one could not. Pinned by
+`tests/test_cache_accuracy_gate.py::test_a_stampless_report_is_counted_once_however_often_it_arrives`
+and, for the ring itself, by `::test_the_ring_limit_is_the_same_number_on_both_sides` and
+`::test_a_full_stored_ring_does_not_evict_the_claim_made_during_the_load`.
 
 *Coarse fixes* are decided by the accuracy gate, `coordinator/cache.py::_accuracy_gate_rejects` (#216). It fires only where the
 two accuracy circles do NOT overlap (`dist > radius_sum`) and only when all of these hold: the option is on, the incoming accuracy

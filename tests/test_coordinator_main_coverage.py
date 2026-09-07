@@ -482,13 +482,29 @@ async def test_async_shutdown_cancels_handles_and_unloads() -> None:
     c._short_retry_cancel = lambda: cancelled.append("retry")
 
     class _Task:
+        """Awaitable on purpose: shutdown now awaits the write it cancelled.
+
+        A stub without ``__await__`` still passed, because the ``TypeError`` was
+        swallowed by the same guard that swallows a failed write - so the test would
+        have stayed green with the flush deleted.
+        """
+
         def done(self) -> bool:
             return False
 
         def cancel(self) -> None:
             cancelled.append("stats")
 
+        def __await__(self):  # type: ignore[no-untyped-def]
+            return iter(())
+
     c._stats_save_task = _Task()
+    saved: list[int] = []
+
+    async def _save() -> None:
+        saved.append(1)
+
+    c._async_save_stats = _save  # type: ignore[method-assign]
     c._eid_refresh_debounce_handle = SimpleNamespace(
         cancel=lambda: cancelled.append("eid1")
     )
@@ -505,6 +521,7 @@ async def test_async_shutdown_cancels_handles_and_unloads() -> None:
     await c.async_shutdown()
 
     assert set(cancelled) == {"dr", "retry", "stats", "eid1", "eid2"}
+    assert saved == [1], "the cancelled write is flushed, not dropped"
     assert c._dr_unsub is None
     assert c._short_retry_cancel is None
     assert unloaded
