@@ -272,10 +272,12 @@ _AGENT_LOCAL_PATH = re.compile(
     # any second level under memory/, not an enumeration: the scopes an agent memory
     # grows are not knowable from here, and an enumeration silently misses new ones
     r"memory/[\w-]+/[\w./-]+"
-    # the agent home, with or without the tilde, and for root as well as a named user,
-    # because containers commonly run as root
-    r"|~?/?\.claude/[\w./-]+"
-    r"|/(?:home/[\w.-]+|root)/\.claude/[\w./-]+"
+    # anything ending in a .claude directory, whatever the home spelling in front of it.
+    # Enumerating home directories was tried and failed twice in review: first /home/
+    # only, then /home/ plus /root/, and macOS (/Users/), Windows (C:/Users/) and $HOME
+    # were still missing. The generic form takes any prefix, and the lookbehind plus the
+    # required trailing slash keep .claudeignore and not.claude/ out.
+    r"|(?:~|\$HOME|/[\w.$-]+(?:/[\w.$-]+)*)?/?\.claude/[\w./-]+"
     r")"
 )
 
@@ -798,14 +800,22 @@ def test_path_detector_flags_every_documented_scope() -> None:
     can vanish in a refactor without anything going red.
     """
     cases = [
+        # memory scopes, generic rather than enumerated
         "memory/projects/x/y.md",
         "memory/_store/note.md",
         "memory/plans/active/PLAN_X.md",
         "memory/briefings/INDEX.md",
         "memory/wings/tech/x.md",
         "memory/erfahrungen/x.md",
+        # home spellings. Every one of these was missed by an earlier draft that
+        # enumerated home directories instead of accepting any prefix.
         "~/.claude/settings.json",
+        "$HOME/.claude/projects/x.md",
+        ".claude/projects/x.md",
         "/home/someone/.claude/projects/x.md",
+        "/root/.claude/x.md",
+        "/Users/alice/.claude/projects/x.md",
+        "C:/Users/alice/.claude/x.md",
     ]
     missed = [case for case in cases if not _agent_local_paths_in(case)]
     assert not missed, f"pattern alternatives without a match: {missed}"
@@ -817,7 +827,14 @@ def test_path_detector_respects_the_word_boundary() -> None:
     Pins the lookbehind: without it, any longer path containing the scope name would
     match, which would flag legitimate documentation directories.
     """
-    assert not _agent_local_paths_in("see docs/memory/plans/rollout.md for the plan")
+    benign = [
+        "see docs/memory/plans/rollout.md for the plan",
+        "see /app/requirements.txt for the pinned set",
+        "the .claudeignore file lists them",
+        "tests/fixtures/not.claude/file.md is a fixture",
+    ]
+    tripped = [text for text in benign if _agent_local_paths_in(text)]
+    assert not tripped, f"benign text flagged: {tripped}"
 
 
 def test_sweep_finds_a_planted_german_comment(tmp_path: Path) -> None:
