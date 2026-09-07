@@ -1137,7 +1137,18 @@ repository is a source, not a private citation; the scheme is what makes it publ
 this is a property and not a list of sites. A `file:` URI is the opposite case, a local
 path in a different spelling, and its extra slashes hid it from the pattern entirely.
 Both are replaced by spaces of the same length, so a citation next to a URL on the same
-line survives. The home prefix is generic over
+line survives. The URL body stops at the delimiters that close a link in prose, not
+merely at whitespace: two Markdown links written back to back have no space between them,
+and a run to the next space swallowed the second one whole, taking a private citation
+with it. In exchange, a URL carrying a closing parenthesis is cut short there and its
+tail can read as a citation; that direction fails loudly rather than silently, which is
+the direction this guard should fail in.
+
+Every shape the detector has been wrong about lives in `_DETECTOR_CORPUS` with its
+expected result. Four review rounds went the same way, a narrowing leaving a gap and the
+widening that closed it producing a false positive elsewhere, so a change to the pattern
+is diffed against that table rather than against the cases its author happened to think
+of. The home prefix is generic over
 both path separators and does not have to be absolute, because a relative reference is
 just as unopenable for a reader; the directory has to start a path segment, so a name
 that merely ends in those letters does not trip. `/app/` is deliberately not part

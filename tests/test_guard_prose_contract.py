@@ -304,7 +304,18 @@ _AGENT_LOCAL_PATH = re.compile(
 # A URL a reader can follow. The scheme is what makes it public, not the host, so this
 # is a property rather than a list of sites. file: is deliberately absent: it names a
 # local path, and the next pattern turns it back into one.
-_PUBLIC_URL = re.compile(r"\b(?:https?|ftps?|git\+https?|ssh)://\S+")
+#
+# The body stops at the delimiters that close a link in prose, not merely at whitespace.
+# Two Markdown links written back to back have no space between them, so a run to the
+# next space swallowed the second one whole, and a private citation inside it disappeared
+# with the public URL. That direction is the dangerous one: the sweep stays green over a
+# real violation. Declared limit in exchange: a URL with a closing parenthesis inside it
+# is cut short there, and the remainder can produce a false positive. That way round
+# fails loudly, which is the direction a guard should fail in.
+_URL_TERMINATORS = ")]}>\"'`"
+_PUBLIC_URL = re.compile(
+    r"\b(?:https?|ftps?|git\+https?|ssh)://[^\s" + re.escape(_URL_TERMINATORS) + r"]+"
+)
 
 # The prefix of a file URI, so that what follows is judged as the local path it is.
 _FILE_URI_PREFIX = re.compile(r"\bfile://(?=/)")
@@ -986,6 +997,80 @@ def test_every_private_directory_is_wired_into_the_pattern() -> None:
     assert not unreached, (
         f"members of _AGENT_PRIVATE_DIRS the pattern never matches: {unreached}"
     )
+
+
+# Every shape the detector has been wrong about, with what it must return. Four review
+# rounds ran the same way: a narrowing left a gap, the widening that closed it produced a
+# false positive somewhere else, and the reviewer found each one. What would have caught
+# them earlier is not another rule but a measurement, so the measurement lives here. A
+# change to the pattern is diffed against this table rather than against the cases its
+# author happened to think of.
+_DETECTOR_CORPUS: dict[str, list[str]] = {
+    # citations a reader cannot open
+    "~/.claude/settings.json": ["~/.claude/settings.json"],
+    "$HOME/.claude/projects/x.md": ["$HOME/.claude/projects/x.md"],
+    ".claude/projects/x.md": [".claude/projects/x.md"],
+    "/home/a/.claude/x.md": ["/home/a/.claude/x.md"],
+    "/root/.codex/instructions.md": ["/root/.codex/instructions.md"],
+    "~/.codex/skills/x/SKILL.md": ["~/.codex/skills/x/SKILL.md"],
+    "project/.claude/settings.json": ["project/.claude/settings.json"],
+    "C:/Users/a/.claude/x.md": ["C:/Users/a/.claude/x.md"],
+    "C:\\Users\\a\\.claude\\x.md": ["C:\\Users\\a\\.claude\\x.md"],
+    ".codex/config.toml": [".codex/config.toml"],
+    "file:///root/.codex/instructions.md": ["/root/.codex/instructions.md"],
+    "memory/_store/note.md": ["memory/_store/note.md"],
+    # near misses: a name that merely ends in one of the directories, or a scope that is
+    # part of a longer documentation path
+    ".claudeignore": [],
+    ".codexignore": [],
+    "not.claude/file.md": [],
+    "/tmp/not.claude/f.md": [],
+    "/etc/app.claude/c.json": [],
+    "docs/memory/plans/rollout.md": [],
+    "/app/requirements.txt": [],
+    "tests/fixtures/not.codex/x.md": [],
+    # public sources, whatever their path component contains
+    "https://github.com/openai/codex/blob/main/.codex/config.toml": [],
+    "see https://example.org/x/.claude/y.md for details": [],
+    "<https://example.org/x/.claude/y.md>": [],
+    "`https://example.org/x/.claude/y.md`": [],
+    "(see https://example.org/x/.claude/y.md)": [],
+    'href="https://example.org/x/.claude/y.md"': [],
+    "ssh://git@example.org/x/.claude/y.md": [],
+    # a public source and a private citation in the same line, in both orders and with
+    # no whitespace between them
+    "https://example.org/x/.claude/y.md and /home/a/.claude/x.md": [
+        "/home/a/.claude/x.md"
+    ],
+    "/home/a/.claude/x.md and https://example.org/x/.claude/y.md": [
+        "/home/a/.claude/x.md"
+    ],
+    "[public](https://example.org/x/.codex/y)[private](~/.codex/notes.md)": [
+        "~/.codex/notes.md"
+    ],
+    "http://example.org/.codex/a, then ~/.claude/b.md": ["~/.claude/b.md"],
+    # The declared limit, pinned so that it stays a measured fact rather than a claim in
+    # a comment: a URL carrying a closing parenthesis is cut short there, and the tail
+    # reads as a citation. It fails loudly, which is the direction a guard should fail
+    # in, and the escape hatch is the allowlist. Change this expectation only together
+    # with the terminator set.
+    "https://en.wikipedia.org/wiki/A_(B)/.claude/y.md": ["/.claude/y.md"],
+}
+
+
+def test_detector_corpus_holds() -> None:
+    """The whole table at once, so a change is measured against every known shape.
+
+    The individual tests below say why each shape matters. This one says that none of
+    them regressed, which is the property four review rounds were spent discovering one
+    case at a time.
+    """
+    wrong = {
+        text: (expected, _agent_local_paths_in(text))
+        for text, expected in _DETECTOR_CORPUS.items()
+        if _agent_local_paths_in(text) != expected
+    }
+    assert not wrong, f"detector corpus regressions (expected, actual): {wrong}"
 
 
 def test_file_uris_are_read_as_the_local_paths_they_are() -> None:
