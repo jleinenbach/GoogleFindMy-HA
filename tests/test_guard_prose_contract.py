@@ -280,6 +280,12 @@ _AGENT_PRIVATE_DIRS = ("claude", "codex")
 # repository can open one, so it is never a "verifiable source inside the project
 # reality". "/app/" is deliberately absent: both of its measured occurrences were
 # "/app/requirements.txt", the container path this project itself uses.
+# What ends a citation of the directory itself. Not a word character, because
+# .claudeignore is a different name; not a separator, because a path continues; not "<",
+# because <file> is this repository's placeholder spelling and not a citation; and not
+# "%", because an escape there means the path goes on in encoded form.
+_DIR_BOUNDARY = r"(?![\w.$<%\\/-])"
+
 _AGENT_LOCAL_PATH = re.compile(
     r"(?<![\w/])("
     # any second level under memory/, not an enumeration: the scopes an agent memory
@@ -297,8 +303,29 @@ _AGENT_LOCAL_PATH = re.compile(
     # directory name becomes the match, which flagged two innocent shapes (a temp
     # directory and an unrelated dotted name) before this was pinned. Requiring a
     # separator after the directory keeps the ignore-file spelling out.
-    r"|(?:(?:~|\$HOME|[\w.$:-]*(?:[\\/][\w.$-]+)*)[\\/])?"
-    r"(?<![\w.$-])\.(?:" + "|".join(_AGENT_PRIVATE_DIRS) + r")[\\/][\w.$\\/-]+"
+    #
+    # The directory ITSELF is a citation too. A home prefix followed by one of these
+    # directories, with or without a trailing separator, names something no reader can
+    # open just as much as a file under it, and requiring a non-empty tail let every such
+    # spelling through in silence. The tail was doing two jobs, boundary and content, so
+    # the boundary is explicit now. A bare mention of a directory name in prose must stay
+    # silent, which is why the directory alone counts only behind a home or path prefix,
+    # and why a separator is still required without one. The boundary also excludes the
+    # opening angle bracket, so this repository's placeholder spelling for a file name is
+    # not read as a citation, and the percent sign, because an escape right after the
+    # directory means the path continues in encoded form and the decoded pass is the one
+    # that should read it.
+    #
+    # One carrier for that boundary, not two. An extra (?![\w-]) here was measured
+    # redundant: both tails already forbid a word character and a hyphen right after the
+    # directory, the first by requiring a separator and the second through _DIR_BOUNDARY.
+    # A red probe that removed it changed nothing, which is the definition of a second
+    # carrier that can silently drift away from the first.
+    r"|(?:~|\$HOME|[\w.$:-]*(?:[\\/][\w.$-]+)*)[\\/]"
+    r"(?<![\w.$-])\.(?:" + "|".join(_AGENT_PRIVATE_DIRS) + r")"
+    r"(?:[\\/][\w.$\\/-]+|[\\/]?" + _DIR_BOUNDARY + r")"
+    r"|(?<![\w.$-])\.(?:" + "|".join(_AGENT_PRIVATE_DIRS) + r")"
+    r"(?:[\\/][\w.$\\/-]+|[\\/]" + _DIR_BOUNDARY + r")"
     r")"
 )
 
@@ -318,13 +345,23 @@ _FILE_URI_PREFIX = re.compile(
     re.IGNORECASE,
 )
 
-# A URL a reader can follow. What makes it public is that its scheme names a network
-# location, not which scheme it happens to be, so the scheme is matched by its grammar
-# (RFC 3986 3.1: a letter, then letters, digits, plus, minus or dot) rather than by a
-# list of names. The list was written once with four names (104c4041), and each review
-# round after it found a spelling the list did not carry: an uppercase scheme, then
-# git://. That is what an enumeration costs where the set is open. The local schemes
-# above are removed first, so nothing that names a local path is read as a public source.
+# A URL a reader can follow. Two properties make it one, and both are needed: a scheme,
+# matched by its grammar (RFC 3986 3.1) rather than by a list of names, AND an authority
+# that is a NETWORK HOST - a bracketed IPv6 literal, a dotted name, or localhost.
+#
+# The list of names was written once with four entries (104c4041), and each review round
+# after it found a spelling the list did not carry: an uppercase scheme, then git://.
+# Dropping the list for the grammar alone was the obvious repair and it was WRONG in the
+# dangerous direction: an editor URI naming a local file under one of the private
+# directories was then read as a public source and blanked whole, so an unopenable
+# citation passed in silence. The host test puts that back the safe way round, since such
+# a URI has a single-label authority and no host. An unregistered scheme over a real host
+# is public; any scheme over something that is not a host is not, and a single-label host
+# fails loudly rather than silently - which is the direction this guard should fail in.
+#
+# The bracketed alternative is not decoration. With "]" among the terminators below, an
+# IPv6 literal would otherwise cut the URL after the scheme and its path would be read as
+# a private citation.
 #
 # The body stops at the delimiters that close a link in prose, not merely at whitespace.
 # Two Markdown links written back to back have no space between them, so a run to the
@@ -335,8 +372,20 @@ _FILE_URI_PREFIX = re.compile(
 # fails loudly, which is the direction a guard should fail in.
 _URL_TERMINATORS = ")]}>\"'`"
 _PUBLIC_URL = re.compile(
-    r"\b[A-Za-z][A-Za-z0-9+.-]*://[^\s" + re.escape(_URL_TERMINATORS) + r"]+"
+    r"\b[A-Za-z][A-Za-z0-9+.-]*://"
+    r"(?:[^\s/@]*@)?"
+    r"(?:\[[0-9A-Fa-f:.]+\]|[^\s/?#\[\]]*\.[^\s/?#\[\]]+|localhost)"
+    r"(?::[0-9]+)?"
+    r"[^\s" + re.escape(_URL_TERMINATORS) + r"]*"
 )
+
+# Everything else that carries a scheme: an editor URI, an app URI, an unregistered
+# scheme, anything whose authority is not a network host. Only the scheme and authority
+# are removed, so the path behind them is judged as the local path it names. Without this
+# step the path pattern cannot even see it, because its own left boundary refuses to
+# start a match directly after a word character, and the last letter of such an authority
+# sits exactly there - one character was enough to hide the whole citation.
+_OPAQUE_URI_PREFIX = re.compile(r"\b[A-Za-z][A-Za-z0-9+.-]*://[^\s/]*")
 
 # Files whose prose legitimately carries non-English words. One entry, with its reason.
 #   tests/test_translation_placeholders.py -- that guard asserts that German UI text
@@ -475,6 +524,7 @@ def _agent_local_paths_in(text: str) -> list[str]:
     """
     normalised = _FILE_URI_PREFIX.sub(lambda m: " " * len(m.group()), text)
     normalised = _PUBLIC_URL.sub(lambda m: " " * len(m.group()), normalised)
+    normalised = _OPAQUE_URI_PREFIX.sub(lambda m: " " * len(m.group()), normalised)
     found = [match.group(1) for match in _AGENT_LOCAL_PATH.finditer(normalised)]
     if "%" in normalised:
         found.extend(
@@ -1069,6 +1119,18 @@ _DETECTOR_CORPUS: dict[str, list[str]] = {
     "see /root/%2Eclaude/x.md": ["/root/.claude/x.md"],
     # a percent sign that is not an escape must leave the unit alone
     "100% of diff hit, then ~/.codex/n.md": ["~/.codex/n.md"],
+    # the directory itself, with and without a trailing separator
+    "~/.codex": ["~/.codex"],
+    "~/.codex/": ["~/.codex/"],
+    "/root/.claude/": ["/root/.claude/"],
+    "$HOME/.claude": ["$HOME/.claude"],
+    ".codex/": [".codex/"],
+    # ... but a bare mention in prose is not a citation, and neither is the placeholder
+    # spelling this repository uses for a file name
+    "the .codex directory": [],
+    "`.claude` and `.codex`": [],
+    "nor ~/.claude/<file>, for the same reason": [],
+    "~/.claude/<file>": [],
     "memory/_store/note.md": ["memory/_store/note.md"],
     # near misses: a name that merely ends in one of the directories, or a scope that is
     # part of a longer documentation path
@@ -1098,6 +1160,17 @@ _DETECTOR_CORPUS: dict[str, list[str]] = {
     "git+ssh://git@example.org/x/.claude/y.md": [],
     "rsync://example.org/x/.codex/y": [],
     "svn+ssh://example.org/x/.claude/y.md": [],
+    "http://localhost:8080/x/.claude/y.md": [],
+    "http://192.168.1.10/x/.codex/y": [],
+    # an IPv6 literal host: "]" closes a link in prose, so the bracket has to be read as
+    # part of the authority or the path behind it is reported as a private citation
+    "http://[2606:4700:4700::1111]/repo/.codex/config.toml": [],
+    # ... and a scheme WITHOUT a network host is not a public source, whatever its name.
+    # Only its scheme and authority are removed, so the local path behind them is judged
+    # as what it is.
+    "vscode://file/root/.codex/instructions.md": ["/root/.codex/instructions.md"],
+    "myapp://x/root/.claude/a.md": ["/root/.claude/a.md"],
+    "editor://open/home/a/.claude/x.md": ["/home/a/.claude/x.md"],
     # a public source and a private citation in the same line, in both orders and with
     # no whitespace between them
     "https://example.org/x/.claude/y.md and /home/a/.claude/x.md": [
@@ -1234,6 +1307,82 @@ def test_percent_encoded_citations_are_decoded_before_matching() -> None:
         "~/.codex/n.md"
     ]
     assert _agent_local_paths_in("https://example.org/a%2Eb/.claude/y.md") == []
+
+
+def test_the_private_directory_itself_is_a_citation() -> None:
+    """Naming the directory is naming something no reader can open.
+
+    Requiring a file under it let every such spelling through in silence, which is the
+    direction that matters. The counter-cases belong in the same test: the boundary that
+    admits the bare directory must not admit a bare mention in prose, an ignore-file
+    name, or the placeholder spelling this repository writes for a file.
+    """
+    cites = {
+        "~/.codex": ["~/.codex"],
+        "~/.codex/": ["~/.codex/"],
+        "/root/.claude/": ["/root/.claude/"],
+        "$HOME/.claude": ["$HOME/.claude"],
+        ".codex/": [".codex/"],
+    }
+    quiet = {
+        "the .codex directory": [],
+        "`.claude` and `.codex`": [],
+        ".claudeignore": [],
+        ".codexignore": [],
+        "~/.claude/<file>": [],
+        "nor ~/.claude/<file>, for the same reason": [],
+    }
+    wrong = {
+        text: _agent_local_paths_in(text)
+        for text, expected in {**cites, **quiet}.items()
+        if _agent_local_paths_in(text) != expected
+    }
+    assert not wrong, f"directory citations misjudged: {wrong}"
+
+
+def test_a_scheme_without_a_network_host_is_not_a_public_source() -> None:
+    """Two properties make a URL openable, and the scheme alone is only one of them.
+
+    Reading any scheme as public was the obvious repair for an enumeration that kept
+    missing spellings, and it failed in the silent direction: a URI naming a local file
+    under a private directory was blanked whole and the citation vanished. Only the
+    scheme and authority are removed from such a URI now, so the path behind them is
+    judged as the local path it is.
+    """
+    cases = {
+        "vscode://file/root/.codex/instructions.md": ["/root/.codex/instructions.md"],
+        "myapp://x/root/.claude/a.md": ["/root/.claude/a.md"],
+        "editor://open/home/a/.claude/x.md": ["/home/a/.claude/x.md"],
+        # a real host keeps the URL public, whatever the scheme is called
+        "git://github.com/example/.codex/project.git": [],
+        "rsync://example.org/x/.codex/y": [],
+        "http://localhost:8080/x/.claude/y.md": [],
+        "http://192.168.1.10/x/.codex/y": [],
+    }
+    wrong = {
+        text: _agent_local_paths_in(text)
+        for text, expected in cases.items()
+        if _agent_local_paths_in(text) != expected
+    }
+    assert not wrong, f"host test did not hold: {wrong}"
+
+
+def test_an_ipv6_host_survives_the_url_terminators() -> None:
+    """A closing bracket ends a link in prose and opens nothing in an IPv6 literal.
+
+    Treating it as a terminator unconditionally cut the URL after its scheme, and the
+    path of an openable source was then reported as a private citation. Loud rather than
+    silent, but wrong, and a reader citing over IPv6 has no way to comply.
+    """
+    assert (
+        _agent_local_paths_in("http://[2606:4700:4700::1111]/repo/.codex/config.toml")
+        == []
+    )
+    assert _agent_local_paths_in("[a](http://[::1]/x/.claude/y.md)") == []
+    # the terminator still does its work outside an authority
+    assert _agent_local_paths_in("[link](https://example.org/a) ~/.codex/n.md") == [
+        "~/.codex/n.md"
+    ]
 
 
 def test_a_path_written_twice_is_still_reported_twice() -> None:

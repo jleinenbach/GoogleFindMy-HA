@@ -1130,6 +1130,19 @@ documentation of a user's own configuration. Add a member when an assistant keep
 notes, plans or instructions there; each member carries its own positive case, and a
 member the pattern never reaches fails a test.
 
+The directory ITSELF is a citation, not only a file under it. A home prefix followed by
+one of those directories, with or without a trailing separator, names something no reader
+can open, and requiring a non-empty tail let every such spelling through in silence. The
+tail was doing two jobs at once, boundary and content, so the boundary is now explicit
+(`_DIR_BOUNDARY`). It has to be, because the widening must not reach a bare mention of a
+directory name in running prose - this contract and the guard's own comments are full of
+those. Hence two shapes and no third: behind a home or path prefix the directory counts
+on its own, and without a prefix a separator is still required. The boundary also
+excludes the opening angle bracket, so the placeholder spelling this repository writes
+for a file name stays quiet, and the percent sign, because an escape immediately after
+the directory means the path continues in encoded form and the decoded pass is the one
+that should read it.
+
 Prose is normalised before the pattern sees it, because two spellings would otherwise be
 judged by what they look like rather than by what they are. A public URL is openable by
 any reader whatever its path component contains, so a link into someone else's
@@ -1144,11 +1157,25 @@ with it. In exchange, a URL carrying a closing parenthesis is cut short there an
 tail can read as a citation; that direction fails loudly rather than silently, which is
 the direction this guard should fail in.
 
-Which scheme a URL carries is not part of the rule. A list of four scheme names was
-written once, and each review round after it found a spelling the list did not carry:
-first an uppercase scheme, then `git://`. The scheme is therefore read by its grammar
-(RFC 3986 3.1: a letter followed by letters, digits, plus, minus or dot), and any scheme
-that names a network location counts as public. The local schemes are a named set, `_LOCAL_URI_SCHEMES`, and
+Two properties make a URL openable, and both are checked. Its scheme is read by its
+grammar (RFC 3986 3.1: a letter followed by letters, digits, plus, minus or dot) rather
+than by a list of names: a list of four was written once, and each review round after it
+found a spelling the list did not carry, first an uppercase scheme, then `git://`. But
+the grammar alone is not enough, and getting that wrong cost a round of its own. Reading
+*any* scheme as public blanked an editor URI naming a local file, and the citation
+vanished in silence. The authority must therefore be a network host as well: a bracketed
+IPv6 literal, a dotted name, or `localhost`. An unregistered scheme over a real host is
+public; any scheme over something that is not a host is not.
+
+A URI that fails the host test is not simply left alone either. Only its scheme and
+authority are blanked, so the local path behind them is judged as what it is. Without
+that step the path pattern cannot even see such a path: its own left boundary refuses to
+start a match directly after a word character, and the last letter of the authority sits
+exactly there.
+
+The bracketed alternative in the host is not decoration. `]` is one of the delimiters
+that close a link in prose, so without it an IPv6 literal cut the URL after its scheme
+and the path of an openable source was reported as a private citation. The local schemes are a named set, `_LOCAL_URI_SCHEMES`, and
 they are normalised first for exactly that reason: a rule that accepts any scheme would
 otherwise swallow the one spelling that means a local path. The `file:` prefix consumes
 an optional authority component, so `file:/path`, `file:///path` and
