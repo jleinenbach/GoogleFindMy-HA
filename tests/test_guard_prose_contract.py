@@ -91,6 +91,7 @@ import subprocess
 import sys
 import tokenize
 from pathlib import Path
+from urllib.parse import unquote
 
 import pytest
 
@@ -301,13 +302,29 @@ _AGENT_LOCAL_PATH = re.compile(
     r")"
 )
 
-# A URL a reader can follow. The scheme is what makes it public, not the host, so this
-# is a property rather than a list of sites. file: is deliberately absent: it names a
-# local path, and the next pattern turns it back into one.
+# A URI whose scheme names a local file instead of a network location. It is normalised
+# before the public-URL rule below, which judges a scheme by its grammar and would
+# otherwise blank this one too.
 #
-# Scheme names are case-insensitive by definition (RFC 3986 3.1), so the match is too.
-# A case-sensitive spelling left HTTPS://host/... unrecognised, and the openable source
-# was then reported as a private citation.
+# The authority component is optional and is consumed with the scheme. file:/path,
+# file:///path with an empty authority and file://localhost/path with a named one are
+# three standard spellings of one thing (RFC 8089), and a pattern that accepted only the
+# middle one let the other two through with their scheme intact, so the path pattern
+# found nothing and an unreadable citation stayed silent. That is the failure direction
+# a guard must not have.
+_LOCAL_URI_SCHEMES = ("file",)
+_FILE_URI_PREFIX = re.compile(
+    r"\b(?:" + "|".join(_LOCAL_URI_SCHEMES) + r"):(?://[^/\s]*)?(?=/)",
+    re.IGNORECASE,
+)
+
+# A URL a reader can follow. What makes it public is that its scheme names a network
+# location, not which scheme it happens to be, so the scheme is matched by its grammar
+# (RFC 3986 3.1: a letter, then letters, digits, plus, minus or dot) rather than by a
+# list of names. The list was written once with four names (104c4041), and each review
+# round after it found a spelling the list did not carry: an uppercase scheme, then
+# git://. That is what an enumeration costs where the set is open. The local schemes
+# above are removed first, so nothing that names a local path is read as a public source.
 #
 # The body stops at the delimiters that close a link in prose, not merely at whitespace.
 # Two Markdown links written back to back have no space between them, so a run to the
@@ -318,18 +335,8 @@ _AGENT_LOCAL_PATH = re.compile(
 # fails loudly, which is the direction a guard should fail in.
 _URL_TERMINATORS = ")]}>\"'`"
 _PUBLIC_URL = re.compile(
-    r"\b(?:https?|ftps?|git\+https?|ssh)://[^\s" + re.escape(_URL_TERMINATORS) + r"]+",
-    re.IGNORECASE,
+    r"\b[A-Za-z][A-Za-z0-9+.-]*://[^\s" + re.escape(_URL_TERMINATORS) + r"]+"
 )
-
-# The prefix of a file URI, so that what follows is judged as the local path it is.
-#
-# The authority component is optional and is consumed with the prefix. Both spellings are
-# standard - file:///path with an empty authority and file://localhost/path with a named
-# one - and the lookahead alone accepted only the first, so the host-qualified form kept
-# its scheme, the path pattern found nothing, and an unreadable citation stayed silent.
-# That is the failure direction a guard must not have.
-_FILE_URI_PREFIX = re.compile(r"\bfile://[^/\s]*(?=/)", re.IGNORECASE)
 
 # Files whose prose legitimately carries non-English words. One entry, with its reason.
 #   tests/test_translation_placeholders.py -- that guard asserts that German UI text
@@ -448,14 +455,34 @@ def _agent_local_paths_in(text: str) -> list[str]:
     made those URLs match from the host name onwards.
 
     A file URI is the opposite case: it names a local path in a different spelling, and
-    the extra slashes hid it from the pattern entirely.
+    the extra slashes hid it from the pattern entirely. It is normalised first, because
+    the public rule accepts any scheme and would otherwise consume this one as well.
 
     Both are handled by replacing the offending run with spaces of the same length, so
     the surrounding text keeps its shape and nothing else shifts.
+
+    A third spelling is not a run but an encoding: percent escapes are standard inside a
+    URI, and %2Ecodex is the same directory as .codex to everyone except a pattern that
+    reads it literally. The text is therefore matched twice, once as written and once
+    decoded, and the second result is appended to the first. Two passes rather than one
+    substitution, because decoding in place would shorten the text and move every later
+    citation; and an append rather than a replacement, because a decoded pass must not
+    lose a path the raw text already showed. Only the second pass drops what the first
+    already found, so a path written twice in one unit is still reported twice, as it
+    was before this pass existed. The decoded pass is skipped when the unit carries no
+    percent sign, which is an optimisation and not a rule: there is nothing to decode in
+    that case.
     """
-    text = _PUBLIC_URL.sub(lambda m: " " * len(m.group()), text)
-    text = _FILE_URI_PREFIX.sub(lambda m: " " * len(m.group()), text)
-    return [match.group(1) for match in _AGENT_LOCAL_PATH.finditer(text)]
+    normalised = _FILE_URI_PREFIX.sub(lambda m: " " * len(m.group()), text)
+    normalised = _PUBLIC_URL.sub(lambda m: " " * len(m.group()), normalised)
+    found = [match.group(1) for match in _AGENT_LOCAL_PATH.finditer(normalised)]
+    if "%" in normalised:
+        found.extend(
+            match.group(1)
+            for match in _AGENT_LOCAL_PATH.finditer(unquote(normalised))
+            if match.group(1) not in found
+        )
+    return found
 
 
 def scan_tree(
@@ -1033,6 +1060,15 @@ _DETECTOR_CORPUS: dict[str, list[str]] = {
     "file://myhost/home/a/.claude/x.md": ["/home/a/.claude/x.md"],
     "FILE:///root/.codex/instructions.md": ["/root/.codex/instructions.md"],
     "[a](file://localhost/home/a/.claude/x.md)": ["/home/a/.claude/x.md"],
+    "file:/root/.codex/instructions.md": ["/root/.codex/instructions.md"],
+    # percent escapes: standard inside a URI, and the same directory to every reader.
+    # Read literally, %2Ecodex is not .codex, so the citation stayed silent.
+    "file:///root/%2Ecodex/instructions.md": ["/root/.codex/instructions.md"],
+    "file:///root/.codex%2Finstructions.md": ["/root/.codex/instructions.md"],
+    "file:///root/%2Eclaude/%78.md": ["/root/.claude/x.md"],
+    "see /root/%2Eclaude/x.md": ["/root/.claude/x.md"],
+    # a percent sign that is not an escape must leave the unit alone
+    "100% of diff hit, then ~/.codex/n.md": ["~/.codex/n.md"],
     "memory/_store/note.md": ["memory/_store/note.md"],
     # near misses: a name that merely ends in one of the directories, or a scope that is
     # part of a longer documentation path
@@ -1056,6 +1092,12 @@ _DETECTOR_CORPUS: dict[str, list[str]] = {
     "HTTPS://github.com/openai/codex/blob/main/.codex/config.toml": [],
     "Https://example.org/x/.claude/y.md": [],
     "SSH://git@example.org/x/.claude/y.md": [],
+    # any scheme that names a network location, judged by its grammar and not by a
+    # list of four names that cost one review round each
+    "git://github.com/example/.codex/project.git": [],
+    "git+ssh://git@example.org/x/.claude/y.md": [],
+    "rsync://example.org/x/.codex/y": [],
+    "svn+ssh://example.org/x/.claude/y.md": [],
     # a public source and a private citation in the same line, in both orders and with
     # no whitespace between them
     "https://example.org/x/.claude/y.md and /home/a/.claude/x.md": [
@@ -1138,6 +1180,76 @@ def test_url_schemes_are_recognised_whatever_their_case() -> None:
         if _agent_local_paths_in(text) != expected
     }
     assert not wrong, f"case-sensitive scheme matching produced: {wrong}"
+
+
+def test_any_network_scheme_counts_as_public() -> None:
+    """A scheme is public because it names a network location, not because it is listed.
+
+    A list of four names was written once, and the two review rounds after it each
+    found a spelling it did not carry - an uppercase scheme, then git://. The pattern
+    now reads the scheme grammar of RFC 3986, so this test is about the shapes nobody
+    enumerated rather than about the four that were.
+    """
+    cases = {
+        "git://github.com/example/.codex/project.git": [],
+        "git+ssh://git@example.org/x/.claude/y.md": [],
+        "rsync://example.org/x/.codex/y": [],
+        "svn+ssh://example.org/x/.claude/y.md": [],
+        "ftp://example.org/x/.codex/y": [],
+        # the local scheme is the one exception, and it stays one: it is normalised
+        # before this rule runs, so it still reports the path it names
+        "file:///root/.codex/instructions.md": ["/root/.codex/instructions.md"],
+    }
+    wrong = {
+        text: _agent_local_paths_in(text)
+        for text, expected in cases.items()
+        if _agent_local_paths_in(text) != expected
+    }
+    assert not wrong, f"scheme grammar did not hold: {wrong}"
+
+
+def test_percent_encoded_citations_are_decoded_before_matching() -> None:
+    """%2Ecodex is .codex to every reader, so the guard has to read it that way.
+
+    This is the silent direction: the encoded spelling matched nothing at all, so a
+    citation a reader cannot open passed the sweep. The escape may sit in a file URI,
+    where it is the standard spelling, or in bare prose, so both are pinned here.
+    """
+    cases = {
+        "file:///root/%2Ecodex/instructions.md": ["/root/.codex/instructions.md"],
+        "file:///root/.codex%2Finstructions.md": ["/root/.codex/instructions.md"],
+        "file:///home/a/%2Eclaude/x.md": ["/home/a/.claude/x.md"],
+        "see /root/%2Eclaude/x.md": ["/root/.claude/x.md"],
+    }
+    wrong = {
+        text: _agent_local_paths_in(text)
+        for text, expected in cases.items()
+        if _agent_local_paths_in(text) != expected
+    }
+    assert not wrong, f"percent-encoded citations stayed hidden: {wrong}"
+
+    # A percent sign that is not an escape must change nothing, and a public URL that
+    # carries one must stay public after decoding.
+    assert _agent_local_paths_in("100% of diff hit, then ~/.codex/n.md") == [
+        "~/.codex/n.md"
+    ]
+    assert _agent_local_paths_in("https://example.org/a%2Eb/.claude/y.md") == []
+
+
+def test_a_path_written_twice_is_still_reported_twice() -> None:
+    """The decoded pass adds, it does not deduplicate what the raw text already showed.
+
+    Dropping repeats would be a quiet change of an unrelated property: the raw pass
+    behaved this way before the second pass existed, and a report is allowed to say that
+    a unit cites the same unopenable path more than once.
+    """
+    line = "~/.claude/a.md and ~/.claude/a.md"
+    assert _agent_local_paths_in(line) == ["~/.claude/a.md", "~/.claude/a.md"]
+
+    # The same line with a percent sign takes the second pass, and must not collapse
+    # either: the raw findings are kept in full and only the decoded extras are filtered.
+    with_escape = "~/.claude/a.md and ~/.claude/a.md, 50%25 done"
+    assert _agent_local_paths_in(with_escape) == ["~/.claude/a.md", "~/.claude/a.md"]
 
 
 def test_a_public_url_next_to_a_private_path_hides_neither() -> None:

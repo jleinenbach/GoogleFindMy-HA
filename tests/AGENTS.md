@@ -1142,12 +1142,26 @@ merely at whitespace: two Markdown links written back to back have no space betw
 and a run to the next space swallowed the second one whole, taking a private citation
 with it. In exchange, a URL carrying a closing parenthesis is cut short there and its
 tail can read as a citation; that direction fails loudly rather than silently, which is
-the direction this guard should fail in. Both spellings are matched without regard to
-case, because a scheme name is case-insensitive by definition (RFC 3986 3.1), and the
-`file:` prefix consumes an optional authority component, so `file:///path` and
-`file://localhost/path` are read alike. Each of those two was a silent or a false
-verdict before it was measured: an uppercase link was reported as a private citation,
-and a host-qualified URI was reported as nothing at all.
+the direction this guard should fail in.
+
+Which scheme a URL carries is not part of the rule. A list of four scheme names was
+written once, and each review round after it found a spelling the list did not carry:
+first an uppercase scheme, then `git://`. The scheme is therefore read by its grammar
+(RFC 3986 3.1: a letter followed by letters, digits, plus, minus or dot), and any scheme
+that names a network location counts as public. The local schemes are a named set, `_LOCAL_URI_SCHEMES`, and
+they are normalised first for exactly that reason: a rule that accepts any scheme would
+otherwise swallow the one spelling that means a local path. The `file:` prefix consumes
+an optional authority component, so `file:/path`, `file:///path` and
+`file://localhost/path` are read alike; accepting only the middle one left the other two
+with their scheme intact and reported nothing at all.
+
+Percent escapes are decoded before the pattern judges a path. `%2Ecodex` is `.codex` to
+every reader, and reading it literally let an unopenable citation through in silence.
+The unit is matched twice, once as written and once decoded, and the second result is
+appended to the first rather than replacing it, so a path the raw text already showed
+cannot be lost and a path written twice is still reported twice. Decoding in place is
+deliberately not done: it would shorten the text and move every later citation, which is
+the property the space-padded blanking exists to protect.
 
 Every shape the detector has been wrong about lives in `_DETECTOR_CORPUS` with its
 expected result. Four review rounds went the same way, a narrowing leaving a gap and the
