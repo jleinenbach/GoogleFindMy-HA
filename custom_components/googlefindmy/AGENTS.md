@@ -115,14 +115,21 @@ therefore derived from the sources rather than listed here, by
 `tests/test_cache_accuracy_gate.py::test_every_counting_site_claims_the_report_first`, so
 a fifth site arrives red instead of arriving silently.
 
-The claim is persisted with the histogram it protects (`accuracy_tally_claims`, written
-and read beside `integration_stats`). Both are halves of one fact: the histogram survives
-a restart, so a claim that did not would let the first post-restart poll count a report
-for the second time - and entity-state restoration has not necessarily repopulated the
-published cache by then either, so nothing else would recognise it. A missing key is the
-state before this existed and is not an error; an entry the loader cannot read is dropped
-rather than half-trusted, because a half-read claim would silence a report that was never
-counted. Identity is the report timestamp where there is one; a
+The claim is persisted inside the histogram record it protects: one cache key
+(`integration_stats`), one write, with the claims under the reserved sub-key
+`_tally_claims`. They are two halves of one fact, and two writes would have two failure
+modes - a claim without its increment silences a measurement that was never recorded, an
+increment without its claim counts one twice on the next delivery. The loader copies only
+known counters into `stats`, so the sub-key cannot become a phantom counter. A missing
+sub-key is the state before this existed and is not an error; an entry the loader cannot
+read is dropped rather than half-trusted.
+
+A retained coarse fix is read for publication through `get_fresh_coarse_fix`, never
+through `get_coarse_fix`. Nothing removes a retained fix when time merely passes - the
+store is pruned when a newer fix commits - so a rejection never followed by a better fix
+stays in the store indefinitely. `get_coarse_fix` is the raw window that producers and
+tests need; the freshness rule (same `stale_threshold`, negative age counts as corrupt)
+lives in the reader. The device tracker keeps its own check as a second line. Identity is the report timestamp where there is one; a
 payload with no parseable `last_seen` is keyed on its position and radius instead, because
 such a report is rejected by the gate, retained nowhere and therefore delivered again on
 every poll - counting it each time would make the persisted distribution measure retry

@@ -199,7 +199,14 @@ async def test_save_stats_persists_copy() -> None:
 
     await c._async_save_stats()
 
-    assert cache.saved["integration_stats"] == {"x": 1}
+    # The record carries the counters plus the tally claims that protect the accuracy
+    # histogram, under a reserved sub-key: one write, so the two halves cannot disagree
+    # after a crash. Counters are compared by projection rather than by equality, since
+    # this test is about the copy, not about the record's shape.
+    record = cache.saved["integration_stats"]
+    assert {k: v for k, v in record.items() if not k.startswith("_")} == {"x": 1}
+    assert record["_tally_claims"] == {}
+    assert record is not c.stats
 
 
 @pytest.mark.asyncio

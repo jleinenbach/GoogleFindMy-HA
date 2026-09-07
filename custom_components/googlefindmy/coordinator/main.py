@@ -366,6 +366,13 @@ _DEVICE_TYPE_PHONE = 20
 _accuracy_bucket = accuracy_bucket
 
 
+# Sub-key under which the per-device tally claims travel inside the ``integration_stats``
+# record. Reserved rather than free-form: the loader copies only known counters into
+# ``self.stats``, so this entry cannot become a phantom counter, and the writer asserts
+# that the name does not collide with a real one.
+TALLY_CLAIMS_KEY = "_tally_claims"
+
+
 def _round_age(age_seconds: float) -> int:
     """Round an age in seconds to the nearest 10 s (sub-poll timing is hidden)."""
     return int(round(age_seconds / 10) * 10)
@@ -1770,10 +1777,9 @@ class GoogleFindMyCoordinator(
                     if key in cached:
                         self.stats[key] = cached[key]
                 _LOGGER.debug("Loaded statistics from cache: %s", self.stats)
+                self._restore_tally_claims(cached.get(TALLY_CLAIMS_KEY))
         except Exception as err:
             _LOGGER.debug("Failed to load statistics from cache: %s", err)
-
-        await self._async_load_tally_claims()
 
         try:
             sound_request_uuids = await self._cache.async_get_cached_value(
@@ -1846,23 +1852,20 @@ class GoogleFindMyCoordinator(
                 err,
             )
 
-    async def _async_load_tally_claims(self) -> None:
-        """Restore the per-device tally claim written by :meth:`_async_save_tally_claims`.
+    def _restore_tally_claims(self, stored: Any) -> None:
+        """Restore the per-device tally claim from the stats record.
 
-        JSON has no tuples, so a stored identity comes back as a list and is turned
-        back into the tuple the comparison expects. A missing key means a cache written
-        before this existed: the map stays empty, which is exactly the old behaviour and
-        not an error.
+        JSON has no tuples, so a stored identity comes back as a list and is turned back
+        into the tuple the comparison expects; a list never equals a tuple, and that
+        failure would be silent. A missing sub-key is a record written before this
+        existed: the map stays empty, which is the old behaviour and not an error. An
+        entry the loader cannot read is dropped rather than half-trusted, because a
+        half-read claim would silence a report that was never counted.
         """
-        try:
-            cached = await self._cache.async_get_cached_value("accuracy_tally_claims")
-        except Exception as err:
-            _LOGGER.debug("Failed to load tally claims from cache: %s", err)
-            return
-        if not isinstance(cached, dict):
+        if not isinstance(stored, dict):
             return
         restored: dict[str, tuple[Any, ...]] = {}
-        for device_id, identity in cached.items():
+        for device_id, identity in stored.items():
             if isinstance(device_id, str) and isinstance(identity, (list, tuple)):
                 restored[device_id] = tuple(identity)
         if restored:
@@ -1870,39 +1873,33 @@ class GoogleFindMyCoordinator(
             _LOGGER.debug("Restored %d tally claim(s) from cache", len(restored))
 
     async def _async_save_stats(self) -> None:
-        """Persist statistics to entry-scoped cache."""
+        """Persist statistics and their tally claims as ONE record.
+
+        The histogram and the claim that keeps a report out of it twice are two halves
+        of one fact. Written separately, a crash or a failed write between them leaves
+        a claim without its increment - which silences a measurement that was never
+        recorded - or an increment without its claim, which counts one twice on the next
+        delivery. One key, one write, one failure mode: either both are yesterday's
+        state or both are today's.
+
+        The claims travel under a reserved sub-key. The loader only copies keys it
+        already knows into ``self.stats``, so the extra entry cannot become a phantom
+        counter, and the name is asserted not to collide with a real one.
+        """
+        assert TALLY_CLAIMS_KEY not in self.stats, (
+            f"{TALLY_CLAIMS_KEY} collides with a real counter"
+        )
+        claims = getattr(self, "_last_tallied_report_id", None) or {}
+        record: dict[str, Any] = self.stats.copy()
+        record[TALLY_CLAIMS_KEY] = {
+            device_id: list(identity)
+            for device_id, identity in claims.items()
+            if isinstance(device_id, str) and isinstance(identity, tuple)
+        }
         try:
-            await self._cache.async_set_cached_value(
-                "integration_stats", self.stats.copy()
-            )
+            await self._cache.async_set_cached_value("integration_stats", record)
         except Exception as err:
             _LOGGER.debug("Failed to save statistics to cache: %s", err)
-        await self._async_save_tally_claims()
-
-    async def _async_save_tally_claims(self) -> None:
-        """Persist the tally claim per device, alongside the histogram it protects.
-
-        The accuracy histogram survives a restart; the claim that keeps a report from
-        entering it twice used to live in memory only. The first poll or device-list
-        seed after a restart then returned a report that had already been counted, and
-        because entity-state restoration has not necessarily repopulated the published
-        cache yet, nothing else could recognise it either. Frequent restarts would make
-        the distribution measure restarts. Both halves of the same fact therefore
-        persist together; a stored value the loader cannot read is dropped, which puts
-        the pair back into the state it had before this existed.
-        """
-        claims = getattr(self, "_last_tallied_report_id", None) or {}
-        try:
-            await self._cache.async_set_cached_value(
-                "accuracy_tally_claims",
-                {
-                    device_id: list(identity)
-                    for device_id, identity in claims.items()
-                    if isinstance(device_id, str) and isinstance(identity, tuple)
-                },
-            )
-        except Exception as err:
-            _LOGGER.debug("Failed to save tally claims to cache: %s", err)
 
     async def _async_save_sound_uuids(self) -> None:
         """Persist Play Sound request UUIDs to entry-scoped cache.
@@ -2095,7 +2092,7 @@ class GoogleFindMyCoordinator(
                 if accuracy_raw is None:
                     accuracy_raw = row.get("accuracy")
 
-                coarse = self.get_coarse_fix(dev_id)
+                coarse = self.get_fresh_coarse_fix(dev_id)
                 coarse_bucket = None
                 coarse_age_s: int | None = None
                 if coarse:

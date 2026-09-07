@@ -1628,9 +1628,59 @@ def test_diagnostics_omits_the_coarse_age_when_the_stamp_is_unusable() -> None:
         }
     }
 
+    # Reviewed and corrected: the earlier expectation was that the bucket is exported
+    # with a null age. A row whose stamp cannot be read is one the integration treats as
+    # expired everywhere else, so diagnostics now omit it entirely rather than exporting
+    # half of it.
+    entry = coord.build_per_device_diagnostics()[0]
+    assert entry["coarse_fix_accuracy_bucket"] is None
+    assert entry["coarse_fix_age_s"] is None
+    # The raw store still holds it: expiry is a reader's rule, not a producer's.
+    assert coord.get_coarse_fix("dev") is not None
+
+
+def test_a_coarse_fix_stops_being_reported_once_it_goes_stale() -> None:
+    """Time alone has to end a rejection, or the side information never expires.
+
+    The store is pruned when a NEWER fix commits. A rejection that is never followed by
+    a better fix therefore stayed readable forever, and diagnostics exported its bucket
+    and an ever-growing age for something the tracker had long since hidden. Both ends
+    are checked here: the raw store still holds the row, because expiry is a reader's
+    rule and not a producer's, and the reader that publishes it stops doing so.
+    """
+    from tests.helpers.main_coordinator_stub import MainCoordinatorStub
+
+    coord = MainCoordinatorStub(config_entry=make_config_entry(entry_id="coarse-stale"))
+    coord.data = [
+        {
+            "device_id": "dev",
+            "accuracy": 20.0,
+            "last_seen": _now() - 60,
+            "is_own_report": False,
+        }
+    ]
+    coord._device_location_data = {"dev": {"device_type": 1}}
+    coord._present_last_seen = {}
+    threshold = DEFAULT_STALE_THRESHOLD
+
+    fresh = {
+        "latitude": FAR[0],
+        "longitude": FAR[1],
+        "accuracy": 1600.0,
+        "last_seen": _now() - 60,
+    }
+    coord._device_coarse_fix = {"dev": dict(fresh)}
     entry = coord.build_per_device_diagnostics()[0]
     assert entry["coarse_fix_accuracy_bucket"] == "500-2000"
+    assert entry["coarse_fix_age_s"] is not None
+
+    stale = dict(fresh, last_seen=_now() - threshold - 60)
+    coord._device_coarse_fix = {"dev": dict(stale)}
+    entry = coord.build_per_device_diagnostics()[0]
+    assert entry["coarse_fix_accuracy_bucket"] is None
     assert entry["coarse_fix_age_s"] is None
+    assert coord.get_coarse_fix("dev") is not None
+    assert coord.get_fresh_coarse_fix("dev") is None
 
 
 def test_diagnostics_omits_the_age_of_a_future_dated_stamp() -> None:
@@ -1668,8 +1718,12 @@ def test_diagnostics_omits_the_age_of_a_future_dated_stamp() -> None:
     }
 
     entry = coord.build_per_device_diagnostics()[0]
-    assert entry["coarse_fix_accuracy_bucket"] == "500-2000"
+    # A future-dated coarse fix is not shown at all, for the same reason the tracker
+    # hides it: a negative age is corruption, not freshness.
+    assert entry["coarse_fix_accuracy_bucket"] is None
     assert entry["coarse_fix_age_s"] is None
+    # The published row has no coarse-store counterpart to filter it, so this is where
+    # the wall-clock rule still has to hold on its own.
     assert entry["last_fix_age_s"] is None
 
 
@@ -2229,14 +2283,13 @@ async def test_the_tally_claim_survives_a_restart() -> None:
 
     coarse = {"latitude": 49.9, "longitude": 10.9, "accuracy": 1600.0}
     assert writer.claim_report_for_tally("dev", dict(coarse)) is True
-    # Through the ordinary stats writer, not the claim writer alone: the two halves have
-    # to leave together, or a claim written by hand in a test would prove nothing about
-    # what production persists.
+    # Through the ordinary stats writer: the two halves have to leave together, in ONE
+    # record. Written separately, a crash between the writes would leave a claim without
+    # its increment - silencing a measurement that was never recorded - or the inverse.
     await writer._async_save_stats()
-    assert "integration_stats" in writer._cache.store
-    assert writer._cache.store["accuracy_tally_claims"] == {
-        "dev": ["fix", 49.9, 10.9, 1600.0]
-    }
+    assert list(writer._cache.store) == ["integration_stats"], writer._cache.store
+    record = writer._cache.store["integration_stats"]
+    assert record["_tally_claims"] == {"dev": ["fix", 49.9, 10.9, 1600.0]}
 
     reader = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
     reader._device_location_data = {}
@@ -2272,7 +2325,8 @@ async def test_a_cache_written_before_claims_existed_loads_without_error() -> No
     coord._device_coarse_fix = {}
     coord._cache = _EmptyCache()
 
-    await coord._async_load_tally_claims()
+    coord.stats = {"background_updates": 0}
+    await coord._async_load_stats()
     assert getattr(coord, "_last_tallied_report_id", None) in (None, {})
     assert coord.claim_report_for_tally("dev", {"accuracy": 42.0}) is True
 
@@ -2291,9 +2345,12 @@ async def test_a_damaged_claim_entry_is_dropped_rather_than_trusted() -> None:
     class _BadCache:
         async def async_get_cached_value(self, key: str) -> Any:
             return {
-                "dev": ["fix", 49.9, 10.9, 1600.0],
-                "broken": "not-a-sequence",
-                7: [],
+                "background_updates": 3,
+                "_tally_claims": {
+                    "dev": ["fix", 49.9, 10.9, 1600.0],
+                    "broken": "not-a-sequence",
+                    7: [],
+                },
             }
 
     coord = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
@@ -2301,20 +2358,24 @@ async def test_a_damaged_claim_entry_is_dropped_rather_than_trusted() -> None:
     coord._device_coarse_fix = {}
     coord._cache = _BadCache()
 
-    await coord._async_load_tally_claims()
+    coord.stats = {"background_updates": 0}
+    await coord._async_load_stats()
     assert coord._last_tallied_report_id == {"dev": ("fix", 49.9, 10.9, 1600.0)}
+    # The counters in the same record still load: a damaged claim does not poison them.
+    assert coord.stats["background_updates"] == 3
 
     # And a stored map with nothing readable in it leaves the attribute untouched
     # rather than installing an empty one, which is the same end state.
     class _AllBadCache:
         async def async_get_cached_value(self, key: str) -> Any:
-            return {"broken": "not-a-sequence"}
+            return {"_tally_claims": {"broken": "not-a-sequence"}}
 
     fresh = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
     fresh._device_location_data = {}
     fresh._device_coarse_fix = {}
+    fresh.stats = {"background_updates": 0}
     fresh._cache = _AllBadCache()
-    await fresh._async_load_tally_claims()
+    await fresh._async_load_stats()
     assert getattr(fresh, "_last_tallied_report_id", None) in (None, {})
 
 

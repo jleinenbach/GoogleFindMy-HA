@@ -711,12 +711,40 @@ class CacheOperations(_MixinBase):
             )
 
     def get_coarse_fix(self, device_id: str) -> dict[str, Any] | None:
-        """Return the last fix the accuracy gate discarded, or ``None`` (#216)."""
+        """Return the last fix the accuracy gate discarded, or ``None`` (#216).
+
+        The raw store window, without a freshness rule: producers and tests need to see
+        what is actually retained. Readers that publish the fix want
+        :meth:`get_fresh_coarse_fix` instead.
+        """
         store = getattr(self, "_device_coarse_fix", None)
         if not store:
             return None
         row = store.get(device_id)
         return dict(row) if row is not None else None
+
+    def get_fresh_coarse_fix(self, device_id: str) -> dict[str, Any] | None:
+        """Return the retained coarse fix only while it is still worth showing.
+
+        Nothing removes a retained fix when time merely passes - the store is pruned
+        when a newer fix commits - so a rejection that is never followed by a better fix
+        stays readable forever. The device tracker knew that and hid it after
+        ``stale_threshold``; the diagnostics path did not, and kept exporting its bucket
+        and an ever-growing age for side information the integration otherwise treats as
+        expired.
+
+        One rule in one place, rather than at each reader: the same ``stale_threshold``
+        the gate and the tracker use, and a negative age counts as corrupt rather than
+        as extremely fresh. The tracker keeps its own check as a second line, because
+        reading a position is where the damage would show.
+        """
+        row = self.get_coarse_fix(device_id)
+        if row is None:
+            return None
+        age = location_age_seconds(row, time.time())
+        if age is None or age < 0 or age > resolve_stale_threshold(self):
+            return None
+        return row
 
     def prime_device_location_cache(self, device_id: str, data: dict[str, Any]) -> None:
         """Prime the internal location cache with externally-provided data.
