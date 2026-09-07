@@ -1,3 +1,4 @@
+# custom_components/googlefindmy/location_row_markers.py
 """Transient markers on a location row, and the one substitution that sets one.
 
 Why a top-level module rather than ``coordinator/helpers/cache.py``: the push
