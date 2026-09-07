@@ -1773,6 +1773,8 @@ class GoogleFindMyCoordinator(
         except Exception as err:
             _LOGGER.debug("Failed to load statistics from cache: %s", err)
 
+        await self._async_load_tally_claims()
+
         try:
             sound_request_uuids = await self._cache.async_get_cached_value(
                 "sound_request_uuids"
@@ -1844,6 +1846,29 @@ class GoogleFindMyCoordinator(
                 err,
             )
 
+    async def _async_load_tally_claims(self) -> None:
+        """Restore the per-device tally claim written by :meth:`_async_save_tally_claims`.
+
+        JSON has no tuples, so a stored identity comes back as a list and is turned
+        back into the tuple the comparison expects. A missing key means a cache written
+        before this existed: the map stays empty, which is exactly the old behaviour and
+        not an error.
+        """
+        try:
+            cached = await self._cache.async_get_cached_value("accuracy_tally_claims")
+        except Exception as err:
+            _LOGGER.debug("Failed to load tally claims from cache: %s", err)
+            return
+        if not isinstance(cached, dict):
+            return
+        restored: dict[str, tuple[Any, ...]] = {}
+        for device_id, identity in cached.items():
+            if isinstance(device_id, str) and isinstance(identity, (list, tuple)):
+                restored[device_id] = tuple(identity)
+        if restored:
+            self._last_tallied_report_id = restored
+            _LOGGER.debug("Restored %d tally claim(s) from cache", len(restored))
+
     async def _async_save_stats(self) -> None:
         """Persist statistics to entry-scoped cache."""
         try:
@@ -1852,6 +1877,32 @@ class GoogleFindMyCoordinator(
             )
         except Exception as err:
             _LOGGER.debug("Failed to save statistics to cache: %s", err)
+        await self._async_save_tally_claims()
+
+    async def _async_save_tally_claims(self) -> None:
+        """Persist the tally claim per device, alongside the histogram it protects.
+
+        The accuracy histogram survives a restart; the claim that keeps a report from
+        entering it twice used to live in memory only. The first poll or device-list
+        seed after a restart then returned a report that had already been counted, and
+        because entity-state restoration has not necessarily repopulated the published
+        cache yet, nothing else could recognise it either. Frequent restarts would make
+        the distribution measure restarts. Both halves of the same fact therefore
+        persist together; a stored value the loader cannot read is dropped, which puts
+        the pair back into the state it had before this existed.
+        """
+        claims = getattr(self, "_last_tallied_report_id", None) or {}
+        try:
+            await self._cache.async_set_cached_value(
+                "accuracy_tally_claims",
+                {
+                    device_id: list(identity)
+                    for device_id, identity in claims.items()
+                    if isinstance(device_id, str) and isinstance(identity, tuple)
+                },
+            )
+        except Exception as err:
+            _LOGGER.debug("Failed to save tally claims to cache: %s", err)
 
     async def _async_save_sound_uuids(self) -> None:
         """Persist Play Sound request UUIDs to entry-scoped cache.

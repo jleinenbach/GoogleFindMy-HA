@@ -32,6 +32,7 @@ months.
 
 from __future__ import annotations
 
+import json
 import time
 from typing import Any
 from unittest.mock import MagicMock
@@ -2147,6 +2148,127 @@ def test_a_retried_report_that_reaches_no_cache_is_counted_once() -> None:
     # count a fix is the worse of the two errors.
     assert coord.claim_report_for_tally("dev", {}) is True
     assert coord.claim_report_for_tally("dev", {}) is True
+
+
+async def test_the_tally_claim_survives_a_restart() -> None:
+    """The histogram outlives a restart, so the claim that protects it has to as well.
+
+    Otherwise the first poll or device-list seed after a restart returns a report that
+    was already counted, and entity-state restoration has not necessarily repopulated
+    the published cache yet, so nothing else recognises it either. Repeated restarts
+    would make the persisted distribution measure restarts.
+
+    Round-tripped through a cache double rather than asserted on the writer alone,
+    because the interesting part is that a JSON list comes back as the tuple the
+    comparison needs - identity is compared by equality, and a list never equals a
+    tuple.
+    """
+    from custom_components.googlefindmy.coordinator import GoogleFindMyCoordinator
+
+    class _Cache:
+        def __init__(self) -> None:
+            self.store: dict[str, Any] = {}
+
+        async def async_set_cached_value(self, key: str, value: Any) -> None:
+            # json round-trip, so tuples really do arrive back as lists
+            self.store[key] = json.loads(json.dumps(value))
+
+        async def async_get_cached_value(self, key: str) -> Any:
+            return self.store.get(key)
+
+    writer = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
+    writer._device_location_data = {}
+    writer._device_coarse_fix = {}
+    writer.stats = {}
+    writer._cache = _Cache()
+
+    coarse = {"latitude": 49.9, "longitude": 10.9, "accuracy": 1600.0}
+    assert writer.claim_report_for_tally("dev", dict(coarse)) is True
+    # Through the ordinary stats writer, not the claim writer alone: the two halves have
+    # to leave together, or a claim written by hand in a test would prove nothing about
+    # what production persists.
+    await writer._async_save_stats()
+    assert "integration_stats" in writer._cache.store
+    assert writer._cache.store["accuracy_tally_claims"] == {
+        "dev": ["fix", 49.9, 10.9, 1600.0]
+    }
+
+    reader = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
+    reader._device_location_data = {}
+    reader._device_coarse_fix = {}
+    reader.stats = {}
+    reader._cache = writer._cache
+    # Through the ordinary stats loader, for the same reason as the writer above: both
+    # halves have to come back together on the production path.
+    await reader._async_load_stats()
+
+    # The same report after the restart: recognised, not counted a second time.
+    assert reader.claim_report_for_tally("dev", dict(coarse)) is False
+    # A different one still gets through, so the restore does not simply block.
+    assert reader.claim_report_for_tally("dev", dict(coarse, accuracy=80.0)) is True
+
+
+async def test_a_cache_written_before_claims_existed_loads_without_error() -> None:
+    """No stored key means the old behaviour, not a failure.
+
+    Stated because the alternative - treating a missing key as a problem - would turn
+    every first start after the update into a logged error for a state that is simply
+    absent.
+    """
+    from custom_components.googlefindmy.coordinator import GoogleFindMyCoordinator
+
+    class _EmptyCache:
+        async def async_get_cached_value(self, key: str) -> Any:
+            return None
+
+    coord = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
+    coord._device_location_data = {}
+    coord._device_coarse_fix = {}
+    coord._cache = _EmptyCache()
+
+    await coord._async_load_tally_claims()
+    assert getattr(coord, "_last_tallied_report_id", None) in (None, {})
+    assert coord.claim_report_for_tally("dev", {"accuracy": 42.0}) is True
+
+
+async def test_a_damaged_claim_entry_is_dropped_rather_than_trusted() -> None:
+    """A stored shape the loader cannot read leaves the pair as it was before.
+
+    The claim and the histogram are two halves of one fact, so a half-read claim is
+    worse than none: it would silence a report that was never counted. Dropping the
+    entry restores the behaviour this feature had before it existed, which is a state
+    the rest of the code already handles.
+    """
+    from custom_components.googlefindmy.coordinator import GoogleFindMyCoordinator
+
+    class _BadCache:
+        async def async_get_cached_value(self, key: str) -> Any:
+            return {
+                "dev": ["fix", 49.9, 10.9, 1600.0],
+                "broken": "not-a-sequence",
+                7: [],
+            }
+
+    coord = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
+    coord._device_location_data = {}
+    coord._device_coarse_fix = {}
+    coord._cache = _BadCache()
+
+    await coord._async_load_tally_claims()
+    assert coord._last_tallied_report_id == {"dev": ("fix", 49.9, 10.9, 1600.0)}
+
+    # And a stored map with nothing readable in it leaves the attribute untouched
+    # rather than installing an empty one, which is the same end state.
+    class _AllBadCache:
+        async def async_get_cached_value(self, key: str) -> Any:
+            return {"broken": "not-a-sequence"}
+
+    fresh = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
+    fresh._device_location_data = {}
+    fresh._device_coarse_fix = {}
+    fresh._cache = _AllBadCache()
+    await fresh._async_load_tally_claims()
+    assert getattr(fresh, "_last_tallied_report_id", None) in (None, {})
 
 
 def test_every_counting_site_claims_the_report_first() -> None:

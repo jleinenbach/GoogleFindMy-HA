@@ -109,7 +109,16 @@ entry points, the `update_device_cache` fallback counts a device-list seed that 
 upstream has counted, and it was found one review round after the others. The set is
 therefore derived from the sources rather than listed here, by
 `tests/test_cache_accuracy_gate.py::test_every_counting_site_claims_the_report_first`, so
-a fifth site arrives red instead of arriving silently. Identity is the report timestamp where there is one; a
+a fifth site arrives red instead of arriving silently.
+
+The claim is persisted with the histogram it protects (`accuracy_tally_claims`, written
+and read beside `integration_stats`). Both are halves of one fact: the histogram survives
+a restart, so a claim that did not would let the first post-restart poll count a report
+for the second time - and entity-state restoration has not necessarily repopulated the
+published cache by then either, so nothing else would recognise it. A missing key is the
+state before this existed and is not an error; an entry the loader cannot read is dropped
+rather than half-trusted, because a half-read claim would silence a report that was never
+counted. Identity is the report timestamp where there is one; a
 payload with no parseable `last_seen` is keyed on its position and radius instead, because
 such a report is rejected by the gate, retained nowhere and therefore delivered again on
 every poll - counting it each time would make the persisted distribution measure retry
