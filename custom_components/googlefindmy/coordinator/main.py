@@ -930,6 +930,10 @@ class GoogleFindMyCoordinator(
         # carry this case. Collected only until the load finishes, then dropped.
         self._purged_before_stats_load: set[str] = set()
         self._stats_loaded: bool = False
+        # Set when a purge inside the load window needs the record rewritten. Deferred
+        # rather than written on the spot, because a write before the merge would
+        # persist live state that is still missing everything the load carries.
+        self._save_after_stats_load: bool = False
 
         # Load persistent statistics asynchronously (name the task for better debugging)
         self.hass.async_create_task(
@@ -1881,6 +1885,14 @@ class GoogleFindMyCoordinator(
             purged = getattr(self, "_purged_before_stats_load", None)
             if purged is not None:
                 purged.clear()
+            if getattr(self, "_save_after_stats_load", False):
+                # A purge landed inside the window and deferred its write to here,
+                # where live state finally carries the merged record. Immediate rather
+                # than debounced, for the reason the purge path states: a reload or
+                # shutdown inside the debounce window cancels a pending write without
+                # flushing it.
+                self._save_after_stats_load = False
+                self.hass.async_create_task(self._async_save_stats())
 
         try:
             sound_request_uuids = await self._cache.async_get_cached_value(
@@ -2347,16 +2359,19 @@ class GoogleFindMyCoordinator(
                 noted = True
         claims = getattr(self, "_last_tallied_report_id", None)
         popped = claims is not None and claims.pop(device_id, None) is not None
-        if popped or noted:
+        if noted:
+            # Inside the load window the durable half must be corrected too - the claim
+            # is not in memory yet, so the pop finds nothing while the STORED record
+            # still lists the device. But NOT by writing now: ``_async_save_stats``
+            # serialises the whole record from live state, and live state is currently
+            # missing everything the load has not merged yet, so a write here would
+            # replace the persisted totals and every sibling ring with the pre-load
+            # values. The load's ``finally`` performs it instead, after the merge.
+            self._save_after_stats_load = True
+        elif popped:
             # Written now, not on the debounce: a reload or shutdown inside the debounce
             # window cancels the pending write without flushing it, and the purged
             # device's claim would then outlive the device it was deleted with.
-            #
-            # ``noted`` matters on its own: inside the load window the claim is by
-            # definition not in memory yet, so the pop finds nothing while the STORED
-            # record still lists the device. Without this the durable half would stay
-            # stale until some later ordinary write, and a hard kill before that would
-            # bring the deleted device's ring back on the next start.
             self.hass.async_create_task(self._async_save_stats())
         # Device-id-keyed timing caches follow the same lifecycle; drop them so a
         # re-added device with the same id starts with clean poll-interval state.

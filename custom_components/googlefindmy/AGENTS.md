@@ -192,10 +192,14 @@ the load finishes and `_restore_tally_claims` skips it. Remembered UNCONDITIONAL
 only when the in-memory pop found something: the claim may not have been loaded yet, which
 is exactly the case the pop cannot see. The set is cleared in the load's `finally`, so a
 failed read closes the window too, and from there on the purge's own pop is the whole
-mechanism. Inside the window the purge ALSO has to trigger the immediate save, which
-otherwise hangs on the pop having found something: it has not, by definition, while the
-stored record still lists the device, so the durable half would stay stale until some later
-ordinary write and a hard kill before that would bring the deleted ring back on restart. Pinned by `::test_a_purge_during_the_load_survives_the_merge` (which also
+mechanism. Inside the window the durable half has to be corrected too - the pop finds
+nothing there by definition, while the stored record still lists the device - but NOT by
+writing on the spot. `_async_save_stats` serialises the WHOLE record from live state, and
+live state is missing everything the load has not merged yet, so a write inside the window
+would replace the persisted totals and every sibling ring with pre-load values. The
+correction is therefore deferred to the load's `finally`, where live state finally carries
+the merged record, and it holds even when the pop DID find a live claim, which a push can
+create before the load resumes (`::test_a_live_claim_inside_the_window_still_defers_the_write`). Pinned by `::test_a_purge_during_the_load_survives_the_merge` (which also
 asserts that a sibling device's ring is NOT dropped) and
 `::test_a_purge_after_the_load_is_carried_by_the_pop_alone`.
 

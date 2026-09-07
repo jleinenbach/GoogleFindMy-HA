@@ -3299,10 +3299,11 @@ def test_a_purge_during_the_load_survives_the_merge() -> None:
         "its first matching measurement suppressed by a claim from its previous life"
     )
     assert "dev-stays" in claims, "the purge must not discard the whole generation"
-    # The durable half too: inside this window the claim is not in memory yet, so the
-    # purge's own pop finds nothing while the STORED record still lists the device. A
-    # hard kill before the next ordinary write would bring the ring back on restart.
-    assert coord.scheduled_saves, "the purge must persist the removal immediately"
+    # The durable half is corrected too, but DEFERRED: writing here would serialise
+    # live state that is still missing everything the load has not merged, replacing
+    # the persisted totals and every sibling ring with pre-load values.
+    assert not coord.scheduled_saves, "no write may happen before the merge"
+    assert coord._save_after_stats_load, "the correction must be booked for after it"
 
 
 def test_a_purge_after_the_load_is_carried_by_the_pop_alone() -> None:
@@ -3325,6 +3326,26 @@ def test_a_purge_after_the_load_is_carried_by_the_pop_alone() -> None:
     assert "dev-gone" in (getattr(coord, "_last_tallied_report_id", None) or {}), (
         "outside the window the skip must not fire; it would drop a legitimate ring"
     )
+
+
+def test_a_live_claim_inside_the_window_still_defers_the_write() -> None:
+    """The window wins over the pop, even when the pop has something to remove.
+
+    A push can create a live claim before the load resumes. The pop then finds
+    it and would take the immediate-write branch - but the record is still
+    written from live state, which is missing everything the load has not merged
+    yet, so the deferral has to hold for this case too.
+    """
+    coord = _purgeable_coord()
+    coord._last_tallied_report_id = {"dev-gone": [("ts-a", 1.0)]}
+
+    coord.purge_device("dev-gone")
+
+    assert "dev-gone" not in coord._last_tallied_report_id, "the pop must still run"
+    assert not coord.scheduled_saves, (
+        "the pop having something to remove does not make a write before the merge safe"
+    )
+    assert coord._save_after_stats_load
 
 
 @pytest.mark.asyncio
@@ -3360,3 +3381,6 @@ async def test_the_load_itself_opens_and_closes_the_purge_window() -> None:
     assert "dev-stays" in claims
     assert coord._stats_loaded is True, "the window must close when the load ends"
     assert not coord._purged_before_stats_load, "and the bookkeeping must be dropped"
+    # The deferred correction runs here, where live state carries the merged record.
+    assert coord.scheduled_saves, "the deferred write must fire after the merge"
+    assert not coord._save_after_stats_load, "and must not fire a second time"
