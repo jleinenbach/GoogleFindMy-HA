@@ -2094,6 +2094,12 @@ async def test_manual_locate_does_not_count_a_replay() -> None:
         },
     )
     coordinator._device_location_data["device-1"] = {"last_seen": stamp}
+    # The report was already tallied once. Seeded through the real claim rather than by
+    # setting the cache row alone: a stored row proves a report was seen, not that a
+    # bucket was counted for it, and the replay predicate now asks the latter.
+    assert coordinator.claim_report_for_tally(
+        "device-1", {"accuracy": 25.0, "last_seen": stamp}
+    )
 
     counted: list[object] = []
     coordinator.count_accuracy_class = lambda row: counted.append(row.get("accuracy"))
