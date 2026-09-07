@@ -1186,14 +1186,20 @@ class GoogleFindMyCoordinator(
         # an unload can outrun that task. Its removal would then exist only in memory
         # that is about to go away, the deleted device's claim would survive in the
         # persisted record, and a device re-added under the same id would have its first
-        # matching measurement suppressed by a claim from its previous life. Writing here
-        # persists the purged state whichever of the two writes gets there first.
+        # matching measurement suppressed by a claim from its previous life.
         #
-        # Cancel first, so the coroutine stops waiting out its sleep, then write once
-        # here. `_debounced_save_stats` swallows the cancellation and returns, so the
-        # await settles it; if the task was already past the sleep and inside the write,
-        # the repeated write is the same record and costs nothing. Failures are
-        # swallowed like the other shutdown steps: an unload must not raise.
+        # The write is therefore UNCONDITIONAL. Gating it on a pending debounced task was
+        # the first attempt and it missed exactly the case that matters most: the purge
+        # writes through a task this attribute never holds, so when only that one is in
+        # flight there is nothing here to find and the whole block was skipped. A
+        # condition that cannot see the more important of the two writers is not a
+        # condition, and the cost of dropping it is one write per unload.
+        #
+        # The pending task is still cancelled first, so its coroutine stops waiting out
+        # its sleep. `_debounced_save_stats` swallows the cancellation and returns, so
+        # the await settles it; if it was already past the sleep and inside the write,
+        # the repeated write is the same record and costs nothing. Failures are swallowed
+        # like the other shutdown steps: an unload must not raise.
         stats_save_task = getattr(self, "_stats_save_task", None)
         if stats_save_task and not stats_save_task.done():
             stats_save_task.cancel()
@@ -1201,11 +1207,11 @@ class GoogleFindMyCoordinator(
                 await stats_save_task
             except (asyncio.CancelledError, Exception):
                 pass
-            try:
-                await self._async_save_stats()
-            except Exception:
-                pass
         self._stats_save_task = None
+        try:
+            await self._async_save_stats()
+        except Exception:
+            pass
 
         # Cancel pending EID-resolver refresh debounce timers so no
         # ``call_later`` callback fires (and creates a task) after unload.

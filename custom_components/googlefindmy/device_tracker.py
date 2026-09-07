@@ -1501,17 +1501,21 @@ class GoogleFindMyDeviceTracker(GoogleFindMyDeviceEntity, TrackerEntity, Restore
         # It is kept rather than dropped because a coarse fix still names the
         # city, and without any fix we would not even know that. Read from the
         # coordinator (single writer, in the fusion), never written here.
+        #
+        # Read through ``get_fresh_coarse_fix``, which is the accessor the contract
+        # reserves for publishers; ``get_coarse_fix`` is the raw window for producers
+        # and tests. Calling the raw one and repeating the age rule here made this
+        # entity a second owner of that policy, and two owners of one rule drift.
         coarse = None
-        get_coarse = getattr(self.coordinator, "get_coarse_fix", None)
+        get_coarse = getattr(self.coordinator, "get_fresh_coarse_fix", None)
         if callable(get_coarse):
             coarse = get_coarse(self.device_id)
         if coarse:
-            # Expire it by the SAME rule the gate itself uses. Without this the
-            # coarse fix would outlive every later good fix and keep naming a
-            # city from hours ago - the round-trip anchor next door has a TTL and
-            # the last-good fix has a retention predicate, so an unbounded third
-            # store would be the odd one out. No second time constant: the shared
-            # ``stale_threshold`` option decides here as well.
+            # The SECOND LINE, not the rule. The accessor above already applies the
+            # shared ``stale_threshold`` and already treats a negative age as corrupt;
+            # this repeats it because reading a position is where the damage would show,
+            # and because a coordinator double without the accessor would otherwise
+            # publish an unchecked fix. It must stay identical to the rule it echoes.
             coarse_age = location_age_seconds(coarse, time.time())
             threshold = resolve_stale_threshold(self.coordinator)
             # A NEGATIVE age means the stamp lies in the future, i.e. it is

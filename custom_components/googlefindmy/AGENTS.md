@@ -151,13 +151,18 @@ careful not to keep. And the claim is dropped in `purge_device` along with the o
 device-keyed caches, with a persist scheduled - otherwise a deleted device keeps an
 entry indefinitely, and one re-added under the same id has its first matching
 measurement suppressed by a claim from its previous life. That write is immediate rather
-than debounced, but it is a task nobody awaits, so `async_shutdown` FLUSHES the pending
-stats write instead of merely cancelling it. Two things ride on that: the increments the
-debounce window was still coalescing, and the purge itself, whose own task an unload can
-outrun. The failure would surface much later, when the id came back. Pinned by
+than debounced, but it is a task nobody awaits, so `async_shutdown` also writes the stats
+record on the way out. It does so UNCONDITIONALLY, and that word is the whole point:
+gating the write on a pending debounced task skipped exactly the case it exists for,
+because the purge writes through a task `_stats_save_task` never holds. A condition that
+cannot see the more important of the two writers is not a condition. Two things ride on
+the write: the increments the debounce window was still coalescing, and the purge itself,
+whose own task an unload can outrun. The failure would surface much later, when the id
+came back. Pinned by
 `tests/test_cache_accuracy_gate.py::test_shutdown_writes_the_pending_stats_instead_of_dropping_them`,
-which uses a real pending task: a stub that only counts `cancel` calls stays green with
-the flush deleted.
+which uses a real pending task because a stub that only counts `cancel` calls stays green
+with the flush deleted, and by `::test_shutdown_writes_even_when_no_debounced_task_is_pending`,
+which is the one that discriminates the unconditional form from the gated one.
 
 A retained coarse fix is read for publication through `get_fresh_coarse_fix`, never
 through `get_coarse_fix`. Nothing removes a retained fix when time merely passes - the

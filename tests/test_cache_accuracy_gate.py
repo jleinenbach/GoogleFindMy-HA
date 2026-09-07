@@ -623,6 +623,13 @@ def _tracker_entity(coarse: dict[str, Any] | None, display: dict[str, Any]):
         get_coarse_fix=lambda dev: dict(coarse) if coarse else None,
         get_display_location_data_for_subentry=lambda key, dev: display,
     )
+    # The publisher reads through the freshness accessor, so the double carries the REAL
+    # one bound to itself rather than a stand-in. A stand-in here would test the entity
+    # against a policy this file invented, and the point of moving the rule into the
+    # coordinator was to stop having two owners of it.
+    coordinator.get_fresh_coarse_fix = lambda dev: CacheOperations.get_fresh_coarse_fix(
+        coordinator, dev
+    )
     entity = dt.GoogleFindMyDeviceTracker.__new__(dt.GoogleFindMyDeviceTracker)
     entity.coordinator = coordinator
     # ``device_id`` and ``subentry_key`` are read-only properties backed by
@@ -637,6 +644,50 @@ def _tracker_entity(coarse: dict[str, Any] | None, display: dict[str, Any]):
     entity._attr_name = "Tracker"
     dt.GoogleFindMyDeviceTracker._sync_location_attrs(entity)
     return entity
+
+
+def test_the_publisher_reads_through_the_freshness_accessor() -> None:
+    """The entity asks for the FRESH fix, not for the raw window.
+
+    The scoped contract reserves ``get_coarse_fix`` for producers and tests and gives
+    publishers ``get_fresh_coarse_fix``; calling the raw one and repeating the age rule
+    locally made this entity a second owner of that rule. Pinned by absence, because that
+    is the only shape that discriminates: a coordinator that offers ONLY the raw accessor
+    must publish nothing. Reverting to the raw call turns this red, while an assertion
+    about published values would stay green either way.
+    """
+    from types import SimpleNamespace
+
+    from custom_components.googlefindmy import device_tracker as dt
+
+    fresh = {
+        "latitude": 49.9,
+        "longitude": 10.9,
+        "accuracy": 1600.0,
+        "last_seen": time.time(),
+    }
+    display = {"latitude": 49.0, "longitude": 10.0, "accuracy": 20.0}
+    coordinator = SimpleNamespace(
+        config_entry=make_config_entry(entry_id="raw-only", data={}, options={}),
+        get_coarse_fix=lambda dev: dict(fresh),
+        get_display_location_data_for_subentry=lambda key, dev: display,
+    )
+    entity = dt.GoogleFindMyDeviceTracker.__new__(dt.GoogleFindMyDeviceTracker)
+    entity.coordinator = coordinator
+    entity._device = {"id": "dev", "name": "Tracker"}
+    entity._subentry_key = "core_tracking"
+    entity._attr_extra_state_attributes = {}
+    entity._select_display_row = lambda: display
+    entity._is_location_stale = lambda: False
+    entity._get_location_age = lambda row=None: 60.0
+    entity._get_location_status = lambda row=None: "Online"
+    entity._attr_name = "Tracker"
+    dt.GoogleFindMyDeviceTracker._sync_location_attrs(entity)
+
+    published = entity._attr_extra_state_attributes
+    assert "coarse_latitude" not in published
+    assert "coarse_longitude" not in published
+    assert "coarse_accuracy" not in published
 
 
 def test_coarse_fix_surfaces_as_side_information() -> None:
@@ -2507,6 +2558,43 @@ async def test_shutdown_writes_the_pending_stats_instead_of_dropping_them() -> N
 
     assert written == [1], "the pending record must be written exactly once"
     assert coord._stats_save_task is None
+
+
+@pytest.mark.asyncio
+async def test_shutdown_writes_even_when_no_debounced_task_is_pending() -> None:
+    """The write that matters most is not the one this attribute holds.
+
+    `purge_device` writes through a task of its own, which `_stats_save_task` never
+    carries. Gating the shutdown flush on a pending debounced task therefore skipped
+    exactly the case the flush exists for: only the purge write in flight, nothing in the
+    slot, the whole block passed over. The flush is unconditional for that reason, and
+    this is the case that says so - the sibling test above keeps passing under the
+    conditional version.
+    """
+    from custom_components.googlefindmy.coordinator import GoogleFindMyCoordinator
+
+    coord = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
+    written: list[int] = []
+
+    async def _record() -> None:
+        written.append(1)
+
+    coord._async_save_stats = _record  # type: ignore[method-assign]
+    coord._stats_save_task = None
+    coord._cancel_pending_subentry_repair = lambda: None  # type: ignore[method-assign]
+    coord._dr_unsub = None
+    coord._short_retry_cancel = None
+    coord._eid_refresh_debounce_handle = None
+    coord._eid_inline_refresh_debounce_handle = None
+
+    async def _unload() -> None:
+        return None
+
+    coord._async_unload = _unload  # type: ignore[method-assign]
+
+    await coord.async_shutdown()
+
+    assert written == [1], "an unload writes the record even with nothing in the slot"
 
 
 def test_the_ring_limit_is_the_same_number_on_both_sides() -> None:
