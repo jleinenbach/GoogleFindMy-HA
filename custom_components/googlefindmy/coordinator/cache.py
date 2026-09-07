@@ -684,6 +684,43 @@ class CacheOperations(_MixinBase):
         tallied[device_id] = ring[-_TALLY_MEMORY:]
         return True
 
+    def clear_tally_claims(self) -> None:
+        """Forget every claimed report identity, for all devices.
+
+        Called when the accuracy histogram is reset. The claims and the
+        histogram are two halves of one statement - "this report has already
+        been counted" - and they are persisted in one record, so zeroing the
+        counters without clearing the claims leaves a state that says nothing
+        was counted and simultaneously refuses to count the reports that would
+        refill it. A delivery whose identity is still in the ring is treated as
+        a replay, so the reset distribution would stay empty for exactly the
+        devices that were most active before it.
+
+        Bounded, so bounded is the damage: the ring holds ``_TALLY_MEMORY``
+        identities per device, and only an IDENTICAL identity is suppressed. A
+        report with a new timestamp was never affected; what a reset without
+        this loses is at most ``_TALLY_MEMORY`` already-claimed re-deliveries
+        per device.
+
+        A reset starts a new epoch, it does not draw a wall-clock boundary: a
+        report that was counted into the previous histogram and is delivered
+        again afterwards is counted into the new one. That is the intended
+        reading of "reset", and it is the same report the claim was protecting.
+
+        Kept here rather than in the caller because ``_last_tallied_report_id``
+        is written in this module only; a second file naming it would drift the
+        moment the store changes shape (it already changed once, from a single
+        value per device to a bounded ring).
+        """
+        tallied = getattr(self, "_last_tallied_report_id", None)
+        # isinstance rather than the `or {}` / `is None` reads the neighbours use
+        # (``is_replayed_report`` above, ``_async_save_stats`` and ``purge_device`` in
+        # main.py): theirs degrade to a no-op on an unexpected shape, whereas ``.clear()``
+        # would raise into the caller's swallowing except and the reset would stop
+        # clearing in silence. Different obligation, so deliberately a different read.
+        if isinstance(tallied, dict):
+            tallied.clear()
+
     def _expire_coarse_fix(self, device_id: str, committed: Mapping[str, Any]) -> None:
         """Drop a retained coarse fix that the just-committed row supersedes.
 

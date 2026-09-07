@@ -3024,3 +3024,129 @@ def test_the_poll_fallback_write_strips_every_transient_marker(
     assert cached["accuracy"] == 400.0, "the fallback must have written the row"
     leaked = [key for key in cached if key.startswith("_")]
     assert not leaked, f"transient markers reached the cached row: {leaked}"
+
+
+# ------------------- resetting the histogram also forgets the claims (#216)
+
+# The claims and the histogram are two halves of one statement ("this report has
+# already been counted") and they are persisted in ONE record, so a reset has to
+# empty both. The full argument, including the bound on the damage and the epoch
+# semantics, lives once in ``CacheOperations.clear_tally_claims``; this block only
+# says what these tests measure.
+
+
+def _claiming_coord() -> Any:
+    """A coordinator that runs the real claim path.
+
+    Same shape as ``test_a_report_with_no_countable_accuracy_is_never_claimed``
+    above, including the empty coarse store: the claim path does not read it
+    today (``is_replayed_report`` deliberately narrowed to the claim ring), but
+    the two helpers are seeded alike so a future widening does not make one of
+    them behave differently for a reason nobody wrote down.
+    """
+    from custom_components.googlefindmy.coordinator import GoogleFindMyCoordinator
+
+    coord = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
+    coord._device_location_data = {}
+    coord._device_coarse_fix = {}
+    return coord
+
+
+def test_clearing_the_claims_lets_a_known_report_count_again() -> None:
+    """The behaviour, not the container: a claimed report is claimable again."""
+    coord = _claiming_coord()
+    report = {"last_seen": _now(), "accuracy": 30.0}
+
+    assert coord.claim_report_for_tally("dev", dict(report)) is True
+    assert coord.claim_report_for_tally("dev", dict(report)) is False, (
+        "precondition: the second delivery of the same report is a replay"
+    )
+
+    coord.clear_tally_claims()
+
+    assert coord.claim_report_for_tally("dev", dict(report)) is True
+
+
+def test_clearing_the_claims_survives_an_untouched_store() -> None:
+    """The store is created lazily, so clearing before the first claim is legal."""
+    coord = _claiming_coord()
+
+    coord.clear_tally_claims()  # must not raise
+
+    assert getattr(coord, "_last_tallied_report_id", None) in (None, {})
+
+
+@pytest.mark.asyncio
+async def test_the_reset_button_leaves_the_writer_nothing_to_carry_over(
+    issue_registry_capture: Any,
+) -> None:
+    """The record the debounced writer produces, not the order of two calls.
+
+    The first version of this test asserted that the button clears the claims
+    BEFORE it schedules the persist. That is not an invariant: the schedule only
+    creates a task whose first statement is a five-second sleep, and
+    ``_async_save_stats`` reads ``stats`` and ``_last_tallied_report_id`` live at
+    write time. Swapping the two calls persists a byte-identical record, so the
+    assertion pinned a source order rather than a behaviour, and a harmless
+    refactor would have failed it while telling the author the failure was real.
+
+    What IS the invariant: by the time the writer runs, both halves of the record
+    are reset together. So this drives the real button and then the real writer,
+    and reads what was handed to the cache.
+
+    It also ties the button's string lookup to the production method: the
+    coordinator here is a real ``GoogleFindMyCoordinator``, so renaming
+    ``clear_tally_claims`` makes ``getattr`` return ``None``, the button skips
+    the call silently, and this test goes red - which no unit test on the method
+    itself would do.
+    """
+    from types import SimpleNamespace
+
+    from custom_components.googlefindmy.button import GoogleFindMyStatsResetButton
+    from custom_components.googlefindmy.const import DOMAIN, SERVICE_SUBENTRY_KEY
+    from custom_components.googlefindmy.coordinator.main import TALLY_CLAIMS_KEY
+
+    written: dict[str, Any] = {}
+
+    async def _capture(key: str, value: Any) -> None:
+        written[key] = value
+
+    bucket = ACCURACY_BUCKET_STATS["<10"]
+    hass = SimpleNamespace(data={DOMAIN: {}})
+    coord = _claiming_coord()
+    coord.hass = hass
+    coord.config_entry = make_config_entry(entry_id="reset-entry")
+    coord.stats = {bucket: 7}
+    coord._diag = None
+    coord._cache = SimpleNamespace(async_set_cached_value=_capture)
+    coord._schedule_stats_persist = MagicMock()
+    coord.async_update_listeners = MagicMock()
+
+    # A real claim, made through the real path, so there is something to lose.
+    assert coord.claim_report_for_tally("dev", {"last_seen": _now(), "accuracy": 30.0})
+    assert coord._last_tallied_report_id, "precondition: a claim exists"
+
+    button = GoogleFindMyStatsResetButton(
+        coord,
+        subentry_key=SERVICE_SUBENTRY_KEY,
+        subentry_identifier=f"{SERVICE_SUBENTRY_KEY}:service",
+    )
+    button.hass = hass
+    # Stubbed because it writes entity state, which needs a registered platform;
+    # the issue-registry sweep is neutralised by the shared fixture, whose managed
+    # teardown is why this test does not patch that module by hand.
+    button._update_last_pressed = lambda: None
+
+    await button.async_press()
+
+    assert coord._schedule_stats_persist.called, "precondition: a write was scheduled"
+
+    # Now run the writer the schedule stands for.
+    await coord._async_save_stats()
+
+    record = written["integration_stats"]
+    assert record[bucket] == 0
+    assert record[TALLY_CLAIMS_KEY] == {}, (
+        "the writer carried claims into a zeroed histogram; every delivery still "
+        "in a ring would read as a replay and not refill the distribution"
+    )

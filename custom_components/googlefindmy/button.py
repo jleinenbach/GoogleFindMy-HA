@@ -950,6 +950,20 @@ class GoogleFindMyStatsResetButton(GoogleFindMyEntity, ButtonEntity, RestoreEnti
                     "Stats reset: failed to delete issue %s: %s", issue_id, err
                 )
 
+        # The claims and the histogram are two halves of one statement and travel in
+        # one record, so both have to be reset before the debounced writer runs. Source
+        # order against the schedule below does NOT matter: the schedule only creates a
+        # task that sleeps first, and the writer reads both halves live.
+        clear_claims = getattr(self.coordinator, "clear_tally_claims", None)
+        if callable(clear_claims):
+            try:
+                clear_claims()
+            except Exception as err:  # pragma: no cover - defensive logging
+                # WARNING, unlike the DEBUG of the neighbours below: their failure is
+                # benign, this one produces exactly the state the reset forbids, a
+                # zeroed histogram persisted beside live claims. It must not be silent.
+                _LOGGER.warning("Stats reset: failed to clear tally claims: %s", err)
+
         schedule_persist = getattr(self.coordinator, "_schedule_stats_persist", None)
         if callable(schedule_persist):
             try:

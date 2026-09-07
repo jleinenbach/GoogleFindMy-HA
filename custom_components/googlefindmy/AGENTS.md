@@ -144,7 +144,31 @@ state the pair must never reach. A purge writes immediately rather than on the d
 because a reload or shutdown inside that window cancels the pending write without
 flushing it.
 
-Two properties of that stored value are load-bearing. The identity of a report with no
+Because the claim and the histogram are two halves of one fact, they also END together. The Reset Statistics
+button clears the claims through `clear_tally_claims()`, so that by the time the debounced
+writer runs, both halves are reset. Zeroing the counters alone would store a record that
+says nothing was counted and at the same time refuses to count some of the reports that
+would refill it: a delivery whose identity is still in a ring reads as a replay. The size
+of that hole is bounded and worth stating so it is not over-diagnosed later - at most
+`_TALLY_MEMORY` already-claimed re-deliveries per device, since a report with a new
+identity was never suppressed.
+
+What is NOT required is a source order against `_schedule_stats_persist()`. That call
+cancels any pending writer and schedules a task whose first statement is a sleep of
+`_stats_debounce_seconds` (5 s today), and `_async_save_stats` reads `self.stats` and
+`_last_tallied_report_id` live at write time. `async_press` has no `await` between the two
+calls at all, so the loop cannot interleave and swapping them persists a byte-identical
+record. The invariant is about the state the WRITER sees, and it
+is pinned that way, by
+`tests/test_cache_accuracy_gate.py::test_the_reset_button_leaves_the_writer_nothing_to_carry_over`:
+it drives the real button and then the real writer and reads the record handed to the
+cache. Any future operation that empties the histogram carries the same obligation.
+
+A reset starts a new epoch; it does not draw a wall-clock boundary. A report counted into
+the previous histogram and delivered again afterwards is counted into the new one - which
+is the point, because it is exactly the report the cleared claim was protecting.
+
+Two properties of the persisted claim identity are load-bearing. The identity of a report with no
 timestamp is a **digest** of its position and radius, never the values themselves: this
 record is durable, and a position in durable state is the one thing this feature is
 careful not to keep. And the claim is dropped in `purge_device` along with the other
