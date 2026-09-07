@@ -124,6 +124,14 @@ known counters into `stats`, so the sub-key cannot become a phantom counter. A m
 sub-key is the state before this existed and is not an error; an entry the loader cannot
 read is dropped rather than half-trusted.
 
+Two properties of that stored value are load-bearing. The identity of a report with no
+timestamp is a **digest** of its position and radius, never the values themselves: this
+record is durable, and a position in durable state is the one thing this feature is
+careful not to keep. And the claim is dropped in `purge_device` along with the other
+device-keyed caches, with a persist scheduled - otherwise a deleted device keeps an
+entry indefinitely, and one re-added under the same id has its first matching
+measurement suppressed by a claim from its previous life.
+
 A retained coarse fix is read for publication through `get_fresh_coarse_fix`, never
 through `get_coarse_fix`. Nothing removes a retained fix when time merely passes - the
 store is pruned when a newer fix commits - so a rejection never followed by a better fix

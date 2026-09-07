@@ -2289,7 +2289,14 @@ async def test_the_tally_claim_survives_a_restart() -> None:
     await writer._async_save_stats()
     assert list(writer._cache.store) == ["integration_stats"], writer._cache.store
     record = writer._cache.store["integration_stats"]
-    assert record["_tally_claims"] == {"dev": ["fix", 49.9, 10.9, 1600.0]}
+    # The persisted identity of a stampless report is a digest, not the position it was
+    # built from: this record is durable, and a position in a durable store is what the
+    # rest of this feature is careful not to keep. Checked by shape rather than by
+    # value, so the digest function can change without rewriting the test.
+    stored = record["_tally_claims"]["dev"]
+    assert stored[0] == "fix" and len(stored) == 2
+    assert isinstance(stored[1], str) and len(stored[1]) == 16
+    assert "49.9" not in json.dumps(record)
 
     reader = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
     reader._device_location_data = {}
@@ -2347,7 +2354,7 @@ async def test_a_damaged_claim_entry_is_dropped_rather_than_trusted() -> None:
             return {
                 "background_updates": 3,
                 "_tally_claims": {
-                    "dev": ["fix", 49.9, 10.9, 1600.0],
+                    "dev": ["fix", "0123456789abcdef"],
                     "broken": "not-a-sequence",
                     7: [],
                 },
@@ -2360,7 +2367,7 @@ async def test_a_damaged_claim_entry_is_dropped_rather_than_trusted() -> None:
 
     coord.stats = {"background_updates": 0}
     await coord._async_load_stats()
-    assert coord._last_tallied_report_id == {"dev": ("fix", 49.9, 10.9, 1600.0)}
+    assert coord._last_tallied_report_id == {"dev": ("fix", "0123456789abcdef")}
     # The counters in the same record still load: a damaged claim does not poison them.
     assert coord.stats["background_updates"] == 3
 

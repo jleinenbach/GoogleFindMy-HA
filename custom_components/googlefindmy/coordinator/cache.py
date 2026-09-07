@@ -16,6 +16,7 @@ Methods moved here:
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import math
 import time
@@ -425,7 +426,13 @@ def _tally_identity(row: Mapping[str, Any]) -> tuple[Any, ...] | None:
     )
     if all(value is None for value in fix):
         return None
-    return ("fix", *fix)
+    # Digest rather than the values: this identity is persisted, and a position in a
+    # durable store is exactly what the rest of this feature is careful not to keep.
+    # Equality is all the comparison needs, so the coordinates never have to leave the
+    # process. blake2s with an 8-byte digest, because this guards against repetition,
+    # not against an adversary.
+    digest = hashlib.blake2s(repr(fix).encode("utf-8"), digest_size=8).hexdigest()
+    return ("fix", digest)
 
 
 class CacheOperations(_MixinBase):

@@ -926,6 +926,45 @@ def test_purge_device_removes_and_republishes() -> None:
     assert "dev" not in c._device_location_data
 
 
+def test_purge_device_drops_the_persisted_tally_claim() -> None:
+    """A persisted, device-keyed value follows the device's lifecycle.
+
+    Two consequences if it does not, and the first is the serious one. The claim of a
+    report without a timestamp is derived from that report's position and is written to
+    a durable store, so a deleted or ignored device would leave a trace of where it was,
+    indefinitely - the one thing the rest of this feature keeps out of durable state.
+    The second: a device re-added under the same id would have its first matching
+    measurement suppressed by a claim from its previous life.
+
+    A persist is scheduled, because dropping it only in memory would restore it on the
+    next start.
+    """
+    c = _bare()
+    _purge_ready(c)
+    scheduled: list[bool] = []
+    c._schedule_stats_persist = lambda: scheduled.append(True)
+    c._last_tallied_report_id = {"dev": ("fix", "deadbeefdeadbeef"), "other": ("ts", 7)}
+
+    c.purge_device("dev")
+
+    assert c._last_tallied_report_id == {"other": ("ts", 7)}
+    assert scheduled == [True]
+
+
+def test_purge_device_without_a_claim_schedules_no_write() -> None:
+    """No claim, no write: a purge must not churn the store for nothing."""
+    c = _bare()
+    _purge_ready(c)
+    scheduled: list[bool] = []
+    c._schedule_stats_persist = lambda: scheduled.append(True)
+    c._last_tallied_report_id = {"other": ("ts", 7)}
+
+    c.purge_device("dev")
+
+    assert c._last_tallied_report_id == {"other": ("ts", 7)}
+    assert scheduled == []
+
+
 def test_purge_device_saves_sound_uuids_when_present() -> None:
     c = _bare()
     _purge_ready(c)

@@ -2195,6 +2195,13 @@ class GoogleFindMyCoordinator(
         coarse_store = getattr(self, "_device_coarse_fix", None)
         if coarse_store is not None:
             coarse_store.pop(device_id, None)
+        # The tally claim is keyed by device id and is PERSISTED, so it outlives the
+        # purge unless it is dropped here: a deleted device would keep an entry in the
+        # store indefinitely, and one re-added under the same id would have its first
+        # matching measurement suppressed by a claim from its previous life.
+        claims = getattr(self, "_last_tallied_report_id", None)
+        if claims is not None and claims.pop(device_id, None) is not None:
+            self._schedule_stats_persist()
         # Device-id-keyed timing caches follow the same lifecycle; drop them so a
         # re-added device with the same id starts with clean poll-interval state.
         self._device_update_history.pop(device_id, None)
