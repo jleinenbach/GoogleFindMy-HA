@@ -1632,6 +1632,46 @@ def test_diagnostics_omits_the_coarse_age_when_the_stamp_is_unusable() -> None:
     assert entry["coarse_fix_age_s"] is None
 
 
+def test_diagnostics_omits_the_age_of_a_future_dated_stamp() -> None:
+    """A stamp in the future has no age, and reporting ``0`` would invent one.
+
+    Intake accepts a drift of two hours, so a future-dated stamp really does reach both
+    the snapshot and the coarse store. The device tracker already hides a coarse fix
+    whose age is negative; clamping the same age to zero here would make the diagnostics
+    dump claim the hidden fix happened just now, and those are the numbers the gate is
+    evaluated with. Both wall-clock fields are checked, because the clamp was the same
+    expression in both places.
+    """
+    from tests.helpers.main_coordinator_stub import MainCoordinatorStub
+
+    coord = MainCoordinatorStub(
+        config_entry=make_config_entry(entry_id="coarse-future")
+    )
+    coord.data = [
+        {
+            "device_id": "dev",
+            "accuracy": 20.0,
+            "last_seen": _now() + 600,
+            "is_own_report": False,
+        }
+    ]
+    coord._device_location_data = {"dev": {"device_type": 1}}
+    coord._present_last_seen = {}
+    coord._device_coarse_fix = {
+        "dev": {
+            "latitude": FAR[0],
+            "longitude": FAR[1],
+            "accuracy": 1600.0,
+            "last_seen": _now() + 600,
+        }
+    }
+
+    entry = coord.build_per_device_diagnostics()[0]
+    assert entry["coarse_fix_accuracy_bucket"] == "500-2000"
+    assert entry["coarse_fix_age_s"] is None
+    assert entry["last_fix_age_s"] is None
+
+
 def test_reader_publishes_only_the_coarse_fields_it_actually_has() -> None:
     """A partial coarse fix must not produce half-empty attributes.
 

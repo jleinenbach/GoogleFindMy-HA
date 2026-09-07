@@ -371,6 +371,28 @@ def _round_age(age_seconds: float) -> int:
     return int(round(age_seconds / 10) * 10)
 
 
+def _wall_clock_age(now_epoch: float, stamp: Any) -> int | None:
+    """Return the rounded age of a wall-clock stamp, or ``None`` if it is unusable.
+
+    A NEGATIVE age means the stamp lies in the future, which is corruption rather than
+    extreme freshness. The intake accepts a drift of
+    ``MAX_ACCEPTED_LOCATION_FUTURE_DRIFT_S``, so such a stamp really does reach the
+    snapshot and the coarse store, and the device tracker already suppresses a fix it
+    finds there. Clamping the age to zero instead would make this telemetry claim the
+    hidden fix happened "just now" and would contaminate the very numbers the accuracy
+    gate is evaluated with, so an unusable stamp reports no age at all.
+
+    Monotonic ages do not come through here: their ``max(0.0, ...)`` guards a clock that
+    ran backwards, and no reader draws a visibility decision from their sign.
+    """
+    if not isinstance(stamp, (int, float)) or isinstance(stamp, bool):
+        return None
+    age = now_epoch - float(stamp)
+    if age < 0:
+        return None
+    return _round_age(age)
+
+
 def _device_class(device_type: Any) -> str:
     """Map a ``device_type`` slot int to a coarse three-class label.
 
@@ -1973,6 +1995,10 @@ class GoogleFindMyCoordinator(
         clear-text keys are emitted. Empty/None ``self.data`` yields ``[]``; any
         failure degrades to ``[]`` rather than leaking a partial record.
 
+        Both wall-clock ages report ``None`` rather than ``0`` when their stamp lies in
+        the future, so a corrupt stamp is never dressed up as a fresh one; see
+        ``_wall_clock_age``.
+
         The two coarse-fix fields report what the accuracy gate discarded (#216)
         WITHOUT its coordinates: a diagnostics dump is routinely pasted into a
         public issue, and a raw radius or position would be re-identifying
@@ -1997,15 +2023,7 @@ class GoogleFindMyCoordinator(
                 row = by_id[dev_id]
                 slot = self._device_location_data.get(dev_id) or {}
 
-                last_seen = row.get("last_seen")
-                if isinstance(last_seen, (int, float)) and not isinstance(
-                    last_seen, bool
-                ):
-                    last_fix_age_s: int | None = _round_age(
-                        max(0.0, now_epoch - float(last_seen))
-                    )
-                else:
-                    last_fix_age_s = None
+                last_fix_age_s = _wall_clock_age(now_epoch, row.get("last_seen"))
 
                 poll_mono = self._present_last_seen.get(dev_id)
                 if isinstance(poll_mono, (int, float)) and not isinstance(
@@ -2031,9 +2049,7 @@ class GoogleFindMyCoordinator(
                 coarse_age_s: int | None = None
                 if coarse:
                     coarse_bucket = _accuracy_bucket(coarse.get("accuracy"))
-                    coarse_seen = coarse.get("last_seen")
-                    if isinstance(coarse_seen, (int, float)):
-                        coarse_age_s = _round_age(max(0.0, now_epoch - coarse_seen))
+                    coarse_age_s = _wall_clock_age(now_epoch, coarse.get("last_seen"))
 
                 entries.append(
                     {

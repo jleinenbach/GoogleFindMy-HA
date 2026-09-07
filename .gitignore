@@ -2,6 +2,7 @@
 __pycache__/
 pytest_output.log
 .coverage
+.coverage.*
 .wheelhouse/
 .bootstrap/
 node_modules/
