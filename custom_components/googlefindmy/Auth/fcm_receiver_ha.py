@@ -86,6 +86,10 @@ from custom_components.googlefindmy.Auth.firebase_messaging.fcmregister import (
     FcmRegisterHTTPError,
 )
 from custom_components.googlefindmy.exceptions import FatalRegistrationError
+from custom_components.googlefindmy.location_row_markers import (
+    strip_transient_keys,
+    substitute_zone_accuracy,
+)
 from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker.decrypt_locations import (
     DecryptionError,
     OwnerKeyLookupTransientError,
@@ -2765,6 +2769,32 @@ class FcmReceiverHA:
     ) -> dict[str, Any] | None:
         """Apply coordinator-specific filtering and return payload or None if filtered."""
         coordinator_payload = dict(payload)
+
+        # Tally the REPORTED accuracy class here (#216), before the Google Home
+        # filter below can replace it with a configured radius. The coordinator
+        # cannot do it: by the time ``update_device_cache`` sees this payload the
+        # substitution has already happened, so a class counted there would
+        # describe the filter's geometry instead of what the push reported. The
+        # marker tells the coordinator not to count it a second time; it is
+        # popped there, so it never reaches the cached row.
+        # Same replay rule as the poll and locate paths: a push carrying a
+        # report timestamp we already hold (a duplicate delivery, or the same
+        # report after a poll) must not enter the distribution twice. Asked of
+        # the coordinator because only it holds both references, and duck-typed
+        # because this receiver runs against partial coordinators too.
+        tally = getattr(coordinator, "count_accuracy_class", None)
+        if callable(tally):
+            try:
+                claim = getattr(coordinator, "claim_report_for_tally", None)
+                # No claim method on a partial coordinator: count, as before.
+                # Losing a duplicate suppression is a smaller defect than losing
+                # the measurement itself.
+                if not callable(claim) or claim(key[1], coordinator_payload):
+                    tally(coordinator_payload)
+                coordinator_payload["_accuracy_counted"] = True
+            except Exception as tally_err:  # pragma: no cover - diagnostics only
+                _LOGGER.debug("Accuracy tally failed for %s: %s", key[1][:8], tally_err)
+
         semantic_name = coordinator_payload.get("semantic_name")
         ghf = _coordinator_google_home_filter(coordinator)
         if semantic_name and ghf is not None:
@@ -2790,7 +2820,7 @@ class FcmReceiverHA:
                     )
                 radius = replacement_attrs.get("radius")
                 if radius is not None:
-                    coordinator_payload["accuracy"] = radius
+                    substitute_zone_accuracy(coordinator_payload, radius)
                 coordinator_payload["semantic_name"] = None
 
         return coordinator_payload
@@ -2805,7 +2835,17 @@ class FcmReceiverHA:
             return True
 
         try:
+            # Shared with the poll cycle's direct-write fallback, which had the
+            # same leak: rationale in ``strip_transient_keys``.
+            strip_transient_keys(payload)
             coordinator._device_location_data[device_id] = payload  # noqa: SLF001
+            # Fourth commit site, same rule as the others: a newer position
+            # makes a retained coarse fix obsolete. Duck-typed because this
+            # fallback exists precisely for coordinators that do not carry the
+            # full surface.
+            expire = getattr(coordinator, "_expire_coarse_fix", None)
+            if callable(expire):
+                expire(device_id, payload)
             _LOGGER.debug(
                 "Fallback: wrote to coordinator._device_location_data directly"
             )

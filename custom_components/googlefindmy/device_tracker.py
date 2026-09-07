@@ -1491,6 +1491,54 @@ class GoogleFindMyDeviceTracker(GoogleFindMyDeviceEntity, TrackerEntity, Restore
         if plus_code is not None:
             attributes["plus_code"] = plus_code
 
+        # Coarse fix the accuracy gate discarded (#216). Exposed as side
+        # information only: deliberately NOT as latitude/longitude, so Home
+        # Assistant's zone logic never sees it. That logic is the actual damage
+        # the gate prevents - it treats the accuracy radius as the zone
+        # tolerance (``zone_dist - zone_radius < radius``), so a 460 m fix 346 m
+        # away from a 32 m home zone would be published as "home".
+        #
+        # It is kept rather than dropped because a coarse fix still names the
+        # city, and without any fix we would not even know that. Read from the
+        # coordinator (single writer, in the fusion), never written here.
+        #
+        # Read through ``get_fresh_coarse_fix``, which is the accessor the contract
+        # reserves for publishers; ``get_coarse_fix`` is the raw window for producers
+        # and tests. Calling the raw one and repeating the age rule here made this
+        # entity a second owner of that policy, and two owners of one rule drift.
+        coarse = None
+        get_coarse = getattr(self.coordinator, "get_fresh_coarse_fix", None)
+        if callable(get_coarse):
+            coarse = get_coarse(self.device_id)
+        if coarse:
+            # The SECOND LINE, not the rule. The accessor above already applies the
+            # shared ``stale_threshold`` and already treats a negative age as corrupt;
+            # this repeats it because reading a position is where the damage would show,
+            # and because a coordinator double without the accessor would otherwise
+            # publish an unchecked fix. It must stay identical to the rule it echoes.
+            coarse_age = location_age_seconds(coarse, time.time())
+            threshold = resolve_stale_threshold(self.coordinator)
+            # A NEGATIVE age means the stamp lies in the future, i.e. it is
+            # corrupt - not "extremely fresh". The producer already refuses to
+            # retain such a fix; this is the second line, because reading a
+            # position is where the damage would show.
+            if coarse_age is None or coarse_age < 0 or coarse_age > threshold:
+                coarse = None
+        if coarse:
+            coarse_lat = coarse.get("latitude")
+            coarse_lon = coarse.get("longitude")
+            if coarse_lat is not None and coarse_lon is not None:
+                attributes["coarse_latitude"] = coarse_lat
+                attributes["coarse_longitude"] = coarse_lon
+            if coarse.get("accuracy") is not None:
+                attributes["coarse_accuracy"] = coarse["accuracy"]
+            # No guard on ``last_seen``: reaching this point already proves it is
+            # present and float-coercible, because ``location_age_seconds``
+            # returns ``None`` otherwise and the expiry check above then drops
+            # the fix. A second check here would be an unreachable branch that
+            # reads like a real one.
+            attributes["coarse_last_seen"] = coarse["last_seen"]
+
         self._attr_extra_state_attributes = attributes
 
     @callback

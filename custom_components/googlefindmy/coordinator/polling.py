@@ -73,7 +73,11 @@ from ..SpotApi.GetEidInfoForE2eeDevices.get_eid_info_request import (
 )
 from ..SpotApi.spot_request import SpotAuthPermanentError
 from ._mixin_typing import _MixinBase
-from .helpers.cache import carry_reused_accuracy
+from .helpers.cache import (
+    carry_reused_accuracy,
+    strip_transient_keys,
+    substitute_zone_accuracy,
+)
 from .helpers.cache import sanitize_decoder_row as _sanitize_decoder_row
 from .helpers.stats import ApiStatus, CryptoStatus, FcmStatus, StatusSnapshot
 from .helpers.subentry import normalize_epoch_seconds as _normalize_epoch_seconds
@@ -2008,6 +2012,41 @@ class PollingOperations(_MixinBase):
                                 is_replay = True
 
                         location["is_replayed"] = is_replay
+
+                        # Tally the REPORTED accuracy class here (#216), which is
+                        # before the fusion AND before anything can substitute the
+                        # value. Before the fusion because the gate may reject and
+                        # this loop then skips to the next device, so a counter
+                        # after it would miss exactly the coarse fixes the
+                        # distribution is for. Before the substitutions because
+                        # ``_apply_semantic_mapping`` writes an anchor radius and
+                        # the two preserve-sites below reuse the CACHED accuracy
+                        # via ``carry_reused_accuracy``: counted after either, a
+                        # semantic-only response would enter the distribution as a
+                        # freshly reported measurement and pull it towards whatever
+                        # happened to be cached. This distribution answers "what do
+                        # incoming fixes report", so a response that reports no
+                        # accuracy of its own must not appear in it at all.
+                        #
+                        # A REPLAY is not an incoming fix. The poll returned a
+                        # report timestamp we already hold, so counting it would
+                        # let the distribution follow the poll interval instead
+                        # of the reports - a device that reports once an hour and
+                        # is polled every five minutes would enter its class
+                        # twelve times. The marker is set either way, so
+                        # ``update_device_cache`` does not tally it later: the
+                        # decision "not counted" belongs here.
+                        #
+                        # ``is_replayed_report`` rather than the ``is_replay``
+                        # flag above: that flag compares against the PUBLISHED
+                        # row only, and a fix the accuracy gate rejected leaves
+                        # that row untouched by design. Its report is stored
+                        # aside, so every later poll of it would look new - for
+                        # exactly the coarse fixes this distribution is for.
+                        if self.claim_report_for_tally(dev_id, location):
+                            self.count_accuracy_class(location)
+                        location["_accuracy_counted"] = True
+
                         mapping_applied = self._apply_semantic_mapping(location)
 
                         # --- Apply Google Home filter (keep parity with FCM push path) ---
@@ -2088,8 +2127,9 @@ class PollingOperations(_MixinBase):
                                             and replacement_attrs.get("radius")
                                             is not None
                                         ):
-                                            location["accuracy"] = (
-                                                replacement_attrs.get("radius")
+                                            substitute_zone_accuracy(
+                                                location,
+                                                replacement_attrs["radius"],
                                             )
                                     # Clear semantic name so HA Core's zone engine determines the final state.
                                     location["semantic_name"] = None
@@ -2177,28 +2217,25 @@ class PollingOperations(_MixinBase):
                         if helper is _CoordinatorClass.update_device_cache:
                             self.update_device_cache(dev_id, location, source="poll")
                         else:
-                            location.pop("_fusion_preapplied", None)
-                            # F-1: strip the supersede marker so it can never leak
-                            # into the cached row. This test-double fallback commits
-                            # directly and does NOT run the post-commit supersede
-                            # action; production always routes through
-                            # update_device_cache, which does.
-                            location.pop("_supersede_round_trip_anchor", None)
-                            # Fund A: same hygiene for the deferred round-trip anchor
-                            # consume/seed markers. Semantic divergence vs. the real
-                            # update_device_cache path: production pops AND applies
-                            # these post-commit (consume/seed the anchor); this
-                            # test-double fallback only strips them so they cannot
-                            # leak into the cached row, and intentionally performs no
-                            # anchor mutation.
-                            location.pop("_round_trip_anchor_seed", None)
-                            location.pop("_round_trip_anchor_consume", None)
-                            location.pop("_report_hint", None)
+                            # Strip EVERY transient marker, not a list of the
+                            # ones that exist today: F-1 (supersede), Fund A
+                            # (the deferred anchor seed/consume) and the two
+                            # accuracy markers all arrived one at a time, and
+                            # each time the list here was correct until the next
+                            # one was added. Semantic divergence vs. the real
+                            # update_device_cache path stays as documented:
+                            # production pops AND applies the anchor intents
+                            # post-commit, this test-double fallback only strips
+                            # them and intentionally performs no anchor mutation.
+                            strip_transient_keys(location)
                             location.setdefault("last_updated", wall_now)
                             merged_location = self._merge_with_existing_cache_row(
                                 dev_id, location
                             )
                             self._device_location_data[dev_id] = merged_location
+                            # Third commit site, same rule: a newer position
+                            # makes a retained coarse fix obsolete.
+                            self._expire_coarse_fix(dev_id, merged_location)
 
                         self.increment_stat("polled_updates")
                         self._consecutive_timeouts = 0

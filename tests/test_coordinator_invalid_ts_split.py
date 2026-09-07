@@ -139,6 +139,10 @@ def test_pre_y2k_timestamp_increments_warn_bucket() -> None:
     coordinator.update_device_cache("device-1", corrupt)
 
     assert stat_counts == {
+        # Accuracy class of the incoming fix. Counted before the fusion and
+        # before the gate (#216), so the distribution sees every fix - including
+        # the ones later dropped, which are the interesting half.
+        "accuracy_bucket_10_50": 1,
         "invalid_ts_drop_count": 1,
         "drop_reason_invalid_ts": 1,
         "invalid_ts_drop_warn": 1,
@@ -170,6 +174,10 @@ def test_regressed_timestamp_increments_benign_bucket() -> None:
     coordinator.update_device_cache("device-1", regressed)
 
     assert stat_counts == {
+        # Accuracy class of the incoming fix. Counted before the fusion and
+        # before the gate (#216), so the distribution sees every fix - including
+        # the ones later dropped, which are the interesting half.
+        "accuracy_bucket_10_50": 1,
         "invalid_ts_drop_count": 1,
         "drop_reason_invalid_ts": 1,
         "invalid_ts_drop_benign": 1,

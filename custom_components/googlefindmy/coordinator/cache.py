@@ -16,20 +16,23 @@ Methods moved here:
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import math
 import time
 from collections import deque
 from collections.abc import Mapping
-from typing import Any
+from typing import Any, NamedTuple
 
 from ..const import (
     _EID_REFRESH_DEBOUNCE_S,
     DATA_EID_RESOLVER,
+    DEFAULT_ACCURACY_GATE_ENABLED,
     DEFAULT_MAX_PLAUSIBLE_SPEED_MPS,
     DEFAULT_ROUNDTRIP_CONFIRM,
     DEFAULT_SPEED_GATE_ENABLED,
     DOMAIN,
+    OPT_ACCURACY_GATE_ENABLED,
     OPT_ROUNDTRIP_CONFIRM,
     OPT_SPEED_GATE_ENABLED,
     ROUND_TRIP_ANCHOR_RADIUS_M,
@@ -49,10 +52,18 @@ from .helpers.cache import (
     should_clear_metadata_only_flag as _should_clear_metadata_only_flag_impl,
 )
 from .helpers.geo import (
+    ACCURACY_BUCKET_STATS,
+    ACCURACY_GATE_MIN_M,
+    ACCURACY_GATE_RATIO,
     DEFAULT_ACCURACY_FALLBACK_M,
     MIN_PHYSICAL_ACCURACY_M,
     is_reliable_fix,
+    location_age_seconds,
+    resolve_stale_threshold,
     select_display_row,
+)
+from .helpers.geo import (
+    accuracy_bucket as _accuracy_bucket_impl,
 )
 from .helpers.geo import (
     coerce_float as _coerce_float_impl,
@@ -60,9 +71,19 @@ from .helpers.geo import (
 from .helpers.geo import (
     haversine_distance as _haversine_distance_impl,
 )
+from .helpers.geo import (
+    is_valid_accuracy as _is_valid_accuracy,
+)
 from .helpers.subentry import normalize_epoch_seconds as _normalize_epoch_seconds
 
 _LOGGER = logging.getLogger(__name__)
+
+# Maximum accepted future drift of a report timestamp, in seconds (2 hours).
+# Module level rather than local to ``_is_significant_update`` because the
+# accuracy gate needs the same bound: it retains a rejected fix BEFORE that
+# method runs, so without a shared constant there would be two answers to the
+# question "is this timestamp plausible".
+MAX_ACCEPTED_LOCATION_FUTURE_DRIFT_S = 7200
 
 # Metadata keys to preserve across cache updates
 _METADATA_KEYS = (
@@ -132,6 +153,295 @@ def _normalize_metadata_keys(data: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+class _GateMetrics(NamedTuple):
+    """The four numbers the accuracy gate compares, bundled for one signature.
+
+    They are computed once in the fusion and handed to the gate from two call
+    sites; passing them individually pushed the signature past the project's
+    argument limit, and recomputing them inside the gate would mean a second
+    copy of ``_safe_accuracy``'s sentinel handling.
+    """
+
+    new_acc: float
+    new_acc_raw: float | None
+    existing_acc: float
+    dist: float
+
+
+class _StampVerdict(NamedTuple):
+    """Verdict on a payload's ``last_seen``, for the two callers that need it.
+
+    ``reason`` is None when the stamp is usable. ``rejected_downstream`` says
+    whether ``_is_significant_update`` would reject this class on its own - the
+    distinction the accuracy gate needs, and the one a plain boolean lost.
+    ``seen`` is the normalized stamp, handed back so the retention path does not
+    parse ``last_seen`` twice and so the type checker sees the narrowing.
+    """
+
+    reason: str | None
+    rejected_downstream: bool
+    seen: float | None
+
+
+def _stamp_verdict(
+    coord: Any,
+    device_id: str,
+    row: Mapping[str, Any],
+) -> _StampVerdict:
+    """Judge a payload's ``last_seen`` for retention and for gate ownership.
+
+    TWO CALLERS, TWO QUESTIONS, ONE RULE. ``_record_coarse_fix`` must not RETAIN
+    a fix with any unusable stamp (one hours ahead yields a negative age, which
+    its freshness test reads as "very fresh"). ``_accuracy_gate_rejects`` asks
+    something narrower: may it CLAIM this drop? It may not, for the three
+    classes ``_is_significant_update`` rejects by itself (pre-Y2K, too far in
+    the future, older than the published row) - those are dropped one step later
+    anyway, and only there are they sorted into ``invalid_ts_drop_count`` /
+    ``future_ts_drop_count``. Booking them as ``accuracy_gate_rejects`` would
+    silence those counters and fill the one counter that exists to judge this
+    gate's thresholds with drops that say nothing about accuracy.
+
+    A MISSING OR UNPARSEABLE STAMP IS THE EXCEPTION, and it is the reason this
+    returns a verdict rather than a bool. ``_is_significant_update`` normalizes
+    to None there and then skips all three timestamp checks, so it does NOT
+    reject the payload. Handing such a payload on would let the coarse fix
+    through the very gate it was measured against. It therefore stays this
+    gate's case: rejected and counted here, retention still refused.
+    """
+    seen = _normalize_epoch_seconds(row.get("last_seen"))
+    if seen is None:
+        return _StampVerdict(
+            f"no usable timestamp {row.get('last_seen')!r}", False, None
+        )
+    if (
+        seen < _Y2K_EPOCH_SECONDS
+        or seen > time.time() + MAX_ACCEPTED_LOCATION_FUTURE_DRIFT_S
+    ):
+        return _StampVerdict(f"implausible timestamp {seen}", True, None)
+    # The forward-order rule against the PUBLISHED row. A stamp in the future is
+    # skipped as authority for the same reason as above: it is corrupt, not
+    # newer.
+    published = (getattr(coord, "_device_location_data", None) or {}).get(device_id)
+    if published:
+        published_seen = _normalize_epoch_seconds(published.get("last_seen"))
+        if (
+            published_seen is not None
+            and published_seen <= time.time()
+            and seen < published_seen
+        ):
+            return _StampVerdict(
+                f"timestamp {seen} predates the published row at {published_seen}",
+                True,
+                None,
+            )
+    return _StampVerdict(None, False, seen)
+
+
+def _accuracy_gate_rejects(
+    coord: Any,
+    device_id: str,
+    new_data: dict[str, Any],
+    existing: Mapping[str, Any],
+    metrics: _GateMetrics,
+) -> bool:
+    """Return ``True`` when a coarse fix must not displace the cached one (#216).
+
+    The comparative half of the fusion's rejection logic, extracted so the two
+    overlap-free situations share ONE rule instead of two that drift apart: a
+    clear jump away from an ordinary cached fix, and a clear jump away from a
+    trusted semantic anchor. On rejection this also retains the coarse fix as
+    side information and counts the rejection, so the caller only has to honour
+    the boolean.
+
+    It is a COMPARISON, never an absolute cut-off. Its removed predecessor
+    (``min_accuracy_threshold``, const default 100 m) discarded on the incoming
+    radius alone and froze trackers; a fix with a wide radius still tells us the
+    city, and without any fix we would not even know that. So nothing is
+    discarded unless a better, reliable and still-fresh alternative is actually
+    present.
+
+    Deliberately NO own-report bypass, unlike the speed gate (whose bypass is
+    about cryptographic provenance, i.e. whether the report can be trusted).
+    This gate is about physical uncertainty, and a phone reports ITS OWN
+    position, not the tracker's: an own fix with a 1600 m radius is exactly as
+    coarse as a foreign one.
+
+    Staleness is read from the shared ``stale_threshold`` option, not from a
+    second time constant, and it is the age against the wall clock - not the
+    distance between the two report timestamps the speed gate uses. An unknown
+    age counts as not-trustworthy, so the incoming fix wins.
+
+    No round-trip anchor is seeded or consumed here (F-CODEX-6 keeps anchor
+    provenance bound to the speed gate's one-shot semantics).
+
+    WHY A MODULE FUNCTION AND NOT A METHOD: every fusion suite builds its
+    coordinator double as ``MagicMock(spec=CacheOperations)``. A method of that
+    class is auto-mocked there and returns a truthy ``Mock``, so the gate would
+    silently reject EVERY payload in eight existing suites - measured: nine
+    round-trip cases went red on exactly that. A module-level function cannot be
+    shadowed by the spec, so those doubles keep exercising the real rule, which
+    is what they did while this code was still inline.
+    """
+    if not coord._accuracy_gate_enabled():
+        return False
+    # The Google Home filter substitutes the HOME ZONE's radius for the reported
+    # accuracy before fusion, on all three inbound paths (poll, manual locate,
+    # push). That number is not a measurement of the device, so comparing it
+    # against the cached precision asks the wrong question: with a home zone of
+    # 200 m or more the gate would refuse the filter's deliberate decision and
+    # leave a tracker away from home instead of moving it there. The marker is
+    # transient and popped before commit; it says "this radius was substituted",
+    # which only the substituting site can know.
+    if new_data.get("_accuracy_substituted"):
+        return False
+    # Mirrors the speed gate's incoming-side check: a missing, non-finite or
+    # sentinel accuracy is not a measurement, and an unmeasured radius must
+    # never be the reason to discard a fix.
+    new_acc_measured = (
+        metrics.new_acc_raw is not None
+        and math.isfinite(metrics.new_acc_raw)
+        and metrics.new_acc_raw >= MIN_PHYSICAL_ACCURACY_M
+    )
+    if not (
+        new_acc_measured
+        and metrics.new_acc >= ACCURACY_GATE_MIN_M
+        and metrics.new_acc >= ACCURACY_GATE_RATIO * metrics.existing_acc
+        and is_reliable_fix(existing)
+    ):
+        return False
+    existing_age = location_age_seconds(existing, time.time())
+    threshold = resolve_stale_threshold(coord)
+    # A NEGATIVE age means the cached row is stamped in the future - clock skew
+    # on the reporting device, tolerated up to
+    # MAX_ACCEPTED_LOCATION_FUTURE_DRIFT_S elsewhere. Only checking ``> threshold``
+    # would read such a row as maximally fresh and let it veto every coarse
+    # update until wall time catches up AND the stale interval then elapses,
+    # pinning the tracker for hours. The reference this gate compares against
+    # has to be trustworthy in BOTH directions; ``_record_coarse_fix`` already
+    # refuses a future stamp as an ordering authority for the same reason.
+    if existing_age is None or existing_age < 0 or existing_age > threshold:
+        return False
+    # Temporal validity decides WHO may claim this drop, and it is checked
+    # before the payload is classified as an accuracy rejection. A payload with
+    # a corrupt or regressed stamp is dropped either way - but by the
+    # significance gate one step later, which is the only place that sorts it
+    # into ``invalid_ts_drop_count`` / ``future_ts_drop_count``. Claiming it
+    # here would silence those counters and inflate ``accuracy_gate_rejects``
+    # with drops that say nothing about the two thresholds this counter exists
+    # to judge. Returning False costs nothing: the payload cannot commit, since
+    # ``_is_significant_update`` rejects exactly these three classes.
+    verdict = _stamp_verdict(coord, device_id, new_data)
+    if verdict.rejected_downstream:
+        _LOGGER.debug(
+            "Accuracy gate not claiming coarse fix %s (%s); leaving the drop "
+            "to the significance gate, which classifies it",
+            device_id,
+            verdict.reason,
+        )
+        return False
+    # Drop any round-trip anchor INTENT the branches above pencilled onto this
+    # payload. Both are deferred markers (F-CODEX-7): they are popped and
+    # applied only after the payload commits, and this payload never commits -
+    # the caller aborts on a False return - so leaving them behind has no
+    # effect today. They are cleared anyway, because a rejected payload
+    # carrying a live anchor intent is a trap for the next person to touch this
+    # ordering, and because E7 ("no anchor contact") should be true of the data,
+    # not just of its consequences. On the trusted-anchor call site no marker
+    # can be set yet (that branch runs before the speed gate), so the pops are
+    # no-ops there rather than a second semantics.
+    new_data.pop("_supersede_round_trip_anchor", None)
+    new_data.pop("_round_trip_anchor_seed", None)
+    new_data.pop("_round_trip_anchor_consume", None)
+    # Keep the coarse information before dropping the payload: the caller
+    # aborts on False, so this must happen first.
+    coord._record_coarse_fix(device_id, new_data)
+    coord.increment_stat("accuracy_gate_rejects")
+    _LOGGER.debug(
+        "Accuracy gate rejected coarse fix %s: %.0fm vs cached %.0fm "
+        "(>= %.0fx), %.0fm away, cached fix %.0fs old (<= %ss stale threshold)",
+        device_id,
+        metrics.new_acc,
+        metrics.existing_acc,
+        ACCURACY_GATE_RATIO,
+        metrics.dist,
+        existing_age,
+        threshold,
+    )
+    return True
+
+
+def _finite_or_none(value: Any) -> float | None:
+    """Return *value* as a finite float, or ``None`` if it is not one.
+
+    ``NaN`` never compares equal to itself, so letting it into an identity tuple would
+    make every delivery of the same report look new. That is the direction this helper
+    exists to close.
+    """
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+# How many tallied identities are remembered per device. The case is a report that keeps
+# coming back, and two such reports can alternate, so one slot is not enough; an unbounded
+# set is not an option in state that persists. Eight covers alternation between a handful
+# of stuck reports across a poll cycle and costs a few hundred bytes per device.
+_TALLY_MEMORY = 8
+
+
+def _has_countable_accuracy(row: Mapping[str, Any]) -> bool:
+    """Say whether ``count_accuracy_class`` would actually tally this row.
+
+    The claim and the tally have to agree on which reports they are about. A
+    semantic-only response carries a timestamp but no usable accuracy, so nothing is
+    counted for it - and a claim recorded anyway would later suppress the same report
+    arriving through another path WITH its accuracy, silencing a measurement that was
+    never taken. Same predicate as the tally, read from the same helpers rather than
+    restated, so the two cannot drift apart.
+    """
+    raw = _coerce_float_impl(row.get("accuracy"))
+    if not _is_valid_accuracy(raw):
+        return False
+    return _accuracy_bucket_impl(raw) is not None
+
+
+def _tally_identity(row: Mapping[str, Any]) -> tuple[Any, ...] | None:
+    """Return what identifies *row* for tally deduplication, or ``None``.
+
+    The timestamp is the identity whenever there is one; it is what every other
+    reference in this module keys on, and it distinguishes two genuinely different
+    reports that happen to share a position.
+
+    A report with no parseable ``last_seen`` still carries an accuracy, so it is still
+    tallied - and being unidentifiable, it used to be tallied again on every retry, so
+    the persisted distribution measured retry frequency rather than incoming fixes. Its
+    position and radius are the only bounded thing left to key on. Two consecutive
+    reports agreeing on all three fields and carrying no stamp are indistinguishable by
+    construction, so counting them once is the honest reading rather than a compromise.
+
+    ``None`` means the report carries nothing to recognise it by. The caller then lets
+    it through, because refusing to count a fix is the worse error of the two: the
+    distribution is what the accuracy gate is judged on.
+    """
+    ts = _normalize_epoch_seconds(row.get("last_seen"))
+    if ts is not None:
+        return ("ts", ts)
+    fix = tuple(
+        _finite_or_none(row.get(key)) for key in ("latitude", "longitude", "accuracy")
+    )
+    if all(value is None for value in fix):
+        return None
+    # Digest rather than the values: this identity is persisted, and a position in a
+    # durable store is exactly what the rest of this feature is careful not to keep.
+    # Equality is all the comparison needs, so the coordinates never have to leave the
+    # process. blake2s with an 8-byte digest, because this guards against repetition,
+    # not against an adversary.
+    digest = hashlib.blake2s(repr(fix).encode("utf-8"), digest_size=8).hexdigest()
+    return ("fix", digest)
+
+
 class CacheOperations(_MixinBase):
     """Cache operations mixin for GoogleFindMyCoordinator.
 
@@ -194,6 +504,284 @@ class CacheOperations(_MixinBase):
             cache[device_id] = dict(row)
         elif device_id not in cache:
             cache[device_id] = dict(row)
+
+    def _record_coarse_fix(self, device_id: str, row: Mapping[str, Any]) -> None:
+        """Remember a fix the accuracy gate discarded, as side information (#216).
+
+        A coarse fix is discarded as a *position* because publishing it would
+        move the tracker and, via the accuracy radius Home Assistant uses as the
+        zone tolerance, could report it as home. Its coarse information (the
+        city, roughly) is still the only thing we would have if no better fix
+        existed, so it is kept here and surfaced as ``coarse_*`` attributes
+        rather than thrown away. Deliberately NOT written into
+        ``_device_location_data``: nothing downstream may mistake it for the
+        published position.
+
+        Must be called BEFORE the gate returns False: the caller aborts the
+        whole payload on a False return (see the fusion call site), so a write
+        placed after it would never run. Lazily initialized via ``getattr``,
+        mirroring ``_record_last_good_location`` so coordinators built through
+        ``__new__`` (or partial test doubles) need no extra wiring. RAM-only.
+        """
+        # A rejected payload never reaches ``_is_significant_update``, where a
+        # corrupt, future or regressed timestamp would normally be dropped and
+        # counted. Without this check a fix stamped hours ahead would be
+        # retained here, and the age computed against the wall clock would come
+        # out NEGATIVE - which the freshness test below reads as "very fresh".
+        # The rule itself lives in ``_implausible_timestamp_reason`` because the
+        # accuracy gate needs the same answer for a different purpose, and two
+        # copies of "plausible" would drift apart.
+        verdict = _stamp_verdict(self, device_id, row)
+        seen = verdict.seen
+        if verdict.reason is not None or seen is None:
+            _LOGGER.debug(
+                "Not retaining coarse fix for %s: %s", device_id, verdict.reason
+            )
+            return
+
+        store = getattr(self, "_device_coarse_fix", None)
+        # Never let an older report replace a newer one. ``_is_significant_update``
+        # enforces forward order for the published row, but a rejected payload
+        # never gets there, so an out-of-order crowd report would otherwise
+        # overwrite a more recent coarse fix and make the side information go
+        # backwards in time.
+        if store is not None:
+            previous = store.get(device_id)
+            if previous is not None:
+                previous_seen = _normalize_epoch_seconds(previous.get("last_seen"))
+                # A retained stamp that lies in the future must not block its own
+                # replacement. The bound above tolerates up to
+                # MAX_ACCEPTED_LOCATION_FUTURE_DRIFT_S of clock skew, but the
+                # reader discards a future stamp outright (negative age), so such
+                # an entry is invisible anyway - letting it win the ordering test
+                # would suppress every real coarse fix until wall time caught up.
+                if previous_seen is not None and previous_seen > time.time():
+                    previous_seen = None
+                if previous_seen is not None and seen < previous_seen:
+                    _LOGGER.debug(
+                        "Not retaining coarse fix for %s: timestamp %s regresses "
+                        "behind the retained %s",
+                        device_id,
+                        seen,
+                        previous_seen,
+                    )
+                    return
+        if store is None:
+            store = {}
+            self._device_coarse_fix = store
+        store[device_id] = {
+            "latitude": row.get("latitude"),
+            "longitude": row.get("longitude"),
+            "accuracy": row.get("accuracy"),
+            # The NORMALIZED stamp, not the raw field. The guards above judge
+            # ``seen``, but every reader of this store computes the age with
+            # ``location_age_seconds``, which does a plain ``float()`` and is
+            # NOT millisecond-tolerant. Storing the raw value would let a
+            # millisecond stamp pass the guards here and then read as ~55 years
+            # in the future downstream: the entity would hide the fix
+            # (negative age) and the diagnostics would clamp it to ``0``, i.e.
+            # report "just now" for a stamp it could not interpret.
+            "last_seen": seen,
+        }
+
+    def count_accuracy_class(self, row: Mapping[str, Any]) -> None:
+        """Tally the REPORTED accuracy class of an incoming fix (#216).
+
+        The reject counter answers "how often did the gate fire"; it does not
+        answer "do 200 m and factor 4 sit in the right place". Only the
+        distribution answers that, and it has to be collected BEFORE the gate -
+        otherwise it never sees the discarded fixes, which are the interesting
+        half.
+
+        MUST be called on every path that feeds a fix into the fusion, and
+        exactly once per fix. There are three entry points (the poll loop, the
+        manual locate and the FCM push) plus the ``update_device_cache``
+        fallback that a device-list seed reaches, which makes four counting
+        sites; ``test_every_counting_site_claims_the_report_first`` derives that
+        set from the sources rather than trusting this sentence;
+        the first two run the fusion themselves and mark the payload
+        ``_fusion_preapplied``, so ``update_device_cache`` deliberately counts
+        only when that marker is absent. ``tests/test_cache_accuracy_gate.py``
+        pins that every caller of ``_apply_weighted_location_fusion`` also
+        calls this, so a fourth entry point cannot silently skip it.
+
+        A fix whose accuracy is missing, non-numeric or carries Android's
+        no-accuracy sentinel (0.0, i.e. below ``MIN_PHYSICAL_ACCURACY_M``) is
+        NOT counted. ``accuracy_bucket`` alone would file the sentinel under
+        ``<10`` and skew the distribution towards precision - the exact opposite
+        of what this measurement is for. Those fixes are counted by
+        ``accuracy_sanitized_count`` instead.
+        """
+        raw = _coerce_float_impl(row.get("accuracy"))
+        if not _is_valid_accuracy(raw):
+            return
+        bucket = _accuracy_bucket_impl(raw)
+        if bucket is not None:
+            self.increment_stat(ACCURACY_BUCKET_STATS[bucket])
+
+    def is_replayed_report(self, device_id: str, row: Mapping[str, Any]) -> bool:
+        """True when this report has already entered the accuracy distribution.
+
+        ONE source of truth, deliberately: the identities this coordinator has actually
+        tallied. Earlier revisions also compared against the published row and the
+        retained coarse fix, and both were surrogates for the question rather than
+        answers to it. A semantic-only response commits its timestamp after copying the
+        previous coordinates and accuracy, so a cache row proves that a timestamp was
+        SEEN, not that a bucket was counted for it. The same report arriving later
+        through another path with its real accuracy was then suppressed - the very case
+        the countability check exists to preserve.
+
+        A bounded RING per device, not one replaceable value. Two reports that both fail
+        to enter either cache and are delivered alternately overwrote each other's claim,
+        so T1, T2, T1, T2 was counted on every delivery while the comment claimed it was
+        counted twice. The ring holds the last ``_TALLY_MEMORY`` identities, which bounds
+        the memory without pretending the alternating case does not exist.
+
+        Deliberately separate from the ``is_replayed`` flag the inbound paths compute for
+        the Google Home filter branch: that one compares against the published row only,
+        and widening it here would change a behaviour this change never measured.
+        """
+        identity = _tally_identity(row)
+        if identity is None:
+            return False
+        tallied = getattr(self, "_last_tallied_report_id", None) or {}
+        return identity in (tallied.get(device_id) or ())
+
+    def claim_report_for_tally(self, device_id: str, row: Mapping[str, Any]) -> bool:
+        """Decide whether this report may enter the distribution, and claim it.
+
+        Returns True exactly once per distinct report timestamp per device. The
+        name says what it does: it is not a pure predicate, it RECORDS the
+        timestamp it lets through, which is the only way to recognise the retry
+        of a report that never reached either cache.
+
+        A bounded ring of the last ``_TALLY_MEMORY`` identities per device, not a single
+        value: two reports delivered alternately used to overwrite each other's claim and
+        were then counted on every delivery. The ring is what bounds the memory; the
+        declared limit is now the ring length, a number one can raise, rather than "one",
+        a shape one could not.
+        """
+        if not _has_countable_accuracy(row):
+            # Nothing to claim, because nothing will be counted. Returning False here
+            # costs nothing - the caller would tally zero either way - and it keeps the
+            # slot free for the delivery that does carry an accuracy.
+            return False
+        if self.is_replayed_report(device_id, row):
+            return False
+        identity = _tally_identity(row)
+        if identity is None:  # pragma: no cover - unreachable
+            # A countable accuracy is itself part of the fallback identity, so passing
+            # the check above guarantees one. Kept as a typed guard rather than an
+            # assertion, which would vanish under -O, and marked because a branch that
+            # cannot be entered must not look like one that merely lacks a test.
+            return True
+        tallied = getattr(self, "_last_tallied_report_id", None)
+        if tallied is None:
+            tallied = {}
+            self._last_tallied_report_id = tallied
+        ring = list(tallied.get(device_id) or ())
+        ring.append(identity)
+        tallied[device_id] = ring[-_TALLY_MEMORY:]
+        return True
+
+    def clear_tally_claims(self) -> None:
+        """Forget every claimed report identity, for all devices.
+
+        Called when the accuracy histogram is reset. The claims and the
+        histogram are two halves of one statement - "this report has already
+        been counted" - and they are persisted in one record, so zeroing the
+        counters without clearing the claims leaves a state that says nothing
+        was counted and simultaneously refuses to count the reports that would
+        refill it. A delivery whose identity is still in the ring is treated as
+        a replay, so the reset distribution would stay empty for exactly the
+        devices that were most active before it.
+
+        Bounded, so bounded is the damage: the ring holds ``_TALLY_MEMORY``
+        identities per device, and only an IDENTICAL identity is suppressed. A
+        report with a new timestamp was never affected; what a reset without
+        this loses is at most ``_TALLY_MEMORY`` already-claimed re-deliveries
+        per device.
+
+        A reset starts a new epoch, it does not draw a wall-clock boundary: a
+        report that was counted into the previous histogram and is delivered
+        again afterwards is counted into the new one. That is the intended
+        reading of "reset", and it is the same report the claim was protecting.
+
+        Kept here rather than in the caller because ``_last_tallied_report_id``
+        is written in this module only; a second file naming it would drift the
+        moment the store changes shape (it already changed once, from a single
+        value per device to a bounded ring).
+        """
+        tallied = getattr(self, "_last_tallied_report_id", None)
+        # isinstance rather than the `or {}` / `is None` reads the neighbours use
+        # (``is_replayed_report`` above, ``_async_save_stats`` and ``purge_device`` in
+        # main.py): theirs degrade to a no-op on an unexpected shape, whereas ``.clear()``
+        # would raise into the caller's swallowing except and the reset would stop
+        # clearing in silence. Different obligation, so deliberately a different read.
+        if isinstance(tallied, dict):
+            tallied.clear()
+
+    def _expire_coarse_fix(self, device_id: str, committed: Mapping[str, Any]) -> None:
+        """Drop a retained coarse fix that the just-committed row supersedes.
+
+        Called after a payload commits. The coarse fix is side information for
+        the case that nothing better exists; once a fix with an equal or newer
+        timestamp is published, it is stale by definition, no matter how young
+        its own stamp still looks to the reader's age rule.
+
+        A committed row without a usable stamp expires nothing: it cannot be
+        shown to be newer, and dropping side information on an unprovable claim
+        would lose the only coarse position we have.
+        """
+        store = getattr(self, "_device_coarse_fix", None)
+        if not store or device_id not in store:
+            return
+        committed_seen = _normalize_epoch_seconds(committed.get("last_seen"))
+        if committed_seen is None:
+            return
+        coarse_seen = _normalize_epoch_seconds(store[device_id].get("last_seen"))
+        if coarse_seen is None or coarse_seen <= committed_seen:
+            store.pop(device_id, None)
+            _LOGGER.debug(
+                "Dropped coarse fix for %s: a newer position was published",
+                device_id,
+            )
+
+    def get_coarse_fix(self, device_id: str) -> dict[str, Any] | None:
+        """Return the last fix the accuracy gate discarded, or ``None`` (#216).
+
+        The raw store window, without a freshness rule: producers and tests need to see
+        what is actually retained. Readers that publish the fix want
+        :meth:`get_fresh_coarse_fix` instead.
+        """
+        store = getattr(self, "_device_coarse_fix", None)
+        if not store:
+            return None
+        row = store.get(device_id)
+        return dict(row) if row is not None else None
+
+    def get_fresh_coarse_fix(self, device_id: str) -> dict[str, Any] | None:
+        """Return the retained coarse fix only while it is still worth showing.
+
+        Nothing removes a retained fix when time merely passes - the store is pruned
+        when a newer fix commits - so a rejection that is never followed by a better fix
+        stays readable forever. The device tracker knew that and hid it after
+        ``stale_threshold``; the diagnostics path did not, and kept exporting its bucket
+        and an ever-growing age for side information the integration otherwise treats as
+        expired.
+
+        One rule in one place, rather than at each reader: the same ``stale_threshold``
+        the gate and the tracker use, and a negative age counts as corrupt rather than
+        as extremely fresh. The tracker keeps its own check as a second line, because
+        reading a position is where the damage would show.
+        """
+        row = self.get_coarse_fix(device_id)
+        if row is None:
+            return None
+        age = location_age_seconds(row, time.time())
+        if age is None or age < 0 or age > resolve_stale_threshold(self):
+            return None
+        return row
 
     def prime_device_location_cache(self, device_id: str, data: dict[str, Any]) -> None:
         """Prime the internal location cache with externally-provided data.
@@ -456,6 +1044,26 @@ class CacheOperations(_MixinBase):
 
         slot["is_replayed"] = is_replay
 
+        # Tally the REPORTED accuracy class (#216) BEFORE the semantic mapping
+        # below can replace the value with an anchor radius, and only if nobody
+        # upstream has counted this payload already. The marker is explicit
+        # rather than derived from ``_fusion_preapplied``: deriving it coupled
+        # "was fused" to "was counted", and the push path is exactly the case
+        # where those two come apart - its accuracy is substituted in
+        # ``FcmReceiverHA._prepare_coordinator_payload``, i.e. before this
+        # method is ever entered, so it has to count there and say so here.
+        # ... and claim it here too. This is the FOURTH counting site, not one of the
+        # three entry points: a device-list seed reaches this fallback with nobody
+        # upstream having counted it. A seed row carries coordinates and a radius but
+        # frequently no parseable ``last_seen``, and the freshness check above then
+        # compares ``None`` with ``None`` and skips nothing, so every refresh added the
+        # same radius again and the persisted histogram measured polling frequency. The
+        # claim is what recognises that repetition; nothing else here can.
+        if not slot.pop("_accuracy_counted", False) and self.claim_report_for_tally(
+            device_id, slot
+        ):
+            self.count_accuracy_class(slot)
+
         # Apply semantic location mapping
         apply_mapping = getattr(self, "_apply_semantic_mapping", None)
         if callable(apply_mapping):
@@ -466,7 +1074,6 @@ class CacheOperations(_MixinBase):
         report_hint = slot.get("_report_hint")
         fusion_preapplied = bool(slot.pop("_fusion_preapplied", False))
 
-        # Apply weighted fusion if not already done
         if not fusion_preapplied and not self._apply_weighted_location_fusion(
             device_id, slot
         ):
@@ -490,6 +1097,9 @@ class CacheOperations(_MixinBase):
         # thus never consumes or seeds an anchor - the ordering fix (Fund A).
         anchor_seed = slot.pop("_round_trip_anchor_seed", None)
         anchor_consume = bool(slot.pop("_round_trip_anchor_consume", False))
+        # Read by the accuracy gate during fusion above; must never reach the
+        # cached row.
+        slot.pop("_accuracy_substituted", None)
 
         status = slot.get("status")
 
@@ -587,6 +1197,15 @@ class CacheOperations(_MixinBase):
                 name_cache[device_id] = name
 
         self._device_location_data[device_id] = slot
+        # A committed fix makes any retained coarse fix that is not newer than it
+        # obsolete: the coarse row exists as side information for as long as we
+        # have nothing better, and now we do. Without this it would keep naming a
+        # city from an earlier report next to the fresh position for up to the
+        # whole stale threshold - the reader's age rule alone cannot see that,
+        # because it only knows the coarse row's own age. Producer-side on
+        # purpose, so the tracker attributes and the diagnostics builder are both
+        # covered by one rule rather than each growing its own.
+        self._expire_coarse_fix(device_id, slot)
         # Coordinator last-good: advance only for reliable (non-estimated) fixes
         # so a sanitized accuracy-less update never overwrites the last reliable
         # position the Plus Code display accessors fall back to (non-poison).
@@ -729,6 +1348,13 @@ class CacheOperations(_MixinBase):
             merged["last_updated"] = time.time()
 
             self._device_location_data[target_id] = merged
+            # Same rule as after a direct commit: this target just received a
+            # newer position, so any coarse fix it retained is obsolete. The
+            # propagation writes the row itself instead of going through
+            # ``update_device_cache``, so the expiry has to be repeated here -
+            # a sibling would otherwise keep showing an old city next to the
+            # propagated position.
+            self._expire_coarse_fix(target_id, merged)
             # Coordinator last-good for the shared target, same non-poison gate.
             self._record_last_good_location(target_id, merged)
 
@@ -799,9 +1425,6 @@ class CacheOperations(_MixinBase):
         """
         # Use centralized constant from helpers/geo.py
         # MIN_PHYSICAL_ACCURACY_M = 0.001m (only error code 0.0 is filtered)
-
-        # Maximum accepted future drift in seconds (2 hours)
-        MAX_ACCEPTED_LOCATION_FUTURE_DRIFT_S = 7200
 
         if not isinstance(new_data, dict):
             _LOGGER.debug("Rejecting update for %s: payload is not a dict", device_id)
@@ -967,6 +1590,15 @@ class CacheOperations(_MixinBase):
             return DEFAULT_ROUNDTRIP_CONFIRM
         return bool(entry.options.get(OPT_ROUNDTRIP_CONFIRM, DEFAULT_ROUNDTRIP_CONFIRM))
 
+    def _accuracy_gate_enabled(self) -> bool:
+        """Return whether the comparative accuracy gate is active (#216)."""
+        entry = getattr(self, "config_entry", None)
+        if entry is None or getattr(entry, "options", None) is None:
+            return DEFAULT_ACCURACY_GATE_ENABLED
+        return bool(
+            entry.options.get(OPT_ACCURACY_GATE_ENABLED, DEFAULT_ACCURACY_GATE_ENABLED)
+        )
+
     def _apply_weighted_location_fusion(
         self,
         device_id: str,
@@ -1054,6 +1686,24 @@ class CacheOperations(_MixinBase):
                     new_data["altitude"] = existing["altitude"]
                 new_data["location_type"] = "trusted"
                 new_data["status"] = "Stationary (at Anchor)"
+                return True
+            # Non-overlapping against a trusted anchor: the accuracy gate applies
+            # here too (#216). The placement rationale F3 below, which keeps the
+            # SPEED gate out of this branch, does not transfer: it rests on a
+            # semantic anchor having no kinematics, and this gate has none - it
+            # compares radii. Leaving the branch exempt would have exempted the
+            # single best cached reference the gate exists to protect, so a fresh
+            # 50 m anchor could still be displaced by a 1600 m fix, which is the
+            # false zone transition this whole change is about. The speed gate
+            # stays out; only the comparative accuracy check runs.
+            if _accuracy_gate_rejects(
+                self,
+                device_id,
+                new_data,
+                existing,
+                _GateMetrics(new_acc, new_acc_raw, existing_acc, dist),
+            ):
+                return False
             return True
 
         # FIX #155: When BOTH sides carry the fallback accuracy, fusion
@@ -1208,6 +1858,24 @@ class CacheOperations(_MixinBase):
                                         # then have burnt the anchor. Mark the intent
                                         # on new_data and pop the anchor only AFTER
                                         # the commit (mirrors _supersede handling).
+                                        # DECLARED LIMIT (#216): this return
+                                        # leaves the fusion above the accuracy
+                                        # gate, so a recovered fix is published
+                                        # with whatever radius it carries - a
+                                        # coarse one included. That is deliberate
+                                        # and not an oversight: the recovery has
+                                        # an INDEPENDENT confirmation of the
+                                        # place (the fix landed within
+                                        # ROUND_TRIP_ANCHOR_RADIUS_M of a
+                                        # remembered anchor), which is exactly
+                                        # what the accuracy gate lacks and
+                                        # substitutes with a comparison. Gating
+                                        # here would also burn the one-shot
+                                        # anchor for nothing and strand the
+                                        # tracker at the far position - the
+                                        # failure this hatch exists to prevent.
+                                        # Pinned by
+                                        # test_round_trip_recovery_outranks_the_accuracy_gate.
                                         new_data["_round_trip_anchor_consume"] = True
                                         self.increment_stat("round_trip_recoveries")
                                         _LOGGER.debug(
@@ -1300,6 +1968,27 @@ class CacheOperations(_MixinBase):
                                 "lon": existing_lon,
                                 "ts": new_ts,
                             }
+
+            # Comparative accuracy gate (#216, and the core of #211). The speed
+            # gate above asks whether the jump is physically possible; this one
+            # asks whether the incoming fix is good enough to displace what we
+            # already have. It runs only where the circles do NOT overlap -
+            # here and, since the trusted-anchor branch above, there as well -
+            # because only an overlap-free pair is a real displacement: where
+            # they overlap the inverse-square weighting already pulls a coarse
+            # fix down to near-zero influence (200**2/20**2 = 100x less weight).
+            #
+            # Rule, rationale and the deliberate absence of an own-report
+            # bypass live in ``_accuracy_gate_rejects``; not restated here, so
+            # the two call sites cannot document it differently.
+            if _accuracy_gate_rejects(
+                self,
+                device_id,
+                new_data,
+                existing,
+                _GateMetrics(new_acc, new_acc_raw, existing_acc, dist),
+            ):
+                return False
             return True
 
         # Overlapping accuracy circles: fuse with inverse-square weighting

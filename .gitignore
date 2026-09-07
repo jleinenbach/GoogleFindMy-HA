@@ -2,6 +2,7 @@
 __pycache__/
 pytest_output.log
 .coverage
+.coverage.*
 .wheelhouse/
 .bootstrap/
 node_modules/
@@ -10,5 +11,5 @@ node_modules/
 .hypothesis/
 jscpd-report/
 coverage.xml
-.venv/
+.venv
 .plans/

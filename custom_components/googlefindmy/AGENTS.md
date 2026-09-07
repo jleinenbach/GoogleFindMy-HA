@@ -87,13 +87,207 @@ Normalize FCM canonic IDs before validation (for example, compare `response_cano
 `canonic_device_id.lower()` and store the lowercase string on decrypted payloads) so tracker updates are not discarded due
 to server-provided hex casing differences.
 
-### Hybrid Low-Accuracy Polling
+### Semantic-only responses and coarse fixes
 
-When a poll response fails the accuracy threshold, `coordinator.py` preserves the previous coordinates and accuracy but still
-updates the new `last_seen` timestamp. This keeps map pins stable (no "jumping" to poor fixes) while reflecting that the device
-recently reported. The cold-start drop path (no cached coordinates available) strips `_report_hint` before returning; mirror that
-hint-stripping step in any new helpers that short-circuit low-quality updates so internal metadata never leaks into entity
-state.
+Two situations look alike in the poll loop and must not be merged.
+
+*Semantic-only responses* (no coordinates, but a `semantic_name`) preserve the previous coordinates and accuracy via
+`should_preserve_previous_coordinates` and `carry_reused_accuracy`, and they do commit the new `last_seen`. This keeps map pins
+stable while reflecting that the device recently reported. Because the reused value is indistinguishable from a fresh one
+downstream, `count_accuracy_class` must run BEFORE this and before every other accuracy substitution (`_apply_semantic_mapping`,
+the Google-Home filter on both the poll and the push path); its distribution answers "what do incoming fixes report", and a
+response reporting no accuracy of its own does not belong in it. All **three** entry points count for themselves and set
+`_accuracy_counted`; `update_device_cache` counts only when that marker is absent and pops it, so it never reaches entity state.
+The marker is deliberately not derived from `_fusion_preapplied`: on the push path the accuracy is substituted in
+`FcmReceiverHA._prepare_coordinator_payload`, i.e. before the coordinator is entered at all, so "was fused" and "was counted" are
+not the same question. Order pinned by
+`tests/test_cache_accuracy_gate.py::test_the_tally_runs_before_any_accuracy_substitution`.
+
+Every site that counts claims first, through `claim_report_for_tally`, which counts a
+report once and then recognises its retries. What makes a report a retry is the ring of
+identities this coordinator has actually tallied - not the published row and not the
+retained coarse fix. Both were surrogates: a semantic-only response commits its timestamp
+after copying the previous coordinates and accuracy, so a cache row proves a timestamp was
+seen, not that a bucket was counted for it, and the same report arriving later with its
+real accuracy was suppressed. The ring is bounded (`_TALLY_MEMORY`) because two reports
+that both fail to reach either cache can be delivered alternately and would otherwise
+overwrite each other's claim; the bound is a number that can be raised, where "one slot"
+was a shape that could not. Cost of that choice, stated: on the first start after this
+change a report counted before it can be counted once more, since the ring starts empty
+while the caches do not. It claims only what would actually be
+tallied: a semantic-only response carries a timestamp but no usable accuracy, and a claim
+recorded for it would later suppress the same report arriving with its accuracy through
+another path - silencing a measurement that was never taken. The predicate is read from
+the same helpers the tally uses, so the two cannot drift apart. That is four sites, not three: besides the
+entry points, the `update_device_cache` fallback counts a device-list seed that nobody
+upstream has counted, and it was found one review round after the others. The set is
+therefore derived from the sources rather than listed here, by
+`tests/test_cache_accuracy_gate.py::test_every_counting_site_claims_the_report_first`, so
+a fifth site arrives red instead of arriving silently.
+
+The claim is persisted inside the histogram record it protects: one cache key
+(`integration_stats`), one write, with the claims under the reserved sub-key
+`_tally_claims`. They are two halves of one fact, and two writes would have two failure
+modes - a claim without its increment silences a measurement that was never recorded, an
+increment without its claim counts one twice on the next delivery. The loader copies only
+known counters into `stats`, so the sub-key cannot become a phantom counter. A missing
+sub-key is the state before this existed and is not an error; an entry the loader cannot
+read is dropped rather than half-trusted.
+
+That load is scheduled rather than awaited, so it can land after a push has already
+counted something. The live counter is not a newer total but the increments since the
+read began, so the two are ADDED rather than one being chosen; and a restored ring is
+merged in FRONT of the live one, because the ring keeps its tail and a live claim must
+not be trimmed away by a full stored ring:
+otherwise an increment would be discarded while its claim survived, which is the one
+state the pair must never reach. A purge writes immediately rather than on the debounce,
+because a reload or shutdown inside that window cancels the pending write without
+flushing it.
+
+Because the claim and the histogram are two halves of one fact, they also END together. The Reset Statistics
+button calls `begin_new_stats_epoch()`, which zeroes the counters, clears the claims and
+bumps the generation counter, so that by the time the debounced writer runs, every half is
+reset. ONE call doing all three, not a rationale attached to two: an earlier version left
+the zeroing at the caller and still called itself one call, which was safe only as long as
+no `await` appeared between the two sites - an invariant nobody had written down. It
+returns whether a usable `stats` mapping was found, so the caller can log that case the way
+it did before; the epoch and the claims are reset either way, because a broken counter
+mapping is no reason to let a discarded generation come back. Zeroing the counters alone would store a record that
+says nothing was counted and at the same time refuses to count some of the reports that
+would refill it: a delivery whose identity is still in a ring reads as a replay. The size
+of that hole is bounded and worth stating so it is not over-diagnosed later - at most
+`_TALLY_MEMORY` already-claimed re-deliveries per device, since a report with a new
+identity was never suppressed.
+
+What is NOT required is a source order against `_schedule_stats_persist()`. That call
+cancels any pending writer and schedules a task whose first statement is a sleep of
+`_stats_debounce_seconds` (5 s today), and `_async_save_stats` reads `self.stats` and
+`_last_tallied_report_id` live at write time. `async_press` has no `await` between the two
+calls at all, so the loop cannot interleave and swapping them persists a byte-identical
+record. The invariant is about the state the WRITER sees, and it
+is pinned that way, by
+`tests/test_cache_accuracy_gate.py::test_the_reset_button_leaves_the_writer_nothing_to_carry_over`:
+it drives the real button and then the real writer and reads the record handed to the
+cache. Any future operation that empties the histogram carries the same obligation.
+
+A reset starts a new epoch; it does not draw a wall-clock boundary. A report counted into
+the previous histogram and delivered again afterwards is counted into the new one - which
+is the point, because it is exactly the report the cleared claim was protecting.
+
+The epoch is not decoration; it is what makes a reset survive the load. `_async_load_stats`
+is created as a task during setup and can resume long after the button was pressed, and it
+ADDS the stored counters onto the live ones and MERGES the stored claim rings back in.
+Without a generation to compare against, a reset inside that window is undone in both
+halves and the debounced write then makes the discarded generation durable again. So the
+loader reads the epoch BEFORE its await and drops the whole record if it changed. Dropping
+rather than partially merging is the only outcome that keeps the pair consistent: there is
+nothing to merge a discarded generation into. Both directions are pinned -
+`::test_a_load_that_predates_a_reset_is_discarded` and, as the counter-test that a guard
+must not swallow the ordinary path, `::test_an_undisturbed_load_still_adds_and_merges`.
+
+A PURGE inside the same window needs the opposite treatment, which is why the epoch cannot
+carry it: a reset discards a whole generation, a purge removes one device from a generation
+that stays valid. So `purge_device` remembers the id in `_purged_before_stats_load` until
+the load finishes and `_restore_tally_claims` skips it. Remembered UNCONDITIONALLY, not
+only when the in-memory pop found something: the claim may not have been loaded yet, which
+is exactly the case the pop cannot see. The set is cleared in the load's `finally`, so a
+failed read closes the window too, and from there on the purge's own pop is the whole
+mechanism. Inside the window the durable half has to be corrected too - the pop finds
+nothing there by definition, while the stored record still lists the device - but NOT by
+writing on the spot. `_async_save_stats` serialises the WHOLE record from live state, and
+live state is missing everything the load has not merged yet, so a write inside the window
+would replace the persisted totals and every sibling ring with pre-load values. The
+correction is therefore deferred to the load's `finally`, where live state finally carries
+the merged record, and it holds even when the pop DID find a live claim, which a push can
+create before the load resumes (`::test_a_live_claim_inside_the_window_still_defers_the_write`). Pinned by `::test_a_purge_during_the_load_survives_the_merge` (which also
+asserts that a sibling device's ring is NOT dropped) and
+`::test_a_purge_after_the_load_is_carried_by_the_pop_alone`.
+
+Two properties of the persisted claim identity are load-bearing. The identity of a report with no
+timestamp is a **digest** of its position and radius, never the values themselves: this
+record is durable, and a position in durable state is the one thing this feature is
+careful not to keep. And the claim is dropped in `purge_device` along with the other
+device-keyed caches, with a persist scheduled - otherwise a deleted device keeps an
+entry indefinitely, and one re-added under the same id has its first matching
+measurement suppressed by a claim from its previous life. That write is immediate rather
+than debounced, but it is a task nobody awaits, so `async_shutdown` also writes the stats
+record on the way out. It does so UNCONDITIONALLY, and that word is the whole point:
+gating the write on a pending debounced task skipped exactly the case it exists for,
+because the purge writes through a task `_stats_save_task` never holds. A condition that
+cannot see the more important of the two writers is not a condition. Two things ride on
+the write: the increments the debounce window was still coalescing, and the purge itself,
+whose own task an unload can outrun. The failure would surface much later, when the id
+came back. Pinned by
+`tests/test_cache_accuracy_gate.py::test_shutdown_writes_the_pending_stats_instead_of_dropping_them`,
+which uses a real pending task because a stub that only counts `cancel` calls stays green
+with the flush deleted, and by `::test_shutdown_writes_even_when_no_debounced_task_is_pending`,
+which is the one that discriminates the unconditional form from the gated one.
+
+A retained coarse fix is read for publication through `get_fresh_coarse_fix`, never
+through `get_coarse_fix`. Nothing removes a retained fix when time merely passes - the
+store is pruned when a newer fix commits - so a rejection never followed by a better fix
+stays in the store indefinitely. `get_coarse_fix` is the raw window that producers and
+tests need; the freshness rule (same `stale_threshold`, negative age counts as corrupt)
+lives in the reader. The device tracker keeps its own check as a second line. Identity is the report timestamp where there is one; a
+payload with no parseable `last_seen` is keyed on its position and radius instead, because
+such a report is rejected by the gate, retained nowhere and therefore delivered again on
+every poll - counting it each time would make the persisted distribution measure retry
+frequency rather than incoming fixes. What holds the claim is a bounded RING per device,
+`cache.py::_TALLY_MEMORY` identities long (8 today), not a single slot: a single slot was
+overwritten by the next unrecognised report, so two of them delivered alternately were
+counted on every delivery. Two bounded and deliberate limits remain: a device that sees
+more than `_TALLY_MEMORY` distinct unretained reports before one repeats loses the oldest
+claim and counts that report again, and two stampless reports agreeing on position and
+radius are indistinguishable by construction. The first limit is now a number one can
+raise rather than a shape one could not. Pinned by
+`tests/test_cache_accuracy_gate.py::test_a_stampless_report_is_counted_once_however_often_it_arrives`
+and, for the ring itself, by `::test_the_ring_limit_is_the_same_number_on_both_sides` and
+`::test_a_full_stored_ring_does_not_evict_the_claim_made_during_the_load`.
+
+*Coarse fixes* are decided by the accuracy gate, `coordinator/cache.py::_accuracy_gate_rejects` (#216). It fires only where the
+two accuracy circles do NOT overlap (`dist > radius_sum`) and only when all of these hold: the option is on, the incoming accuracy
+is a real measurement, it is at least `ACCURACY_GATE_MIN_M` (an absolute floor, so a merely relative degradation is never enough),
+it is at least `ACCURACY_GATE_RATIO` times worse than the cached one, and the cached fix is reliable and younger than
+`stale_threshold`. There are **two** call sites and they must stay in step: the ordinary clear-jump branch, and the
+trusted-anchor branch for a fix that does not overlap the anchor. The second one matters most - a trusted semantic anchor is the
+best reference the integration has, so exempting it would exempt exactly the case the gate exists for. The placement rationale F3
+that keeps the *speed* gate out of the trusted branch does not transfer: it rests on a semantic anchor having no kinematics, and
+this gate compares radii, not motion.
+
+On a rejection all three callers (poll loop, manual locate, `update_device_cache`) abort, so **the location row is not committed -
+not even its new `last_seen`** (side effects already applied before the fusion, such as anchor metadata, do persist). That is
+deliberate and load-bearing: the age of the cached row is the gate's release condition, so committing a fresh timestamp behind the
+gate would keep the cached fix permanently fresh and the gate would never release. Do not "fix" an aging row that way. Boundary
+pinned by `tests/test_cache_accuracy_gate.py::test_gate_stops_rejecting_once_the_cached_fix_goes_stale`.
+
+**A refusal is not silence.** The refused fix is retained as side information and the tracker publishes it as its `coarse_*`
+attributes, so every one of the three callers has to notify the listeners even when nothing was committed - and all three already
+do, from a place far enough from the rejection that a reader looking only at the branch will miss it. The poll cycle publishes
+`end_snapshot` from the `finally` of `_async_start_poll_cycle`; `async_locate_device` calls `async_set_updated_data(self.data)`
+from the `finally` that closes its whole body, roughly 350 lines below the `return {}`; and the push fan-out reaches
+`_notify_coordinator` because `_write_coordinator_payload` reports success whenever `update_device_cache` was callable, which it
+was, refusal or not. In Home Assistant `async_set_updated_data` ends in `async_update_listeners`, and every branch of the
+tracker's `_handle_coordinator_update` ends in `async_write_ha_state` after re-reading `get_fresh_coarse_fix`.
+
+So do NOT add a notification next to the rejection: it would fire a second, identical entity update, and at a worse moment, since
+the device is still in `_locate_inflight` there and the locate button would be written unavailable and available one statement
+apart. What the distance does justify is a pin, and there was none: removing the `finally` line left every suite that drives a
+locate green. `tests/test_coordinator_locate_basics.py::TestAsyncLocateDeviceGating::test_a_refused_fix_still_notifies_the_listeners`
+now asserts the ORDER (notify, refuse, notify) rather than a count, because the entry-side notification cannot carry a coarse fix
+that has not been fetched yet.
+
+The release condition is the age of the *row*, not of the *measurement*, and two existing paths refresh that age while reusing the
+previous coordinates: the semantic-only preserve above, and the trusted-anchor snap-back (`status = "Stationary (at Anchor)"`,
+which only happens on an overlap). While either keeps firing, the gate keeps rejecting. That is intended rather than the
+predecessor's failure mode: in both cases the cached position is a trusted or genuinely measured one that the integration has
+decided to hold, so a fix an order of magnitude coarser must not displace it. The predecessor (`min_accuracy_threshold`, removed
+upstream in September 2025) froze trackers for the opposite reason - it discarded on the incoming radius alone, with no cached
+reference at all. Both refresh paths stop as soon as the device really leaves, because neither fires without an overlap; the
+anchor then ages out and the coarse fix wins.
+
+The drop path taken when `_normalize_coords` fails (no usable coordinate pair and nothing cached to preserve) strips
+`_report_hint` before returning; mirror that hint-stripping step in any new helpers that short-circuit low-quality updates so
+internal metadata never leaks into entity state.
 
 ### Authentication failure propagation
 

@@ -33,6 +33,10 @@ from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from typing import Any
 
+# Re-exported for the coordinator-side callers that have always imported them
+# from here; the definitions live outside this package so ``Auth`` can use them
+# without dragging the coordinator package into its import graph.
+from ...location_row_markers import strip_transient_keys, substitute_zone_accuracy
 from .geo import haversine_distance, safe_accuracy
 from .subentry import format_epoch_utc, normalize_epoch_seconds
 
@@ -63,6 +67,8 @@ __all__ = [
     "select_best_location_source",
     "should_allow_location_update",
     "should_clear_metadata_only_flag",
+    "strip_transient_keys",
+    "substitute_zone_accuracy",
 ]
 
 # ---------------------------------------------------------------------------

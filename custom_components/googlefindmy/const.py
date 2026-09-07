@@ -580,6 +580,7 @@ OPT_STALE_THRESHOLD: str = "stale_threshold"
 OPT_SHOW_LOCATION_AGE: str = "show_location_age"
 OPT_SPEED_GATE_ENABLED: str = "speed_gate_enabled"
 OPT_ROUNDTRIP_CONFIRM: str = "roundtrip_confirm_enabled"
+OPT_ACCURACY_GATE_ENABLED: str = "accuracy_gate_enabled"
 # Legacy option key - kept for reading old configurations, no longer used
 OPT_STALE_THRESHOLD_ENABLED: str = "stale_threshold_enabled"
 
@@ -601,6 +602,7 @@ OPTION_KEYS: tuple[str, ...] = (
     OPT_SHOW_LOCATION_AGE,
     OPT_SPEED_GATE_ENABLED,
     OPT_ROUNDTRIP_CONFIRM,
+    OPT_ACCURACY_GATE_ENABLED,
 )
 
 # Keys which may exist historically in entry.data and should be soft-copied to entry.options
@@ -744,6 +746,21 @@ ROUND_TRIP_TTL_S: int = 900
 # own constant (not an alias) so it stays one-line adjustable.
 ROUND_TRIP_ANCHOR_RADIUS_M: float = 200.0
 
+# Accuracy gate (#216, and the core of #211). A coarse crowd fix must not
+# displace a better, still-fresh position, and must not trip Home Assistant's
+# zone logic: the reported accuracy radius is the TOLERANCE of the zone
+# assignment (zone/__init__.py: ``zone_dist - zone_radius < radius``), so a
+# 460 m fix 346 m away from a 32 m home zone is published as "home".
+#
+# Deliberately a switch, not a numeric field. The predecessor option
+# ``min_accuracy_threshold`` (default 100 m, range 25-500) was an absolute
+# threshold and was removed one day after it shipped ("causing too many
+# problems", 47a18cc5). Its default sat right ON the median reported FMDN
+# accuracy (94-148 m, Boettger et al., PoPETs 2025(4), Tab. 5+6), so it
+# discarded about half of all genuine reports. The comparative rule below has
+# no such failure mode: it never discards without a better alternative.
+DEFAULT_ACCURACY_GATE_ENABLED: bool = True
+
 CONTRIBUTOR_MODE_HIGH_TRAFFIC: str = "high_traffic"
 CONTRIBUTOR_MODE_IN_ALL_AREAS: str = "in_all_areas"
 DEFAULT_CONTRIBUTOR_MODE: str = CONTRIBUTOR_MODE_IN_ALL_AREAS
@@ -771,6 +788,7 @@ DEFAULT_OPTIONS: dict[str, object] = {
     OPT_SHOW_LOCATION_AGE: DEFAULT_SHOW_LOCATION_AGE,
     OPT_SPEED_GATE_ENABLED: DEFAULT_SPEED_GATE_ENABLED,
     OPT_ROUNDTRIP_CONFIRM: DEFAULT_ROUNDTRIP_CONFIRM,
+    OPT_ACCURACY_GATE_ENABLED: DEFAULT_ACCURACY_GATE_ENABLED,
 }
 
 # -------------------- Options schema versioning (lightweight) --------------------
@@ -954,6 +972,9 @@ CONFIG_FIELDS: dict[str, dict[str, object]] = {
         "type": "bool",
     },
     OPT_ROUNDTRIP_CONFIRM: {
+        "type": "bool",
+    },
+    OPT_ACCURACY_GATE_ENABLED: {
         "type": "bool",
     },
     # OPT_IGNORED_DEVICES is intentionally omitted: it is managed by a dedicated
@@ -1214,12 +1235,14 @@ __all__ = [
     "OPT_SHOW_LOCATION_AGE",
     "OPT_SPEED_GATE_ENABLED",
     "OPT_ROUNDTRIP_CONFIRM",
+    "OPT_ACCURACY_GATE_ENABLED",
     "OPT_STALE_THRESHOLD_ENABLED",
     "MIGRATE_DATA_KEYS_TO_OPTIONS",
     "UPDATE_INTERVAL",
     "DEFAULT_SPEED_GATE_ENABLED",
     "DEFAULT_MAX_PLAUSIBLE_SPEED_MPS",
     "DEFAULT_ROUNDTRIP_CONFIRM",
+    "DEFAULT_ACCURACY_GATE_ENABLED",
     "ROUND_TRIP_TTL_S",
     "ROUND_TRIP_ANCHOR_RADIUS_M",
     "DEFAULT_LOCATION_POLL_INTERVAL",

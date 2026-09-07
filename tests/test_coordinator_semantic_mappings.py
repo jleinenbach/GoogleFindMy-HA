@@ -2034,3 +2034,77 @@ class TestTheDocumentedRejectionGuardStaysTrue:
         assert not [name for name in listed if name not in defined], [
             name for name in listed if name not in defined
         ]
+
+
+@pytest.mark.asyncio
+async def test_manual_locate_marks_a_substituted_zone_radius() -> None:
+    """The filter's radius must reach the payload flagged as a zone radius.
+
+    ``substitute_zone_accuracy`` puts the home zone's radius into ``accuracy``
+    and marks it, because the accuracy gate would otherwise weigh that number
+    against the cached precision and refuse the filter's deliberate move home
+    (#216). This is the manual-locate call site; the poll one is covered in
+    ``tests/test_cache_accuracy_gate.py``. The marker is transient and popped in
+    ``update_device_cache``, which this harness stubs out, so it is still
+    present on the returned payload - that is the point being pinned here.
+    """
+    google_filter = _TrackingFilter(
+        should_filter=False,
+        replacement={"latitude": 48.5, "longitude": 9.5, "radius": 400.0},
+    )
+    coordinator = _base_coordinator(
+        {},
+        google_filter,
+        {
+            "latitude": 52.0,
+            "longitude": 13.0,
+            "accuracy": 25.0,
+            "semantic_name": "Kitchen speaker",
+        },
+    )
+
+    result = await coordinator.async_locate_device("device-1")
+
+    assert google_filter.called == 1
+    assert result["accuracy"] == pytest.approx(400.0)
+    assert result["latitude"] == pytest.approx(48.5)
+    assert result["_accuracy_substituted"] is True
+
+
+@pytest.mark.asyncio
+async def test_manual_locate_does_not_count_a_replay() -> None:
+    """Third counting site of the accuracy distribution, same replay rule.
+
+    Repeated manual locates that return the report already cached would
+    otherwise enter one fix into the distribution once per button press, and
+    that distribution is what the accuracy gate's thresholds get re-tuned
+    against (#216).
+    """
+    import time
+
+    stamp = time.time() - 300
+    coordinator = _base_coordinator(
+        {},
+        _TrackingFilter(),
+        {
+            "latitude": 52.0,
+            "longitude": 13.0,
+            "accuracy": 25.0,
+            "last_seen": stamp,
+        },
+    )
+    coordinator._device_location_data["device-1"] = {"last_seen": stamp}
+    # The report was already tallied once. Seeded through the real claim rather than by
+    # setting the cache row alone: a stored row proves a report was seen, not that a
+    # bucket was counted for it, and the replay predicate now asks the latter.
+    assert coordinator.claim_report_for_tally(
+        "device-1", {"accuracy": 25.0, "last_seen": stamp}
+    )
+
+    counted: list[object] = []
+    coordinator.count_accuracy_class = lambda row: counted.append(row.get("accuracy"))
+
+    result = await coordinator.async_locate_device("device-1")
+
+    assert result is not None, "the locate must have run, or this proves nothing"
+    assert counted == [], f"a replayed locate was counted: {counted}"

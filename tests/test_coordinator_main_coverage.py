@@ -199,7 +199,14 @@ async def test_save_stats_persists_copy() -> None:
 
     await c._async_save_stats()
 
-    assert cache.saved["integration_stats"] == {"x": 1}
+    # The record carries the counters plus the tally claims that protect the accuracy
+    # histogram, under a reserved sub-key: one write, so the two halves cannot disagree
+    # after a crash. Counters are compared by projection rather than by equality, since
+    # this test is about the copy, not about the record's shape.
+    record = cache.saved["integration_stats"]
+    assert {k: v for k, v in record.items() if not k.startswith("_")} == {"x": 1}
+    assert record["_tally_claims"] == {}
+    assert record is not c.stats
 
 
 @pytest.mark.asyncio
@@ -475,13 +482,29 @@ async def test_async_shutdown_cancels_handles_and_unloads() -> None:
     c._short_retry_cancel = lambda: cancelled.append("retry")
 
     class _Task:
+        """Awaitable on purpose: shutdown now awaits the write it cancelled.
+
+        A stub without ``__await__`` still passed, because the ``TypeError`` was
+        swallowed by the same guard that swallows a failed write - so the test would
+        have stayed green with the flush deleted.
+        """
+
         def done(self) -> bool:
             return False
 
         def cancel(self) -> None:
             cancelled.append("stats")
 
+        def __await__(self):  # type: ignore[no-untyped-def]
+            return iter(())
+
     c._stats_save_task = _Task()
+    saved: list[int] = []
+
+    async def _save() -> None:
+        saved.append(1)
+
+    c._async_save_stats = _save  # type: ignore[method-assign]
     c._eid_refresh_debounce_handle = SimpleNamespace(
         cancel=lambda: cancelled.append("eid1")
     )
@@ -498,6 +521,7 @@ async def test_async_shutdown_cancels_handles_and_unloads() -> None:
     await c.async_shutdown()
 
     assert set(cancelled) == {"dr", "retry", "stats", "eid1", "eid2"}
+    assert saved == [1], "the cancelled write is flushed, not dropped"
     assert c._dr_unsub is None
     assert c._short_retry_cancel is None
     assert unloaded
@@ -917,6 +941,52 @@ def test_purge_device_removes_and_republishes() -> None:
     ids = {row.get("device_id") for row in published}
     assert ids == {"other"}
     assert "dev" not in c._device_location_data
+
+
+def test_purge_device_drops_the_persisted_tally_claim() -> None:
+    """A persisted, device-keyed value follows the device's lifecycle.
+
+    Two consequences if it does not, and the first is the serious one. The claim of a
+    report without a timestamp is derived from that report's position and is written to
+    a durable store, so a deleted or ignored device would leave a trace of where it was,
+    indefinitely - the one thing the rest of this feature keeps out of durable state.
+    The second: a device re-added under the same id would have its first matching
+    measurement suppressed by a claim from its previous life.
+
+    A persist is scheduled, because dropping it only in memory would restore it on the
+    next start.
+    """
+    c = _bare()
+    _purge_ready(c)
+    written: list[Any] = []
+    c.hass = SimpleNamespace(async_create_task=written.append)
+    c._last_tallied_report_id = {
+        "dev": [("fix", "deadbeefdeadbeef")],
+        "other": [("ts", 7)],
+    }
+
+    c.purge_device("dev")
+
+    assert c._last_tallied_report_id == {"other": [("ts", 7)]}
+    # Written now rather than on the debounce: a reload or shutdown inside that window
+    # cancels the pending write without flushing it, and the purged device's claim would
+    # outlive the device it was deleted with.
+    assert len(written) == 1
+    written[0].close()
+
+
+def test_purge_device_without_a_claim_schedules_no_write() -> None:
+    """No claim, no write: a purge must not churn the store for nothing."""
+    c = _bare()
+    _purge_ready(c)
+    written: list[Any] = []
+    c.hass = SimpleNamespace(async_create_task=written.append)
+    c._last_tallied_report_id = {"other": [("ts", 7)]}
+
+    c.purge_device("dev")
+
+    assert c._last_tallied_report_id == {"other": [("ts", 7)]}
+    assert written == []
 
 
 def test_purge_device_saves_sound_uuids_when_present() -> None:

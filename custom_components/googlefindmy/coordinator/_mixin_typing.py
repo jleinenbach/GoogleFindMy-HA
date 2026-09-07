@@ -397,11 +397,41 @@ class _MixinBase:
     ) -> bool:
         raise NotImplementedError
 
+    def count_accuracy_class(self, row: Mapping[str, Any]) -> None:
+        """Tally the reported accuracy class of an incoming fix (#216).
+
+        Declared here because the poll loop and the manual locate call it
+        alongside ``_apply_weighted_location_fusion`` above; the implementation
+        lives in ``CacheOperations``.
+        """
+        raise NotImplementedError
+
     def _merge_with_existing_cache_row(
         self,
         device_id: str,
         new_row: dict[str, Any],
     ) -> dict[str, Any]:
+        raise NotImplementedError
+
+    def _expire_coarse_fix(
+        self,
+        device_id: str,
+        committed: Mapping[str, Any],
+    ) -> None:
+        raise NotImplementedError
+
+    def is_replayed_report(
+        self,
+        device_id: str,
+        row: Mapping[str, Any],
+    ) -> bool:
+        raise NotImplementedError
+
+    def claim_report_for_tally(
+        self,
+        device_id: str,
+        row: Mapping[str, Any],
+    ) -> bool:
         raise NotImplementedError
 
     def _persist_anchor_metadata(

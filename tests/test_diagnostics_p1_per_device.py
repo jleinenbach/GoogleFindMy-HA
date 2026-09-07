@@ -46,6 +46,10 @@ _EXPECTED_DEVICE_KEYS = {
     "last_accuracy_bucket",
     "is_own_report",
     "has_key",
+    # Accuracy gate (#216): what was discarded, without its coordinates. A
+    # diagnostics dump is routinely pasted into a public issue.
+    "coarse_fix_accuracy_bucket",
+    "coarse_fix_age_s",
 }
 
 
@@ -197,8 +201,15 @@ def test_drop_counters_surface_in_stats_block(
         (49.9, "10-50"),
         (50, "50-200"),
         (199.9, "50-200"),
-        (200, ">200"),
-        (500, ">200"),
+        # The former single ">200" class was split (#216): it covered everything
+        # from the accuracy gate's lower bound to infinity and so hid exactly the
+        # range the gate acts on.
+        (200, "200-500"),
+        (499.9, "200-500"),
+        (500, "500-2000"),
+        (1600, "500-2000"),  # the radius reported in BSkando#216
+        (2000, ">2000"),
+        (50000, ">2000"),
         (None, None),
         (-1, None),
     ],

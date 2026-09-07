@@ -53,6 +53,7 @@ from .helpers.cache import (
     SOUND_UUID_MAX_AGE_S,
     carry_reused_accuracy,
     is_sound_uuid_expired,
+    substitute_zone_accuracy,
 )
 from .helpers.geo import MIN_PHYSICAL_ACCURACY_M
 
@@ -367,6 +368,18 @@ class LocateOperations(_MixinBase):
                         is_replay = True
 
                 location_data["is_replayed"] = is_replay
+
+                # Tally the REPORTED accuracy class here (#216); see the identical
+                # call in the poll loop for the full reasoning. Same position for
+                # the same two reasons: before the fusion, which may reject and
+                # return, and before any substitution of the value (semantic
+                # mapping, Google-Home filter, semantic-only preserve). And the
+                # same replay rule: repeated manual locates without a new report
+                # must not enter the distribution more than once.
+                if self.claim_report_for_tally(device_id, location_data):
+                    self.count_accuracy_class(location_data)
+                location_data["_accuracy_counted"] = True
+
                 mapping_applied = self._apply_semantic_mapping(location_data)
 
                 # --- Parity with polling path: Google Home semantic spam filter --------
@@ -435,8 +448,9 @@ class LocateOperations(_MixinBase):
                                     "radius" in replacement_attrs
                                     and replacement_attrs.get("radius") is not None
                                 ):
-                                    location_data["accuracy"] = replacement_attrs.get(
-                                        "radius"
+                                    substitute_zone_accuracy(
+                                        location_data,
+                                        replacement_attrs["radius"],
                                     )
                             # Clear semantic name so HA Core's zone engine determines the final state.
                             location_data["semantic_name"] = None
