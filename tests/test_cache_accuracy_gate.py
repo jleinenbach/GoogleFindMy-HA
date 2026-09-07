@@ -1130,6 +1130,24 @@ def test_the_push_fallback_write_strips_the_marker() -> None:
 
     cached = coordinator._device_location_data["device-id"]
     assert cached["accuracy"] == 400.0
+
+    # A coordinator that DOES carry the expiry surface gets it called: the
+    # fallback is duck-typed, so both shapes have to be exercised, otherwise the
+    # duck-typing is only asserted in the comment.
+    expired: list[str] = []
+
+    class _WithExpiry(_Bare):
+        def _expire_coarse_fix(self, device_id: str, committed: Any) -> None:
+            expired.append(device_id)
+
+    FcmReceiverHA._write_coordinator_payload(
+        receiver,
+        _WithExpiry(),
+        "device-id",
+        {"accuracy": 400.0, "_accuracy_counted": True},
+    )
+    assert expired == ["device-id"]
+
     # Not "the two markers we know today": any transient key that survives here
     # becomes an entity attribute. Written as a property so the next marker is
     # covered by construction - the previous version named the keys and missed
@@ -1199,6 +1217,46 @@ def test_the_substitution_marker_never_reaches_the_cached_row() -> None:
     # The payload did commit - otherwise the assertion above would hold for the
     # wrong reason (nothing written at all).
     assert cached["accuracy"] == 400.0
+
+
+def test_the_new_mixin_declarations_refuse_to_be_used_unimplemented() -> None:
+    """A declaration that silently returned None would be worse than a crash.
+
+    ``_mixin_typing`` states what the mixins promise each other. The three
+    entries this branch adds raise instead of returning a default, so a
+    coordinator assembled without ``CacheOperations`` fails loudly rather than
+    quietly never expiring a coarse fix and never recognising a replay.
+    """
+    from custom_components.googlefindmy.coordinator._mixin_typing import _MixinBase
+
+    with pytest.raises(NotImplementedError):
+        _MixinBase._expire_coarse_fix(object(), "dev", {})
+    with pytest.raises(NotImplementedError):
+        _MixinBase.is_replayed_report(object(), "dev", {})
+    with pytest.raises(NotImplementedError):
+        _MixinBase.claim_report_for_tally(object(), "dev", {})
+
+
+def test_expiry_keeps_the_coarse_fix_when_the_commit_has_no_timestamp() -> None:
+    """An unprovable claim must not cost the only coarse position we have.
+
+    A committed row without a usable stamp cannot be shown to be newer than the
+    retained coarse fix. Dropping it anyway would lose the city we would
+    otherwise still know, which is the whole reason a coarse fix is kept.
+    """
+    from custom_components.googlefindmy.coordinator import GoogleFindMyCoordinator
+
+    coord = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
+    coord._device_coarse_fix = {
+        "dev": {"latitude": FAR[0], "longitude": FAR[1], "last_seen": _now() - 300}
+    }
+
+    coord._expire_coarse_fix("dev", {"latitude": HOME[0], "longitude": HOME[1]})
+    assert coord.get_coarse_fix("dev") is not None
+
+    # Non-vacuous: with a usable stamp the same call does expire it.
+    coord._expire_coarse_fix("dev", {"last_seen": _now()})
+    assert coord.get_coarse_fix("dev") is None
 
 
 def test_a_committed_fix_expires_the_retained_coarse_one() -> None:
