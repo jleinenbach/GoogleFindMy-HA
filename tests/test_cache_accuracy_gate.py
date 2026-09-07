@@ -3096,9 +3096,12 @@ async def test_the_reset_button_leaves_the_writer_nothing_to_carry_over(
 
     It also ties the button's string lookup to the production method: the
     coordinator here is a real ``GoogleFindMyCoordinator``, so renaming
-    ``clear_tally_claims`` makes ``getattr`` return ``None``, the button skips
+    ``begin_new_stats_epoch`` makes ``getattr`` return ``None``, the button skips
     the call silently, and this test goes red - which no unit test on the method
-    itself would do.
+    itself would do. The epoch assertion below is part of that: without it a
+    revert of the button to the older ``clear_tally_claims`` would still clear
+    the claims and keep this test green, while a stats load still in flight would
+    add the discarded generation back.
     """
     from types import SimpleNamespace
 
@@ -3140,6 +3143,10 @@ async def test_the_reset_button_leaves_the_writer_nothing_to_carry_over(
     await button.async_press()
 
     assert coord._schedule_stats_persist.called, "precondition: a write was scheduled"
+    assert coord._stats_epoch == 1, (
+        "the button must open a new generation, otherwise a stats load still in "
+        "flight adds the discarded counters back and merges its claim rings in"
+    )
 
     # Now run the writer the schedule stands for.
     await coord._async_save_stats()
@@ -3150,3 +3157,72 @@ async def test_the_reset_button_leaves_the_writer_nothing_to_carry_over(
         "the writer carried claims into a zeroed histogram; every delivery still "
         "in a ring would read as a replay and not refill the distribution"
     )
+
+
+# ------------------- a reset overtakes a stats load still in flight (#216)
+
+# ``_async_load_stats`` is created as a task during setup, so it resumes at an
+# arbitrary later point and can land after the user pressed Reset Statistics. It
+# adds the stored counters onto the live ones and merges the stored claim rings
+# back in, so without a generation marker the reset is undone in both halves and
+# the debounced write then makes the old generation durable again.
+
+
+def _loading_coord(stored: dict[str, Any], *, interrupt: bool) -> Any:
+    """A coordinator whose stats read optionally presses Reset mid-flight."""
+    from types import SimpleNamespace
+
+    from custom_components.googlefindmy.coordinator import GoogleFindMyCoordinator
+
+    coord = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
+    coord._device_location_data = {}
+    coord._device_coarse_fix = {}
+    coord._stats_epoch = 0
+
+    async def _get(key: str) -> Any:
+        if key != "integration_stats":
+            return None
+        if interrupt:
+            # What the button does, inside the window the read is awaited in.
+            coord.stats = dict.fromkeys(coord.stats, 0)
+            coord.begin_new_stats_epoch()
+        return stored
+
+    coord._cache = SimpleNamespace(async_get_cached_value=_get)
+    return coord
+
+
+@pytest.mark.asyncio
+async def test_a_load_that_predates_a_reset_is_discarded() -> None:
+    """The reset wins, in both halves."""
+    bucket = ACCURACY_BUCKET_STATS["<10"]
+    stored = {bucket: 41, "_tally_claims": {"dev": [["dev-ts", 1.0]]}}
+    coord = _loading_coord(stored, interrupt=True)
+    coord.stats = {bucket: 7}
+
+    await coord._async_load_stats()
+
+    assert coord.stats[bucket] == 0, "the discarded generation was added back"
+    assert not getattr(coord, "_last_tallied_report_id", None), (
+        "the discarded generation's claims were merged back in"
+    )
+
+
+@pytest.mark.asyncio
+async def test_an_undisturbed_load_still_adds_and_merges() -> None:
+    """The counter-test: the epoch must not change the ordinary path.
+
+    Addition rather than replacement, and the claim rings merged rather than
+    dropped, are properties this feature went through several review rounds to
+    get right. A guard that also changed the undisturbed case would be a
+    regression dressed as a fix.
+    """
+    bucket = ACCURACY_BUCKET_STATS["<10"]
+    stored = {bucket: 41, "_tally_claims": {"dev": [["dev-ts", 1.0]]}}
+    coord = _loading_coord(stored, interrupt=False)
+    coord.stats = {bucket: 1}
+
+    await coord._async_load_stats()
+
+    assert coord.stats[bucket] == 42, "the stored total must be ADDED, not chosen"
+    assert coord._last_tallied_report_id.get("dev"), "the stored ring must be merged"

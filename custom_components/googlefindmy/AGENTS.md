@@ -145,8 +145,14 @@ because a reload or shutdown inside that window cancels the pending write withou
 flushing it.
 
 Because the claim and the histogram are two halves of one fact, they also END together. The Reset Statistics
-button clears the claims through `clear_tally_claims()`, so that by the time the debounced
-writer runs, both halves are reset. Zeroing the counters alone would store a record that
+button calls `begin_new_stats_epoch()`, which zeroes the counters, clears the claims and
+bumps the generation counter, so that by the time the debounced writer runs, every half is
+reset. ONE call doing all three, not a rationale attached to two: an earlier version left
+the zeroing at the caller and still called itself one call, which was safe only as long as
+no `await` appeared between the two sites - an invariant nobody had written down. It
+returns whether a usable `stats` mapping was found, so the caller can log that case the way
+it did before; the epoch and the claims are reset either way, because a broken counter
+mapping is no reason to let a discarded generation come back. Zeroing the counters alone would store a record that
 says nothing was counted and at the same time refuses to count some of the reports that
 would refill it: a delivery whose identity is still in a ring reads as a replay. The size
 of that hole is bounded and worth stating so it is not over-diagnosed later - at most
@@ -167,6 +173,17 @@ cache. Any future operation that empties the histogram carries the same obligati
 A reset starts a new epoch; it does not draw a wall-clock boundary. A report counted into
 the previous histogram and delivered again afterwards is counted into the new one - which
 is the point, because it is exactly the report the cleared claim was protecting.
+
+The epoch is not decoration; it is what makes a reset survive the load. `_async_load_stats`
+is created as a task during setup and can resume long after the button was pressed, and it
+ADDS the stored counters onto the live ones and MERGES the stored claim rings back in.
+Without a generation to compare against, a reset inside that window is undone in both
+halves and the debounced write then makes the discarded generation durable again. So the
+loader reads the epoch BEFORE its await and drops the whole record if it changed. Dropping
+rather than partially merging is the only outcome that keeps the pair consistent: there is
+nothing to merge a discarded generation into. Both directions are pinned -
+`::test_a_load_that_predates_a_reset_is_discarded` and, as the counter-test that a guard
+must not swallow the ordinary path, `::test_an_undisturbed_load_still_adds_and_merges`.
 
 Two properties of the persisted claim identity are load-bearing. The identity of a report with no
 timestamp is a **digest** of its position and radius, never the values themselves: this

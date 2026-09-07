@@ -921,6 +921,10 @@ class GoogleFindMyCoordinator(
         # Debounced stats persistence (avoid flushing on every increment)
         self._stats_save_task: asyncio.Task[None] | None = None
         self._stats_debounce_seconds: float = 5.0
+        # Which generation of the histogram the numbers below belong to. Bumped by a
+        # reset, read by the load below across its await, so a load that started in the
+        # previous generation cannot put it back. See ``begin_new_stats_epoch``.
+        self._stats_epoch: int = 0
 
         # Load persistent statistics asynchronously (name the task for better debugging)
         self.hass.async_create_task(
@@ -1804,11 +1808,51 @@ class GoogleFindMyCoordinator(
         return snapshot
 
     # ---------------------------- Stats persistence -------------------------
+    def begin_new_stats_epoch(self) -> bool:
+        """Start a fresh histogram generation: zero, clear, invalidate.
+
+        All three in ONE call, because the counters and the claims are two
+        halves of one fact and must not come to hang on two call sites that a
+        later edit can separate. An earlier version left the zeroing to the
+        caller and claimed to be one call anyway; that was only safe as long as
+        no ``await`` appeared between the two sites, an invariant nobody had
+        written down. Now there is nothing to keep in step.
+
+        The epoch is what makes the reset survive a load that is still in
+        flight. ``_async_load_stats`` is created as a task during setup and can
+        resume long after the user pressed the button; it adds the stored
+        counters onto the live ones and merges the stored claim rings back in.
+        Without a generation to compare against, that undoes the reset silently
+        and the debounced write then makes the old generation durable again.
+
+        Returns whether the counters were zeroed, so the caller can log a
+        coordinator without a usable ``stats`` mapping the way it did before.
+        The epoch and the claims are reset either way: a broken counter mapping
+        is no reason to let a stale generation come back.
+        """
+        self._stats_epoch = getattr(self, "_stats_epoch", 0) + 1
+        self.clear_tally_claims()
+        stats = getattr(self, "stats", None)
+        if not isinstance(stats, dict):
+            return False
+        for key in list(stats):
+            stats[key] = 0
+        return True
+
     async def _async_load_stats(self) -> None:
         """Load statistics from entry-scoped cache."""
+        epoch = getattr(self, "_stats_epoch", 0)
         try:
             cached = await self._cache.async_get_cached_value("integration_stats")
-            if cached and isinstance(cached, dict):
+            if getattr(self, "_stats_epoch", 0) != epoch:
+                # A reset happened while this read was in flight. Both halves of the
+                # record below belong to the generation the user just discarded, so
+                # restoring either would undo the reset - the counters by addition, the
+                # claims by suppressing the very reports that would refill the fresh
+                # histogram. Dropping the read is the only outcome that keeps the pair
+                # consistent; there is nothing to merge a discarded generation into.
+                _LOGGER.debug("Discarded a stats load overtaken by a reset")
+            elif cached and isinstance(cached, dict):
                 # This load is scheduled, not awaited, so a push or the first poll can
                 # already have counted something by the time it resumes. The live value
                 # is not a newer total, it is the increments that happened since this

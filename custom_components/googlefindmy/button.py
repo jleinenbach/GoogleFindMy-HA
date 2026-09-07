@@ -890,12 +890,22 @@ class GoogleFindMyStatsResetButton(GoogleFindMyEntity, ButtonEntity, RestoreEnti
         """Reset coordinator statistics and refresh listeners."""
 
         hass = self.coordinator.hass
-        stats = getattr(self.coordinator, "stats", None)
-        if isinstance(stats, dict):
-            for key in list(stats.keys()):
-                stats[key] = 0
+        # Counters, tally claims and the generation marker in one call: they are
+        # halves of one fact, and the marker is what keeps a stats load that is
+        # still in flight from adding the discarded generation back. Source order
+        # against the persist below does NOT matter - that schedule only creates a
+        # task which sleeps first, and the writer reads every half live.
+        begin_epoch = getattr(self.coordinator, "begin_new_stats_epoch", None)
+        if callable(begin_epoch):
+            try:
+                if not begin_epoch():
+                    _LOGGER.debug("Stats reset: coordinator stats missing or invalid")
+            except Exception as err:  # pragma: no cover - defensive logging
+                # WARNING, unlike the DEBUG of the neighbours below: their failure
+                # is benign, this one produces exactly the state the reset forbids.
+                _LOGGER.warning("Stats reset: failed to start a new epoch: %s", err)
         else:
-            _LOGGER.debug("Stats reset skipped: coordinator stats missing or invalid")
+            _LOGGER.debug("Stats reset skipped: coordinator cannot start an epoch")
 
         diag_buffer = getattr(self.coordinator, "_diag", None)
         if diag_buffer is not None:
@@ -949,20 +959,6 @@ class GoogleFindMyStatsResetButton(GoogleFindMyEntity, ButtonEntity, RestoreEnti
                 _LOGGER.debug(
                     "Stats reset: failed to delete issue %s: %s", issue_id, err
                 )
-
-        # The claims and the histogram are two halves of one statement and travel in
-        # one record, so both have to be reset before the debounced writer runs. Source
-        # order against the schedule below does NOT matter: the schedule only creates a
-        # task that sleeps first, and the writer reads both halves live.
-        clear_claims = getattr(self.coordinator, "clear_tally_claims", None)
-        if callable(clear_claims):
-            try:
-                clear_claims()
-            except Exception as err:  # pragma: no cover - defensive logging
-                # WARNING, unlike the DEBUG of the neighbours below: their failure is
-                # benign, this one produces exactly the state the reset forbids, a
-                # zeroed histogram persisted beside live claims. It must not be silent.
-                _LOGGER.warning("Stats reset: failed to clear tally claims: %s", err)
 
         schedule_persist = getattr(self.coordinator, "_schedule_stats_persist", None)
         if callable(schedule_persist):
