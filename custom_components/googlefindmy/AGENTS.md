@@ -203,6 +203,39 @@ create before the load resumes (`::test_a_live_claim_inside_the_window_still_def
 asserts that a sibling device's ring is NOT dropped) and
 `::test_a_purge_after_the_load_is_carried_by_the_pop_alone`.
 
+That rule is not the purge's private business, and it no longer lives at the call site.
+`_async_save_stats` reads the window itself: while `_stats_loaded` is False it records
+`_save_after_stats_load` and returns without writing. Of its four callers only the
+purge had learned the rule; the load's own `finally` is outside the window by
+construction, but the debounced writer (reached from `increment_stat`, from
+`_refresh_canonicless_drop_stats` and from the reset button) and the flush in
+`async_shutdown` used to reach it with nothing to stop them, and either one
+replaced the stored totals and every ring with pre-load values. A rule that one of its
+callers knows is not a rule. `_stats_loaded` is read with a default of True, so an object
+built without it writes as before - the opposite default would silence every such
+writer instead, which is why the counter-case is pinned too.
+
+Deferral needs somewhere to write later, and the unload is the one caller that has no
+later: `async_unload_entry` closes the entry-scoped cache immediately after
+`async_shutdown` returns, and a write arriving afterwards raises and is swallowed. So
+the unload does not defer, it CLOSES the window: `async_shutdown` waits for the load
+task - kept on `_stats_load_task` for that purpose, waited without cancelling and
+bounded by `_STATS_LOAD_SHUTDOWN_WAIT_S` - and only then flushes, at which point live
+state carries the merged record. If the bound is hit the flush defers as any other
+writer would and the stored record simply stays as it was, which is the safe direction.
+Pinned by `::test_a_write_inside_the_load_window_leaves_the_stored_record_alone` and
+`::test_the_deferred_write_reaches_the_store_after_the_merge`; the counter-cases that
+keep the guard from swallowing the ordinary path are
+`::test_a_write_after_the_load_still_writes` and
+`::test_a_coordinator_without_the_load_marker_writes_as_before`. The unload arm is
+pinned by `::test_an_unload_inside_the_load_window_writes_the_merged_record` (waits,
+then writes the merged record) and `::test_an_unload_whose_load_never_finishes_leaves_the_record_alone`
+(bound expires, defers, leaves the store untouched); that the wait has a handle to read
+at all is pinned by `::test_the_constructor_hands_the_load_task_to_the_unload`, because
+every other test installs the handle by hand and would stay green without it. The
+reset-inside-the-window chain is pinned by
+`::test_a_reset_inside_the_load_window_stays_durable`.
+
 Two properties of the persisted claim identity are load-bearing. The identity of a report with no
 timestamp is a **digest** of its position and radius, never the values themselves: this
 record is durable, and a position in durable state is the one thing this feature is
@@ -211,7 +244,8 @@ device-keyed caches, with a persist scheduled - otherwise a deleted device keeps
 entry indefinitely, and one re-added under the same id has its first matching
 measurement suppressed by a claim from its previous life. That write is immediate rather
 than debounced, but it is a task nobody awaits, so `async_shutdown` also writes the stats
-record on the way out. It does so UNCONDITIONALLY, and that word is the whole point:
+record on the way out. It does so without asking whether a debounced task is pending, and
+that independence is the whole point:
 gating the write on a pending debounced task skipped exactly the case it exists for,
 because the purge writes through a task `_stats_save_task` never holds. A condition that
 cannot see the more important of the two writers is not a condition. Two things ride on
@@ -221,7 +255,10 @@ came back. Pinned by
 `tests/test_cache_accuracy_gate.py::test_shutdown_writes_the_pending_stats_instead_of_dropping_them`,
 which uses a real pending task because a stub that only counts `cancel` calls stays green
 with the flush deleted, and by `::test_shutdown_writes_even_when_no_debounced_task_is_pending`,
-which is the one that discriminates the unconditional form from the gated one.
+which is the one that discriminates the debounce-independent form from the gated one. The
+flush does hold back on a second, unrelated axis - the stats load window - and rather than
+letting that shorten it, `async_shutdown` waits the window out first; see the paragraph on
+`_stats_loaded` above.
 
 A retained coarse fix is read for publication through `get_fresh_coarse_fix`, never
 through `get_coarse_fix`. Nothing removes a retained fix when time merely passes - the

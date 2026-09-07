@@ -36,7 +36,7 @@ import asyncio
 import json
 import time
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -46,6 +46,7 @@ from custom_components.googlefindmy.const import (
     OPT_ACCURACY_GATE_ENABLED,
     OPT_STALE_THRESHOLD,
 )
+from custom_components.googlefindmy.coordinator import main as main_module
 from custom_components.googlefindmy.coordinator.cache import (
     MAX_ACCEPTED_LOCATION_FUTURE_DRIFT_S,
     CacheOperations,
@@ -2567,9 +2568,10 @@ async def test_shutdown_writes_even_when_no_debounced_task_is_pending() -> None:
     `purge_device` writes through a task of its own, which `_stats_save_task` never
     carries. Gating the shutdown flush on a pending debounced task therefore skipped
     exactly the case the flush exists for: only the purge write in flight, nothing in the
-    slot, the whole block passed over. The flush is unconditional for that reason, and
-    this is the case that says so - the sibling test above keeps passing under the
-    conditional version.
+    slot, the whole block passed over. The flush asks nothing about that slot for this
+    reason, and this is the case that says so - the sibling test above keeps passing
+    under the gated version. (It does ask about the load window, on a different axis:
+    see `::test_an_unload_inside_the_load_window_writes_the_merged_record`.)
     """
     from custom_components.googlefindmy.coordinator import GoogleFindMyCoordinator
 
@@ -3384,3 +3386,311 @@ async def test_the_load_itself_opens_and_closes_the_purge_window() -> None:
     # The deferred correction runs here, where live state carries the merged record.
     assert coord.scheduled_saves, "the deferred write must fire after the merge"
     assert not coord._save_after_stats_load, "and must not fire a second time"
+
+
+# ---------------------------------------------------------------------------
+# The writer's own knowledge of the load window.
+#
+# ``purge_device`` learned this rule for itself, and for a while it was the only
+# caller that knew it. Of the four callers of ``_async_save_stats``, two reach the
+# window with nothing to stop them: the debounced writer behind ``increment_stat``
+# and the flush in ``async_shutdown``. Inside the window the writer
+# serialises live state, which is missing everything the load has not merged yet, so
+# such a write does not add to the stored record - it replaces the persisted totals
+# and every claim ring with pre-load values, and the load then reads back what the
+# write left. Measured before the fix: a stored ``background_updates`` of 10 came back
+# as 0 with an empty claim map.
+# ---------------------------------------------------------------------------
+
+
+def _windowed_writer(stored: dict[str, Any]) -> Any:
+    """A coordinator with the load still in flight and a cache holding a record."""
+    from types import SimpleNamespace
+
+    from custom_components.googlefindmy.coordinator import GoogleFindMyCoordinator
+
+    coord = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
+    coord._device_location_data = {}
+    coord._device_coarse_fix = {}
+    coord.stats = {"background_updates": 0, "accuracy_bucket_coarse": 0}
+    coord._stats_epoch = 0
+    coord._stats_loaded = False
+    coord._purged_before_stats_load = set()
+    coord._save_after_stats_load = False
+
+    class _Cache:
+        def __init__(self) -> None:
+            self.store: dict[str, Any] = {"integration_stats": stored}
+
+        async def async_set_cached_value(self, key: str, value: Any) -> None:
+            self.store[key] = json.loads(json.dumps(value))
+
+        async def async_get_cached_value(self, key: str) -> Any:
+            return self.store.get(key)
+
+    coord._cache = _Cache()
+    coord.pending_tasks: list[Any] = []
+    coord.hass = SimpleNamespace(
+        async_create_task=lambda coro, **_k: coord.pending_tasks.append(coro)
+    )
+    return coord
+
+
+@pytest.mark.asyncio
+async def test_a_write_inside_the_load_window_leaves_the_stored_record_alone() -> None:
+    """The stored totals and rings survive a writer that fires too early."""
+    stored = {
+        "background_updates": 10,
+        "accuracy_bucket_coarse": 4,
+        "_tally_claims": {"dev-a": [["fix", "abcdef0123456789"]]},
+    }
+    coord = _windowed_writer(dict(stored))
+
+    await coord._async_save_stats()
+
+    assert coord._cache.store["integration_stats"] == stored, (
+        "the write replaced the persisted record with pre-load live state; the load "
+        "would then read back its own erasure"
+    )
+    assert coord._save_after_stats_load is True, (
+        "the write must be deferred, not dropped - the increments it carries still "
+        "have to reach the store once the merge has happened"
+    )
+
+
+@pytest.mark.asyncio
+async def test_the_deferred_write_reaches_the_store_after_the_merge() -> None:
+    """Deferring is only correct if the load actually performs the write."""
+    coord = _windowed_writer(
+        {
+            "background_updates": 10,
+            "accuracy_bucket_coarse": 0,
+            "_tally_claims": {"dev-a": [["fix", "abcdef0123456789"]]},
+        }
+    )
+    coord.stats["background_updates"] = 3  # counted while the load was in flight
+
+    await coord._async_save_stats()
+    await coord._async_load_stats()
+    for coro in coord.pending_tasks:
+        await coro
+
+    record = coord._cache.store["integration_stats"]
+    assert record["background_updates"] == 13, (
+        "the stored total and the increments counted during the window are ADDED; "
+        "either one alone means a lost measurement"
+    )
+    assert "dev-a" in record["_tally_claims"], "and the stored ring must survive"
+
+
+@pytest.mark.asyncio
+async def test_a_write_after_the_load_still_writes() -> None:
+    """The counter-test: the guard must not swallow the ordinary path.
+
+    Without it the whole feature could be satisfied by never writing at all, and the
+    same mistake in the other direction - reading the flag with a default of False -
+    would silence every writer whose coordinator does not set the attribute.
+    """
+    coord = _windowed_writer({"background_updates": 10, "_tally_claims": {}})
+    coord._stats_loaded = True
+    coord.stats["background_updates"] = 7
+
+    await coord._async_save_stats()
+
+    assert coord._cache.store["integration_stats"]["background_updates"] == 7
+    assert coord._save_after_stats_load is False
+
+
+@pytest.mark.asyncio
+async def test_a_coordinator_without_the_load_marker_writes_as_before() -> None:
+    """Absent means loaded. Tests and older objects build without the attribute."""
+    coord = _windowed_writer({"background_updates": 10, "_tally_claims": {}})
+    del coord._stats_loaded
+    coord.stats["background_updates"] = 7
+
+    await coord._async_save_stats()
+
+    assert coord._cache.store["integration_stats"]["background_updates"] == 7
+
+
+@pytest.mark.asyncio
+def _shutdownable(coord: Any) -> Any:
+    """Everything ``async_shutdown`` touches on the way to the stats flush."""
+    coord._cancel_pending_subentry_repair = lambda: None  # type: ignore[method-assign]
+    coord._dr_unsub = None
+    coord._short_retry_cancel = None
+    coord._stats_save_task = None
+    coord._eid_refresh_debounce_handle = None
+    coord._eid_inline_refresh_debounce_handle = None
+
+    async def _unload() -> None:
+        return None
+
+    coord._async_unload = _unload  # type: ignore[method-assign]
+    return coord
+
+
+@pytest.mark.asyncio
+async def test_an_unload_inside_the_load_window_writes_the_merged_record() -> None:
+    """The unload is the one caller that cannot defer, so it closes the window instead.
+
+    Deferring needs somewhere to write later, and after ``async_shutdown`` returns the
+    entry-scoped cache is closed; a write arriving then raises and is swallowed. So the
+    flush waits for the load task first and only then writes - by which time live state
+    carries the merged record. The two shutdown tests above stub ``_async_save_stats``
+    out entirely, so neither can see any of this; this one drives the unload end to end
+    against the real writer and reads what the cache holds.
+    """
+    stored = {
+        "background_updates": 10,
+        "accuracy_bucket_coarse": 4,
+        "_tally_claims": {"dev-a": [["fix", "abcdef0123456789"]]},
+    }
+    coord = _shutdownable(_windowed_writer(dict(stored)))
+    coord.stats["background_updates"] = 3  # counted before the load resumed
+    coord._stats_load_task = asyncio.create_task(coord._async_load_stats())
+
+    await coord.async_shutdown()
+    for coro in coord.pending_tasks:  # the load's own deferred write, if any
+        await coro
+
+    record = coord._cache.store["integration_stats"]
+    assert record["background_updates"] == 13, (
+        "the flush wrote pre-load live state over the persisted record instead of "
+        "waiting for the merge"
+    )
+    assert record["_tally_claims"] == stored["_tally_claims"], (
+        "and every stored ring must come through the unload"
+    )
+
+
+@pytest.mark.asyncio
+async def test_an_unload_whose_load_never_finishes_leaves_the_record_alone() -> None:
+    """The bound must not turn into a write of pre-load state.
+
+    Waiting is bounded so a cache that cannot answer delays the unload rather than
+    hanging it. When that bound is hit the window is still open, so the flush has to
+    defer like any other writer and leave the stored record exactly as it was - the safe
+    direction. Without the guard this is the case that silently erases it.
+    """
+    stored = {"background_updates": 10, "_tally_claims": {"dev-a": [["fix", "ab"]]}}
+    coord = _shutdownable(_windowed_writer(dict(stored)))
+    inner = coord._cache.async_get_cached_value
+
+    async def _never(key: str) -> Any:
+        if key == "integration_stats":
+            await asyncio.sleep(3600)
+        return await inner(key)
+
+    coord._cache.async_get_cached_value = _never  # type: ignore[method-assign]
+    coord._stats_load_task = asyncio.create_task(coord._async_load_stats())
+
+    with patch.object(main_module, "_STATS_LOAD_SHUTDOWN_WAIT_S", 0.01):
+        await coord.async_shutdown()
+
+    assert coord._cache.store["integration_stats"] == stored, (
+        "the bound expired and the flush wrote pre-load live state anyway"
+    )
+    # Read before the teardown below: cancelling the load runs its ``finally``, which
+    # consumes this very flag to schedule the deferred write.
+    assert coord._save_after_stats_load is True
+
+    coord._stats_load_task.cancel()
+    # Awaited, not just cancelled: the cancellation reaches the load's ``finally`` only
+    # on the next pass, and that ``finally`` schedules the deferred write into the
+    # double's list. Close what nobody will run, so the loop stays quiet.
+    await asyncio.gather(coord._stats_load_task, return_exceptions=True)
+    for coro in coord.pending_tasks:
+        coro.close()
+
+
+@pytest.mark.asyncio
+async def test_a_reset_inside_the_load_window_stays_durable() -> None:
+    """Deferral must not hand the discarded generation back at the next start.
+
+    The epoch makes the loader DROP the stored record, so after a reset inside the
+    window nothing restores the old counters - but something still has to WRITE the new,
+    zeroed ones, or the store keeps the generation the user discarded. Before the guard
+    the debounced write did that by accident, clobbering the store on its way past. Now
+    it is the deferral that carries it, and this pins the whole chain: reset, deferred
+    write, epoch-discarding load, write.
+    """
+    coord = _windowed_writer(
+        {
+            "background_updates": 10,
+            "accuracy_bucket_coarse": 4,
+            "_tally_claims": {"dev-a": [["fix", "abcdef0123456789"]]},
+        }
+    )
+    coord.stats["background_updates"] = 3
+    coord._last_tallied_report_id = {"dev-a": [("ts", 1.0)]}
+
+    # The button is pressed while the load is suspended in its read, which is the only
+    # arrangement in which the epoch does any work: the loader samples it BEFORE that
+    # await, so a reset that precedes the loader is invisible to it - the sample would
+    # already carry the new value, the comparison would match, and the discarded
+    # generation would be merged back in. That arrangement fails against every
+    # implementation and would therefore pin nothing.
+    inner = coord._cache.async_get_cached_value
+    pressed: list[bool] = []
+
+    async def _get(key: str) -> Any:
+        if key == "integration_stats":
+            # Recorded rather than asserted: this runs inside the loader's ``try``,
+            # whose ``except Exception`` would swallow an AssertionError and turn a
+            # broken precondition into a confusing counter mismatch further down.
+            pressed.append(coord.begin_new_stats_epoch())
+            await coord._async_save_stats()  # the persist the button schedules
+        return await inner(key)
+
+    coord._cache.async_get_cached_value = _get  # type: ignore[method-assign]
+
+    await coord._async_load_stats()
+    for coro in coord.pending_tasks:
+        await coro
+
+    assert pressed == [True], "the reset must have run inside the loader's await"
+    record = coord._cache.store["integration_stats"]
+    assert record["background_updates"] == 0, (
+        "the discarded generation came back: the load must drop the stored record on "
+        "the epoch AND the deferred write must persist the zeroed one"
+    )
+    assert record["_tally_claims"] == {}, "the cleared claims must be durable too"
+
+
+@pytest.mark.asyncio
+async def test_the_constructor_hands_the_load_task_to_the_unload() -> None:
+    """The wait in ``async_shutdown`` is only as good as the handle it reads.
+
+    Every test above installs ``_stats_load_task`` by hand, so all of them stay green
+    if the constructor stops storing it - and the wait would then be a no-op in
+    production while the suite reported the feature as covered. This one drives the real
+    constructor and asks what it left behind.
+    """
+    from custom_components.googlefindmy.coordinator import GoogleFindMyCoordinator
+
+    class _Cache:
+        async def async_get_cached_value(self, _key: str) -> None:
+            return None
+
+        async def async_set_cached_value(self, _key: str, _value: Any) -> None:
+            return None
+
+    class _Hass:
+        def __init__(self) -> None:
+            self.loop = asyncio.get_running_loop()
+            self.data: dict[str, Any] = {}
+
+        def async_create_task(self, coro: Any, *, name: str | None = None) -> Any:
+            return self.loop.create_task(coro, name=name)
+
+    coord = GoogleFindMyCoordinator(_Hass(), cache=_Cache())
+
+    task = getattr(coord, "_stats_load_task", None)
+    assert task is not None, (
+        "the constructor did not keep the load task, so the unload has nothing to wait "
+        "for and flushes inside the window"
+    )
+    assert task.get_coro().__qualname__.endswith("_async_load_stats")
+
+    await asyncio.gather(task, return_exceptions=True)
