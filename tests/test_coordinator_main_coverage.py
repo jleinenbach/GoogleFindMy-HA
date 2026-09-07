@@ -941,8 +941,8 @@ def test_purge_device_drops_the_persisted_tally_claim() -> None:
     """
     c = _bare()
     _purge_ready(c)
-    scheduled: list[bool] = []
-    c._schedule_stats_persist = lambda: scheduled.append(True)
+    written: list[Any] = []
+    c.hass = SimpleNamespace(async_create_task=written.append)
     c._last_tallied_report_id = {
         "dev": [("fix", "deadbeefdeadbeef")],
         "other": [("ts", 7)],
@@ -951,21 +951,25 @@ def test_purge_device_drops_the_persisted_tally_claim() -> None:
     c.purge_device("dev")
 
     assert c._last_tallied_report_id == {"other": [("ts", 7)]}
-    assert scheduled == [True]
+    # Written now rather than on the debounce: a reload or shutdown inside that window
+    # cancels the pending write without flushing it, and the purged device's claim would
+    # outlive the device it was deleted with.
+    assert len(written) == 1
+    written[0].close()
 
 
 def test_purge_device_without_a_claim_schedules_no_write() -> None:
     """No claim, no write: a purge must not churn the store for nothing."""
     c = _bare()
     _purge_ready(c)
-    scheduled: list[bool] = []
-    c._schedule_stats_persist = lambda: scheduled.append(True)
+    written: list[Any] = []
+    c.hass = SimpleNamespace(async_create_task=written.append)
     c._last_tallied_report_id = {"other": [("ts", 7)]}
 
     c.purge_device("dev")
 
     assert c._last_tallied_report_id == {"other": [("ts", 7)]}
-    assert scheduled == []
+    assert written == []
 
 
 def test_purge_device_saves_sound_uuids_when_present() -> None:

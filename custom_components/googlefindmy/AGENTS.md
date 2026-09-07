@@ -134,6 +134,14 @@ known counters into `stats`, so the sub-key cannot become a phantom counter. A m
 sub-key is the state before this existed and is not an error; an entry the loader cannot
 read is dropped rather than half-trusted.
 
+That load is scheduled rather than awaited, so it can land after a push has already
+counted something. It therefore restores a counter only while that counter is still at
+its initial value, and merges a restored ring into the live one instead of replacing it:
+otherwise an increment would be discarded while its claim survived, which is the one
+state the pair must never reach. A purge writes immediately rather than on the debounce,
+because a reload or shutdown inside that window cancels the pending write without
+flushing it.
+
 Two properties of that stored value are load-bearing. The identity of a report with no
 timestamp is a **digest** of its position and radius, never the values themselves: this
 record is durable, and a position in durable state is the one thing this feature is

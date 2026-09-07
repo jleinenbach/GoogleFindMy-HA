@@ -372,6 +372,11 @@ _accuracy_bucket = accuracy_bucket
 # that the name does not collide with a real one.
 TALLY_CLAIMS_KEY = "_tally_claims"
 
+# Mirror of the cache layer's ring length, used when merging a restored ring into a live
+# one. Imported rather than restated would couple the modules the wrong way round; the
+# value is asserted equal by a test, so a change to one of them cannot pass silently.
+TALLY_RING_LIMIT = 8
+
 
 def _round_age(age_seconds: float) -> int:
     """Round an age in seconds to the nearest 10 s (sub-poll timing is hidden)."""
@@ -1773,8 +1778,14 @@ class GoogleFindMyCoordinator(
         try:
             cached = await self._cache.async_get_cached_value("integration_stats")
             if cached and isinstance(cached, dict):
-                for key in self.stats.keys():
-                    if key in cached:
+                # This load is scheduled, not awaited, so a push or the first poll can
+                # already have counted something by the time it resumes. Overwriting a
+                # counter that has moved would discard that increment while its claim
+                # survives, which is the one state the pair must never reach: a
+                # measurement suppressed for an increment that no longer exists. A
+                # counter that is still at its initial value has nothing to lose.
+                for key, value in self.stats.items():
+                    if key in cached and not value:
                         self.stats[key] = cached[key]
                 _LOGGER.debug("Loaded statistics from cache: %s", self.stats)
                 self._restore_tally_claims(cached.get(TALLY_CLAIMS_KEY))
@@ -1876,9 +1887,21 @@ class GoogleFindMyCoordinator(
             ]
             if identities:
                 restored[device_id] = identities
-        if restored:
+        if not restored:
+            return
+        # Merge rather than replace, for the same race: a claim made while this load was
+        # in flight belongs to an increment that already happened, and dropping it would
+        # let the next delivery count that report again. Stored identities are appended
+        # behind the live ones and the ring is trimmed, so the bound still holds.
+        live = getattr(self, "_last_tallied_report_id", None)
+        if not live:
             self._last_tallied_report_id = restored
-            _LOGGER.debug("Restored %d tally claim(s) from cache", len(restored))
+        else:
+            for device_id, identities in restored.items():
+                ring = list(live.get(device_id) or ())
+                ring.extend(i for i in identities if i not in ring)
+                live[device_id] = ring[-TALLY_RING_LIMIT:]
+        _LOGGER.debug("Restored %d tally claim(s) from cache", len(restored))
 
     async def _async_save_stats(self) -> None:
         """Persist statistics and their tally claims as ONE record.
@@ -2211,7 +2234,10 @@ class GoogleFindMyCoordinator(
         # matching measurement suppressed by a claim from its previous life.
         claims = getattr(self, "_last_tallied_report_id", None)
         if claims is not None and claims.pop(device_id, None) is not None:
-            self._schedule_stats_persist()
+            # Written now, not on the debounce: a reload or shutdown inside the debounce
+            # window cancels the pending write without flushing it, and the purged
+            # device's claim would then outlive the device it was deleted with.
+            self.hass.async_create_task(self._async_save_stats())
         # Device-id-keyed timing caches follow the same lifecycle; drop them so a
         # re-added device with the same id starts with clean poll-interval state.
         self._device_update_history.pop(device_id, None)

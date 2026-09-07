@@ -2387,6 +2387,59 @@ async def test_a_damaged_claim_entry_is_dropped_rather_than_trusted() -> None:
     assert getattr(fresh, "_last_tallied_report_id", None) in (None, {})
 
 
+@pytest.mark.asyncio
+async def test_a_load_in_flight_does_not_undo_work_done_meanwhile() -> None:
+    """The stats load is scheduled, not awaited, so something can happen before it lands.
+
+    A push or the first poll can count a bucket and claim its report while the cache read
+    is still pending. Overwriting the counter from the older record would discard that
+    increment while its claim survives - a measurement suppressed for an increment that
+    no longer exists, which is the one state the pair must never reach. A counter still
+    at its initial value has nothing to lose and is restored as before.
+    """
+    from custom_components.googlefindmy.coordinator import GoogleFindMyCoordinator
+
+    class _Cache:
+        async def async_get_cached_value(self, key: str) -> Any:
+            if key != "integration_stats":
+                return None
+            return {
+                "background_updates": 5,
+                "polled_updates": 7,
+                "_tally_claims": {"dev": [["ts", 111]]},
+            }
+
+    coord = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
+    coord._device_location_data = {}
+    coord._device_coarse_fix = {}
+    coord._cache = _Cache()
+    # Work that happened while the load was in flight.
+    coord.stats = {"background_updates": 1, "polled_updates": 0}
+    coord._last_tallied_report_id = {"dev": [("ts", 222)]}
+
+    await coord._async_load_stats()
+
+    assert coord.stats["background_updates"] == 1, "a moved counter must not be reset"
+    assert coord.stats["polled_updates"] == 7, "an untouched counter still restores"
+    # Both claims survive: the live one belongs to the increment above, the stored one
+    # to an increment from before the restart.
+    assert coord._last_tallied_report_id == {"dev": [("ts", 222), ("ts", 111)]}
+
+
+def test_the_ring_limit_is_the_same_number_on_both_sides() -> None:
+    """Two modules name the ring length; a divergence must not pass silently.
+
+    The cache layer trims when claiming, the coordinator trims when merging a restored
+    ring into a live one. Importing one from the other would couple them the wrong way
+    round, so the value is duplicated - and pinned here, which is the cheap half of that
+    trade.
+    """
+    from custom_components.googlefindmy.coordinator.cache import _TALLY_MEMORY
+    from custom_components.googlefindmy.coordinator.main import TALLY_RING_LIMIT
+
+    assert _TALLY_MEMORY == TALLY_RING_LIMIT
+
+
 def test_every_counting_site_claims_the_report_first() -> None:
     """Whoever counts a report must first claim it, measured rather than enumerated.
 
