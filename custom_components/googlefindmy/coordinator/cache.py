@@ -369,6 +369,49 @@ def _accuracy_gate_rejects(
     return True
 
 
+def _finite_or_none(value: Any) -> float | None:
+    """Return *value* as a finite float, or ``None`` if it is not one.
+
+    ``NaN`` never compares equal to itself, so letting it into an identity tuple would
+    make every delivery of the same report look new. That is the direction this helper
+    exists to close.
+    """
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def _tally_identity(row: Mapping[str, Any]) -> tuple[Any, ...] | None:
+    """Return what identifies *row* for tally deduplication, or ``None``.
+
+    The timestamp is the identity whenever there is one; it is what every other
+    reference in this module keys on, and it distinguishes two genuinely different
+    reports that happen to share a position.
+
+    A report with no parseable ``last_seen`` still carries an accuracy, so it is still
+    tallied - and being unidentifiable, it used to be tallied again on every retry, so
+    the persisted distribution measured retry frequency rather than incoming fixes. Its
+    position and radius are the only bounded thing left to key on. Two consecutive
+    reports agreeing on all three fields and carrying no stamp are indistinguishable by
+    construction, so counting them once is the honest reading rather than a compromise.
+
+    ``None`` means the report carries nothing to recognise it by. The caller then lets
+    it through, because refusing to count a fix is the worse error of the two: the
+    distribution is what the accuracy gate is judged on.
+    """
+    ts = _normalize_epoch_seconds(row.get("last_seen"))
+    if ts is not None:
+        return ("ts", ts)
+    fix = tuple(
+        _finite_or_none(row.get(key)) for key in ("latitude", "longitude", "accuracy")
+    )
+    if all(value is None for value in fix):
+        return None
+    return ("fix", *fix)
+
+
 class CacheOperations(_MixinBase):
     """Cache operations mixin for GoogleFindMyCoordinator.
 
@@ -564,7 +607,13 @@ class CacheOperations(_MixinBase):
         """
         ts = _normalize_epoch_seconds(row.get("last_seen"))
         if ts is None:
-            return False
+            # No stamp means the two stores cannot be asked: they are keyed by
+            # ``last_seen``. The third reference below can be, because it keys on
+            # whatever identifies the report, so fall through to it rather than
+            # declaring the report new on every delivery.
+            tallied = getattr(self, "_last_tallied_report_id", None) or {}
+            identity = _tally_identity(row)
+            return identity is not None and tallied.get(device_id) == identity
         store = getattr(self, "_device_coarse_fix", None) or {}
         for reference in (
             self._device_location_data.get(device_id),
@@ -578,8 +627,8 @@ class CacheOperations(_MixinBase):
         # in NEITHER store - a delayed report older than the published row, for
         # instance, which the significance gate drops afterwards. Retried, it
         # matches nothing above and would be counted once per retry.
-        tallied = getattr(self, "_last_tallied_report_ts", None) or {}
-        return bool(tallied.get(device_id) == ts)
+        tallied = getattr(self, "_last_tallied_report_id", None) or {}
+        return bool(tallied.get(device_id) == _tally_identity(row))
 
     def claim_report_for_tally(self, device_id: str, row: Mapping[str, Any]) -> bool:
         """Decide whether this report may enter the distribution, and claim it.
@@ -597,13 +646,13 @@ class CacheOperations(_MixinBase):
         """
         if self.is_replayed_report(device_id, row):
             return False
-        ts = _normalize_epoch_seconds(row.get("last_seen"))
-        if ts is not None:
-            tallied = getattr(self, "_last_tallied_report_ts", None)
+        identity = _tally_identity(row)
+        if identity is not None:
+            tallied = getattr(self, "_last_tallied_report_id", None)
             if tallied is None:
                 tallied = {}
-                self._last_tallied_report_ts = tallied
-            tallied[device_id] = ts
+                self._last_tallied_report_id = tallied
+            tallied[device_id] = identity
         return True
 
     def _expire_coarse_fix(self, device_id: str, committed: Mapping[str, Any]) -> None:

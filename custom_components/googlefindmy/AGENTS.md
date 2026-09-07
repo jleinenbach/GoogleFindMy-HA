@@ -103,6 +103,16 @@ The marker is deliberately not derived from `_fusion_preapplied`: on the push pa
 not the same question. Order pinned by
 `tests/test_cache_accuracy_gate.py::test_the_tally_runs_before_any_accuracy_substitution`.
 
+All three entry points claim through `claim_report_for_tally`, which counts a report once
+and then recognises its retries. Identity is the report timestamp where there is one; a
+payload with no parseable `last_seen` is keyed on its position and radius instead, because
+such a report is rejected by the gate, retained nowhere and therefore delivered again on
+every poll - counting it each time would make the persisted distribution measure retry
+frequency rather than incoming fixes. Two bounded and deliberate limits: one slot per
+device, so alternating between two unrecognised reports counts both, and two stampless
+reports agreeing on position and radius are indistinguishable by construction. Pinned by
+`tests/test_cache_accuracy_gate.py::test_a_stampless_report_is_counted_once_however_often_it_arrives`.
+
 *Coarse fixes* are decided by the accuracy gate, `coordinator/cache.py::_accuracy_gate_rejects` (#216). It fires only where the
 two accuracy circles do NOT overlap (`dist > radius_sum`) and only when all of these hold: the option is on, the incoming accuracy
 is a real measurement, it is at least `ACCURACY_GATE_MIN_M` (an absolute floor, so a merely relative degradation is never enough),

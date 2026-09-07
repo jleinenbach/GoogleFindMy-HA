@@ -2135,10 +2135,62 @@ def test_a_retried_report_that_reaches_no_cache_is_counted_once() -> None:
     # simply block everything after the first.
     assert coord.claim_report_for_tally("dev", {"last_seen": published + 60}) is True
 
-    # A report without a stamp is claimed every time: it cannot be recognised,
-    # and refusing it would drop measurements rather than duplicates.
+    # A report without a stamp is still identifiable by its position and radius,
+    # and it has to be: retried, it used to be counted once per delivery, so the
+    # distribution measured retry frequency. Reviewed and corrected - the earlier
+    # expectation here was that it is claimed every time.
     assert coord.claim_report_for_tally("dev", {"accuracy": 50.0}) is True
-    assert coord.claim_report_for_tally("dev", {"accuracy": 50.0}) is True
+    assert coord.claim_report_for_tally("dev", {"accuracy": 50.0}) is False
+    # A different stampless report is a different measurement.
+    assert coord.claim_report_for_tally("dev", {"accuracy": 800.0}) is True
+    # Nothing at all to recognise it by: claimed every time, because refusing to
+    # count a fix is the worse of the two errors.
+    assert coord.claim_report_for_tally("dev", {}) is True
+    assert coord.claim_report_for_tally("dev", {}) is True
+
+
+def test_a_stampless_report_is_counted_once_however_often_it_arrives() -> None:
+    """The one report that no store can hold, delivered again and again.
+
+    A coarse payload without a parseable ``last_seen`` is rejected by the gate and
+    retained nowhere: retention keys on the stamp, so there is nothing to key on. The
+    published row cannot recognise it either. It is nevertheless tallied, because it
+    carries an accuracy - and that combination is what made the persisted distribution
+    count deliveries instead of fixes. Polling, manual locate and the push path all
+    reach the same claim, so one bounded fingerprint per device closes it for all three.
+
+    The declared limit is pinned in the same breath: two stampless reports that agree on
+    position and radius are indistinguishable by construction, and alternating between
+    two different ones defeats the single slot. Both are bounded and known, unlike an
+    unbounded set of every report ever seen.
+    """
+    from custom_components.googlefindmy.coordinator import GoogleFindMyCoordinator
+
+    coord = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
+    coord._device_location_data = {}
+    coord._device_coarse_fix = {}
+
+    coarse = {"latitude": 49.9, "longitude": 10.9, "accuracy": 1600.0}
+    assert coord.claim_report_for_tally("dev", dict(coarse)) is True
+    assert coord.claim_report_for_tally("dev", dict(coarse)) is False
+    assert coord.claim_report_for_tally("dev", dict(coarse)) is False
+
+    # A move of the same coarse radius is a different fix and is counted.
+    moved = dict(coarse, latitude=50.1)
+    assert coord.claim_report_for_tally("dev", moved) is True
+
+    # Another device keeps its own slot.
+    assert coord.claim_report_for_tally("other", dict(coarse)) is True
+
+    # A NaN never equals itself, so an identity built from raw floats would call every
+    # delivery new. Each delivery builds its own NaN here, because a tuple comparison
+    # short-circuits on identity: reusing one NaN object makes the two tuples compare
+    # equal and the probe passes against a broken implementation.
+    def _nan_fix() -> dict[str, float]:
+        return {"latitude": float("nan"), "longitude": 10.9, "accuracy": 1600.0}
+
+    assert coord.claim_report_for_tally("nan-dev", _nan_fix()) is True
+    assert coord.claim_report_for_tally("nan-dev", _nan_fix()) is False
 
 
 def test_the_replay_predicate_also_knows_the_retained_coarse_fix() -> None:
