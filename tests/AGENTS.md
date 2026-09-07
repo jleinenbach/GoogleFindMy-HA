@@ -1128,7 +1128,16 @@ enumeration by necessity: no property of a directory name marks it as an assista
 private tree, and matching any dot-directory under a home would swallow legitimate
 documentation of a user's own configuration. Add a member when an assistant keeps its
 notes, plans or instructions there; each member carries its own positive case, and a
-member the pattern never reaches fails a test. The home prefix is generic over
+member the pattern never reaches fails a test.
+
+Prose is normalised before the pattern sees it, because two spellings would otherwise be
+judged by what they look like rather than by what they are. A public URL is openable by
+any reader whatever its path component contains, so a link into someone else's
+repository is a source, not a private citation; the scheme is what makes it public, so
+this is a property and not a list of sites. A `file:` URI is the opposite case, a local
+path in a different spelling, and its extra slashes hid it from the pattern entirely.
+Both are replaced by spaces of the same length, so a citation next to a URL on the same
+line survives. The home prefix is generic over
 both path separators and does not have to be absolute, because a relative reference is
 just as unopenable for a reader; the directory has to start a path segment, so a name
 that merely ends in those letters does not trip. `/app/` is deliberately not part

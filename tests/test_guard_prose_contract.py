@@ -301,6 +301,14 @@ _AGENT_LOCAL_PATH = re.compile(
     r")"
 )
 
+# A URL a reader can follow. The scheme is what makes it public, not the host, so this
+# is a property rather than a list of sites. file: is deliberately absent: it names a
+# local path, and the next pattern turns it back into one.
+_PUBLIC_URL = re.compile(r"\b(?:https?|ftps?|git\+https?|ssh)://\S+")
+
+# The prefix of a file URI, so that what follows is judged as the local path it is.
+_FILE_URI_PREFIX = re.compile(r"\bfile://(?=/)")
+
 # Files whose prose legitimately carries non-English words. One entry, with its reason.
 #   tests/test_translation_placeholders.py -- that guard asserts that German UI text
 #   uses the informal address form, so its prose has to name the formal pronouns it
@@ -406,7 +414,25 @@ def _german_markers_in(
 
 
 def _agent_local_paths_in(text: str) -> list[str]:
-    """Return every agent-local path cited in *text*."""
+    """Return every agent-local path cited in *text*.
+
+    Prose is not a list of paths, so the text is normalised before the pattern sees it.
+    Two spellings would otherwise be judged by what they look like rather than by what
+    they are, and both were found in review:
+
+    A public URL is openable by any reader, whatever its path component happens to
+    contain, so a link to someone else's repository that has one of these directories in
+    it is a source, not a private citation. Widening the prefix to accept relative paths
+    made those URLs match from the host name onwards.
+
+    A file URI is the opposite case: it names a local path in a different spelling, and
+    the extra slashes hid it from the pattern entirely.
+
+    Both are handled by replacing the offending run with spaces of the same length, so
+    the surrounding text keeps its shape and nothing else shifts.
+    """
+    text = _PUBLIC_URL.sub(lambda m: " " * len(m.group()), text)
+    text = _FILE_URI_PREFIX.sub(lambda m: " " * len(m.group()), text)
     return [match.group(1) for match in _AGENT_LOCAL_PATH.finditer(text)]
 
 
@@ -962,6 +988,40 @@ def test_every_private_directory_is_wired_into_the_pattern() -> None:
     )
 
 
+def test_file_uris_are_read_as_the_local_paths_they_are() -> None:
+    """A file URI names a local path, so the path is what gets reported.
+
+    The extra slashes hid this spelling from the pattern entirely, which made an
+    unreadable citation look clean. Pairs rather than a truthiness check, because the
+    interesting part is which substring comes back.
+    """
+    cases = {
+        "file:///root/.codex/instructions.md": ["/root/.codex/instructions.md"],
+        "file:///home/a/.claude/x.md": ["/home/a/.claude/x.md"],
+    }
+    wrong = {
+        text: _agent_local_paths_in(text)
+        for text, expected in cases.items()
+        if _agent_local_paths_in(text) != expected
+    }
+    assert not wrong, f"file URIs not resolved to their local path: {wrong}"
+
+
+def test_a_public_url_next_to_a_private_path_hides_neither() -> None:
+    """Blanking the URL must not swallow a real citation on the same line.
+
+    A normalisation step that removed too much would be invisible: the sweep would stay
+    green and nobody would know which of the two reasons produced the silence.
+    """
+    after = "/home/a/.claude/x.md and https://example.org/x/.claude/y.md"
+    assert _agent_local_paths_in(after) == ["/home/a/.claude/x.md"]
+
+    # The citation ahead of the URL is the case that pins how far the blanking reaches:
+    # with the URL last, a run to end of line looks the same as a run to the next space.
+    before = "https://example.org/x/.claude/y.md and /home/a/.claude/x.md"
+    assert _agent_local_paths_in(before) == ["/home/a/.claude/x.md"]
+
+
 def test_scan_honours_the_restriction_to_known_paths(tmp_path: Path) -> None:
     """A file outside the restriction is not swept, one inside it still is.
 
@@ -1036,6 +1096,10 @@ def test_path_detector_respects_the_word_boundary() -> None:
         "/etc/app.claude/config.json is unrelated",
         "the .codexignore file lists them",
         "tests/fixtures/not.codex/file.md is a fixture",
+        # public URLs whose path component happens to contain one of the directories.
+        # A reader can open these, so they are sources rather than private citations.
+        "see https://github.com/openai/codex/blob/main/.codex/config.toml for it",
+        "documented at https://example.org/x/.claude/y.md today",
     ]
     tripped = [text for text in benign if _agent_local_paths_in(text)]
     assert not tripped, f"benign text flagged: {tripped}"
