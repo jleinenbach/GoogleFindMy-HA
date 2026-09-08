@@ -311,7 +311,15 @@ def scan_production_tree() -> tuple[list[Finding], list[Finding]]:
 #: ever add to it.
 #:
 #: Measured at the starting state (commit 77d9eb97): 88 occurrences at 48 sites;
-#: after AP-11 (the compatibility shim stopped naming the old keyword): 85 at 46.
+#: after AP-11 (the compatibility shim stopped naming the old keyword): 85 at 46;
+#: after AP-14 (identity.py moved to the shared resolver): 84 at 45.  Measure it
+#: yourself rather than trusting the line above::
+#:
+#:     python3 -c "import ast,pathlib; t=ast.parse(pathlib.Path(
+#:     'tests/test_guard_device_registry_kwargs.py').read_text());
+#:     d=[ast.literal_eval(n.value) for n in ast.walk(t) if isinstance(
+#:     n, ast.AnnAssign) and getattr(n.target,'id','')=='KNOWN_VIOLATIONS'][0];
+#:     print(len(d), sum(d.values()))"
 KNOWN_VIOLATIONS: dict[tuple[str, str, str], int] = {
     (
         "async_get_device",
@@ -322,11 +330,6 @@ KNOWN_VIOLATIONS: dict[tuple[str, str, str], int] = {
         "async_get_device",
         "config_flow.py",
         "<module>.ConfigFlow._ensure_service_device_binding",
-    ): 1,
-    (
-        "async_get_device",
-        "coordinator/identity.py",
-        "<module>.IdentityOperations._reset_resolver_offset",
     ): 1,
     (
         "async_get_device",

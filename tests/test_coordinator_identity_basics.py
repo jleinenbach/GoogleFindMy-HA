@@ -398,6 +398,51 @@ class _FakeDeviceReg:
         return self._device
 
 
+class _ScopedDeviceReg:
+    """A Core 2026.8+ substitute: one identifier plus the owning entry id."""
+
+    def __init__(self, owned: dict[tuple[str, str], SimpleNamespace]) -> None:
+        self._owned = owned
+        self.calls: list[tuple[tuple[str, str], str]] = []
+
+    def async_get_device_by_identifier(
+        self, identifier: tuple[str, str], config_entry_id: str
+    ) -> SimpleNamespace | None:
+        self.calls.append((identifier, config_entry_id))
+        return self._owned.get(identifier)
+
+
+class TestResolveRegistryDevice:
+    """The thin caller owns exactly one thing: the candidate order.
+
+    The lookup itself is covered in
+    ``tests/test_coordinator_helpers_registry.py``; what is asserted here is
+    that ``identity.py`` asks for the entry-scoped identifier first and passes
+    its own entry id as the ownership scope.
+    """
+
+    def test_the_entry_scoped_identifier_is_asked_for_first(
+        self, coord: IdentityStub
+    ) -> None:
+        scoped = SimpleNamespace(id="reg-scoped")
+        registry = _ScopedDeviceReg({(DOMAIN, "entry-xyz:dev-1"): scoped})
+
+        assert coord._resolve_registry_device(registry, "entry-xyz", "dev-1") is scoped
+        assert registry.calls == [((DOMAIN, "entry-xyz:dev-1"), "entry-xyz")]
+
+    def test_the_legacy_identifier_follows_when_the_scoped_one_misses(
+        self, coord: IdentityStub
+    ) -> None:
+        legacy = SimpleNamespace(id="reg-legacy")
+        registry = _ScopedDeviceReg({(DOMAIN, "dev-1"): legacy})
+
+        assert coord._resolve_registry_device(registry, "entry-xyz", "dev-1") is legacy
+        assert registry.calls == [
+            ((DOMAIN, "entry-xyz:dev-1"), "entry-xyz"),
+            ((DOMAIN, "dev-1"), "entry-xyz"),
+        ]
+
+
 class TestResetResolverOffset:
     """B1: no hass → return; B2: no entry_id → debug log + return;
     B3: device missing → return; B4: hass.data not dict → return;
@@ -429,6 +474,23 @@ class TestResetResolverOffset:
         coord._reset_resolver_offset("dev-1")
         # The lookup was attempted with both identifier shapes.
         assert fake_reg.calls == [{(DOMAIN, "entry-xyz:dev-1"), (DOMAIN, "dev-1")}]
+
+    def test_a_modern_core_is_queried_per_identifier_and_scoped(
+        self, coord: IdentityStub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """From Core 2026.8 the same reset runs through the scoped lookup.
+
+        The legacy assertion above keeps the pre-2026.8 shape alive; without
+        this counterpart the whole method would only ever be exercised against
+        a registry the supported cores are leaving behind.
+        """
+        registry = _ScopedDeviceReg({})
+        monkeypatch.setattr(dr, "async_get", lambda hass: registry)
+        coord._reset_resolver_offset("dev-1")
+        assert registry.calls == [
+            ((DOMAIN, "entry-xyz:dev-1"), "entry-xyz"),
+            ((DOMAIN, "dev-1"), "entry-xyz"),
+        ]
 
     def test_hass_data_not_dict_returns(
         self, coord: IdentityStub, monkeypatch: pytest.MonkeyPatch

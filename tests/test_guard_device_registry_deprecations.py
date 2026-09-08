@@ -7,14 +7,15 @@ not explicitly accepted.  The counted set is the point: the gate reports "no
 unexpected deprecation", and that sentence is only worth as much as the set of
 operations behind it.
 
-The set mirrors what production actually does today.  Thirteen operations:
+The set mirrors what production reaches on a core that reports, which is
+2026.9 and newer.  Twelve operations:
 
 * one for call pattern A (move) and one for pattern B (ensure ownership),
 * three for pattern C (detach): the two sites that send
   ``remove_config_subentry_id=None`` *without* arming a move, plus one that
   arms one, because the armed and the unarmed form take different Core
   branches,
-* seven for the places that reach ``async_get_device``, and
+* six for the places that reach ``async_get_device``, and
 * one for the deprecated ``devices`` mapping.
 
 The production sites are named by enclosing function rather than by line
@@ -90,8 +91,12 @@ ACCEPTED_DEPRECATIONS: tuple[AcceptedDeprecation, ...] = (
         key="async_get_device",
         needle="`device_registry.async_get_device`",
         reason=(
-            "Seven production sites still resolve devices by identifier set; the "
-            "shared resolver lands in AP-14 and the call sites follow."
+            "Six sites still call the deprecated lookup: two in services.py, "
+            "two in coordinator/registry.py, one in __init__.py and one in "
+            "config_flow.py. The shared resolver landed in AP-14 together with "
+            "the identity.py site; these six follow in AP-12, AP-13, AP-15 and "
+            "AP-16. The resolver's own legacy branch is not among them: it only "
+            "runs below core 2026.8, which does not report at all."
         ),
         resolved_by="AP-16",
     ),
@@ -129,10 +134,11 @@ def _entries(hass: Any) -> tuple[Any, Any, str, str]:
 def _operations(hass: Any) -> list[tuple[str, str, Any]]:
     """Return ``(id, production site, callable)`` for every covered operation.
 
-    Thirteen entries: three call patterns, seven ``async_get_device`` reach
-    points and three ``remove_config_subentry_id=None`` sites.  Several share an
-    underlying Core API on purpose -- the list enumerates *production sites*, so
-    that removing one site visibly shrinks it.
+    Twelve entries, composed exactly as the module docstring lists them: one
+    for pattern A, one for pattern B, three for pattern C, six ``async_get_device``
+    reach points and one ``devices`` mapping site.  Several share an underlying
+    Core API on purpose -- the list enumerates *production sites*, so that
+    removing one site visibly shrinks it.
     """
     from homeassistant.helpers import device_registry as dr
 
@@ -217,11 +223,6 @@ def _operations(hass: Any) -> list[tuple[str, str, Any]]:
             _get_device("s377"),
         ),
         (
-            "get_device_identity_240",
-            "coordinator/identity.py::_reset_resolver_offset",
-            _get_device("i240"),
-        ),
-        (
             "get_device_config_flow_6976",
             "config_flow.py::ConfigFlow._ensure_service_device_binding",
             _get_device("cf6976"),
@@ -243,7 +244,7 @@ def _operations(hass: Any) -> list[tuple[str, str, Any]]:
         ),
         (
             "devices_mapping",
-            "__init__.py and diagnostics.py, twelve sites",
+            "__init__.py and diagnostics.py, six sites",
             _devices_mapping,
         ),
     ]
@@ -306,7 +307,7 @@ def test_no_unexpected_deprecation_is_raised(
     _prepare(hass, monkeypatch, device_registry_deprecations)
 
     operations = _operations(hass)
-    assert len(operations) == 13, (
+    assert len(operations) == 12, (
         "the covered set changed; update the count and the module docstring so "
         "the gate's scope stays stated rather than assumed"
     )

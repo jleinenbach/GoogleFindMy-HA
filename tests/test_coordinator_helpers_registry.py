@@ -1,10 +1,13 @@
 # tests/test_coordinator_helpers_registry.py
 """Branch-Coverage tests for ``coordinator.helpers.registry``.
 
-The 18 public helper functions in
-:mod:`custom_components.googlefindmy.coordinator.helpers.registry` are pure
-functions: no Home-Assistant runtime, no I/O, no module-level globals beyond
-re-exported constants.  These tests exercise every documented branch via the
+The 19 public helper functions in
+:mod:`custom_components.googlefindmy.coordinator.helpers.registry` hold no
+state: no I/O, no module-level globals beyond re-exported constants.  Eighteen
+of them are pure; ``resolve_device_by_identifiers`` is the exception and takes a
+live device registry, because the lookup it replaces is the one thing that must
+not be rebuilt per call site.  These tests exercise every documented branch via
+the
 Aniche-style Specification -> Boundary -> Structural progression
 (PLAN_GFM_TEST_EXPANSION_SPRINT.md AP-1.1a).
 
@@ -21,8 +24,8 @@ Nothing here should be read as "this is how to talk to a current core" -- new
 production code expresses an intent instead, see AGENTS.md, section "Device
 registry ownership".
 
-Branch budget (notes-sidecar ``helpers/registry.py``): ~70 branches across the
-18 functions listed in :data:`__all__` (the four dataclasses/enums and the
+Branch budget (notes-sidecar ``helpers/registry.py``): ~75 branches across the
+19 functions listed in :data:`__all__` (the four dataclasses/enums and the
 two keyword tuples there are data, not branches, and are covered through the
 functions that read them).  Each test docstring names the function
 and the branch the case exercises so a failing test points at the spec line,
@@ -1399,3 +1402,194 @@ class TestPlanDeviceOwnership:
         assert operation.kwargs["remove_config_subentry_id"] == "sub-surplus"
         assert operation.kwargs["add_config_entry_id"] == "entry-1"
         assert operation.kwargs["add_config_subentry_id"] == "sub-2"
+
+
+# ---------------------------------------------------------------------------
+# resolve_device_by_identifiers -- the single device lookup point (AP-14)
+# ---------------------------------------------------------------------------
+
+
+class _LegacyOnlyRegistry:
+    """A pre-2026.8 registry: identifier sets, no entry scoping.
+
+    Mirrors the shape the integration met up to Core 2026.7 and still meets on
+    the declared minimum ``2025.9.1``: one ``async_get_device`` taking a set,
+    with no notion of an owning entry.
+    """
+
+    def __init__(self, devices: dict[tuple[str, str], Any]) -> None:
+        self._devices = devices
+        self.calls: list[set[tuple[str, str]]] = []
+
+    def async_get_device(self, identifiers: set[tuple[str, str]]) -> Any | None:
+        self.calls.append(set(identifiers))
+        for identifier in identifiers:
+            if (device := self._devices.get(identifier)) is not None:
+                return device
+        return None
+
+
+class _BothApisRegistry(_LegacyOnlyRegistry):
+    """Carries both lookup APIs at once, which no real core does.
+
+    Deliberately unrealistic, and the only shape that can observe the "no
+    fallback after a modern miss" rule: against a registry that has the modern
+    API alone, dropping the guard is invisible because the legacy branch finds
+    no callable to call.
+    """
+
+    def __init__(
+        self, devices: dict[tuple[str, str], Any], *, owner: str = "entry-1"
+    ) -> None:
+        super().__init__(devices)
+        self._owner = owner
+        self.scoped_calls: list[tuple[tuple[str, str], str]] = []
+
+    def async_get_device_by_identifier(
+        self, identifier: tuple[str, str], config_entry_id: str
+    ) -> Any | None:
+        self.scoped_calls.append((identifier, config_entry_id))
+        if config_entry_id != self._owner:
+            return None
+        return self._devices.get(identifier)
+
+
+class _DriftedSignatureRegistry(_LegacyOnlyRegistry):
+    """Has the new name but refuses the new signature."""
+
+    def async_get_device_by_identifier(self, *args: Any, **kwargs: Any) -> Any:
+        raise TypeError("unexpected signature")
+
+
+class TestResolveDeviceByIdentifiers:
+    """All three core branches, the priority, and the cross-entry narrowing."""
+
+    _SCOPED = (_DOMAIN, "entry-1:dev-1")
+    _UNSCOPED = (_DOMAIN, "dev-1")
+
+    def _modern(self, registry: Any, *, entry_id: str = "entry-1") -> Any | None:
+        return registry_helpers.resolve_device_by_identifiers(
+            registry, (self._SCOPED, self._UNSCOPED), entry_id=entry_id
+        )
+
+    def test_scoped_identifier_wins_over_the_legacy_one(
+        self, single_owner_device_registry: Any
+    ) -> None:
+        """Both identifiers resolve; the caller's order decides, not the registry."""
+        registry = single_owner_device_registry
+        registry.add_config_entry("entry-1")
+        scoped = registry.add_device(
+            identifiers={self._SCOPED}, config_entry_id="entry-1"
+        )
+        legacy = registry.add_device(
+            identifiers={self._UNSCOPED}, config_entry_id="entry-1"
+        )
+
+        assert self._modern(registry) is scoped
+        assert legacy.id != scoped.id
+
+    def test_legacy_identifier_is_used_when_the_scoped_one_is_absent(
+        self, single_owner_device_registry: Any
+    ) -> None:
+        """A not-yet-migrated installation is still found."""
+        registry = single_owner_device_registry
+        registry.add_config_entry("entry-1")
+        legacy = registry.add_device(
+            identifiers={self._UNSCOPED}, config_entry_id="entry-1"
+        )
+
+        assert self._modern(registry) is legacy
+
+    def test_a_miss_returns_none(self, single_owner_device_registry: Any) -> None:
+        """Exhausting the candidates is an answer, not an exception."""
+        registry = single_owner_device_registry
+        registry.add_config_entry("entry-1")
+
+        assert self._modern(registry) is None
+
+    def test_a_modern_miss_does_not_fall_back_to_the_legacy_call(self) -> None:
+        """Retrying unscoped after a scoped miss would undo the entry scoping.
+
+        Measured against a registry carrying both APIs, because that is the
+        only shape in which dropping the guard changes an observable result.
+        """
+        stranger = object()
+        registry = _BothApisRegistry({self._UNSCOPED: stranger}, owner="entry-2")
+
+        assert self._modern(registry) is None
+        assert registry.calls == []
+        assert registry.scoped_calls == [
+            (self._SCOPED, "entry-1"),
+            (self._UNSCOPED, "entry-1"),
+        ]
+
+    def test_a_device_of_another_entry_is_not_returned(
+        self, single_owner_device_registry: Any
+    ) -> None:
+        """The deliberate narrowing: identifiers are unique per entry only.
+
+        Two GoogleFindMy entries can both carry the legacy unscoped identifier.
+        Before the entry scoping, which one a set lookup returned depended on
+        iteration order.
+        """
+        registry = single_owner_device_registry
+        registry.add_config_entry("entry-1")
+        registry.add_config_entry("entry-2")
+        stranger = registry.add_device(
+            identifiers={self._UNSCOPED}, config_entry_id="entry-2"
+        )
+
+        assert self._modern(registry) is None
+        assert (
+            registry.async_get_device_by_identifier(self._UNSCOPED, "entry-2")
+            is stranger
+        )
+
+    def test_legacy_core_receives_the_whole_candidate_set(self) -> None:
+        """On the declared minimum there is only the set-based call."""
+        sentinel = object()
+        registry = _LegacyOnlyRegistry({self._UNSCOPED: sentinel})
+
+        assert self._modern(registry) is sentinel
+        assert registry.calls == [{self._SCOPED, self._UNSCOPED}]
+
+    def test_signature_drift_propagates_instead_of_rescoping_silently(self) -> None:
+        """A ``TypeError`` surfaces; it is never answered with a legacy retry.
+
+        Retrying unscoped would undo the entry scoping and hand back a device of
+        a different config entry, and the repository already rules that modern
+        registries surface their ``TypeError`` rather than being rewritten into
+        a legacy call.
+        """
+        sentinel = object()
+        registry = _DriftedSignatureRegistry({self._SCOPED: sentinel})
+
+        with pytest.raises(TypeError):
+            self._modern(registry)
+        assert registry.calls == []
+
+    def test_a_registry_with_neither_api_yields_none(self) -> None:
+        """No lookup surface at all is survivable, not an exception."""
+        assert self._modern(SimpleNamespace()) is None
+
+    @pytest.mark.parametrize("legacy_core", [False, True])
+    def test_no_candidates_is_a_miss_on_either_core(self, legacy_core: bool) -> None:
+        """An empty priority list must not degrade into an unscoped lookup.
+
+        Both cores are exercised: on a legacy registry an unguarded empty tuple
+        would reach ``async_get_device(identifiers=set())``, a deprecated call
+        searching for nothing that the caller never asked for.
+        """
+        registry: Any = _LegacyOnlyRegistry({})
+        if not legacy_core:
+            registry = _BothApisRegistry({})
+
+        assert (
+            registry_helpers.resolve_device_by_identifiers(
+                registry, (), entry_id="entry-1"
+            )
+            is None
+        )
+        assert registry.calls == []
+        if not legacy_core:
+            assert registry.scoped_calls == []

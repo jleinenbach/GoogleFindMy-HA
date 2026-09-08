@@ -49,6 +49,7 @@ __all__ = [
     "normalize_device_name",
     "parse_device_identifier",
     "plan_device_ownership",
+    "resolve_device_by_identifiers",
     "resolve_tracker_subentry_candidate",
     "should_defer_service_subentry",
 ]
@@ -471,6 +472,82 @@ def plan_device_ownership(  # noqa: PLR0913 - one parameter per ownership axis
     if kwarg := caps.subentry_kwarg_for_update:
         payload[kwarg] = target_subentry_id
     return (DeviceRegistryOperation("async_update_device", payload),)
+
+
+# ---------------------------------------------------------------------------
+# Device Lookup
+# ---------------------------------------------------------------------------
+
+
+def resolve_device_by_identifiers(
+    dev_reg: Any, candidates: tuple[tuple[str, str], ...], *, entry_id: str
+) -> Any | None:
+    """Resolve a registry entry from ``candidates``, highest priority first.
+
+    This is the single place in the integration that looks a device up by
+    identifier. Call it instead of ``async_get_device``; do not build the entry
+    scoping by hand at a call site.
+
+    Priority is explicit: the caller orders ``candidates`` and the first hit
+    wins. Before Core 2026.8 the call sites passed the whole set to a single
+    ``async_get_device`` call, whose result depended on set iteration order and
+    could resolve to a device owned by a *different* GoogleFindMy config entry
+    that still carried the legacy unscoped identifier. Scoping the lookup to
+    ``entry_id`` removes that cross-entry hit. That is a deliberate narrowing,
+    not a regression: a device owned by another entry was never a valid answer.
+
+    Core matrix:
+
+    * ``2026.8.0`` and newer: ``async_get_device_by_identifier`` takes **one**
+      identifier tuple plus the owning entry id and cannot be ambiguous
+      (``homeassistant/helpers/device_registry.py`` at tag ``2026.9.0``, line
+      1999).
+    * up to ``2026.7``: neither that method nor ``async_get_devices`` exists, so
+      the legacy branch below is the only one that runs on our declared minimum
+      core ``2025.9.1``. Do not delete it as dead code.
+
+    ``async_get_devices`` is deliberately not used as a middle step. It arrives
+    in the very same core release (``2026.8.0``), so a registry that lacks
+    ``async_get_device_by_identifier`` lacks it too and a registry that has the
+    former never reaches the legacy branch. It also returns an unordered list,
+    which would put the priority back into implicit code. It stays the right
+    call wherever a *set* of devices is wanted, which is nowhere here.
+
+    Core 2026.9 adds a main/child device distinction where this lookup searches
+    main devices only (tag ``2026.9.0``, lines 1999-2021). This integration
+    registers no child devices: it never calls ``async_get_or_create_child`` and
+    never sets ``parent_device_id``. ``via_device`` is a different relation and
+    does not make a device a child. Revisit this function if that changes.
+
+    Args:
+        dev_reg: The device registry, or any object with the same surface.
+        candidates: ``(domain, identifier)`` tuples, highest priority first.
+        entry_id: The config entry that must own the device.
+
+    Returns:
+        The matching registry entry, or ``None``.
+    """
+    if not candidates:
+        return None
+
+    by_identifier = getattr(dev_reg, "async_get_device_by_identifier", None)
+    if callable(by_identifier):  # HA 2026.8+
+        for identifier in candidates:
+            # A ``TypeError`` from here propagates on purpose. Catching it and
+            # retrying unscoped would silently undo the entry scoping this
+            # branch exists for, and the repository already rules that modern
+            # registries surface their ``TypeError`` instead of being rewritten
+            # into a legacy call (``tests/AGENTS.md``, the modern registry
+            # TypeError propagation reminder).
+            device = by_identifier(identifier, entry_id)
+            if device is not None:
+                return device
+        return None
+
+    legacy = getattr(dev_reg, "async_get_device", None)  # HA <= 2026.7
+    if callable(legacy):
+        return legacy(identifiers=set(candidates))
+    return None
 
 
 # ---------------------------------------------------------------------------

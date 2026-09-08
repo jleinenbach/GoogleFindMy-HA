@@ -8,6 +8,7 @@ Methods moved here:
 - _dismiss_auth_issue: Dismiss auth Repairs issue
 - _schedule_eid_resolver_refresh: Refresh the global EID resolver
 - _register_identity_key: Register device identity key for shared tracker detection
+- _resolve_registry_device: Look this entry's device up, scoped identifier first
 - _reset_resolver_offset: Clear resolver offsets when identity keys rotate
 - get_active_device_identities: Return identity keys for enabled, non-ignored devices
 """
@@ -55,6 +56,7 @@ from .helpers.identity import (
 from .helpers.identity import (
     store_if_value as _store_if_value_impl,
 )
+from .helpers.registry import resolve_device_by_identifiers
 from .helpers.subentry import normalize_epoch_seconds
 
 if TYPE_CHECKING:
@@ -221,6 +223,24 @@ class IdentityOperations(_MixinBase):
                     sorted(device_set),
                 )
 
+    def _resolve_registry_device(
+        self, dev_reg: Any, entry_id: str, device_id: str
+    ) -> Any | None:
+        """Resolve this entry's registry device, entry-scoped identifier first.
+
+        The entry-scoped identifier is the target form produced by the
+        identifier migration in ``__init__.py``; the unscoped one is the
+        transitional form of installations that have not migrated yet. Ordering
+        them here makes the priority a control-flow structure instead of a
+        property of set iteration order. The lookup itself lives in
+        :func:`resolve_device_by_identifiers`.
+        """
+        return resolve_device_by_identifiers(
+            dev_reg,
+            ((DOMAIN, f"{entry_id}:{device_id}"), (DOMAIN, device_id)),
+            entry_id=entry_id,
+        )
+
     def _reset_resolver_offset(self, device_id: str) -> None:
         """Clear resolver offsets using registry IDs when identity keys rotate."""
 
@@ -233,11 +253,7 @@ class IdentityOperations(_MixinBase):
 
         dev_reg = dr.async_get(hass)
         if entry_id and dev_reg:
-            identifiers = {
-                (DOMAIN, f"{entry_id}:{device_id}"),
-                (DOMAIN, device_id),
-            }
-            device = dev_reg.async_get_device(identifiers=identifiers)
+            device = self._resolve_registry_device(dev_reg, entry_id, device_id)
             if device:
                 registry_id = device.id
 

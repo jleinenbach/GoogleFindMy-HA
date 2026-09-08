@@ -576,9 +576,24 @@ dev_reg.async_update_device(
 # current ownership is unknown, refuse instead of guessing.
 dev_reg.async_remove_device(device.id)
 
-# Unambiguous lookup, scoped to the entry that owns the device.
+# Unambiguous lookup, scoped to the entry that owns the device. This is what
+# Core offers; it exists only from 2026.8.0 on. In THIS integration do not call
+# it from a new call site -- go through the shared resolver below, which also
+# covers the declared minimum core and owns the identifier priority.
 device = dev_reg.async_get_device_by_identifier(
     (DOMAIN, canonic_id), entry.entry_id
+)
+
+# The integration-level form. One translation point for lookups, the way
+# plan_device_ownership is the one translation point for ownership.
+from custom_components.googlefindmy.coordinator.helpers.registry import (
+    resolve_device_by_identifiers,
+)
+
+device = resolve_device_by_identifiers(
+    dev_reg,
+    ((DOMAIN, f"{entry.entry_id}:{canonic_id}"), (DOMAIN, canonic_id)),
+    entry_id=entry.entry_id,
 )
 ```
 
@@ -635,8 +650,29 @@ a different split than before, which is why the entry-scoped lookups exist.
 Core 2026.9 adds a main/child device distinction. There,
 `async_get_device_by_identifier` searches **main devices only**, and a child
 device is found through `async_get_child_device_by_identifier` (tag `2026.9.0`,
-lines 1999-2021). If this integration ever registers child devices, that
-distinction has to be revisited at the call sites; today it does not.
+lines 1999-2021). A child device is created exclusively through
+`async_get_or_create_child(..., parent_device_id=...)`; this integration calls
+neither that method nor sets `parent_device_id` anywhere, so every device it
+owns is a main device and the lookups above are complete. Note that `via_device`
+is **not** the same relation: it records a network topology hint on a main
+device and does not turn it into a child. If the integration ever registers real
+child devices, the distinction has to be revisited at every lookup call site.
+
+### About the `AP-nn` markers in tests and comments
+
+Several tests, ratchets and allowlists in this repository carry markers of the
+form `AP-nn` in their reasons and expiry fields. They name the work packages of
+the migration that this section describes, in the order the migration executes
+them: contracts first (`AP-01` to `AP-04`), then the test infrastructure that
+makes the deprecations observable (`AP-05` to `AP-09`), then the capability
+switch and the intent planner (`AP-10`, `AP-11`), then the call sites one file
+at a time (`AP-12` to `AP-17`), and finally the removal of the transitional
+scaffolding (`AP-18` onwards). A `resolved_by="AP-nn"` field therefore reads as
+"this entry must disappear once that file has been migrated"; the accompanying
+dead-entry test enforces the other direction, so no marker can outlive its
+subject silently. The plan document itself is not part of this repository, which
+is why every marker is accompanied by a reason in plain words: the reason is the
+evidence, the marker is only an ordering hint.
 
 **Checklist tie-in:** Section V — High priority (deletion risk via
 `remove_config_entry_id`) and Medium priority (ownership keywords, ambiguous
