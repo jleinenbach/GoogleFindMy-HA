@@ -133,8 +133,19 @@ class TestBuildLegacyDeviceRegistryKwargs:
     """Tests for build_legacy_device_registry_kwargs function.
 
     RISK: Home Assistant version compatibility.
-    Modern HA uses add_config_entry_id/add_config_subentry_id.
-    Legacy HA uses config_entry_id/config_subentry_id.
+
+    Scope: this renaming branch serves registry doubles, not supported cores.
+    The declared minimum, tag 2025.9.1, already ships the ``add_*`` spelling on
+    ``async_update_device`` (``homeassistant/helpers/device_registry.py``, line
+    1014 in that tag), so the rename predates the minimum rather than bridging
+    to it. What *is* live on the minimum is the ownership branch that emits the
+    ``add_*``/``remove_*`` quadruple.
+
+    These tests pin the behaviour of *this translator*, not the Core API. The
+    four ownership kwargs are deprecated from 2026.8 and stop working in
+    2027.8; a device now belongs to exactly one config entry and subentry.
+    Nothing here should be read as "this is how to talk to a current Core" --
+    see AGENTS.md, section "Device registry ownership", for that.
     """
 
     def test_add_config_entry_id_renamed(self) -> None:

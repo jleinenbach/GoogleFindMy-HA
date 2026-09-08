@@ -1,0 +1,370 @@
+# tests/test_guard_device_registry_deprecations.py
+"""Gate: no device registry deprecation may reach Core unnoticed.
+
+This runs a **counted** set of registry operations against real Home Assistant
+and fails as soon as one of them raises a ``report_usage`` this repository has
+not explicitly accepted.  The counted set is the point: the gate reports "no
+unexpected deprecation", and that sentence is only worth as much as the set of
+operations behind it.
+
+The set mirrors what production actually does today.  Thirteen operations:
+
+* one for call pattern A (move) and one for pattern B (ensure ownership),
+* three for pattern C (detach): the two sites that send
+  ``remove_config_subentry_id=None`` *without* arming a move, plus one that
+  arms one, because the armed and the unarmed form take different Core
+  branches,
+* seven for the places that reach ``async_get_device``, and
+* one for the deprecated ``devices`` mapping.
+
+The production sites are named by enclosing function rather than by line
+number: line numbers drift with every unrelated edit, and a stale reference is
+worse than none.
+
+Two structural safeguards keep a green run from being vacuous:
+
+* a **canary** performs a known-deprecated call and requires the recorder to see
+  it -- if the wiring from ``tests/helpers/deprecation_recorder.py`` is ever
+  lost, the canary fails while the gate itself would go quietly green, and
+* the allowlist is checked for **dead entries**, so it cannot silently grow into
+  a list of things that stopped happening years ago.
+
+Home Assistant 2026.8 changed the *behaviour* but shipped no ``report_usage``
+for these APIs; the reports only appear in 2026.9.  On a version without the
+reporter every operation below is silent, so the gate skips instead of claiming
+a clean bill of health it cannot support.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Any
+
+import pytest
+
+from tests.helpers import deprecation_recorder as recorder_helpers
+
+try:
+    from pytest_homeassistant_custom_component.common import MockConfigEntry
+except ModuleNotFoundError:  # pragma: no cover - environment guard
+    pytest.fail(
+        "pytest-homeassistant-custom-component must be installed to run the "
+        "device registry deprecation gate.",
+        pytrace=False,
+    )
+
+pytest_plugins = ("pytest_homeassistant_custom_component",)
+
+
+@pytest.fixture(autouse=True)
+def _use_real_ha_modules(use_real_homeassistant_modules: None) -> None:
+    """The gate is only meaningful against the real device registry."""
+
+
+@dataclass(frozen=True)
+class AcceptedDeprecation:
+    """One deprecation this repository knowingly still triggers."""
+
+    key: str
+    #: Substring identifying the report; matched against ``report.what``.
+    needle: str
+    reason: str
+    #: The work package after which this entry must disappear.
+    resolved_by: str
+
+
+#: Every deprecation the integration may still raise, each with a reason and an
+#: expiry.  An entry that no longer matches anything is a dead entry and fails
+#: ``test_allowlist_has_no_dead_entries``.
+ACCEPTED_DEPRECATIONS: tuple[AcceptedDeprecation, ...] = (
+    AcceptedDeprecation(
+        key="ownership_kwargs",
+        needle="add_config_entry_id",
+        reason=(
+            "Production still speaks the pre-2026.8 kwargs; AP-10 and AP-11 only "
+            "add the intent planner, they remove no call site."
+        ),
+        resolved_by="AP-17",
+    ),
+    AcceptedDeprecation(
+        key="async_get_device",
+        needle="`device_registry.async_get_device`",
+        reason=(
+            "Seven production sites still resolve devices by identifier set; the "
+            "shared resolver lands in AP-14 and the call sites follow."
+        ),
+        resolved_by="AP-16",
+    ),
+    AcceptedDeprecation(
+        key="devices_mapping",
+        needle="`device_registry.devices`",
+        reason=(
+            "Six `devices.values()` sites live in __init__.py and diagnostics.py "
+            "and are migrated last."
+        ),
+        resolved_by="AP-17",
+    ),
+)
+
+
+def _entries(hass: Any) -> tuple[Any, Any, str, str]:
+    """Create two config entries, the first with one subentry."""
+    from homeassistant.config_entries import ConfigSubentryData
+
+    owner = MockConfigEntry(
+        domain="googlefindmy",
+        subentries_data=[
+            ConfigSubentryData(
+                data={}, subentry_type="test", title="tracker", unique_id="tracker"
+            )
+        ],
+    )
+    owner.add_to_hass(hass)
+    other = MockConfigEntry(domain="other")
+    other.add_to_hass(hass)
+    (subentry_id,) = tuple(owner.subentries)
+    return owner, other, owner.entry_id, subentry_id
+
+
+def _operations(hass: Any) -> list[tuple[str, str, Any]]:
+    """Return ``(id, production site, callable)`` for every covered operation.
+
+    Thirteen entries: three call patterns, seven ``async_get_device`` reach
+    points and three ``remove_config_subentry_id=None`` sites.  Several share an
+    underlying Core API on purpose -- the list enumerates *production sites*, so
+    that removing one site visibly shrinks it.
+    """
+    from homeassistant.helpers import device_registry as dr
+
+    registry = dr.async_get(hass)
+    owner, other, entry_id, subentry_id = _entries(hass)
+
+    def _device(tag: str) -> Any:
+        return registry.async_get_or_create(
+            config_entry_id=entry_id,
+            config_subentry_id=subentry_id,
+            identifiers={("googlefindmy", f"gate-{tag}")},
+            name=f"gate probe {tag}",
+        )
+
+    def _pattern_a() -> None:
+        device = _device("a")
+        registry.async_update_device(device.id, add_config_entry_id=other.entry_id)
+        registry.async_update_device(
+            device.id,
+            remove_config_entry_id=entry_id,
+            remove_config_subentry_id=subentry_id,
+        )
+
+    def _pattern_b() -> None:
+        device = _device("b")
+        registry.async_update_device(device.id, add_config_entry_id=entry_id)
+
+    def _pattern_c(tag: str) -> Any:
+        def _run() -> None:
+            device = _device(tag)
+            registry.async_update_device(
+                device.id,
+                remove_config_entry_id=entry_id,
+                remove_config_subentry_id=None,
+            )
+
+        return _run
+
+    def _get_device(tag: str) -> Any:
+        def _run() -> None:
+            registry.async_get_device({("googlefindmy", f"gate-lookup-{tag}")})
+
+        return _run
+
+    def _devices_mapping() -> None:
+        list(registry.devices.values())
+
+    return [
+        (
+            "pattern_a_move",
+            "coordinator/registry.py::_ensure_registry_for_devices",
+            _pattern_a,
+        ),
+        (
+            "pattern_b_ensure",
+            "coordinator/registry.py::_ensure_service_device_exists",
+            _pattern_b,
+        ),
+        (
+            "pattern_c_registry_696",
+            "coordinator/registry.py::_ensure_service_device_exists (unarmed)",
+            _pattern_c("c1"),
+        ),
+        (
+            "pattern_c_registry_1561",
+            "coordinator/registry.py::_ensure_registry_for_devices (armed)",
+            _pattern_c("c2"),
+        ),
+        (
+            "pattern_c_services_125",
+            "services.py::async_rebuild_device_registry (unarmed)",
+            _pattern_c("c3"),
+        ),
+        (
+            "get_device_services_354",
+            "services.py::async_rebuild_device_registry",
+            _get_device("s354"),
+        ),
+        (
+            "get_device_services_377",
+            "services.py::async_rebuild_device_registry",
+            _get_device("s377"),
+        ),
+        (
+            "get_device_identity_240",
+            "coordinator/identity.py::_reset_resolver_offset",
+            _get_device("i240"),
+        ),
+        (
+            "get_device_config_flow_6976",
+            "config_flow.py::ConfigFlow._ensure_service_device_binding",
+            _get_device("cf6976"),
+        ),
+        (
+            "get_device_registry_689",
+            "coordinator/registry.py::_ensure_service_device_exists",
+            _get_device("r689"),
+        ),
+        (
+            "get_device_registry_1424",
+            "coordinator/registry.py::_ensure_registry_for_devices",
+            _get_device("r1424"),
+        ),
+        (
+            "get_device_init_4549",
+            "__init__.py::_async_relink_entities_for_entry.lookup_device",
+            _get_device("i4549"),
+        ),
+        (
+            "devices_mapping",
+            "__init__.py and diagnostics.py, twelve sites",
+            _devices_mapping,
+        ),
+    ]
+
+
+def _prepare(
+    hass: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    recorder: recorder_helpers.DeprecationRecorder,
+) -> Any:
+    """Skip if this Core version is silent, otherwise bind and return the registry.
+
+    Binding has to happen against ``type(registry)``: under
+    ``use_real_homeassistant_modules`` the live registry class carries the
+    globals of an earlier module object, so the autouse fixture's patch of
+    ``sys.modules`` does not reach it.
+    """
+    from homeassistant.helpers import device_registry as dr
+
+    registry = dr.async_get(hass)
+    if not recorder_helpers.reporter_available(registry):
+        pytest.skip(
+            "this Home Assistant version raises no report_usage for the device "
+            "registry APIs (behaviour changed in 2026.8, reporting added in "
+            "2026.9); the gate would be vacuously green"
+        )
+    recorder_helpers.bind_into(monkeypatch, recorder, type(registry))
+    return registry
+
+
+def test_canary_proves_the_recorder_is_listening(
+    hass: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    device_registry_deprecations: recorder_helpers.DeprecationRecorder,
+) -> None:
+    """A known-deprecated call must be observed, or this whole module is void."""
+    assert (
+        "homeassistant.helpers.device_registry"
+        in device_registry_deprecations.bound_modules
+    ), "the recorder is not bound into the device registry module"
+
+    registry = _prepare(hass, monkeypatch, device_registry_deprecations)
+
+    device_registry_deprecations.clear()
+    recorder_helpers.call_from_integration_frame(
+        registry.async_get_device, {("googlefindmy", "canary")}
+    )
+
+    assert device_registry_deprecations.matching("async_get_device"), (
+        "the canary call was not recorded"
+    )
+
+
+def test_no_unexpected_deprecation_is_raised(
+    hass: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    device_registry_deprecations: recorder_helpers.DeprecationRecorder,
+) -> None:
+    """Run every covered operation and reject anything not on the allowlist."""
+    _prepare(hass, monkeypatch, device_registry_deprecations)
+
+    operations = _operations(hass)
+    assert len(operations) == 13, (
+        "the covered set changed; update the count and the module docstring so "
+        "the gate's scope stays stated rather than assumed"
+    )
+
+    unexpected: list[tuple[str, str, str]] = []
+    seen: set[str] = set()
+    for name, site, run in operations:
+        device_registry_deprecations.clear()
+        recorder_helpers.call_from_integration_frame(run)
+        for report in device_registry_deprecations.reports:
+            accepted = next(
+                (
+                    entry
+                    for entry in ACCEPTED_DEPRECATIONS
+                    if entry.needle in report.what
+                ),
+                None,
+            )
+            if accepted is None:
+                unexpected.append((name, site, report.what))
+            else:
+                seen.add(accepted.key)
+
+    assert not unexpected, "unexpected device registry deprecations:\n" + "\n".join(
+        f"  {name} ({site}): {what}" for name, site, what in unexpected
+    )
+
+    print("\nCurrently accepted device registry deprecations:")
+    for entry in ACCEPTED_DEPRECATIONS:
+        status = "observed" if entry.key in seen else "not observed"
+        print(f"  {entry.key} [{status}] until {entry.resolved_by}: {entry.reason}")
+
+
+def test_allowlist_has_no_dead_entries(
+    hass: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    device_registry_deprecations: recorder_helpers.DeprecationRecorder,
+) -> None:
+    """Every allowlist entry must still be triggered by a covered operation.
+
+    Without this an entry outlives the code that caused it, and the allowlist
+    stops describing the repository.  It is the mirror image of the gate: the
+    gate catches deprecations nobody accepted, this catches acceptances nobody
+    needs.
+    """
+    _prepare(hass, monkeypatch, device_registry_deprecations)
+
+    seen: set[str] = set()
+    for _name, _site, run in _operations(hass):
+        device_registry_deprecations.clear()
+        recorder_helpers.call_from_integration_frame(run)
+        for report in device_registry_deprecations.reports:
+            for entry in ACCEPTED_DEPRECATIONS:
+                if entry.needle in report.what:
+                    seen.add(entry.key)
+
+    dead = [entry.key for entry in ACCEPTED_DEPRECATIONS if entry.key not in seen]
+    assert not dead, (
+        f"allowlist entries no longer triggered by any covered operation: {dead}. "
+        "Remove them, or extend the covered set if the operation was dropped."
+    )
