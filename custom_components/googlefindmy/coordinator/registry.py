@@ -185,10 +185,22 @@ class RegistryOperations(_MixinBase):
     ) -> str | None:
         """Return the config-subentry kwarg name accepted by ``call``.
 
-        Home Assistant 2025.11 renamed the ``async_update_device`` keyword from
-        ``config_subentry_id`` to ``add_config_subentry_id``. Earlier versions still
-        expect ``config_subentry_id``. This helper inspects the callable signature
-        and returns the supported keyword, caching the result for reuse.
+        This helper inspects the callable signature and returns the supported
+        keyword, caching the result for reuse.
+
+        Version note corrected: the rename predates our declared minimum.
+        Tag ``2025.9.1`` already ships ``add_config_subentry_id`` on
+        ``async_update_device`` (``homeassistant/helpers/device_registry.py``,
+        line 1014 in that tag) and no longer accepts ``config_subentry_id``
+        there at all (signature at line 1009). The legacy branch below
+        therefore serves no supported core any more, only registry doubles in
+        tests. It stays for now; removing it is a separate change.
+
+        Note also that ``async_get_or_create`` keeps ``config_subentry_id`` in
+        *every* release up to 2026.9, so the choice made here is a distinction
+        between callers, not between core versions. Ownership *changes* must not
+        come through this helper at all; see ``_apply_device_ownership`` and
+        ``docs/AI_DEPRECATIONS_GUIDE.md``, section VI.
         """
 
         cache_attr = "_device_registry_config_subentry_kwarg_cache"

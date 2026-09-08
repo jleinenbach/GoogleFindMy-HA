@@ -102,6 +102,27 @@ Add similar guards whenever a new optional attribute becomes relevant so future 
   )
   ```
 
+## Device ownership in flow code
+
+The config flow binds the service device itself. Any such binding is an **ownership**
+change, and from Home Assistant Core 2026.8 a device belongs to exactly one config
+entry and exactly one config subentry. Do not pass `add_config_entry_id`,
+`add_config_subentry_id`, `remove_config_entry_id` or `remove_config_subentry_id`
+from flow code: on a modern core the first only arms a deferred move, and the third
+*deletes* the device when the removed subentry is the one the device sits on and no
+such move is armed.
+
+Where to route it depends on what the flow has at hand. When the coordinator is
+reachable, go through its ownership entry point so there is a single execution
+point. When it is not (the flow has a coordinator-less fallback path that calls
+`dev_reg.async_update_device` directly), call the pure planner
+`plan_device_ownership` from
+`custom_components/googlefindmy/coordinator/helpers/registry.py` and execute the
+operations it returns; it needs no `hass` and no coordinator instance. What must
+**not** happen is a third hand-written keyword translation in `config_flow.py`: the
+`TypeError` retry that used to live there is exactly that, and it is being removed.
+Background and deadlines: `docs/AI_DEPRECATIONS_GUIDE.md`, section VI.
+
 ## Cross-reference checklist
 
 * [`docs/CONFIG_SUBENTRIES_HANDBOOK.md`](../../../docs/CONFIG_SUBENTRIES_HANDBOOK.md) — Mirrors this guide's subentry-flow reminders and now tracks every AGENT link. Update both documents together whenever setup/unload contracts, discovery affordances, or reconfigure hooks change.

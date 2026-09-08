@@ -80,12 +80,27 @@ def extract_device_display_name(
 def build_legacy_device_registry_kwargs(
     kwargs: Mapping[str, Any],
 ) -> dict[str, Any]:
-    """Translate modern device-registry kwargs to their legacy names.
+    """Translate ownership keywords for cores that predate the current names.
 
-    Home Assistant 2025.11+ uses new keyword argument names for device registry:
+    Mapping applied here:
     - add_config_entry_id -> config_entry_id
     - add_config_subentry_id -> config_subentry_id
     - remove_config_subentry_id -> (dropped, not supported in legacy)
+
+    Version note corrected: the rename predates our declared minimum.
+    Tag ``2025.9.1`` already ships ``add_config_subentry_id`` on
+    ``async_update_device`` (``homeassistant/helpers/device_registry.py``, line
+    1014 in that tag). This *naming* branch therefore serves registry doubles
+    rather than supported cores, unlike the legacy *ownership* path that emits
+    the ``add_*``/``remove_*`` quadruple, which is live on the declared minimum.
+    Note that ``async_get_or_create`` keeps
+    ``config_subentry_id`` in *every* release up to 2026.9: the keyword choice
+    is a distinction between callers, not between core versions.
+
+    Do not read this translator as a licence to write the old keywords. From
+    Core 2026.8 ``add_config_entry_id`` attaches nothing and
+    ``remove_config_entry_id`` on the owning entry deletes the device; see
+    ``docs/AI_DEPRECATIONS_GUIDE.md``, section VI.
 
     Args:
         kwargs: Modern keyword arguments for device registry calls.
