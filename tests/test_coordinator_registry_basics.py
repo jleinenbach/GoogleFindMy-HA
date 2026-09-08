@@ -25,12 +25,19 @@ from custom_components.googlefindmy.const import (
     SERVICE_DEVICE_IDENTIFIER_PREFIX,
 )
 from custom_components.googlefindmy.coordinator import registry as registry_mod
+from custom_components.googlefindmy.coordinator.helpers.registry import (
+    OwnershipIntent,
+)
 from tests.helpers.config_entries_stub import make_config_entry
 from tests.helpers.registry_mixin_stub import (
     RegistryStub,
     _DevRegStub,
     _EntRegStub,
     make_hass_stub,
+)
+from tests.helpers.single_owner_device_registry import (
+    UNDEFINED,
+    SingleOwnerDeviceRegistry,
 )
 
 # ---------------------------------------------------------------------------
@@ -338,7 +345,7 @@ class TestConfigSubentryKwargName:
     def test_cache_resets_when_attribute_is_not_a_dict(
         self, coord: RegistryStub
     ) -> None:
-        coord._device_registry_config_subentry_kwarg_cache = "not-a-dict"  # type: ignore[assignment]
+        coord._device_registry_capability_cache = "not-a-dict"  # type: ignore[assignment]
 
         def api(*, config_subentry_id: str | None = None) -> None: ...
 
@@ -346,7 +353,7 @@ class TestConfigSubentryKwargName:
             coord._device_registry_config_subentry_kwarg_name(api)
             == "config_subentry_id"
         )
-        assert isinstance(coord._device_registry_config_subentry_kwarg_cache, dict)
+        assert isinstance(coord._device_registry_capability_cache, dict)
 
     def test_bound_method_uses_underlying_func_for_cache_key(
         self, coord: RegistryStub
@@ -361,7 +368,7 @@ class TestConfigSubentryKwargName:
             coord._device_registry_config_subentry_kwarg_name(a.call)
             == "config_subentry_id"
         )
-        cache = coord._device_registry_config_subentry_kwarg_cache
+        cache = coord._device_registry_capability_cache
         assert isinstance(cache, dict)
         assert len(cache) == 1
         # Different bound instance, same underlying ``__func__`` → reuses entry.
@@ -833,3 +840,572 @@ class TestReindexPollTargetsWrapper:
 
         assert coord.reindex_poll_targets() is None
         coord._reindex_poll_targets_from_device_registry.assert_called_once_with()
+
+
+# ---------------------------------------------------------------------------
+# AP-11 ``_device_registry_capabilities`` / ``_apply_device_ownership``
+# ---------------------------------------------------------------------------
+#
+# The modern path is exercised against :class:`SingleOwnerDeviceRegistry`, the
+# double that ``tests/test_device_registry_single_owner_contract.py`` validates
+# against real Core.  Asserting the resulting *ownership* there, rather than the
+# keywords, is what ``tests/AGENTS.md`` asks for: the keywords are an
+# implementation detail of the planner, the ownership is the contract.  The
+# legacy dialect has no such double -- Core 2025.9 is not installed here -- so
+# those cases assert the operation sequence the planner derived, which the same
+# section explicitly sanctions.
+
+
+def _legacy_update(recorder: list[dict[str, Any]]) -> Any:
+    """Return an ``async_update_device`` double with the 2025.9 signature.
+
+    Verified against tag 2025.9.1: ``add_config_entry_id``,
+    ``add_config_subentry_id``, ``remove_config_entry_id`` and
+    ``remove_config_subentry_id``, and no ``new_*`` keyword.
+    """
+
+    def async_update_device(
+        device_id: str,
+        *,
+        add_config_entry_id: str | None = None,
+        add_config_subentry_id: str | None = None,
+        remove_config_entry_id: str | None = None,
+        remove_config_subentry_id: str | None = None,
+        **extra: Any,
+    ) -> str:
+        recorder.append(
+            {
+                "device_id": device_id,
+                "add_config_entry_id": add_config_entry_id,
+                "add_config_subentry_id": add_config_subentry_id,
+                "remove_config_entry_id": remove_config_entry_id,
+                "remove_config_subentry_id": remove_config_subentry_id,
+                **extra,
+            }
+        )
+        return "updated"
+
+    return async_update_device
+
+
+def _populate(registry: SingleOwnerDeviceRegistry) -> SingleOwnerDeviceRegistry:
+    """Give ``registry`` one device owned by ``entry-1``/``sub-1``."""
+    registry.add_config_entry("entry-1", {"sub-1", "sub-2"})
+    registry.add_device(
+        identifiers={("googlefindmy", "dev")},
+        config_entry_id="entry-1",
+        config_subentry_id="sub-1",
+    )
+    return registry
+
+
+def _at_entry_root(registry: SingleOwnerDeviceRegistry) -> Any:
+    """Give ``registry`` one device sitting directly on ``entry-1``."""
+    registry.add_config_entry("entry-1")
+    return registry.add_device(
+        identifiers={("googlefindmy", "hub")}, config_entry_id="entry-1"
+    )
+
+
+class TestDeviceRegistryCapabilities:
+    """The profile comes from the signature and is cached per underlying func."""
+
+    def test_modern_signature_is_single_owner(
+        self,
+        coord: RegistryStub,
+        single_owner_device_registry: SingleOwnerDeviceRegistry,
+    ) -> None:
+        caps = coord._device_registry_capabilities(
+            single_owner_device_registry.async_update_device
+        )
+        assert caps.single_owner_model is True
+        assert caps.subentry_kwarg_for_update == "new_config_subentry_id"
+
+    def test_legacy_signature_is_not_single_owner(self, coord: RegistryStub) -> None:
+        caps = coord._device_registry_capabilities(_legacy_update([]))
+        assert caps.single_owner_model is False
+        assert caps.subentry_kwarg_for_update == "add_config_subentry_id"
+
+    def test_profile_is_cached_per_callable(self, coord: RegistryStub) -> None:
+        call = _legacy_update([])
+        first = coord._device_registry_capabilities(call)
+        assert coord._device_registry_capabilities(call) is first
+        assert len(coord._device_registry_capability_cache) == 1
+
+    def test_shim_never_hands_out_the_move_keyword(self, coord: RegistryStub) -> None:
+        """A rename shim must not become an ownership change.
+
+        A callable that knows only the ``new_*`` spelling gets nothing rather
+        than the keyword that would move the device.  ``subentry_kwarg_for_update``
+        would answer ``new_config_subentry_id`` here; the shim must not.
+        """
+
+        def async_update_device(
+            device_id: str,
+            *,
+            new_config_entry_id: str | None = None,
+            new_config_subentry_id: str | None = None,
+        ) -> None: ...
+
+        assert (
+            coord._device_registry_config_subentry_kwarg_name(async_update_device)
+            is None
+        )
+
+    def test_shim_keeps_the_bare_spelling_when_offered(
+        self, coord: RegistryStub
+    ) -> None:
+        """Both spellings present: the historical, non-moving one wins."""
+
+        def async_update_device(
+            *,
+            config_subentry_id: str | None = None,
+            add_config_subentry_id: str | None = None,
+            new_config_subentry_id: str | None = None,
+        ) -> None: ...
+
+        assert (
+            coord._device_registry_config_subentry_kwarg_name(async_update_device)
+            == "config_subentry_id"
+        )
+
+    def test_get_or_create_needs_no_special_case(self, coord: RegistryStub) -> None:
+        """Measured at 2025.9.1, 2026.8.0 and 2026.9.0: it takes the bare name."""
+
+        def async_get_or_create(
+            *,
+            config_entry_id: str | None = None,
+            config_subentry_id: str | None = None,
+        ) -> None: ...
+
+        assert (
+            coord._device_registry_config_subentry_kwarg_name(async_get_or_create)
+            == "config_subentry_id"
+        )
+
+
+class TestUnmigratedOwnershipBrake:
+    """Ownership keywords that bypassed the planner are reported, then dropped."""
+
+    def test_report_stage_lets_the_call_through(
+        self,
+        coord: RegistryStub,
+        caplog: pytest.LogCaptureFixture,
+        single_owner_device_registry: SingleOwnerDeviceRegistry,
+    ) -> None:
+        """Until AP-18 the call is unchanged; the report stays out of ERROR.
+
+        Every remaining call site is known and listed in the deprecation
+        allowlist, so an error per device and refresh would drown the real ones.
+        """
+        registry = _populate(single_owner_device_registry)
+        with caplog.at_level("DEBUG"):
+            coord._call_device_registry_api(
+                registry.async_update_device,
+                base_kwargs={"device_id": "device-1", "add_config_entry_id": "entry-1"},
+            )
+        assert registry.operations[-1][1]["add_config_entry_id"] == "entry-1"
+        assert "passed through" in caplog.text
+        assert not [r for r in caplog.records if r.levelname == "ERROR"]
+
+    def test_drop_stage_removes_both_families_together(
+        self,
+        coord: RegistryStub,
+        monkeypatch: pytest.MonkeyPatch,
+        single_owner_device_registry: SingleOwnerDeviceRegistry,
+    ) -> None:
+        """AP-18 flips the switch; a half-dropped pair would delete a device."""
+        monkeypatch.setattr(registry_mod, "_OWNERSHIP_ENFORCEMENT", "drop")
+        registry = _populate(single_owner_device_registry)
+        coord._call_device_registry_api(
+            registry.async_update_device,
+            base_kwargs={
+                "device_id": "device-1",
+                "add_config_entry_id": "entry-1",
+                "remove_config_entry_id": "entry-1",
+                "remove_config_subentry_id": "sub-1",
+            },
+        )
+        # The device survives: without the drop, ``remove_config_entry_id`` on
+        # the owning entry would have deleted it.
+        assert registry.async_get("device-1") is not None
+        recorded = registry.operations[-1][1]
+        assert recorded["remove_config_entry_id"] is UNDEFINED
+        assert recorded["add_config_entry_id"] is UNDEFINED
+
+    def test_a_potentially_deleting_combination_is_warned(
+        self,
+        coord: RegistryStub,
+        caplog: pytest.LogCaptureFixture,
+        single_owner_device_registry: SingleOwnerDeviceRegistry,
+    ) -> None:
+        """A lone add_* is inert here, a remove_* on the owning entry deletes.
+
+        Reporting both at the same level would hide the dangerous form in the
+        noise of the harmless one.
+        """
+        registry = _populate(single_owner_device_registry)
+        with caplog.at_level("DEBUG"):
+            coord._call_device_registry_api(
+                registry.async_update_device,
+                base_kwargs={
+                    "device_id": "device-1",
+                    "remove_config_entry_id": "entry-1",
+                    "remove_config_subentry_id": "sub-1",
+                },
+            )
+        assert [r.levelname for r in caplog.records if "Unmigrated" in r.message] == [
+            "WARNING"
+        ]
+
+    def test_legacy_core_is_never_braked(
+        self, coord: RegistryStub, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """On the declared minimum the old keywords are the only working ones."""
+        calls: list[dict[str, Any]] = []
+        with caplog.at_level("DEBUG"):
+            coord._call_device_registry_api(
+                _legacy_update(calls),
+                base_kwargs={"device_id": "dev-1", "add_config_entry_id": "entry-1"},
+            )
+        assert calls[0]["add_config_entry_id"] == "entry-1"
+        assert "Unmigrated ownership keywords" not in caplog.text
+
+
+class TestUnknownSubentryFallbackKeepsPairs:
+    """The retry drops the bare name only, never half of a remove pair."""
+
+    def test_remove_pair_survives_the_fallback(self, coord: RegistryStub) -> None:
+        """Stripping ``remove_config_subentry_id`` alone widens the removal.
+
+        ``remove_config_entry_id`` without its subentry half is an entry-wide
+        removal, and on Core 2026.8+ that deletes the device. The call site in
+        ``_ensure_registry_for_devices`` really does send both together with a
+        bare ``config_subentry_id``.
+        """
+        from homeassistant.config_entries import UnknownSubEntry
+
+        attempts: list[dict[str, Any]] = []
+
+        def api(
+            *,
+            config_subentry_id: str | None = None,
+            remove_config_entry_id: str | None = None,
+            remove_config_subentry_id: str | None = None,
+        ) -> str:
+            attempts.append(
+                {
+                    "config_subentry_id": config_subentry_id,
+                    "remove_config_entry_id": remove_config_entry_id,
+                    "remove_config_subentry_id": remove_config_subentry_id,
+                }
+            )
+            if config_subentry_id == "missing":
+                raise UnknownSubEntry
+            return "ok"
+
+        result = coord._call_device_registry_api(
+            api,
+            base_kwargs={
+                "config_subentry_id": "missing",
+                "remove_config_entry_id": "entry-1",
+                "remove_config_subentry_id": "sub-1",
+            },
+        )
+        assert result == "ok"
+        assert attempts[1]["config_subentry_id"] is None
+        assert attempts[1]["remove_config_entry_id"] == "entry-1"
+        assert attempts[1]["remove_config_subentry_id"] == "sub-1"
+
+
+class TestApplyDeviceOwnership:
+    """The single place that changes who owns a device."""
+
+    def test_move_puts_the_device_into_the_target_subentry(
+        self,
+        coord: RegistryStub,
+        single_owner_device_registry: SingleOwnerDeviceRegistry,
+    ) -> None:
+        registry = _populate(single_owner_device_registry)
+        coord._apply_device_ownership(
+            registry,
+            intent=OwnershipIntent.MOVE,
+            device_id="device-1",
+            entry_id="entry-1",
+            target_subentry_id="sub-2",
+        )
+        device = registry.async_get("device-1")
+        assert device is not None
+        assert (device.config_entry_id, device.config_subentry_id) == (
+            "entry-1",
+            "sub-2",
+        )
+
+    def test_ensure_on_the_right_owner_touches_nothing(
+        self,
+        coord: RegistryStub,
+        single_owner_device_registry: SingleOwnerDeviceRegistry,
+    ) -> None:
+        registry = _populate(single_owner_device_registry)
+        device = registry.async_get("device-1")
+        result = coord._apply_device_ownership(
+            registry,
+            intent=OwnershipIntent.ENSURE,
+            device_id="device-1",
+            entry_id="entry-1",
+            target_subentry_id="sub-1",
+            device=device,
+        )
+        assert registry.operations == []
+        assert result is device
+
+    def test_ensure_moves_a_device_owned_elsewhere(
+        self,
+        coord: RegistryStub,
+        single_owner_device_registry: SingleOwnerDeviceRegistry,
+    ) -> None:
+        registry = _populate(single_owner_device_registry)
+        registry.add_config_entry("entry-other")
+        stray = registry.add_device(
+            identifiers={("googlefindmy", "stray")},
+            config_entry_id="entry-other",
+        )
+        coord._apply_device_ownership(
+            registry,
+            intent=OwnershipIntent.ENSURE,
+            device_id=stray.id,
+            entry_id="entry-1",
+            target_subentry_id="sub-2",
+        )
+        moved = registry.async_get(stray.id)
+        assert moved is not None
+        assert (moved.config_entry_id, moved.config_subentry_id) == ("entry-1", "sub-2")
+
+    def test_detach_on_the_owning_link_removes_the_device(
+        self,
+        coord: RegistryStub,
+        single_owner_device_registry: SingleOwnerDeviceRegistry,
+    ) -> None:
+        """Core deletes here; the plan makes that visible at the call site."""
+        registry = single_owner_device_registry
+        device = _at_entry_root(registry)
+        result = coord._apply_device_ownership(
+            registry,
+            intent=OwnershipIntent.DETACH,
+            device_id=device.id,
+            entry_id="entry-1",
+            device=device,
+        )
+        assert registry.async_get(device.id) is None
+        assert result is None
+
+    def test_detach_on_a_foreign_subentry_does_nothing(
+        self,
+        coord: RegistryStub,
+        single_owner_device_registry: SingleOwnerDeviceRegistry,
+    ) -> None:
+        """The device sits in a subentry, the caller drops the hub link."""
+        registry = _populate(single_owner_device_registry)
+        device = registry.async_get("device-1")
+        coord._apply_device_ownership(
+            registry,
+            intent=OwnershipIntent.DETACH,
+            device_id="device-1",
+            entry_id="entry-1",
+            device=device,
+        )
+        assert registry.async_get("device-1") is device
+        assert registry.operations == []
+
+    def test_detach_resolves_the_device_when_the_caller_has_none(
+        self,
+        coord: RegistryStub,
+        single_owner_device_registry: SingleOwnerDeviceRegistry,
+    ) -> None:
+        """``async_get`` is not deprecated and is the cheap ownership read."""
+        registry = single_owner_device_registry
+        device = _at_entry_root(registry)
+        coord._apply_device_ownership(
+            registry,
+            intent=OwnershipIntent.DETACH,
+            device_id=device.id,
+            entry_id="entry-1",
+        )
+        assert registry.async_get(device.id) is None
+
+    def test_detach_on_a_registry_without_async_get_refuses(
+        self,
+        coord: RegistryStub,
+        caplog: pytest.LogCaptureFixture,
+        single_owner_device_registry: SingleOwnerDeviceRegistry,
+    ) -> None:
+        """No way to read the ownership means no way to justify a deletion."""
+        registry = _populate(single_owner_device_registry)
+        dev_reg = SimpleNamespace(
+            async_update_device=registry.async_update_device,
+            async_remove_device=registry.async_remove_device,
+        )
+        with caplog.at_level("ERROR"):
+            coord._apply_device_ownership(
+                dev_reg,
+                intent=OwnershipIntent.DETACH,
+                device_id="device-1",
+                entry_id="entry-1",
+            )
+        assert registry.async_get("device-1") is not None
+        assert "device entry not resolvable" in caplog.text
+
+    def test_detach_without_a_resolvable_device_refuses(
+        self,
+        coord: RegistryStub,
+        caplog: pytest.LogCaptureFixture,
+        single_owner_device_registry: SingleOwnerDeviceRegistry,
+    ) -> None:
+        """Refusing loudly beats deleting a device we cannot describe."""
+        registry = _populate(single_owner_device_registry)
+        with caplog.at_level("ERROR"):
+            coord._apply_device_ownership(
+                registry,
+                intent=OwnershipIntent.DETACH,
+                device_id="device-unknown",
+                entry_id="entry-1",
+            )
+        assert registry.operations == []
+        assert "device entry not resolvable" in caplog.text
+
+    def test_detach_on_a_device_without_ownership_attributes_refuses(
+        self,
+        coord: RegistryStub,
+        caplog: pytest.LogCaptureFixture,
+        single_owner_device_registry: SingleOwnerDeviceRegistry,
+    ) -> None:
+        """An object that describes no ownership is unknown, not unowned.
+
+        Collapsing the two would turn the refusal into a silent no-op, and the
+        caller could not tell the difference.
+        """
+        registry = _populate(single_owner_device_registry)
+        with caplog.at_level("ERROR"):
+            coord._apply_device_ownership(
+                registry,
+                intent=OwnershipIntent.DETACH,
+                device_id="device-1",
+                entry_id="entry-1",
+                device=SimpleNamespace(id="device-1"),
+            )
+        assert registry.async_get("device-1") is not None
+        assert "device entry not resolvable" in caplog.text
+
+    def test_move_does_not_read_the_current_owner(
+        self,
+        coord: RegistryStub,
+        single_owner_device_registry: SingleOwnerDeviceRegistry,
+    ) -> None:
+        """MOVE needs no ownership read, so it must not pay for one."""
+        registry = _populate(single_owner_device_registry)
+        reads: list[str] = []
+        original = registry.async_get
+
+        def _counting(device_id: str) -> Any:
+            reads.append(device_id)
+            return original(device_id)
+
+        registry.async_get = _counting  # type: ignore[method-assign]
+        coord._apply_device_ownership(
+            registry,
+            intent=OwnershipIntent.MOVE,
+            device_id="device-1",
+            entry_id="entry-1",
+            target_subentry_id="sub-2",
+        )
+        assert reads == []
+
+    def test_ensure_without_target_and_without_state_refuses(
+        self,
+        coord: RegistryStub,
+        caplog: pytest.LogCaptureFixture,
+        single_owner_device_registry: SingleOwnerDeviceRegistry,
+    ) -> None:
+        """Omitting the target subentry is not neutral on a single-owner core.
+
+        Core sets the subentry to ``None`` alongside the new entry, so acting on
+        an unknown current owner would move the device to the entry root on a
+        guess.
+        """
+        registry = _populate(single_owner_device_registry)
+        with caplog.at_level("ERROR"):
+            coord._apply_device_ownership(
+                registry,
+                intent=OwnershipIntent.ENSURE,
+                device_id="device-unknown",
+                entry_id="entry-1",
+            )
+        assert registry.operations == []
+        assert "Cannot apply ensure" in caplog.text
+
+    def test_missing_remove_helper_is_reported(
+        self,
+        coord: RegistryStub,
+        caplog: pytest.LogCaptureFixture,
+        single_owner_device_registry: SingleOwnerDeviceRegistry,
+    ) -> None:
+        """Returning the unchanged device would look like a successful removal."""
+        registry = _populate(single_owner_device_registry)
+        device = SimpleNamespace(config_entry_id="entry-1", config_subentry_id=None)
+        dev_reg = SimpleNamespace(
+            async_update_device=registry.async_update_device,
+            async_get=lambda device_id: device,
+        )
+        with caplog.at_level("ERROR"):
+            coord._apply_device_ownership(
+                dev_reg,
+                intent=OwnershipIntent.DETACH,
+                device_id="device-1",
+                entry_id="entry-1",
+                device=device,
+            )
+        assert "has no async_remove_device" in caplog.text
+
+    def test_legacy_move_speaks_the_old_dialect(self, coord: RegistryStub) -> None:
+        """No 2025.9 double exists, so the operation sequence is the assertion."""
+        calls: list[dict[str, Any]] = []
+        coord._apply_device_ownership(
+            SimpleNamespace(async_update_device=_legacy_update(calls)),
+            intent=OwnershipIntent.MOVE,
+            device_id="dev-1",
+            entry_id="entry-1",
+            target_subentry_id="sub-2",
+            detach_subentry_id="sub-surplus",
+        )
+        assert calls[0]["remove_config_subentry_id"] == "sub-surplus"
+        assert calls[0]["add_config_subentry_id"] == "sub-2"
+
+    def test_legacy_move_never_cancels_itself(self, coord: RegistryStub) -> None:
+        """Removing the link we are about to add would empty the entry.
+
+        On a pre-2026.8 core that drops the config entry from the device, and if
+        it was the only one the device goes with it.
+        """
+        calls: list[dict[str, Any]] = []
+        coord._apply_device_ownership(
+            SimpleNamespace(async_update_device=_legacy_update(calls)),
+            intent=OwnershipIntent.MOVE,
+            device_id="dev-1",
+            entry_id="entry-1",
+            target_subentry_id="sub-2",
+            detach_subentry_id="sub-2",
+        )
+        assert calls[0]["remove_config_entry_id"] is None
+        assert calls[0]["remove_config_subentry_id"] is None
+        assert calls[0]["add_config_subentry_id"] == "sub-2"
+
+    def test_missing_update_helper_is_a_no_op(self, coord: RegistryStub) -> None:
+        sentinel = SimpleNamespace(config_entry_id="entry-1", config_subentry_id=None)
+        result = coord._apply_device_ownership(
+            SimpleNamespace(),
+            intent=OwnershipIntent.MOVE,
+            device_id="dev-1",
+            entry_id="entry-1",
+            device=sentinel,
+        )
+        assert result is sentinel

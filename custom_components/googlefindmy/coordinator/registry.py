@@ -5,6 +5,9 @@ during Phase 2 of the refactoring.
 
 Methods moved here:
 - _call_device_registry_api: Core registry call with compatibility handling
+- _apply_device_ownership: The single execution point for ownership changes
+- _device_registry_capabilities: Signature-derived capability profile
+- _report_unmigrated_ownership_kwargs: Brake against pre-2026.8 keywords
 - _device_registry_kwargs_need_legacy_retry: Legacy kwarg detection
 - _device_registry_build_legacy_kwargs: Legacy kwarg translation
 - _device_registry_config_subentry_kwarg_name: Subentry kwarg detection
@@ -56,6 +59,17 @@ from ..const import (
 )
 from ._mixin_typing import _MixinBase
 from .helpers.registry import (
+    OWNERSHIP_ADD_KWARGS as _OWNERSHIP_ADD_KWARGS,
+)
+from .helpers.registry import (
+    OWNERSHIP_REMOVE_KWARGS as _OWNERSHIP_REMOVE_KWARGS,
+)
+from .helpers.registry import (
+    DeviceOwnership,
+    DeviceRegistryCapabilities,
+    OwnershipIntent,
+)
+from .helpers.registry import (
     build_canonical_unique_id as _build_canonical_unique_id_impl,
 )
 from .helpers.registry import (
@@ -63,6 +77,9 @@ from .helpers.registry import (
 )
 from .helpers.registry import (
     build_legacy_device_registry_kwargs as _build_legacy_kwargs_impl,
+)
+from .helpers.registry import (
+    detect_device_registry_capabilities as _detect_capabilities_impl,
 )
 from .helpers.registry import (
     extract_canonical_device_id as _extract_canonical_device_id_impl,
@@ -98,6 +115,9 @@ from .helpers.registry import (
     parse_device_identifier as _parse_identifier_impl,
 )
 from .helpers.registry import (
+    plan_device_ownership as _plan_device_ownership_impl,
+)
+from .helpers.registry import (
     resolve_tracker_subentry_candidate as _resolve_tracker_subentry_impl,
 )
 from .helpers.registry import (
@@ -108,6 +128,13 @@ from .helpers.subentry import (
 )
 
 _LOGGER = logging.getLogger(__name__)
+
+# Two-stage emergency brake for ownership keywords that were not migrated to
+# ``_apply_device_ownership``. In this work package it stands on "report": the
+# call is let through and only logged. AP-18 flips it to "drop" once every call
+# site speaks intents. Dropping earlier would make every intermediate commit
+# non-functional on Core 2026.8+, where the old keywords still parse.
+_OWNERSHIP_ENFORCEMENT = "report"
 
 
 class RegistryOperations(_MixinBase):
@@ -127,12 +154,17 @@ class RegistryOperations(_MixinBase):
         """Call a device registry API, handling keyword compatibility."""
 
         kwargs = dict(base_kwargs or {})
+        sent_legacy_subentry_kwarg = False
         if "config_subentry_id" in kwargs:
             replacement = self._device_registry_config_subentry_kwarg_name(call)
             if replacement is None:
                 kwargs.pop("config_subentry_id")
             elif replacement != "config_subentry_id":
                 kwargs[replacement] = kwargs.pop("config_subentry_id")
+            else:
+                sent_legacy_subentry_kwarg = True
+
+        self._report_unmigrated_ownership_kwargs(call, kwargs)
 
         try:
             return call(**kwargs)
@@ -148,20 +180,76 @@ class RegistryOperations(_MixinBase):
             )
             return call(**legacy_kwargs)
         except (UnknownEntry, UnknownSubEntry) as err:
-            kwarg_name = self._device_registry_config_subentry_kwarg_name(call)
-            if (
-                kwarg_name == "add_config_subentry_id"
-                or "config_subentry_id" not in kwargs
-            ):
+            # Retry without subentry information only when the call really did
+            # carry the bare ``config_subentry_id``. A callable that speaks the
+            # renamed keyword (``add_`` or ``new_``) means what it says, so an
+            # unknown subentry there is a genuine error and must surface.
+            if not sent_legacy_subentry_kwarg:
                 raise
             _LOGGER.debug(
                 "Device registry call %s rejected config_subentry_id (%s); retrying without it",
                 getattr(call, "__qualname__", repr(call)),
                 err,
             )
+            # Only the bare name is dropped. Filtering every subentry spelling
+            # would strip ``remove_config_subentry_id`` while leaving
+            # ``remove_config_entry_id`` in place, and an entry-wide removal is
+            # exactly the call that deletes a device on Core 2026.8+.
             fallback_kwargs = dict(kwargs)
             fallback_kwargs.pop("config_subentry_id", None)
             return call(**fallback_kwargs)
+
+    def _report_unmigrated_ownership_kwargs(
+        self, call: Callable[..., Any], kwargs: dict[str, Any]
+    ) -> None:
+        """Report, and from AP-18 on drop, pre-2026.8 ownership keywords.
+
+        From Core 2026.8 the ``new_config_*`` keywords must not be combined with
+        the ``add_``/``remove_`` pair; core raises ``HomeAssistantError``. Note
+        what the legacy ``add_`` keyword really does on that core: on its own it
+        attaches nothing, but combined with its ``remove_`` counterpart it arms a
+        pending move that the removal then completes. Dropping only one half of
+        such a pair therefore turns a working move into a deletion, which is why
+        the two families are only ever dropped together.
+        """
+        # No name check: measured at tags 2025.9.1, 2026.8.0 and 2026.9.0,
+        # ``async_update_device`` is the only registry call that carries the
+        # ``new_*`` keywords, so the profile already narrows this to it. A name
+        # check would additionally miss every wrapper without a ``__name__``.
+        caps = self._device_registry_capabilities(call)
+        if not caps.single_owner_model:
+            return
+        stale = [key for key in _OWNERSHIP_REMOVE_KWARGS if key in kwargs] + [
+            key for key in _OWNERSHIP_ADD_KWARGS if key in kwargs
+        ]
+        if not stale:
+            return
+        dropping = _OWNERSHIP_ENFORCEMENT == "drop"
+        # A lone add_* is inert on this core. A remove_* on the owning entry is
+        # not: it deletes the device. The two deserve different visibility.
+        destructive = _OWNERSHIP_REMOVE_KWARGS[0] in stale
+        # Level by consequence, not by sentiment. While the switch stands on
+        # "report" nothing is altered and every remaining call site is known and
+        # listed in ``tests/test_guard_device_registry_deprecations.py``; an
+        # error per device and refresh would drown the real ones. Once the
+        # switch drops keywords the call really changes, and that must be loud.
+        if dropping:
+            log = _LOGGER.error
+        elif destructive:
+            log = _LOGGER.warning
+        else:
+            log = _LOGGER.debug
+        log(
+            "Unmigrated ownership keywords %s for %s: ownership changes must go "
+            "through _apply_device_ownership on Home Assistant 2026.8+ (%s)",
+            ", ".join(stale),
+            getattr(call, "__qualname__", repr(call)),
+            "dropped" if dropping else "passed through",
+        )
+        if dropping:
+            # All of them, or none: see the docstring above.
+            for key in stale:
+                kwargs.pop(key, None)
 
     def _device_registry_kwargs_need_legacy_retry(
         self,
@@ -180,13 +268,53 @@ class RegistryOperations(_MixinBase):
         """Translate modern device-registry kwargs to their legacy names."""
         return _build_legacy_kwargs_impl(kwargs)
 
+    def _device_registry_capabilities(
+        self, call: Callable[..., Any]
+    ) -> DeviceRegistryCapabilities:
+        """Return the cached capability profile for ``call``.
+
+        The profile is read from the signature, never from a version string.
+        A fork, a backport or a patched core can carry any number; the signature
+        is what the call actually has to satisfy. See
+        ``docs/AI_DEPRECATIONS_GUIDE.md``, section VI.
+        """
+        cache_attr = "_device_registry_capability_cache"
+        cache_obj = getattr(self, cache_attr, None)
+        cache: dict[Any, DeviceRegistryCapabilities]
+        if isinstance(cache_obj, dict):
+            cache = cast(dict[Any, DeviceRegistryCapabilities], cache_obj)
+        else:
+            cache = cast(dict[Any, DeviceRegistryCapabilities], {})
+            setattr(self, cache_attr, cache)
+
+        func = getattr(call, "__func__", call)
+        try:
+            caps = cache.get(func)
+        except TypeError:  # pragma: no cover - unhashable callable
+            return _detect_capabilities_impl(call)
+        if caps is None:
+            caps = _detect_capabilities_impl(call)
+            cache[func] = caps
+        return caps
+
     def _device_registry_config_subentry_kwarg_name(
         self, call: Callable[..., Any]
     ) -> str | None:
         """Return the config-subentry kwarg name accepted by ``call``.
 
-        This helper inspects the callable signature and returns the supported
-        keyword, caching the result for reuse.
+        Compatibility shim for ``async_get_or_create`` and for the callers that
+        still speak the bare ``config_subentry_id``. Ownership *changes* do not
+        come through here any more; they go through
+        :meth:`_apply_device_ownership`, which asks
+        :meth:`_device_registry_capabilities` for the right keyword.
+
+        The preference order lives in
+        :attr:`DeviceRegistryCapabilities.subentry_kwarg_for_shim` and is
+        deliberately the historical one: a callable that still accepts the bare
+        ``config_subentry_id`` gets it, and ``new_config_subentry_id`` is never
+        returned. Handing out the newer spelling here would silently turn this
+        shim back into an ownership-changing path, and on Core 2026.8+ that is
+        the difference between a no-op and a move.
 
         Version note corrected: the rename predates our declared minimum.
         Tag ``2025.9.1`` already ships ``add_config_subentry_id`` on
@@ -197,45 +325,142 @@ class RegistryOperations(_MixinBase):
         tests. It stays for now; removing it is a separate change.
 
         Note also that ``async_get_or_create`` keeps ``config_subentry_id`` in
-        *every* release up to 2026.9, so the choice made here is a distinction
-        between callers, not between core versions. Ownership *changes* must not
-        come through this helper at all; see ``_apply_device_ownership`` and
-        ``docs/AI_DEPRECATIONS_GUIDE.md``, section VI.
+        *every* release up to 2026.9 (verified at tags 2025.9.1, 2026.8.0 and
+        2026.9.0), which is why that call needs no special case here: the
+        preference order picks the bare name for it anyway. Ownership *changes*
+        must not come through this helper at all; see
+        :meth:`_apply_device_ownership` and ``docs/AI_DEPRECATIONS_GUIDE.md``,
+        section VI.
         """
 
-        cache_attr = "_device_registry_config_subentry_kwarg_cache"
-        cache_obj = getattr(self, cache_attr, None)
-        cache: dict[Callable[..., Any], str | None]
-        if isinstance(cache_obj, dict):
-            cache = cast(dict[Callable[..., Any], str | None], cache_obj)
-        else:
-            cache = cast(dict[Callable[..., Any], str | None], {})
-            setattr(self, cache_attr, cache)
+        return self._device_registry_capabilities(call).subentry_kwarg_for_shim
 
-        func = getattr(call, "__func__", call)
-        if func in cache:
-            return cache[func]
+    def _apply_device_ownership(  # noqa: PLR0913 - one parameter per ownership axis
+        self,
+        dev_reg: Any,
+        *,
+        intent: OwnershipIntent,
+        device_id: str,
+        entry_id: str,
+        target_subentry_id: str | None = None,
+        detach_subentry_id: str | None = None,
+        device: Any | None = None,
+        extra: Mapping[str, Any] | None = None,
+    ) -> Any:
+        """Execute an ownership intent against ``dev_reg``.
+
+        This is the only place in the integration that changes which config
+        entry or subentry owns a device. Call sites state an intent; the
+        keywords are chosen by ``plan_device_ownership`` from the signature of
+        the installed core. See ``docs/AI_DEPRECATIONS_GUIDE.md``, section VI.
+
+        ``device`` is the device entry the caller already holds. When it is
+        absent, the intent needs the current ownership (DETACH, ENSURE) and the
+        core uses the single-owner model, this method resolves it first: DETACH
+        must never run on an unknown ownership state, because on that core
+        dropping the owning entry deletes the device and every entity attached
+        to it. MOVE does not read the current ownership and skips the lookup.
+
+        Args:
+            dev_reg: The device registry.
+            intent: MOVE, ENSURE or DETACH.
+            device_id: The device to act on.
+            entry_id: Our config entry.
+            target_subentry_id: Where the device shall sit (MOVE, ENSURE).
+            detach_subentry_id: Which link to give up (DETACH, legacy MOVE).
+            device: The device entry, when the caller already holds it.
+            extra: Additional keyword arguments for the update call, for
+                example ``name``. Ownership and subentry keywords do not belong
+                in here: a ``config_subentry_id`` would pass through the
+                compatibility shim and arrive as ``add_config_subentry_id`` next
+                to the ``new_*`` pair, which Core 2026.8+ rejects with
+                ``HomeAssistantError``. Use ``target_subentry_id`` instead.
+
+        Returns:
+            The updated device entry, ``None`` after a removal, or the device
+            that was passed in when nothing had to be done.
+        """
+        update_call = getattr(dev_reg, "async_update_device", None)
+        if not callable(update_call) or not device_id or not entry_id:
+            return device
+
+        caps = self._device_registry_capabilities(update_call)
+        needs_state = intent in (OwnershipIntent.DETACH, OwnershipIntent.ENSURE)
+        if device is None and needs_state and caps.single_owner_model:
+            # ``async_get(device_id)`` is *not* deprecated, unlike the
+            # by-identifiers lookup it replaces; it is the cheap way to learn
+            # the current ownership before deciding anything. MOVE does not read
+            # it, so it does not pay for it.
+            get_by_id = getattr(dev_reg, "async_get", None)
+            if callable(get_by_id):
+                device = get_by_id(device_id)
+        # A device entry that carries neither attribute tells us nothing, and
+        # "unknown" must not collapse into "owned by nobody": that difference is
+        # the whole point of DeviceOwnership, and on a single-owner core it is
+        # the difference between a refusal and a silent no-op.
+        describes_ownership = device is not None and (
+            hasattr(device, "config_entry_id") or hasattr(device, "config_subentry_id")
+        )
+        current = (
+            DeviceOwnership(
+                getattr(device, "config_entry_id", None),
+                getattr(device, "config_subentry_id", None),
+            )
+            if describes_ownership
+            else None
+        )
 
         try:
-            signature = inspect.signature(call)
-        except (TypeError, ValueError):  # pragma: no cover - defensive fallback
-            kwarg_name: str | None = None
-        else:
-            parameters = signature.parameters
-            if "config_subentry_id" in parameters:
-                kwarg_name = "config_subentry_id"
-            elif "add_config_subentry_id" in parameters:
-                kwarg_name = "add_config_subentry_id"
-            elif any(
-                param.kind is inspect.Parameter.VAR_KEYWORD
-                for param in parameters.values()
-            ):
-                kwarg_name = "config_subentry_id"
-            else:
-                kwarg_name = None
+            plan = _plan_device_ownership_impl(
+                intent,
+                caps=caps,
+                device_id=device_id,
+                entry_id=entry_id,
+                target_subentry_id=target_subentry_id,
+                detach_subentry_id=detach_subentry_id,
+                current=current,
+                extra=extra,
+            )
+        except ValueError:
+            if intent not in (
+                OwnershipIntent.DETACH,
+                OwnershipIntent.ENSURE,
+            ):  # pragma: no cover - MOVE has no refusal today; guard for later
+                # Only the planner's refusals are expected here; anything else
+                # is a real error and must not be swallowed under a wrong
+                # message.
+                raise
+            # The planner refuses to guess: DETACH would delete a device it
+            # cannot describe, ENSURE without a target would move it to the
+            # entry root. Both are reported instead of attempted.
+            _LOGGER.error(
+                "Cannot apply %s to device %s on entry %s: device entry not resolvable",
+                intent.value,
+                device_id,
+                entry_id,
+            )
+            return device
 
-        cache[func] = kwarg_name
-        return kwarg_name
+        result: Any = device
+        for operation in plan:
+            if operation.method == "async_remove_device":
+                remove_call = getattr(dev_reg, "async_remove_device", None)
+                if callable(remove_call):
+                    remove_call(operation.kwargs["device_id"])
+                    result = None
+                else:
+                    # The return value cannot express this failure: the device
+                    # comes back unchanged, which the caller cannot tell apart
+                    # from an empty plan. Hence the log.
+                    _LOGGER.error(
+                        "Cannot remove device %s: registry has no async_remove_device",
+                        device_id,
+                    )
+                continue
+            result = self._call_device_registry_api(
+                update_call, base_kwargs=dict(operation.kwargs)
+            )
+        return result
 
     def _device_registry_allows_translation_update(self, dev_reg: Any) -> bool:
         """Return True if the registry accepts translation metadata during updates."""

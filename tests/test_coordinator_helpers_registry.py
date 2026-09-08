@@ -1,7 +1,7 @@
 # tests/test_coordinator_helpers_registry.py
 """Branch-Coverage tests for ``coordinator.helpers.registry``.
 
-The 16 public helpers in
+The 18 public helper functions in
 :mod:`custom_components.googlefindmy.coordinator.helpers.registry` are pure
 functions: no Home-Assistant runtime, no I/O, no module-level globals beyond
 re-exported constants.  These tests exercise every documented branch via the
@@ -22,7 +22,9 @@ production code expresses an intent instead, see AGENTS.md, section "Device
 registry ownership".
 
 Branch budget (notes-sidecar ``helpers/registry.py``): ~70 branches across the
-16 functions listed in :data:`__all__`.  Each test docstring names the function
+18 functions listed in :data:`__all__` (the four dataclasses/enums and the
+two keyword tuples there are data, not branches, and are covered through the
+functions that read them).  Each test docstring names the function
 and the branch the case exercises so a failing test points at the spec line,
 not the implementation.
 
@@ -1144,7 +1146,32 @@ class TestDetectDeviceRegistryCapabilities:
         assert caps.accepts_var_keyword is True
         assert caps.single_owner_model is False
         assert caps.subentry_kwarg_for_update == "config_subentry_id"
-        assert caps.subentry_kwarg_for_create == "config_subentry_id"
+        assert caps.subentry_kwarg_for_shim == "config_subentry_id"
+
+    def test_a_half_new_signature_is_not_single_owner(self) -> None:
+        """Both new keywords or neither: a partial double is not a core.
+
+        The two switches must agree.  If ``subentry_kwarg_for_update`` answered
+        ``new_config_subentry_id`` here while ``single_owner_model`` said False,
+        the legacy ENSURE branch would emit ``add_config_entry_id`` next to
+        ``new_config_subentry_id`` -- the combination Core 2026.8+ rejects.
+        """
+        caps = registry_helpers.detect_device_registry_capabilities(
+            _profile(
+                new_config_subentry_id=None,
+                add_config_entry_id=None,
+                add_config_subentry_id=None,
+            )
+        )
+        assert caps.single_owner_model is False
+        assert caps.subentry_kwarg_for_update == "add_config_subentry_id"
+
+    def test_a_signature_without_any_subentry_keyword_yields_none(self) -> None:
+        """No spelling at all means no keyword, not a guessed one."""
+        caps = registry_helpers.detect_device_registry_capabilities(
+            _profile(add_config_entry_id=None, remove_config_entry_id=None)
+        )
+        assert caps.subentry_kwarg_for_update is None
 
     def test_unreadable_signature_degrades_to_empty_profile(self) -> None:
         """A callable without an introspectable signature must not crash."""
@@ -1221,6 +1248,61 @@ class TestPlanDeviceOwnership:
         )
         assert operation.kwargs["add_config_entry_id"] == "entry-1"
         assert operation.kwargs["add_config_subentry_id"] == "sub-1"
+
+    def test_ensure_without_target_on_a_known_foreign_owner_takes_the_root(
+        self,
+    ) -> None:
+        """With a known current owner the entry root is a decision, not a guess.
+
+        Core resets the subentry alongside the new entry, so this is what
+        "we own it, no subentry named" means on a single-owner core.  It is only
+        allowed because ``current`` is known; without it the planner refuses.
+        """
+        (operation,) = registry_helpers.plan_device_ownership(
+            registry_helpers.OwnershipIntent.ENSURE,
+            caps=self._modern(),
+            device_id="dev-1",
+            entry_id="entry-1",
+            current=registry_helpers.DeviceOwnership("entry-other", "sub-x"),
+        )
+        assert operation.kwargs["new_config_entry_id"] == "entry-1"
+        assert "new_config_subentry_id" not in operation.kwargs
+
+    def test_ensure_without_target_on_a_legacy_core_only_adds_the_entry(
+        self,
+    ) -> None:
+        """Below 2026.8 an add without a subentry is a plain hub link."""
+        (operation,) = registry_helpers.plan_device_ownership(
+            registry_helpers.OwnershipIntent.ENSURE,
+            caps=self._legacy(),
+            device_id="dev-1",
+            entry_id="entry-1",
+        )
+        assert operation.kwargs["add_config_entry_id"] == "entry-1"
+        assert "add_config_subentry_id" not in operation.kwargs
+
+    def test_legacy_move_on_a_registry_without_subentries_omits_the_keyword(
+        self,
+    ) -> None:
+        """A core that knows no subentry keyword gets none invented for it."""
+        caps = registry_helpers.detect_device_registry_capabilities(
+            _profile(add_config_entry_id=None, remove_config_entry_id=None)
+        )
+        (operation,) = registry_helpers.plan_device_ownership(
+            registry_helpers.OwnershipIntent.MOVE,
+            caps=caps,
+            device_id="dev-1",
+            entry_id="entry-1",
+            target_subentry_id="sub-2",
+            detach_subentry_id="sub-1",
+        )
+        assert set(operation.kwargs) == {
+            "device_id",
+            "remove_config_entry_id",
+            "remove_config_subentry_id",
+            "add_config_entry_id",
+        }
+        assert operation.kwargs["remove_config_subentry_id"] == "sub-1"
 
     def test_detach_on_matching_link_removes_the_device(self) -> None:
         """On a single-owner core, dropping the only link deletes the device.

@@ -310,7 +310,8 @@ def scan_production_tree() -> tuple[list[Finding], list[Finding]]:
 #: already listed.  Every migration work package shrinks this table; nothing may
 #: ever add to it.
 #:
-#: Measured at the starting state (commit 77d9eb97): 88 occurrences at 48 sites.
+#: Measured at the starting state (commit 77d9eb97): 88 occurrences at 48 sites;
+#: after AP-11 (the compatibility shim stopped naming the old keyword): 85 at 46.
 KNOWN_VIOLATIONS: dict[tuple[str, str, str], int] = {
     (
         "async_get_device",
@@ -459,16 +460,6 @@ KNOWN_VIOLATIONS: dict[tuple[str, str, str], int] = {
         "config_flow.py",
         "<module>.ConfigFlow._ensure_service_device_binding",
     ): 9,
-    (
-        "kwargs_string",
-        "coordinator/registry.py",
-        "<module>.RegistryOperations._call_device_registry_api",
-    ): 1,
-    (
-        "kwargs_string",
-        "coordinator/registry.py",
-        "<module>.RegistryOperations._device_registry_config_subentry_kwarg_name",
-    ): 2,
     (
         "kwargs_string",
         "coordinator/registry.py",

@@ -12,7 +12,10 @@ Contents:
 
 from __future__ import annotations
 
-from collections.abc import Collection, Mapping
+import inspect
+from collections.abc import Callable, Collection, Mapping
+from dataclasses import dataclass
+from enum import Enum
 from typing import Any
 
 # Re-export constants used by this module's functions
@@ -23,10 +26,17 @@ from ...const import (
 
 __all__ = [
     "LEGACY_SERVICE_IDENTIFIER",
+    "OWNERSHIP_ADD_KWARGS",
+    "OWNERSHIP_REMOVE_KWARGS",
     "SERVICE_DEVICE_IDENTIFIER_PREFIX",
+    "DeviceOwnership",
+    "DeviceRegistryCapabilities",
+    "DeviceRegistryOperation",
+    "OwnershipIntent",
     "build_canonical_unique_id",
     "build_entity_unique_id_candidates",
     "build_legacy_device_registry_kwargs",
+    "detect_device_registry_capabilities",
     "extract_canonical_device_id",
     "extract_device_display_name",
     "extract_service_subentry_ids",
@@ -38,6 +48,7 @@ __all__ = [
     "needs_legacy_kwarg_retry",
     "normalize_device_name",
     "parse_device_identifier",
+    "plan_device_ownership",
     "resolve_tracker_subentry_candidate",
     "should_defer_service_subentry",
 ]
@@ -168,6 +179,298 @@ def needs_legacy_kwarg_retry(
         return True
 
     return False
+
+
+# ---------------------------------------------------------------------------
+# Device Registry Capability Profile and Ownership Planner
+# ---------------------------------------------------------------------------
+#
+# The minimum supported core is 2025.9.1 (hacs.json, pyproject.toml). It knows
+# neither ``new_config_entry_id`` nor ``new_config_subentry_id``, so the switch
+# below is a runtime signature probe, not a version comparison. Do not replace
+# it with a version check and do not delete the legacy branches: they are the
+# only ones that run on the declared minimum. Raising the minimum to 2026.8.0 is
+# not permitted before six months after that release; see AGENTS.md.
+#
+# See docs/AI_DEPRECATIONS_GUIDE.md, section VI, for why the old keywords
+# changed meaning rather than name.
+
+#: The ownership keywords that *add* a link on cores below 2026.8. From 2026.8
+#: on, ``add_config_entry_id`` alone attaches nothing; it only arms a pending
+#: move that a matching ``remove_config_entry_id`` then completes.
+OWNERSHIP_ADD_KWARGS: tuple[str, ...] = (
+    "add_config_entry_id",
+    "add_config_subentry_id",
+)
+
+#: The ownership keywords that *drop* a link. From 2026.8 on,
+#: ``remove_config_entry_id`` on the owning entry deletes the device and every
+#: entity attached to it.
+OWNERSHIP_REMOVE_KWARGS: tuple[str, ...] = (
+    "remove_config_entry_id",
+    "remove_config_subentry_id",
+)
+
+
+@dataclass(frozen=True, slots=True)
+class DeviceRegistryCapabilities:
+    """What the installed device registry callable accepts.
+
+    Derived from the callable's signature, never from a version string: a fork,
+    a backport or a patched core can carry any number, but the signature is what
+    the call actually has to satisfy.
+    """
+
+    has_new_config_entry_id: bool
+    has_new_config_subentry_id: bool
+    has_add_config_subentry_id: bool
+    has_legacy_config_subentry_id: bool
+    accepts_var_keyword: bool
+
+    @property
+    def single_owner_model(self) -> bool:
+        """True on Core 2026.8+, where a device has exactly one owner.
+
+        Both new keywords are required, not just one: they arrived together in
+        2026.8.0 and a callable carrying only one of them is a partial double,
+        not a core. Verified against tags 2025.9.1, 2026.8.0 and 2026.9.0.
+        """
+        return self.has_new_config_entry_id and self.has_new_config_subentry_id
+
+    @property
+    def subentry_kwarg_for_update(self) -> str | None:
+        """Keyword that expresses "the device shall sit in this subentry"."""
+        if self.single_owner_model:
+            return "new_config_subentry_id"
+        if self.has_add_config_subentry_id:
+            return "add_config_subentry_id"
+        if self.has_legacy_config_subentry_id or self.accepts_var_keyword:
+            return "config_subentry_id"
+        return None
+
+    @property
+    def subentry_kwarg_for_shim(self) -> str | None:
+        """Keyword a plain compatibility rename may use.
+
+        Deliberately never ``new_config_subentry_id``: that keyword *moves* a
+        device, and a rename shim must not become an ownership change. Ownership
+        goes through :func:`plan_device_ownership` instead.
+
+        This also answers the ``async_get_or_create`` question without a special
+        case. Measured at tags 2025.9.1, 2026.8.0 and 2026.9.0: that call takes
+        ``config_subentry_id`` in every one of them and never takes a ``new_*``
+        keyword, so the preference order below already picks the right name for
+        it.
+        """
+        if self.has_legacy_config_subentry_id:
+            return "config_subentry_id"
+        if self.has_add_config_subentry_id:
+            return "add_config_subentry_id"
+        if self.accepts_var_keyword:
+            return "config_subentry_id"
+        return None
+
+
+def detect_device_registry_capabilities(
+    call: Callable[..., Any],
+) -> DeviceRegistryCapabilities:
+    """Derive the capability profile from ``call``'s signature.
+
+    An unreadable signature degrades to the all-false profile, which selects the
+    legacy branches everywhere. That is the safe direction: guessing
+    "single owner" would send ``new_config_subentry_id`` at a test double that
+    swallows unknown keywords, and the test would pass while production broke.
+    """
+    parameters: Mapping[str, inspect.Parameter]
+    try:
+        parameters = inspect.signature(call).parameters
+    except (TypeError, ValueError):  # pragma: no cover - defensive fallback
+        parameters = {}
+    return DeviceRegistryCapabilities(
+        has_new_config_entry_id="new_config_entry_id" in parameters,
+        has_new_config_subentry_id="new_config_subentry_id" in parameters,
+        has_add_config_subentry_id="add_config_subentry_id" in parameters,
+        has_legacy_config_subentry_id="config_subentry_id" in parameters,
+        accepts_var_keyword=any(
+            param.kind is inspect.Parameter.VAR_KEYWORD for param in parameters.values()
+        ),
+    )
+
+
+class OwnershipIntent(Enum):
+    """What the caller wants, independent of the core version."""
+
+    MOVE = "move"
+    """Pattern A: the device shall live in ``target_subentry_id``."""
+
+    ENSURE = "ensure"
+    """Pattern B: make sure it already does."""
+
+    DETACH = "detach"
+    """Pattern C: give up one specific ownership link."""
+
+
+@dataclass(frozen=True, slots=True)
+class DeviceOwnership:
+    """Who owns a device right now, as read from the device entry.
+
+    ``None`` instead of an instance means *unknown*, which is not the same as
+    "owned by nobody". DETACH refuses to act on an unknown state, because on a
+    single-owner core the removal of the owning entry deletes the device. That
+    distinction is the reason this is a class rather than two ``str | None``
+    parameters: with two parameters both cases collapse into ``None``.
+    """
+
+    entry_id: str | None
+    subentry_id: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class DeviceRegistryOperation:
+    """One executable registry step."""
+
+    method: str
+    """Either ``async_update_device`` or ``async_remove_device``."""
+
+    kwargs: Mapping[str, Any]
+
+
+def plan_device_ownership(  # noqa: PLR0913 - one parameter per ownership axis
+    intent: OwnershipIntent,
+    *,
+    caps: DeviceRegistryCapabilities,
+    device_id: str,
+    entry_id: str,
+    target_subentry_id: str | None = None,
+    detach_subentry_id: str | None = None,
+    current: DeviceOwnership | None = None,
+    extra: Mapping[str, Any] | None = None,
+) -> tuple[DeviceRegistryOperation, ...]:
+    """Translate an ownership intent into registry operations.
+
+    ``current`` is the ownership read from the device entry, or ``None`` when the
+    caller did not resolve the device. On cores below 2026.8 a device entry has
+    no ``config_entry_id`` attribute, so ``current`` is ``None`` there. The
+    legacy DETACH and ENSURE branches ignore it; the legacy MOVE reads
+    ``current.subentry_id`` as a fallback, but only when ``detach_subentry_id``
+    was omitted.
+
+    ``detach_subentry_id`` names the link to give up: ``None`` means the hub link
+    (the device sitting directly on the entry). It is *not* interchangeable with
+    ``target_subentry_id``. Core only removes ownership when the removed subentry
+    matches the one the device actually sits in; see
+    ``homeassistant/helpers/device_registry.py``, ``async_update_device``, the
+    branch guarded by ``remove_config_entry_id == old.config_entry_id`` and a
+    matching ``remove_config_subentry_id``.
+
+    Args:
+        intent: What the caller wants to achieve.
+        caps: Capability profile of the installed ``async_update_device``.
+        device_id: The device to act on.
+        entry_id: Our config entry.
+        target_subentry_id: Where the device shall sit (MOVE, ENSURE).
+        detach_subentry_id: Which link to give up (DETACH, legacy MOVE).
+        current: Ownership read from the device entry, or ``None`` if unknown.
+        extra: Additional keyword arguments for an ``async_update_device``
+            operation. Ownership and subentry keywords do not belong in here;
+            use the parameters above. A removal and an empty plan carry no
+            keywords at all, so ``extra`` has no effect in those branches.
+
+    Returns:
+        Zero or more operations, in execution order. An empty tuple means
+        "nothing to do", which is observably different from an update that
+        changes nothing: it produces no deprecation report and no registry event.
+
+    Raises:
+        ValueError: On a single-owner core, when the intent cannot be carried
+            out without knowing the current ownership: DETACH always, ENSURE
+            when no ``target_subentry_id`` was given.
+    """
+    payload: dict[str, Any] = {"device_id": device_id, **dict(extra or {})}
+
+    if intent is OwnershipIntent.DETACH:
+        if caps.single_owner_model:
+            if current is None:
+                # Deleting on a guess is not an option: on this core the removal
+                # of the owning entry removes the device and all its entities.
+                raise ValueError(
+                    "DETACH needs the current ownership; resolve the device first"
+                )
+            if (
+                current.entry_id != entry_id
+                or current.subentry_id != detach_subentry_id
+            ):
+                # Core would not touch the device either: the link the caller
+                # wants to drop is not the link the device sits on. No-op, and
+                # explicitly not a deletion.
+                return ()
+            return (
+                DeviceRegistryOperation(
+                    "async_remove_device", {"device_id": device_id}
+                ),
+            )
+        payload["remove_config_entry_id"] = entry_id
+        payload["remove_config_subentry_id"] = detach_subentry_id
+        return (DeviceRegistryOperation("async_update_device", payload),)
+
+    if intent is OwnershipIntent.ENSURE:
+        if caps.single_owner_model:
+            if (
+                current is not None
+                and current.entry_id == entry_id
+                and (
+                    target_subentry_id is None
+                    or current.subentry_id == target_subentry_id
+                )
+            ):
+                return ()
+            if target_subentry_id is None and current is None:
+                # Omitting ``new_config_subentry_id`` is not neutral: core sets
+                # the subentry to None alongside the new entry (pinned against
+                # real core as ``new_entry_moves_immediately`` in
+                # tests/test_device_registry_single_owner_contract.py). Without
+                # a target and without a known current owner this branch would
+                # therefore move a device to the entry root on a guess.
+                raise ValueError(
+                    "ENSURE without a target subentry needs the current "
+                    "ownership; resolve the device first"
+                )
+            # Setting the owning entry is idempotent in core (the update is only
+            # recorded when the value differs), so it is set unconditionally
+            # rather than depending on a ``current`` the caller may not have.
+            payload["new_config_entry_id"] = entry_id
+            if target_subentry_id is not None:
+                payload["new_config_subentry_id"] = target_subentry_id
+            return (DeviceRegistryOperation("async_update_device", payload),)
+        payload["add_config_entry_id"] = entry_id
+        if target_subentry_id is not None and (kwarg := caps.subentry_kwarg_for_update):
+            payload[kwarg] = target_subentry_id
+        return (DeviceRegistryOperation("async_update_device", payload),)
+
+    # OwnershipIntent.MOVE
+    if caps.single_owner_model:
+        # Both keywords together: passing new_config_subentry_id alone makes core
+        # resolve the subentry against the *old* owning entry and raise
+        # HomeAssistantError when the device still belongs to another entry.
+        payload["new_config_entry_id"] = entry_id
+        payload["new_config_subentry_id"] = target_subentry_id
+        return (DeviceRegistryOperation("async_update_device", payload),)
+
+    surplus_subentry_id = (
+        detach_subentry_id
+        if detach_subentry_id is not None
+        else (current.subentry_id if current is not None else None)
+    )
+    if surplus_subentry_id != target_subentry_id:
+        # Removing the link we are about to add would cancel the move out. On a
+        # pre-2026.8 core that empties the entry's subentry set, and if it was
+        # the only link the device is deleted. Emit the add half alone instead.
+        payload["remove_config_entry_id"] = entry_id
+        payload["remove_config_subentry_id"] = surplus_subentry_id
+    payload["add_config_entry_id"] = entry_id
+    if kwarg := caps.subentry_kwarg_for_update:
+        payload[kwarg] = target_subentry_id
+    return (DeviceRegistryOperation("async_update_device", payload),)
 
 
 # ---------------------------------------------------------------------------
