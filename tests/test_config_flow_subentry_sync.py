@@ -42,12 +42,16 @@ from custom_components.googlefindmy.const import (
     TRACKER_SUBENTRY_KEY,
     service_device_identifier,
 )
+from custom_components.googlefindmy.coordinator.helpers import (
+    registry as registry_helpers,
+)
 from tests.helpers.config_entries_stub import make_config_entry
 from tests.helpers.config_flow import (
     ConfigEntriesDomainUniqueIdLookupMixin,
     attach_config_entries_flow_manager,
     set_config_flow_unique_id,
 )
+from tests.helpers.single_owner_device_registry import SingleOwnerDeviceRegistry
 
 SCHEMA_VERSION = 2
 DEFAULT_LOCATION_POLL_INTERVAL = 900
@@ -629,10 +633,120 @@ async def test_device_selection_updates_existing_feature_group() -> None:
     assert manager.updated[-1]["translation_key"] == TRACKER_SUBENTRY_KEY
 
 
-def test_service_device_binding_clears_stale_subentry(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Service device updates must clear stale config_subentry_id bindings."""
+_OMITTED = object()
+"""Marker for "this keyword was not passed", which ``None`` cannot express here."""
+
+
+class _LegacyRegistryDouble:
+    """A pre-2026.8 registry, as the declared minimum ``2025.9.1`` presents it.
+
+    The signature is the shape that decides the keywords: it carries
+    ``add_config_subentry_id`` and no ``new_*`` pair, which is what
+    ``detect_device_registry_capabilities`` reads. Device entries of that core
+    carry neither ``config_entry_id`` nor ``config_subentry_id``, so the double's
+    entries do not either.
+
+    Why a local double at all, next to the shared ``SingleOwnerDeviceRegistry``:
+    that one models the 2026.8 rules and therefore cannot present a legacy
+    signature, and the legacy branch is the one the declared minimum runs. The
+    same resolution was reached for the legacy doubles of the two preceding work
+    packages, ``coordinator/registry.py`` and ``services.py``. It records
+    payloads rather than applying them, which is why no assertion here reads
+    them: what a call-site test may observe is the intent and the operation
+    sequence the planner derived from it (``tests/AGENTS.md``, "Translation
+    alignment checks"), and the resulting ownership goes to the shared double.
+
+    One deviation from tag ``2025.9.1``, stated because it moves the capability
+    profile: real ``async_update_device`` has no ``**kwargs`` there, this one
+    does, so ``accepts_var_keyword`` reads True instead of False. It decides
+    nothing here because ``has_add_config_subentry_id`` is checked first in both
+    ``subentry_kwarg_for_update`` and ``subentry_kwarg_for_shim``.
+    """
+
+    def __init__(self, device: Any) -> None:
+        self._device = device
+        self.updated: list[dict[str, Any]] = []
+        self.lookups: list[set[tuple[str, str]]] = []
+
+    def async_get_device(self, identifiers: set[tuple[str, str]]) -> Any | None:
+        self.lookups.append(set(identifiers))
+        return self._device
+
+    def async_update_device(
+        self,
+        device_id: str,
+        *,
+        add_config_entry_id: Any = _OMITTED,
+        add_config_subentry_id: Any = _OMITTED,
+        remove_config_entry_id: Any = _OMITTED,
+        remove_config_subentry_id: Any = _OMITTED,
+        **extra: Any,
+    ) -> str:
+        # The sentinel, not ``None``: on this core ``add_config_subentry_id=None``
+        # names the hub link, and a default of ``None`` would make the two
+        # indistinguishable in the recorded payload.
+        payload: dict[str, Any] = {"device_id": device_id}
+        for key, value in (
+            ("add_config_entry_id", add_config_entry_id),
+            ("add_config_subentry_id", add_config_subentry_id),
+            ("remove_config_entry_id", remove_config_entry_id),
+            ("remove_config_subentry_id", remove_config_subentry_id),
+        ):
+            if value is not _OMITTED:
+                payload[key] = value
+        payload.update(extra)
+        self.updated.append(payload)
+        return f"updated-{device_id}"
+
+
+class _LookupRecordingRegistry(SingleOwnerDeviceRegistry):
+    """The shared single-owner double, with the lookups it was asked recorded.
+
+    ``tests/AGENTS.md`` ("Device registry expectations") points every
+    single-owner test at this class, because it is the one checked against real
+    core in ``tests/test_device_registry_single_owner_contract.py``: it *applies*
+    ownership instead of collecting keywords, so a test can assert where the
+    device ends up. The subclass adds nothing to that behaviour; it only notes
+    the identifier order the resolver asked for, which the base class does not
+    keep and which two tests here are about.
+    """
+
+    def __init__(self, *, owner: str) -> None:
+        super().__init__()
+        self.lookups: list[tuple[tuple[str, str], str]] = []
+        self.add_config_entry(owner)
+
+    def async_get_device_by_identifier(
+        self, identifier: tuple[str, str], config_entry_id: str
+    ) -> Any:
+        self.lookups.append((identifier, config_entry_id))
+        return super().async_get_device_by_identifier(identifier, config_entry_id)
+
+
+def _watch_planner(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
+    """Record every ownership plan the flow asks for, and pass it through.
+
+    ``tests/AGENTS.md`` ("Translation alignment checks") allows a call-site test
+    to assert the observed ``OwnershipIntent`` and the operation sequence the
+    planner derived from it, and forbids asserting that a superseded keyword was
+    forwarded. This is how the tests below observe the first without doing the
+    second.
+    """
+
+    calls: list[dict[str, Any]] = []
+    real = registry_helpers.plan_device_ownership
+
+    def _spy(intent: Any, **kwargs: Any) -> Any:
+        operations = real(intent, **kwargs)
+        calls.append({"intent": intent, "operations": operations, **kwargs})
+        return operations
+
+    monkeypatch.setattr(config_flow, "plan_device_ownership", _spy)
+    return calls
+
+
+def _service_entry(*, service_subentry_id: str | None = None) -> Any:
+    """Return a config entry for the service-device binding tests."""
 
     entry = make_config_entry(
         entry_id="entry-1",
@@ -640,160 +754,383 @@ def test_service_device_binding_clears_stale_subentry(
         subentries={},
         runtime_data=SimpleNamespace(),
     )
-    hass = SimpleNamespace()
+    if service_subentry_id is not None:
+        entry.service_subentry_id = service_subentry_id
+    return entry
 
-    expected_identifiers = {service_device_identifier(entry.entry_id)}
 
-    class _RegistryStub:
-        """Capture device-registry updates issued by the binding helper."""
+def test_service_device_binding_moves_to_service_subentry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """On a single-owner core the binding states the move, not the old kwargs.
 
-        def __init__(self) -> None:
-            self.updated: list[dict[str, Any]] = []
+    Replaces ``test_service_device_binding_sets_add_config_entry_id``: from Core
+    2026.8 ``add_config_entry_id`` on its own only arms a deferred move and
+    changes nothing, so asserting it would pin a no-op.
+    """
 
-        def async_get_device(self, *args: Any, **kwargs: Any) -> SimpleNamespace | None:
-            if args:
-                identifiers = args[0]
-            else:
-                identifiers = kwargs.get("identifiers")
-            assert identifiers == expected_identifiers
-            return SimpleNamespace(id="service-device", config_subentry_id="stale-id")
-
-        def async_update_device(self, **kwargs: Any) -> None:
-            self.updated.append(dict(kwargs))
-
-    registry = _RegistryStub()
-
+    entry = _service_entry(service_subentry_id="service-subentry")
+    registry = _LookupRecordingRegistry(owner=entry.entry_id)
+    registry.entries[entry.entry_id].subentries.add("service-subentry")
+    device = registry.add_device(
+        identifiers={service_device_identifier(entry.entry_id)},
+        config_entry_id=entry.entry_id,
+        config_subentry_id=None,
+    )
     monkeypatch.setattr(config_flow.dr, "async_get", lambda hass_arg: registry)
 
     config_flow.ConfigFlow._ensure_service_device_binding(
-        hass,
+        SimpleNamespace(),
+        entry,
+        coordinator=None,
+        service_config_subentry_id=entry.service_subentry_id,
+    )
+
+    moved = registry.async_get(device.id)
+    assert moved is not None
+    assert moved.config_entry_id == entry.entry_id
+    assert moved.config_subentry_id == "service-subentry"
+
+
+def test_service_device_binding_clears_stale_subentry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An empty target is a move to the entry root, not "leave it alone"."""
+
+    entry = _service_entry()
+    registry = _LookupRecordingRegistry(owner=entry.entry_id)
+    registry.entries[entry.entry_id].subentries.add("stale-id")
+    device = registry.add_device(
+        identifiers={service_device_identifier(entry.entry_id)},
+        config_entry_id=entry.entry_id,
+        config_subentry_id="stale-id",
+    )
+    monkeypatch.setattr(config_flow.dr, "async_get", lambda hass_arg: registry)
+
+    config_flow.ConfigFlow._ensure_service_device_binding(
+        SimpleNamespace(),
         entry,
         coordinator=None,
         service_config_subentry_id=None,
     )
 
-    assert registry.updated, "service device update should be issued"
-    payload = registry.updated[-1]
-    assert payload == {
-        "device_id": "service-device",
-        "config_subentry_id": None,
-    }
-    assert "add_config_entry_id" not in payload
+    cleared = registry.async_get(device.id)
+    assert cleared is not None, "the device must survive the move to the root"
+    assert cleared.config_entry_id == entry.entry_id
+    assert cleared.config_subentry_id is None
 
 
-def test_service_device_binding_sets_add_config_entry_id(
+def test_service_device_binding_asks_once_on_a_legacy_core(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Service device binding must use add_config_entry_id when subentries exist."""
+    """One planned move, one registry call, no retry round.
 
-    entry = make_config_entry(
-        entry_id="entry-1",
-        title="Find My",
-        subentries={},
-        runtime_data=SimpleNamespace(),
-    )
-    entry.service_subentry_id = "service-subentry"
-    hass = SimpleNamespace()
+    Replaces ``test_service_device_binding_retries_with_legacy_keywords``. That
+    test pinned a hand-written ``TypeError`` retry which renamed
+    ``add_config_*`` to ``config_*``; no supported core takes a bare
+    ``config_subentry_id`` (measured at tags 2025.9.1, 2026.8.0 and 2026.9.0),
+    so the rename produced a call that could not succeed. The keywords are the
+    planner's business, so what a call-site test may pin is the intent, its
+    target and the resulting operation sequence.
+    """
 
-    expected_identifiers = {
-        service_device_identifier(entry.entry_id),
-        (DOMAIN, f"{entry.entry_id}:{entry.service_subentry_id}:service"),
-    }
-
-    class _RegistryStub:
-        def __init__(self) -> None:
-            self.updated: list[dict[str, Any]] = []
-
-        def async_get_device(self, *args: Any, **kwargs: Any) -> SimpleNamespace | None:
-            if args:
-                identifiers = args[0]
-            else:
-                identifiers = kwargs.get("identifiers")
-            assert identifiers == expected_identifiers
-            return SimpleNamespace(id="service-device", config_subentry_id=None)
-
-        def async_update_device(self, **kwargs: Any) -> None:
-            self.updated.append(dict(kwargs))
-
-    registry = _RegistryStub()
-
+    entry = _service_entry(service_subentry_id="service-subentry")
+    planned = _watch_planner(monkeypatch)
+    registry = _LegacyRegistryDouble(SimpleNamespace(id="service-device"))
     monkeypatch.setattr(config_flow.dr, "async_get", lambda hass_arg: registry)
 
     config_flow.ConfigFlow._ensure_service_device_binding(
-        hass,
+        SimpleNamespace(),
         entry,
         coordinator=None,
         service_config_subentry_id=entry.service_subentry_id,
     )
 
-    assert registry.updated, "service device update should be issued"
-    payload = registry.updated[-1]
-    assert payload == {
-        "device_id": "service-device",
-        "config_subentry_id": entry.service_subentry_id,
-        "add_config_entry_id": entry.entry_id,
-    }
+    assert len(planned) == 1
+    assert planned[0]["intent"] is registry_helpers.OwnershipIntent.MOVE
+    assert planned[0]["target_subentry_id"] == "service-subentry"
+    assert [op.method for op in planned[0]["operations"]] == ["async_update_device"]
+    assert len(registry.updated) == 1, "no retry round"
 
 
-def test_service_device_binding_retries_with_legacy_keywords(
+class _VarKeywordRegistry(_LegacyRegistryDouble):
+    """A registry whose ``async_update_device`` names no keyword of its own.
+
+    Measured, not assumed: ``inspect.signature`` reads ``(**kwargs)`` here, so
+    ``detect_device_registry_capabilities`` answers ``accepts_var_keyword=True``
+    with every other flag false. That is the weakest profile a readable
+    signature can produce, and the one where a removal is most dangerous: with a
+    known current ownership the planner emits ``remove_config_entry_id`` +
+    ``remove_config_subentry_id`` while the adding half degrades to a bare
+    ``add_config_entry_id``, which names the current owner and arms nothing. On a
+    2026.8 registry that unmatched pair is the deletion. The device entry below
+    describes its ownership, so the only thing keeping the pair away is that the
+    flow hands it to neither executor.
+    """
+
+    def __init__(self, device: Any) -> None:
+        super().__init__(device)
+        self.async_update_device = self._record  # type: ignore[method-assign]
+
+    def _record(self, **kwargs: Any) -> str:
+        self.updated.append(dict(kwargs))
+        return "updated"
+
+
+def test_service_device_binding_never_emits_a_removal(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Direct binding calls should retry with legacy kwargs on TypeError."""
+    """No path of this call site may produce a ``remove_*`` keyword.
 
-    entry = make_config_entry(
-        entry_id="entry-1",
-        title="Find My",
-        subentries={},
-        runtime_data=SimpleNamespace(),
+    On a 2026.8 registry ``remove_config_entry_id`` paired with the subentry the
+    device sits in *is* the deletion, and this call site never emitted one before
+    the migration. The planner only emits it when the caller hands over a known
+    current ownership, so the binding does not hand one over. Pinned against the
+    degraded capability profile, where that is the difference between a keyword
+    and a deleted device with all its entities.
+    """
+
+    entry = _service_entry(service_subentry_id="service-subentry")
+    planned = _watch_planner(monkeypatch)
+    device = SimpleNamespace(
+        id="service-device",
+        config_entry_id=entry.entry_id,
+        config_subentry_id="stale-id",
     )
-    entry.service_subentry_id = "service-subentry"
-    hass = SimpleNamespace()
-
-    expected_identifiers = {
-        service_device_identifier(entry.entry_id),
-        (DOMAIN, f"{entry.entry_id}:{entry.service_subentry_id}:service"),
-    }
-
-    class _RegistryStub:
-        def __init__(self) -> None:
-            self.updated: list[dict[str, Any]] = []
-
-        def async_get_device(self, *args: Any, **kwargs: Any) -> SimpleNamespace | None:
-            if args:
-                identifiers = args[0]
-            else:
-                identifiers = kwargs.get("identifiers")
-            assert identifiers == expected_identifiers
-            return SimpleNamespace(id="service-device", config_subentry_id=None)
-
-        def async_update_device(self, **kwargs: Any) -> None:
-            self.updated.append(dict(kwargs))
-            if "add_config_entry_id" in kwargs:
-                raise TypeError("unexpected keyword argument 'add_config_entry_id'")
-
-    registry = _RegistryStub()
-
+    registry = _VarKeywordRegistry(device)
     monkeypatch.setattr(config_flow.dr, "async_get", lambda hass_arg: registry)
 
     config_flow.ConfigFlow._ensure_service_device_binding(
-        hass,
+        SimpleNamespace(),
         entry,
         coordinator=None,
         service_config_subentry_id=entry.service_subentry_id,
     )
 
-    assert registry.updated == [
+    assert planned, "a plan must have been asked for"
+    for call in planned:
+        assert call.get("current") is None, "no ownership state may be handed over"
+        for operation in call["operations"]:
+            assert "remove_config_entry_id" not in operation.kwargs
+            assert "remove_config_subentry_id" not in operation.kwargs
+    assert registry.updated, "the binding must still be written"
+
+
+def test_service_device_binding_names_the_hub_link_on_a_legacy_core(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An empty target is passed as ``None``, not omitted.
+
+    Omitting the subentry keyword is not the same statement: it leaves the link
+    the device carries untouched, while ``None`` names the entry root. The double
+    tells the two apart on purpose.
+    """
+
+    entry = _service_entry()
+    planned = _watch_planner(monkeypatch)
+    registry = _LegacyRegistryDouble(SimpleNamespace(id="service-device"))
+    monkeypatch.setattr(config_flow.dr, "async_get", lambda hass_arg: registry)
+
+    config_flow.ConfigFlow._ensure_service_device_binding(
+        SimpleNamespace(),
+        entry,
+        coordinator=None,
+        service_config_subentry_id=None,
+    )
+
+    assert len(planned) == 1
+    assert planned[0]["intent"] is registry_helpers.OwnershipIntent.MOVE
+    assert "target_subentry_id" in planned[0], "the empty target is named, not omitted"
+    assert planned[0]["target_subentry_id"] is None
+    assert len(registry.updated) == 1
+
+
+def test_service_device_binding_hands_the_legacy_lookup_both_identifiers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Below Core 2026.8 the resolver has no scoped API and passes the set on.
+
+    The order the flow builds is still stated, but it cannot decide anything
+    here; what this pins is that both spellings reach the lookup at all, which no
+    other test covers since the single-owner double answers per identifier.
+    """
+
+    entry = _service_entry(service_subentry_id="service-subentry")
+    registry = _LegacyRegistryDouble(SimpleNamespace(id="service-device"))
+    monkeypatch.setattr(config_flow.dr, "async_get", lambda hass_arg: registry)
+
+    config_flow.ConfigFlow._ensure_service_device_binding(
+        SimpleNamespace(),
+        entry,
+        coordinator=None,
+        service_config_subentry_id=entry.service_subentry_id,
+    )
+
+    assert registry.lookups == [
         {
-            "device_id": "service-device",
-            "config_subentry_id": entry.service_subentry_id,
-            "add_config_entry_id": entry.entry_id,
-        },
-        {
-            "device_id": "service-device",
-            "config_subentry_id": entry.service_subentry_id,
-            "config_entry_id": entry.entry_id,
-        },
+            service_device_identifier(entry.entry_id),
+            (DOMAIN, f"{entry.entry_id}:{entry.service_subentry_id}:service"),
+        }
     ]
+
+
+def test_service_device_binding_asks_the_canonical_identifier_first(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Priority is explicit, not set iteration order."""
+
+    entry = _service_entry(service_subentry_id="service-subentry")
+    canonical = service_device_identifier(entry.entry_id)
+    scoped = (DOMAIN, f"{entry.entry_id}:{entry.service_subentry_id}:service")
+    registry = _LookupRecordingRegistry(owner=entry.entry_id)
+    registry.entries[entry.entry_id].subentries.add("service-subentry")
+    wanted = registry.add_device(
+        identifiers={canonical},
+        config_entry_id=entry.entry_id,
+        config_subentry_id=None,
+    )
+    other = registry.add_device(
+        identifiers={scoped},
+        config_entry_id=entry.entry_id,
+        config_subentry_id=None,
+    )
+    monkeypatch.setattr(config_flow.dr, "async_get", lambda hass_arg: registry)
+
+    config_flow.ConfigFlow._ensure_service_device_binding(
+        SimpleNamespace(),
+        entry,
+        coordinator=None,
+        service_config_subentry_id=entry.service_subentry_id,
+    )
+
+    assert registry.lookups[0] == (canonical, entry.entry_id)
+    assert registry.async_get(wanted.id).config_subentry_id == "service-subentry"
+    assert registry.async_get(other.id).config_subentry_id is None
+
+
+def test_service_device_binding_falls_back_to_the_scoped_identifier(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The older subentry-scoped spelling still resolves when it is all there is."""
+
+    entry = _service_entry(service_subentry_id="service-subentry")
+    canonical = service_device_identifier(entry.entry_id)
+    scoped = (DOMAIN, f"{entry.entry_id}:{entry.service_subentry_id}:service")
+    registry = _LookupRecordingRegistry(owner=entry.entry_id)
+    registry.entries[entry.entry_id].subentries.add("service-subentry")
+    device = registry.add_device(
+        identifiers={scoped},
+        config_entry_id=entry.entry_id,
+        config_subentry_id=None,
+    )
+    monkeypatch.setattr(config_flow.dr, "async_get", lambda hass_arg: registry)
+
+    config_flow.ConfigFlow._ensure_service_device_binding(
+        SimpleNamespace(),
+        entry,
+        coordinator=None,
+        service_config_subentry_id=entry.service_subentry_id,
+    )
+
+    assert registry.lookups == [(canonical, entry.entry_id), (scoped, entry.entry_id)]
+    assert registry.async_get(device.id).config_subentry_id == "service-subentry"
+
+
+def test_service_device_binding_prefers_the_coordinator_entry_point(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With a coordinator at hand the flow uses its ownership entry point.
+
+    The contract routes the change there when it is reachable, because that path
+    adds the unmigrated-keyword brake only coordinator call sites need.
+    """
+
+    entry = _service_entry(service_subentry_id="service-subentry")
+    registry = _LookupRecordingRegistry(owner=entry.entry_id)
+    registry.entries[entry.entry_id].subentries.add("service-subentry")
+    device = registry.add_device(
+        identifiers={service_device_identifier(entry.entry_id)},
+        config_entry_id=entry.entry_id,
+        config_subentry_id=None,
+    )
+    monkeypatch.setattr(config_flow.dr, "async_get", lambda hass_arg: registry)
+
+    seen: list[dict[str, Any]] = []
+
+    def _apply_device_ownership(dev_reg: Any, **kwargs: Any) -> None:
+        seen.append({"dev_reg": dev_reg, **kwargs})
+
+    coordinator = SimpleNamespace(_apply_device_ownership=_apply_device_ownership)
+
+    config_flow.ConfigFlow._ensure_service_device_binding(
+        SimpleNamespace(),
+        entry,
+        coordinator=coordinator,
+        service_config_subentry_id=entry.service_subentry_id,
+    )
+
+    assert registry.operations == [], "the coordinator path must own the write"
+    assert len(seen) == 1
+    call = seen[0]
+    assert call["dev_reg"] is registry
+    assert call["intent"] is registry_helpers.OwnershipIntent.MOVE
+    assert call["device_id"] == device.id
+    assert call["entry_id"] == entry.entry_id
+    assert call["target_subentry_id"] == "service-subentry"
+    assert "device" not in call, (
+        "handing the device over would let the coordinator read an ownership "
+        "state and plan a removal pair; MOVE does not need it"
+    )
+
+
+def test_service_device_binding_falls_back_when_the_coordinator_path_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failing coordinator path must not leave the binding unwritten."""
+
+    entry = _service_entry(service_subentry_id="service-subentry")
+    registry = _LookupRecordingRegistry(owner=entry.entry_id)
+    registry.entries[entry.entry_id].subentries.add("service-subentry")
+    device = registry.add_device(
+        identifiers={service_device_identifier(entry.entry_id)},
+        config_entry_id=entry.entry_id,
+        config_subentry_id=None,
+    )
+    monkeypatch.setattr(config_flow.dr, "async_get", lambda hass_arg: registry)
+
+    def _boom(dev_reg: Any, **kwargs: Any) -> None:
+        raise RuntimeError("coordinator path unavailable")
+
+    coordinator = SimpleNamespace(_apply_device_ownership=_boom)
+
+    config_flow.ConfigFlow._ensure_service_device_binding(
+        SimpleNamespace(),
+        entry,
+        coordinator=coordinator,
+        service_config_subentry_id=entry.service_subentry_id,
+    )
+
+    assert registry.async_get(device.id).config_subentry_id == "service-subentry"
+
+
+def test_service_device_binding_does_nothing_without_a_device(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unresolved device ends the binding; it never writes on a guess."""
+
+    entry = _service_entry(service_subentry_id="service-subentry")
+    registry = _LookupRecordingRegistry(owner=entry.entry_id)
+    monkeypatch.setattr(config_flow.dr, "async_get", lambda hass_arg: registry)
+
+    config_flow.ConfigFlow._ensure_service_device_binding(
+        SimpleNamespace(),
+        entry,
+        coordinator=None,
+        service_config_subentry_id=entry.service_subentry_id,
+    )
+
+    assert registry.lookups, "the flow must have asked before giving up"
+    assert registry.operations == []
 
 
 @pytest.mark.asyncio

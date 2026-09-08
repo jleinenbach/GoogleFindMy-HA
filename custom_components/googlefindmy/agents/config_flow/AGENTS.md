@@ -121,8 +121,12 @@ operations it returns through `execute_ownership_plan` in the same module;
 neither needs `hass` nor a coordinator instance. There are two executors and that
 is deliberate, because not every call site has a coordinator; what stays single
 is the *translation*. What must
-**not** happen is a third hand-written keyword translation in `config_flow.py`: the
-`TypeError` retry that used to live there is exactly that, and it is being removed.
+**not** happen is a third hand-written keyword translation in `config_flow.py`. One
+used to live there, a `TypeError` retry that renamed `add_config_*` to `config_*`;
+it was removed in AP-15, and its rename produced a keyword no supported core takes
+(`async_update_device` has no bare `config_subentry_id` at tag 2025.9.1, 2026.8.0
+or 2026.9.0). Do not restore it: an error message is not a signature, and the
+planner reads the signature.
 Background and deadlines: `docs/AI_DEPRECATIONS_GUIDE.md`, section VI.
 
 ## Cross-reference checklist

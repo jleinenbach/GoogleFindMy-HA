@@ -60,10 +60,10 @@ from ..const import (
 from ._mixin_typing import _MixinBase
 from .helpers.registry import (
     NOT_GIVEN,
-    DeviceOwnership,
     DeviceRegistryCapabilities,
     NotGivenType,
     OwnershipIntent,
+    read_device_ownership,
 )
 from .helpers.registry import (
     OWNERSHIP_ADD_KWARGS as _OWNERSHIP_ADD_KWARGS,
@@ -367,8 +367,8 @@ class RegistryOperations(_MixinBase):
 
         This is where the coordinator changes which config entry or subentry
         owns a device. It is not the only executor in the integration: call
-        sites without a coordinator instance (``services.py``, and
-        ``config_flow.py`` next) run their plan through
+        sites without a coordinator instance (``services.py`` and
+        ``config_flow.py``) run their plan through
         ``execute_ownership_plan`` in the helpers module. What must stay single
         is the *translation*, and that is ``plan_device_ownership``, which both
         executors use. This method adds what only coordinator call sites need:
@@ -424,17 +424,8 @@ class RegistryOperations(_MixinBase):
         # "unknown" must not collapse into "owned by nobody": that difference is
         # the whole point of DeviceOwnership, and on a single-owner core it is
         # the difference between a refusal and a silent no-op.
-        describes_ownership = device is not None and (
-            hasattr(device, "config_entry_id") or hasattr(device, "config_subentry_id")
-        )
-        current = (
-            DeviceOwnership(
-                getattr(device, "config_entry_id", None),
-                getattr(device, "config_subentry_id", None),
-            )
-            if describes_ownership
-            else None
-        )
+        # ``read_device_ownership`` is the one place that draws that line.
+        current = read_device_ownership(device)
 
         try:
             plan = _plan_device_ownership_impl(

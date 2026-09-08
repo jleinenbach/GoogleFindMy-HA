@@ -57,6 +57,7 @@ __all__ = [
     "normalize_device_name",
     "parse_device_identifier",
     "plan_device_ownership",
+    "read_device_ownership",
     "resolve_device_by_identifiers",
     "resolve_tracker_subentry_candidate",
     "should_defer_service_subentry",
@@ -827,6 +828,47 @@ def device_owning_entry_ids(device: Any) -> tuple[str, ...]:
             candidate for candidate in legacy_owners if isinstance(candidate, str)
         )
     return ()
+
+
+def read_device_ownership(device: Any) -> DeviceOwnership | None:
+    """Read who owns ``device`` right now, or ``None`` when that is unknown.
+
+    Unknown ownership and "owned by nobody" are two different statements, and on
+    a single-owner core the difference decides between a refusal and a deletion.
+    A device entry that carries neither ownership attribute answers neither
+    question, so it yields ``None`` rather than an empty
+    :class:`DeviceOwnership`. That is the normal state on the declared minimum
+    core: at tag ``2025.9.1`` a device entry carries neither ``config_entry_id``
+    nor ``config_subentry_id`` (its ownership fields are ``config_entries`` and
+    ``config_entries_subentries``).
+
+    The predicate is an ``or``, and the two half-known shapes are deliberately
+    not symmetric, so no blanket "it changes nothing" applies. An entry carrying
+    only ``config_subentry_id`` yields owner ``None``, which matches no entry,
+    and a DETACH planned from it answers with an empty plan. An entry carrying
+    only ``config_entry_id`` and naming the caller's entry yields subentry
+    ``None``, which *is* the hub link, and a DETACH planned from it answers with
+    the removal, correctly, because that is what the state says. No supported
+    core produces either shape (``2025.9.1`` has neither field, ``2026.8`` has
+    both); they are a half-migrated double's shapes.
+
+    Args:
+        device: A device registry entry, or anything with the same surface, or
+            ``None`` when the caller did not resolve one.
+
+    Returns:
+        The ownership the entry describes, or ``None`` when it describes none.
+    """
+    if device is None:
+        return None
+    if not (
+        hasattr(device, "config_entry_id") or hasattr(device, "config_subentry_id")
+    ):
+        return None
+    return DeviceOwnership(
+        getattr(device, "config_entry_id", None),
+        getattr(device, "config_subentry_id", None),
+    )
 
 
 def parse_device_identifier(

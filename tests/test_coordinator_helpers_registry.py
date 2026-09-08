@@ -1725,6 +1725,56 @@ class TestDeviceOwningEntryIds:
         ) == ("entry-1",)
 
 
+class TestReadDeviceOwnership:
+    """Unknown ownership and "owned by nobody" must stay distinguishable."""
+
+    def test_no_device_is_unknown(self) -> None:
+        """A caller that resolved nothing knows nothing."""
+        assert registry_helpers.read_device_ownership(None) is None
+
+    def test_an_entry_without_either_field_is_unknown(self) -> None:
+        """The declared minimum core's shape: neither field, so no answer.
+
+        Returning an empty ``DeviceOwnership`` here would read as "owned by
+        nobody" and let a DETACH proceed on a guess.
+        """
+        assert registry_helpers.read_device_ownership(SimpleNamespace(id="d")) is None
+
+    def test_a_modern_entry_answers_both_axes(self) -> None:
+        """Core 2026.8 carries both fields."""
+        ownership = registry_helpers.read_device_ownership(
+            SimpleNamespace(config_entry_id="entry-1", config_subentry_id="sub-1")
+        )
+        assert ownership == registry_helpers.DeviceOwnership("entry-1", "sub-1")
+
+    def test_a_modern_entry_on_the_hub_link_answers_none_for_the_subentry(
+        self,
+    ) -> None:
+        """Sitting directly on the entry is a known state, not an unknown one."""
+        ownership = registry_helpers.read_device_ownership(
+            SimpleNamespace(config_entry_id="entry-1", config_subentry_id=None)
+        )
+        assert ownership == registry_helpers.DeviceOwnership("entry-1", None)
+
+    def test_only_the_subentry_field_yields_an_owner_of_none(self) -> None:
+        """First half-known shape: no owner, so no entry matches it."""
+        assert registry_helpers.read_device_ownership(
+            SimpleNamespace(config_subentry_id="sub-1")
+        ) == registry_helpers.DeviceOwnership(None, "sub-1")
+
+    def test_only_the_entry_field_yields_the_hub_link(self) -> None:
+        """Second half-known shape, and it is not the mirror of the first.
+
+        The absent subentry reads as ``None``, which *is* the hub link, so a
+        DETACH planned from this state answers with the removal. That asymmetry
+        is the reason this function documents both shapes instead of calling
+        them equivalent.
+        """
+        assert registry_helpers.read_device_ownership(
+            SimpleNamespace(config_entry_id="entry-1")
+        ) == registry_helpers.DeviceOwnership("entry-1", None)
+
+
 class _RecordingUpdateRegistry:
     """Modern registry double that records what it was asked to do."""
 

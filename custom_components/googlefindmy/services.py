@@ -54,13 +54,13 @@ from .const import (
     service_device_identifier,
 )
 from .coordinator.helpers.registry import (
-    DeviceOwnership,
     OwnershipIntent,
     detect_device_registry_capabilities,
     device_belongs_to_entry,
     device_owning_entry_ids,
     execute_ownership_plan,
     plan_device_ownership,
+    read_device_ownership,
     resolve_device_by_identifiers,
 )
 
@@ -182,29 +182,9 @@ async def async_rebuild_device_registry(hass: HomeAssistant, call: ServiceCall) 
 
         # Unknown ownership and "owned by nobody" are two different statements,
         # and on a single-owner core the difference decides between a refusal
-        # and a deletion. A device entry that carries neither attribute answers
-        # neither question, so it yields ``None`` rather than an empty ownership.
-        # The predicate is an ``or``, mirroring
-        # ``RegistryOperations._apply_device_ownership``. The two half-known
-        # shapes are not symmetric, so no blanket "it changes nothing" applies:
-        # an entry carrying only ``config_subentry_id`` yields owner ``None``,
-        # which does not match this entry, and the planner answers with an empty
-        # plan. An entry carrying only ``config_entry_id`` and naming us yields
-        # subentry ``None``, which *is* the hub link, and the planner answers
-        # with the removal -- correctly, because that is what the state says. No
-        # supported core produces either shape (2025.9.1 has neither field,
-        # 2026.8 has both); they are a half-migrated double's shapes.
-        describes_ownership = device is not None and (
-            hasattr(device, "config_entry_id") or hasattr(device, "config_subentry_id")
-        )
-        current = (
-            DeviceOwnership(
-                getattr(device, "config_entry_id", None),
-                getattr(device, "config_subentry_id", None),
-            )
-            if describes_ownership
-            else None
-        )
+        # and a deletion. ``read_device_ownership`` draws that line and carries
+        # the reasoning about the two half-known shapes.
+        current = read_device_ownership(device)
 
         try:
             plan = plan_device_ownership(

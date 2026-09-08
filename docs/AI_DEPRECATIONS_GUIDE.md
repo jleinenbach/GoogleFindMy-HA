@@ -627,7 +627,7 @@ site has a coordinator. The coordinator executes through
 `RegistryOperations._apply_device_ownership` in
 `custom_components/googlefindmy/coordinator/registry.py`, which adds the
 unmigrated-keyword brake and the `config_subentry_id` compatibility shim its own
-call sites need. Everywhere else -- `services.py` today, `config_flow.py` next --
+call sites need. Everywhere else -- `services.py` and `config_flow.py` --
 the executor is `execute_ownership_plan` in the helpers module. Both take their
 keywords from the same planner and neither names an ownership keyword itself. A
 static guard,

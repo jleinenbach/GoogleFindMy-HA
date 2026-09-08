@@ -314,7 +314,8 @@ def scan_production_tree() -> tuple[list[Finding], list[Finding]]:
 #: after AP-11 (the compatibility shim stopped naming the old keyword): 85 at 46;
 #: after AP-14 (identity.py moved to the shared resolver): 84 at 45; after
 #: AP-12 (coordinator/registry.py speaks intents): 47 at 34; after AP-13
-#: (services.py speaks intents and asks per entry): 35 at 25.  Measure it
+#: (services.py speaks intents and asks per entry): 35 at 25; after AP-15
+#: (config_flow.py speaks intents): 25 at 23.  Measure it
 #: yourself rather than trusting the line above::
 #:
 #:     python3 -c "import ast,pathlib; t=ast.parse(pathlib.Path(
@@ -327,11 +328,6 @@ KNOWN_VIOLATIONS: dict[tuple[str, str, str], int] = {
         "async_get_device",
         "__init__.py",
         "<module>._async_relink_entities_for_entry.lookup_device",
-    ): 1,
-    (
-        "async_get_device",
-        "config_flow.py",
-        "<module>.ConfigFlow._ensure_service_device_binding",
     ): 1,
     (
         "config_entries",
@@ -443,11 +439,6 @@ KNOWN_VIOLATIONS: dict[tuple[str, str, str], int] = {
         "__init__.py",
         "<module>._async_purge_unloaded_subentry_registrations",
     ): 2,
-    (
-        "kwargs_string",
-        "config_flow.py",
-        "<module>.ConfigFlow._ensure_service_device_binding",
-    ): 9,
 }
 
 
