@@ -250,8 +250,9 @@ link then returns "Unauthorized".
 
 You do not have to restart to fix that. Call the service
 **`googlefindmy.refresh_device_urls`** (Developer tools → Actions → *Refresh
-Device URLs*); it rewrites the configuration URL of every device with a current
-token, and the link works again immediately.
+Device URLs*); it rewrites the configuration URL of every device that belongs to one of this
+integration's config entries with a current token, and the link works again
+immediately.
 
 One prerequisite: Home Assistant must have a reachable base URL. If none is
 configured, the service logs a warning and updates nothing, so the stale link

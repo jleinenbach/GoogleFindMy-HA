@@ -5,7 +5,7 @@ during Phase 2 of the refactoring.
 
 Methods moved here:
 - _call_device_registry_api: Core registry call with compatibility handling
-- _apply_device_ownership: The single execution point for ownership changes
+- _apply_device_ownership: The coordinator's execution point for ownership changes
 - _device_registry_capabilities: Signature-derived capability profile
 - _report_unmigrated_ownership_kwargs: Brake against pre-2026.8 keywords
 - _device_registry_kwargs_need_legacy_retry: Legacy kwarg detection
@@ -365,10 +365,17 @@ class RegistryOperations(_MixinBase):
     ) -> Any:
         """Execute an ownership intent against ``dev_reg``.
 
-        This is the only place in the integration that changes which config
-        entry or subentry owns a device. Call sites state an intent; the
-        keywords are chosen by ``plan_device_ownership`` from the signature of
-        the installed core. See ``docs/AI_DEPRECATIONS_GUIDE.md``, section VI.
+        This is where the coordinator changes which config entry or subentry
+        owns a device. It is not the only executor in the integration: call
+        sites without a coordinator instance (``services.py``, and
+        ``config_flow.py`` next) run their plan through
+        ``execute_ownership_plan`` in the helpers module. What must stay single
+        is the *translation*, and that is ``plan_device_ownership``, which both
+        executors use. This method adds what only coordinator call sites need:
+        the unmigrated-keyword brake and the ``config_subentry_id``
+        compatibility shim. Call sites state an intent; the keywords are chosen
+        by ``plan_device_ownership`` from the signature of the installed core.
+        See ``docs/AI_DEPRECATIONS_GUIDE.md``, section VI.
 
         ``device`` is the device entry the caller already holds. When it is
         absent, the intent needs the current ownership (DETACH, ENSURE) and the

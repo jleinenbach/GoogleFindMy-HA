@@ -113,12 +113,14 @@ from flow code: on a modern core the first only arms a deferred move, and the th
 such move is armed.
 
 Where to route it depends on what the flow has at hand. When the coordinator is
-reachable, go through its ownership entry point so there is a single execution
-point. When it is not (the flow has a coordinator-less fallback path that calls
-`dev_reg.async_update_device` directly), call the pure planner
-`plan_device_ownership` from
-`custom_components/googlefindmy/coordinator/helpers/registry.py` and execute the
-operations it returns; it needs no `hass` and no coordinator instance. What must
+reachable, go through its ownership entry point. When it is not (the flow has a
+coordinator-less fallback path that calls `dev_reg.async_update_device`
+directly), call the pure planner `plan_device_ownership` from
+`custom_components/googlefindmy/coordinator/helpers/registry.py` and run the
+operations it returns through `execute_ownership_plan` in the same module;
+neither needs `hass` nor a coordinator instance. There are two executors and that
+is deliberate, because not every call site has a coordinator; what stays single
+is the *translation*. What must
 **not** happen is a third hand-written keyword translation in `config_flow.py`: the
 `TypeError` retry that used to live there is exactly that, and it is being removed.
 Background and deadlines: `docs/AI_DEPRECATIONS_GUIDE.md`, section VI.

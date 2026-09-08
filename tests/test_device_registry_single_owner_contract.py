@@ -314,12 +314,17 @@ async def test_detach_deletes_only_when_both_levels_match(hass: Any) -> None:
     * device at the entry root + ``remove_config_subentry_id=None`` -> deleted,
     * device inside a subentry + ``remove_config_subentry_id=None`` -> untouched.
 
-    Measured on this tree: eight call sites pass ``remove_config_entry_id``.
-    Five of them pass ``remove_config_subentry_id=None``, and three of those five
-    also arm a move with ``add_config_entry_id`` in the same call, which turns
-    the removal into a move instead of a deletion. The remaining **two** --
-    ``coordinator/registry.py`` in ``_ensure_service_device_exists`` and
-    ``services.py`` in the hub cleanup -- carry the deletion risk. The other
+    Measured before the migration: eight call sites passed
+    ``remove_config_entry_id``, five of them with
+    ``remove_config_subentry_id=None``, and three of those five armed a move with
+    ``add_config_entry_id`` in the same call, which turns the removal into a move
+    instead of a deletion. The remaining two carried the deletion risk. **Both
+    are gone**: AP-12 moved ``coordinator/registry.py`` onto intents and AP-13
+    ``services.py``. Re-measured after AP-13, exactly one production site outside
+    the legacy translator still names the keyword, ``__init__.py`` in the
+    subentry removal path, and it passes a real subentry id. Take the number from
+    the ratchet in ``tests/test_guard_device_registry_kwargs.py``, which is
+    measured on every run, rather than from this paragraph. The other
     three sites pass a real subentry id and are unaffected.
     """
     core = _run_case_against_core(

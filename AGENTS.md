@@ -284,7 +284,12 @@ Always keep any `from __future__` imports immediately after the module docstring
     `_apply_device_ownership` / `plan_device_ownership`, which selects
     `new_config_subentry_id`, the legacy quadruple or `async_remove_device`
     depending on the signature of the installed core (minimum `2025.9.1`, so the
-    legacy branch stays). Keep logging the `(entry_id, device_id, identifiers)`
+    legacy branch stays). `plan_device_ownership` is the one translation point
+    and has no alternative; the executor depends on where you are. With a
+    coordinator in hand, call `_apply_device_ownership`. Without one (`services.py`,
+    `config_flow.py`), build the plan and run it through `execute_ownership_plan`
+    in the same helpers module. Never name an ownership keyword at a call site
+    either way. Keep logging the `(entry_id, device_id, identifiers)`
     tuple in debug builds to catch mismatches early, and mirror the troubleshooting
     playbooks in `docs/CONFIG_SUBENTRIES_HANDBOOK.md`, Section VI, when triaging
     stuck or orphaned devices. A static guard,

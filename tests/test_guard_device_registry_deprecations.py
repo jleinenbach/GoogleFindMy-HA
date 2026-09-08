@@ -11,28 +11,28 @@ The set mirrors what production reaches on a core that reports, which is
 2026.9 and newer.  Twelve operations:
 
 * one for call pattern A (move) and one for pattern B (ensure ownership),
-* three for pattern C (detach): one site that sends
-  ``remove_config_subentry_id=None`` *without* arming a move, plus two forms
-  kept as reporter evidence, because the armed and the unarmed form take
-  different Core branches,
-* six for the places that reach ``async_get_device``, of which four are
+* three for pattern C (detach), all three kept as reporter evidence since
+  AP-13; the armed and the unarmed form take different Core branches and are
+  therefore listed separately,
+* six for the places that reach ``async_get_device``, of which two are
   reachable call sites today, and
 * one for the deprecated ``devices`` mapping.
 
 The counts of *reachable* sites shrink with every work package while the count
-of *operations* stays at twelve; see the paragraph below on why the six
-migrated ones stay.
+of *operations* stays at twelve; see the paragraph below on why the migrated
+ones stay.
 
 The production sites are named by enclosing function rather than by line
 number: line numbers drift with every unrelated edit, and a stale reference is
 worse than none.
 
-Six of the twelve carry no production site any more: AP-12 moved every
-ownership and lookup call in ``coordinator/registry.py`` onto intents. Their
-operations stay, and that is deliberate. They do not prove that the fork still
+Nine of the twelve carry no production site any more: AP-12 moved every
+ownership and lookup call in ``coordinator/registry.py`` onto intents, and AP-13
+did the same for ``services.py``. Their operations stay, and that is
+deliberate. They do not prove that the fork still
 makes the call; they prove that *Core still reports it*, which is what keeps the
 canary and the dead-entry check honest and what will catch a regression that
-brings the old form back. They are marked ``migrated in AP-12`` in place of a
+brings the old form back. They are marked ``migrated in AP-12`` or ``migrated in AP-13`` in place of a
 site.
 
 Two structural safeguards keep a green run from being vacuous:
@@ -105,13 +105,13 @@ ACCEPTED_DEPRECATIONS: tuple[AcceptedDeprecation, ...] = (
         key="async_get_device",
         needle="`device_registry.async_get_device`",
         reason=(
-            "Four sites still call the deprecated lookup: two in services.py, "
-            "one in __init__.py and one in config_flow.py. The shared resolver "
-            "landed in AP-14 with the identity.py site, and AP-12 moved the two "
-            "coordinator/registry.py sites onto it; the remaining four follow "
-            "in AP-13, AP-15 and AP-16. The resolver's own legacy branch is not "
-            "among them: it only runs below core 2026.8, which does not report "
-            "at all."
+            "Two sites still call the deprecated lookup: one in __init__.py "
+            "and one in config_flow.py. The shared resolver landed in AP-14 "
+            "with the identity.py site, AP-12 moved the two "
+            "coordinator/registry.py sites onto it and AP-13 the two in "
+            "services.py; the remaining two follow in AP-15 and AP-16. The "
+            "resolver's own legacy branch is not among them: it only runs below "
+            "core 2026.8, which does not report at all."
         ),
         resolved_by="AP-16",
     ),
@@ -224,17 +224,17 @@ def _operations(hass: Any) -> list[tuple[str, str, Any]]:
         ),
         (
             "pattern_c_services_125",
-            "services.py::async_rebuild_device_registry (unarmed)",
+            "migrated in AP-13; kept as reporter evidence",
             _pattern_c("c3"),
         ),
         (
             "get_device_services_354",
-            "services.py::async_rebuild_device_registry",
+            "migrated in AP-13; kept as reporter evidence",
             _get_device("s354"),
         ),
         (
             "get_device_services_377",
-            "services.py::async_rebuild_device_registry",
+            "migrated in AP-13; kept as reporter evidence",
             _get_device("s377"),
         ),
         (

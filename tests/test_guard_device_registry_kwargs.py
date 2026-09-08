@@ -313,7 +313,8 @@ def scan_production_tree() -> tuple[list[Finding], list[Finding]]:
 #: Measured at the starting state (commit 77d9eb97): 88 occurrences at 48 sites;
 #: after AP-11 (the compatibility shim stopped naming the old keyword): 85 at 46;
 #: after AP-14 (identity.py moved to the shared resolver): 84 at 45; after
-#: AP-12 (coordinator/registry.py speaks intents): 47 at 34.  Measure it
+#: AP-12 (coordinator/registry.py speaks intents): 47 at 34; after AP-13
+#: (services.py speaks intents and asks per entry): 35 at 25.  Measure it
 #: yourself rather than trusting the line above::
 #:
 #:     python3 -c "import ast,pathlib; t=ast.parse(pathlib.Path(
@@ -332,11 +333,6 @@ KNOWN_VIOLATIONS: dict[tuple[str, str, str], int] = {
         "config_flow.py",
         "<module>.ConfigFlow._ensure_service_device_binding",
     ): 1,
-    (
-        "async_get_device",
-        "services.py",
-        "<module>.async_rebuild_device_registry",
-    ): 2,
     (
         "config_entries",
         "__init__.py",
@@ -393,31 +389,6 @@ KNOWN_VIOLATIONS: dict[tuple[str, str, str], int] = {
         "<module>.async_get_config_entry_diagnostics",
     ): 1,
     (
-        "config_entries",
-        "services.py",
-        "<module>.async_rebuild_device_registry",
-    ): 1,
-    (
-        "config_entries",
-        "services.py",
-        "<module>.async_rebuild_device_registry._entry_links_for_device",
-    ): 1,
-    (
-        "config_entries",
-        "services.py",
-        "<module>.async_register_services._resolve_runtime_for_device_id",
-    ): 1,
-    (
-        "config_entries",
-        "services.py",
-        "<module>.async_register_services.async_rebuild_registry_service",
-    ): 1,
-    (
-        "config_entries",
-        "services.py",
-        "<module>.async_register_services.async_refresh_device_urls_service",
-    ): 1,
-    (
         "devices",
         "__init__.py",
         "<module>._async_migrate_device_identifiers_to_entry_scope",
@@ -468,30 +439,15 @@ KNOWN_VIOLATIONS: dict[tuple[str, str, str], int] = {
         "<module>.async_get_config_entry_diagnostics",
     ): 1,
     (
-        "devices",
-        "services.py",
-        "<module>.async_register_services.async_refresh_device_urls_service",
-    ): 1,
-    (
         "kwargs",
         "__init__.py",
         "<module>._async_purge_unloaded_subentry_registrations",
     ): 2,
     (
-        "kwargs",
-        "services.py",
-        "<module>.async_rebuild_device_registry._detach_hub_link_from_device",
-    ): 3,
-    (
         "kwargs_string",
         "config_flow.py",
         "<module>.ConfigFlow._ensure_service_device_binding",
     ): 9,
-    (
-        "kwargs_string",
-        "services.py",
-        "<module>.async_rebuild_device_registry._detach_hub_link_from_device",
-    ): 1,
 }
 
 

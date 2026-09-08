@@ -19,6 +19,7 @@ from custom_components.googlefindmy.const import (
     SERVICE_SUBENTRY_KEY,
     SUBENTRY_TYPE_TRACKER,
     TRACKER_SUBENTRY_KEY,
+    service_device_identifier,
 )
 from tests.helpers import (
     FakeConfigEntriesManager,
@@ -927,3 +928,306 @@ async def test_rebuild_registry_handles_legacy_remove_config_subentry_kwarg(
         service_subentry_id
     }
     assert service_device.config_subentry_id == service_subentry_id
+
+
+# ---------------------------------------------------------------------------
+# AP-13: the hub detach on a single-owner core (Home Assistant 2026.8+)
+#
+# The tests above run against a registry double that models the *pre*-2026.8
+# world, where a device holds a set of links and detaching one leaves the
+# others. From 2026.8 a device has a single owning entry, so giving that entry
+# up removes the device and every entity on it. These tests exercise the same
+# service against ``SingleOwnerDeviceRegistry``, the double that is checked
+# against real core in ``tests/test_device_registry_single_owner_contract.py``.
+# ---------------------------------------------------------------------------
+
+
+def _single_owner_hub_environment(
+    *,
+    entry_id: str = "hub-entry",
+    tracker_subentry_id: str = "tracker-subentry",
+    service_subentry_id: str = "service-subentry",
+) -> tuple[Any, Any]:
+    """Build the hass/coordinator scaffolding the cleanup service needs."""
+
+    entry = FakeConfigEntry(entry_id=entry_id, title="Hub Entry")
+    manager = FakeConfigEntriesManager([entry])
+    hass = FakeHass(manager)
+
+    tracker_metadata = SimpleNamespace(
+        config_subentry_id=tracker_subentry_id, entry_id=entry_id
+    )
+    service_metadata = SimpleNamespace(
+        config_subentry_id=service_subentry_id, entry_id=entry_id
+    )
+
+    def _metadata(*, key: str) -> SimpleNamespace | None:
+        if key == TRACKER_SUBENTRY_KEY:
+            return tracker_metadata
+        if key == SERVICE_SUBENTRY_KEY:
+            return service_metadata
+        return None
+
+    coordinator = SimpleNamespace(
+        config_entry=entry,
+        data=[],
+        name="Coordinator",
+        _ensure_registry_for_devices=lambda devices, ignored: 0,
+        _get_ignored_set=set,
+        _ensure_service_device_exists=lambda: None,
+        get_subentry_metadata=_metadata,
+    )
+    runtime = SimpleNamespace(coordinator=coordinator)
+    entry.runtime_data = runtime
+    hass.data.setdefault(DOMAIN, {}).setdefault("entries", {})[entry_id] = runtime
+    return hass, entry
+
+
+def _patch_registries(monkeypatch: pytest.MonkeyPatch, registry: Any) -> None:
+    """Point the service at ``registry`` and at an empty entity registry."""
+
+    monkeypatch.setattr(
+        "custom_components.googlefindmy.services.dr.async_get",
+        lambda hass: registry,
+    )
+    monkeypatch.setattr(
+        "custom_components.googlefindmy.services.dr.async_entries_for_config_entry",
+        lambda reg, entry_id: reg.async_entries_for_config_entry(entry_id),
+        raising=False,
+    )
+    entity_registry = FakeEntityRegistry()
+    monkeypatch.setattr(
+        "custom_components.googlefindmy.services.er.async_get",
+        lambda hass: entity_registry,
+    )
+
+
+@pytest.mark.asyncio
+async def test_single_owner_device_on_the_hub_link_is_given_up(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A device sitting on the entry root with no tracker link is detached.
+
+    On this core giving up the owning entry *is* the removal, so the planner
+    emits ``async_remove_device`` rather than a keyword pair. That the device is
+    gone afterwards is the assertion; the keywords are not.
+    """
+    from tests.helpers.single_owner_device_registry import SingleOwnerDeviceRegistry
+
+    registry = SingleOwnerDeviceRegistry()
+    registry.add_config_entry("hub-entry", {"tracker-subentry", "service-subentry"})
+    orphan = registry.add_device(
+        identifiers={(DOMAIN, "orphan-device")},
+        config_entry_id="hub-entry",
+        config_subentry_id=None,
+        name="Orphan",
+    )
+    registry.add_device(
+        identifiers={service_device_identifier("hub-entry")},
+        config_entry_id="hub-entry",
+        config_subentry_id="service-subentry",
+        name="Service",
+    )
+
+    hass, _entry = _single_owner_hub_environment()
+    _patch_registries(monkeypatch, registry)
+
+    await services.async_rebuild_device_registry(hass, ServiceCall({}))
+
+    assert orphan.id not in registry.devices
+    assert ("remove_device", {"device_id": orphan.id}) in registry.operations
+
+
+@pytest.mark.asyncio
+async def test_single_owner_device_in_a_subentry_is_left_alone(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A device that does not sit on the hub link is not touched.
+
+    The planner answers "no-op" rather than "remove": the link the caller wants
+    to give up is not the link the device sits on. Without that distinction this
+    is the call that deletes a healthy tracker.
+    """
+    from tests.helpers.single_owner_device_registry import SingleOwnerDeviceRegistry
+
+    registry = SingleOwnerDeviceRegistry()
+    registry.add_config_entry("hub-entry", {"tracker-subentry", "service-subentry"})
+    tracker = registry.add_device(
+        identifiers={(DOMAIN, "tracker-device")},
+        config_entry_id="hub-entry",
+        config_subentry_id="other-subentry",
+        name="Tracker",
+    )
+    registry.add_device(
+        identifiers={service_device_identifier("hub-entry")},
+        config_entry_id="hub-entry",
+        config_subentry_id="service-subentry",
+        name="Service",
+    )
+
+    hass, _entry = _single_owner_hub_environment()
+    _patch_registries(monkeypatch, registry)
+
+    with caplog.at_level(logging.INFO):
+        await services.async_rebuild_device_registry(hass, ServiceCall({}))
+
+    assert tracker.id in registry.devices
+    assert not [op for op in registry.operations if op[0] == "remove_device"]
+    # An empty plan still counts as a handled device. That is what the old code
+    # did -- it sent the removal, core did nothing, and the caller counted it --
+    # and the count feeds the summary the user sees. This assertion pins the
+    # return value of the "nothing to detach" branch, which is otherwise free to
+    # flip. It also pins an inaccuracy: the summary says "Removed 1" for a run
+    # that removed nothing. That is pre-existing and out of scope here; making
+    # the count follow the executed operations means changing the return type of
+    # the detach helper and of ``_apply_device_ownership`` beside it.
+    assert "Removed 1 orphaned device links" in caplog.text
+
+
+class _ModernRegistryWithBlindDevices:
+    """Single-owner signature, device entries that describe no ownership.
+
+    Not a core: the combination cannot occur in Home Assistant, where the
+    signature and the device shape ship together. It is the shape a partially
+    migrated test double or a patched fork can present, and it is the only way
+    to reach the planner's refusal from this service.
+    """
+
+    def __init__(self, devices: list[Any]) -> None:
+        self._devices = {device.id: device for device in devices}
+        self.updated: list[tuple[str, dict[str, Any]]] = []
+        self.removed: list[str] = []
+
+    def async_entries_for_config_entry(self, entry_id: str) -> list[Any]:
+        return list(self._devices.values())
+
+    def async_get(self, device_id: str) -> Any | None:
+        return self._devices.get(device_id)
+
+    def async_get_device_by_identifier(
+        self, identifier: tuple[str, str], config_entry_id: str
+    ) -> Any | None:
+        for device in self._devices.values():
+            if identifier in device.identifiers:
+                return device
+        return None
+
+    def async_update_device(
+        self,
+        device_id: str,
+        *,
+        new_config_entry_id: Any = None,
+        new_config_subentry_id: Any = None,
+        **changes: Any,
+    ) -> Any:
+        self.updated.append((device_id, dict(changes)))
+        return self._devices.get(device_id)
+
+    def async_remove_device(self, device_id: str) -> None:
+        self.removed.append(device_id)
+        self._devices.pop(device_id, None)
+
+
+@pytest.mark.asyncio
+async def test_unknown_ownership_is_reported_instead_of_guessed(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The detach refuses when it cannot read the current ownership.
+
+    Deleting on a guess is the failure this whole work package exists to avoid,
+    so the refusal is a logged error and an untouched device, not a removal.
+    """
+    blind_device = SimpleNamespace(
+        id="blind-device",
+        identifiers={(DOMAIN, "blind-device")},
+        config_entries={"hub-entry"},
+        config_entries_subentries={"hub-entry": {None}},
+        name="Blind",
+    )
+    service_device = service_device_stub(
+        entry_id="hub-entry",
+        service_subentry_id="service-subentry",
+        name="Service",
+    )
+    registry = _ModernRegistryWithBlindDevices([service_device, blind_device])
+
+    hass, _entry = _single_owner_hub_environment()
+    _patch_registries(monkeypatch, registry)
+
+    with caplog.at_level(logging.ERROR):
+        await services.async_rebuild_device_registry(hass, ServiceCall({}))
+
+    assert registry.removed == []
+    assert registry.updated == []
+    # The wording is the planner's own refusal, forwarded by the service through
+    # its error template. "device entry not resolvable" is a different message,
+    # raised by the coordinator's executor, and is deliberately not accepted
+    # here: an ``or`` over two messages passes when neither path is the one
+    # under test.
+    assert "DETACH needs the current ownership" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_half_known_ownership_with_an_entry_is_treated_as_the_hub_link(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A device naming only its entry sits on the hub link, and is given up.
+
+    One of the two half-known shapes the ``or`` in ``describes_ownership``
+    admits. ``config_entry_id`` names us and ``config_subentry_id`` is absent,
+    which is exactly the hub link, so the planner removes. Reading this as
+    "unknown" instead would refuse and leave the orphan behind.
+    """
+    half_known = SimpleNamespace(
+        id="half-known-device",
+        identifiers={(DOMAIN, "half-known-device")},
+        config_entry_id="hub-entry",
+        name="Half known",
+    )
+    service_device = service_device_stub(
+        entry_id="hub-entry",
+        service_subentry_id="service-subentry",
+        name="Service",
+    )
+    registry = _ModernRegistryWithBlindDevices([service_device, half_known])
+
+    hass, _entry = _single_owner_hub_environment()
+    _patch_registries(monkeypatch, registry)
+
+    await services.async_rebuild_device_registry(hass, ServiceCall({}))
+
+    assert registry.removed == ["half-known-device"]
+
+
+@pytest.mark.asyncio
+async def test_half_known_ownership_with_a_subentry_only_is_a_no_op(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The other half-known shape names no entry, so it is not our hub link.
+
+    ``config_subentry_id`` alone yields owner ``None``, which does not match this
+    entry; the planner answers with an empty plan. The asymmetry between this
+    test and its twin is why the comment beside the predicate no longer claims a
+    single outcome for both shapes.
+    """
+    half_known = SimpleNamespace(
+        id="half-known-device",
+        identifiers={(DOMAIN, "half-known-device")},
+        config_entries={"hub-entry"},
+        config_subentry_id="some-subentry",
+        name="Half known",
+    )
+    service_device = service_device_stub(
+        entry_id="hub-entry",
+        service_subentry_id="service-subentry",
+        name="Service",
+    )
+    registry = _ModernRegistryWithBlindDevices([service_device, half_known])
+
+    hass, _entry = _single_owner_hub_environment()
+    _patch_registries(monkeypatch, registry)
+
+    await services.async_rebuild_device_registry(hass, ServiceCall({}))
+
+    assert registry.removed == []
+    assert registry.updated == []

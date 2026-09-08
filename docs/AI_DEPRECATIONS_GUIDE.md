@@ -621,9 +621,16 @@ Because this repository supports cores without the new keywords, the choice is
 made once, behind a signature probe, and the call sites state an **intent**
 (`MOVE`, `ENSURE`, `DETACH`) rather than keywords. The single translation point in
 this integration is `plan_device_ownership` in
-`custom_components/googlefindmy/coordinator/helpers/registry.py`; the single
-execution point is `RegistryOperations._apply_device_ownership` in
-`custom_components/googlefindmy/coordinator/registry.py`. A static guard,
+`custom_components/googlefindmy/coordinator/helpers/registry.py`. Translation is
+the part that must not be duplicated; execution is not, because not every call
+site has a coordinator. The coordinator executes through
+`RegistryOperations._apply_device_ownership` in
+`custom_components/googlefindmy/coordinator/registry.py`, which adds the
+unmigrated-keyword brake and the `config_subentry_id` compatibility shim its own
+call sites need. Everywhere else -- `services.py` today, `config_flow.py` next --
+the executor is `execute_ownership_plan` in the helpers module. Both take their
+keywords from the same planner and neither names an ownership keyword itself. A
+static guard,
 `tests/test_guard_device_registry_kwargs.py`, fails the build if the superseded
 keywords reappear outside the legacy translator.
 

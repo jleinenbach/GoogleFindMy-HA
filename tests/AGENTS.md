@@ -1064,7 +1064,12 @@ following to preserve migration coverage:
    is forwarded: that assertion pins a superseded API and would keep the old
    call alive. The keywords are an implementation detail of
    `plan_device_ownership`, chosen from the signature of the installed core; the
-   intent is the contract. See `docs/AI_DEPRECATIONS_GUIDE.md`, section VI.
+   intent is the contract. One exception, and only one: a test of an **executor**
+   (`execute_ownership_plan`, `_call_device_registry_api`) may assert the
+   keywords, because an executor picks none of its own, forwards what the planner
+   already chose, and owns no resulting ownership that could be asserted instead.
+   A test of a **call site** may not. See `docs/AI_DEPRECATIONS_GUIDE.md`,
+   section VI.
 
 ## Translation alignment checks
 

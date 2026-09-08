@@ -13,6 +13,7 @@ Contents:
 from __future__ import annotations
 
 import inspect
+import logging
 from collections.abc import Callable, Collection, Iterable, Mapping
 from dataclasses import dataclass
 from enum import Enum
@@ -23,6 +24,8 @@ from ...const import (
     LEGACY_SERVICE_IDENTIFIER,
     SERVICE_DEVICE_IDENTIFIER_PREFIX,
 )
+
+_LOGGER = logging.getLogger(__name__)
 
 __all__ = [
     "LEGACY_SERVICE_IDENTIFIER",
@@ -40,6 +43,8 @@ __all__ = [
     "build_legacy_device_registry_kwargs",
     "detect_device_registry_capabilities",
     "device_belongs_to_entry",
+    "device_owning_entry_ids",
+    "execute_ownership_plan",
     "extract_canonical_device_id",
     "extract_device_display_name",
     "extract_service_subentry_ids",
@@ -564,6 +569,86 @@ def plan_device_ownership(  # noqa: PLR0913 - one parameter per ownership axis
     return (DeviceRegistryOperation("async_update_device", payload),)
 
 
+def execute_ownership_plan(
+    dev_reg: Any, operations: Collection[DeviceRegistryOperation]
+) -> Any:
+    """Run the operations :func:`plan_device_ownership` produced.
+
+    This is the executor for call sites that have no coordinator instance, such
+    as the services module and the config flow. The coordinator itself keeps its
+    own richer path (``RegistryOperations._apply_device_ownership``), which adds
+    the unmigrated-keyword brake and the ``config_subentry_id`` compatibility
+    shim that only its call sites need. Both paths take their keywords from the
+    same planner, which is the single translation point the contract names; see
+    ``AGENTS.md``, "Registry updates", and ``docs/AI_DEPRECATIONS_GUIDE.md``,
+    section VI.
+
+    The ``TypeError`` retry below is the shared version of the hand-written one
+    that used to sit in ``services.py``, and its reach is **narrower** than that
+    one's. The hand-written version looked at the error message alone; this one
+    asks :func:`needs_legacy_kwarg_retry` with
+    :attr:`DeviceRegistryCapabilities.subentry_kwarg_for_shim`, which answers
+    ``add_config_subentry_id`` for the signature of the declared minimum
+    ``2025.9.1`` and therefore refuses the retry there outright. What is left is
+    a callable whose signature carries the bare ``config_subentry_id`` or a
+    ``**kwargs``, that is doubles and cores below the declared minimum. That is
+    also why nothing is lost: ``async_update_device`` already accepts
+    ``remove_config_subentry_id`` at tag ``2025.9.1`` (line 1035), so no
+    supported core reaches the branch at all.
+
+    Args:
+        dev_reg: The device registry.
+        operations: The plan, in execution order.
+
+    Returns:
+        The device entry the last update returned, or ``None`` after a removal.
+        An empty plan returns ``None``; callers that need to tell "nothing to do"
+        from "removed" ask the plan, not this return value.
+
+    Raises:
+        Whatever the registry raises. Call sites keep their own error handling,
+        because their log messages differ.
+    """
+    result: Any = None
+    for operation in operations:
+        if operation.method == "async_remove_device":
+            remove_call = getattr(dev_reg, "async_remove_device", None)
+            if not callable(remove_call):
+                raise AttributeError(
+                    "device registry has no async_remove_device; cannot execute "
+                    "the removal this plan requires"
+                )
+            remove_call(operation.kwargs["device_id"])
+            result = None
+            continue
+
+        update_call = getattr(dev_reg, "async_update_device", None)
+        if not callable(update_call):
+            raise AttributeError(
+                "device registry has no async_update_device; cannot execute "
+                "the update this plan requires"
+            )
+        kwargs = dict(operation.kwargs)
+        try:
+            result = update_call(**kwargs)
+        except TypeError as err:
+            # ``subentry_kwarg_for_shim``, deliberately not
+            # ``subentry_kwarg_for_update``: the question here is which spelling
+            # the callable understands, not which one would move a device.
+            caps = detect_device_registry_capabilities(update_call)
+            if not needs_legacy_kwarg_retry(
+                caps.subentry_kwarg_for_shim, str(err), kwargs
+            ):
+                raise
+            _LOGGER.debug(
+                "Retrying %s with legacy keyword arguments after %s",
+                getattr(update_call, "__qualname__", repr(update_call)),
+                err,
+            )
+            result = update_call(**build_legacy_device_registry_kwargs(kwargs))
+    return result
+
+
 # ---------------------------------------------------------------------------
 # Device Lookup
 # ---------------------------------------------------------------------------
@@ -672,7 +757,11 @@ def device_belongs_to_entry(device: Any, entry_id: str | None) -> bool:
     never a valid answer.
 
     An unknown state answers ``False``: a device entry that describes no
-    ownership at all is not evidence of ownership.
+    ownership at all is not evidence of ownership. An **empty**
+    ``config_entry_id`` is such a state and not a fourth answer: it names no
+    entry, so the shim is asked instead. :func:`device_owning_entry_ids` reads it
+    the same way, and the pair is documented as behaving alike in
+    ``agents/typing_guidance/AGENTS.md``.
 
     Args:
         device: A device registry entry, or anything with the same surface.
@@ -685,7 +774,7 @@ def device_belongs_to_entry(device: Any, entry_id: str | None) -> bool:
         return False
 
     owner = getattr(device, "config_entry_id", None)
-    if isinstance(owner, str):
+    if isinstance(owner, str) and owner:
         return owner == entry_id
 
     legacy_owners = getattr(device, "config_entries", None)
@@ -694,6 +783,50 @@ def device_belongs_to_entry(device: Any, entry_id: str | None) -> bool:
     ):
         return any(candidate == entry_id for candidate in legacy_owners)
     return False
+
+
+def device_owning_entry_ids(device: Any) -> tuple[str, ...]:
+    """Return the config entries that own ``device``, best spelling first.
+
+    The set-returning counterpart to :func:`device_belongs_to_entry`, for the
+    call sites that need the owners themselves rather than a yes/no answer.
+
+    From Core 2026.8 a device has exactly one owning entry, named in
+    ``config_entry_id``; the tuple then holds one element. Below that core the
+    owners live in ``config_entries``, and the tuple holds as many as the device
+    carries. Reading ``config_entries`` on the newer core still works -- it
+    survives as a deprecated shim -- and is still wrong for the two reasons
+    :func:`device_belongs_to_entry` spells out: it is the spelling this
+    migration removes, and on a device split from a pre-migration composite it
+    can name several entries where ``config_entry_id`` names one.
+
+    Order is the registry's, not ours. On the newer core there is nothing to
+    order; below it ``config_entries`` is a ``set``, so a caller that picks "the
+    first" is picking an arbitrary element and has to say why that is allowed.
+
+    Args:
+        device: A device registry entry, or anything with the same surface.
+
+    Returns:
+        The owning config entry ids. Empty when the device describes no
+        ownership at all, which is not the same statement as "owned by nobody"
+        but is the only answer this function can give.
+    """
+    if device is None:
+        return ()
+
+    owner = getattr(device, "config_entry_id", None)
+    if isinstance(owner, str) and owner:
+        return (owner,)
+
+    legacy_owners = getattr(device, "config_entries", None)
+    if isinstance(legacy_owners, Iterable) and not isinstance(
+        legacy_owners, (str, bytes)
+    ):
+        return tuple(
+            candidate for candidate in legacy_owners if isinstance(candidate, str)
+        )
+    return ()
 
 
 def parse_device_identifier(

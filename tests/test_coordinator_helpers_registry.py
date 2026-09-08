@@ -1649,6 +1649,249 @@ class TestDeviceBelongsToEntry:
         """A missing device owns nothing."""
         assert not registry_helpers.device_belongs_to_entry(None, "entry-1")
 
+    def test_empty_modern_owner_falls_through_to_the_shim(self) -> None:
+        """An empty ``config_entry_id`` names nobody and must not shadow the shim.
+
+        The twin assertion to
+        ``TestDeviceOwningEntryIds::test_empty_modern_owner_falls_through_to_the_shim``.
+        The two accessors are documented as a pair, so they have to read the same
+        shape the same way.
+        """
+        assert registry_helpers.device_belongs_to_entry(
+            SimpleNamespace(config_entry_id="", config_entries={"entry-1"}), "entry-1"
+        )
+
+
+class TestDeviceOwningEntryIds:
+    """The set-returning counterpart, same two core generations."""
+
+    def test_modern_entry_is_the_single_owner(self) -> None:
+        """From 2026.8 there is exactly one owner, so the tuple holds one id."""
+        assert registry_helpers.device_owning_entry_ids(
+            SimpleNamespace(config_entry_id="entry-1")
+        ) == ("entry-1",)
+
+    def test_modern_entry_wins_over_the_shim(self) -> None:
+        """``config_entry_id`` is preferred even when the shim disagrees.
+
+        The shim can name several entries on a device split from a
+        pre-migration composite; the single owner is the answer we want.
+        """
+        assert registry_helpers.device_owning_entry_ids(
+            SimpleNamespace(
+                config_entry_id="entry-1", config_entries={"entry-1", "entry-2"}
+            )
+        ) == ("entry-1",)
+
+    def test_legacy_set_yields_every_owner(self) -> None:
+        """Below 2026.8 a device can belong to several entries at once."""
+        assert set(
+            registry_helpers.device_owning_entry_ids(
+                SimpleNamespace(config_entry_id=None, config_entries={"a", "b"})
+            )
+        ) == {"a", "b"}
+
+    def test_unknown_state_yields_nothing(self) -> None:
+        """A device entry that describes no ownership answers with an empty tuple."""
+        assert registry_helpers.device_owning_entry_ids(SimpleNamespace()) == ()
+
+    def test_none_device_yields_nothing(self) -> None:
+        """A missing device owns nothing."""
+        assert registry_helpers.device_owning_entry_ids(None) == ()
+
+    def test_a_string_is_not_a_set_of_owners(self) -> None:
+        """``config_entries`` holding a string must not be walked character-wise.
+
+        Without the explicit exclusion a two-character id would come back as two
+        one-character "entries", which every caller would then treat as owners.
+        """
+        assert (
+            registry_helpers.device_owning_entry_ids(
+                SimpleNamespace(config_entry_id=None, config_entries="ab")
+            )
+            == ()
+        )
+
+    def test_non_string_members_are_dropped(self) -> None:
+        """Only string ids are owners; anything else cannot name a config entry."""
+        assert registry_helpers.device_owning_entry_ids(
+            SimpleNamespace(config_entry_id=None, config_entries=["a", None, 7])
+        ) == ("a",)
+
+    def test_empty_modern_owner_falls_through_to_the_shim(self) -> None:
+        """An empty ``config_entry_id`` names nobody and must not shadow the shim."""
+        assert registry_helpers.device_owning_entry_ids(
+            SimpleNamespace(config_entry_id="", config_entries={"entry-1"})
+        ) == ("entry-1",)
+
+
+class _RecordingUpdateRegistry:
+    """Modern registry double that records what it was asked to do."""
+
+    def __init__(self) -> None:
+        self.updates: list[dict[str, Any]] = []
+        self.removed: list[str] = []
+
+    def async_update_device(
+        self,
+        device_id: str,
+        *,
+        new_config_entry_id: Any = None,
+        new_config_subentry_id: Any = None,
+        name: Any = None,
+    ) -> str:
+        self.updates.append(
+            {
+                "device_id": device_id,
+                "new_config_entry_id": new_config_entry_id,
+                "new_config_subentry_id": new_config_subentry_id,
+                "name": name,
+            }
+        )
+        return f"updated-{device_id}"
+
+    def async_remove_device(self, device_id: str) -> None:
+        self.removed.append(device_id)
+
+
+class _LegacyRejectingRegistry:
+    """Pre-2026.8 registry that refuses ``remove_config_subentry_id``."""
+
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    def async_update_device(self, device_id: str, **changes: Any) -> str:
+        self.calls.append({"device_id": device_id, **changes})
+        if "remove_config_subentry_id" in changes:
+            raise TypeError("unexpected keyword argument 'remove_config_subentry_id'")
+        return f"updated-{device_id}"
+
+
+class TestExecuteOwnershipPlan:
+    """The executor for call sites without a coordinator.
+
+    These tests assert keywords, which ``tests/AGENTS.md`` otherwise forbids
+    ("assert the resulting ownership, never the keyword"). The rule is aimed at
+    tests of *call sites*, where a keyword assertion pins a superseded API and
+    keeps it alive. This function is not a call site: it chooses no keyword, it
+    forwards what the planner already chose, and it owns no device whose
+    resulting ownership could be asserted instead. What is under test here is the
+    forwarding and its failure modes, and the keywords are the only observable
+    it has. The ownership outcomes are asserted where they arise, against
+    ``SingleOwnerDeviceRegistry`` in :class:`TestPlanDeviceOwnership` and in the
+    service tests.
+    """
+
+    def test_update_operation_is_forwarded_verbatim(self) -> None:
+        """Every keyword the planner chose reaches the registry unchanged."""
+        registry = _RecordingUpdateRegistry()
+        plan = (
+            registry_helpers.DeviceRegistryOperation(
+                "async_update_device",
+                {
+                    "device_id": "dev-1",
+                    "new_config_entry_id": "entry-1",
+                    "new_config_subentry_id": "sub-1",
+                },
+            ),
+        )
+        assert (
+            registry_helpers.execute_ownership_plan(registry, plan) == "updated-dev-1"
+        )
+        assert registry.updates == [
+            {
+                "device_id": "dev-1",
+                "new_config_entry_id": "entry-1",
+                "new_config_subentry_id": "sub-1",
+                "name": None,
+            }
+        ]
+
+    def test_removal_operation_returns_none(self) -> None:
+        """After a removal there is no device left to return."""
+        registry = _RecordingUpdateRegistry()
+        plan = (
+            registry_helpers.DeviceRegistryOperation(
+                "async_remove_device", {"device_id": "dev-1"}
+            ),
+        )
+        assert registry_helpers.execute_ownership_plan(registry, plan) is None
+        assert registry.removed == ["dev-1"]
+
+    def test_empty_plan_touches_nothing(self) -> None:
+        """An empty plan is "nothing to do", not "do something harmless"."""
+        registry = _RecordingUpdateRegistry()
+        assert registry_helpers.execute_ownership_plan(registry, ()) is None
+        assert registry.updates == []
+        assert registry.removed == []
+
+    def test_legacy_signature_triggers_the_shared_retry(self) -> None:
+        """A core that rejects the new keyword gets the translated call.
+
+        This is the retry that used to be hand-written in ``services.py``. It
+        serves no core at or above the declared minimum ``2025.9.1``, which
+        already accepts ``remove_config_subentry_id``; the branch exists for
+        signatures that do not, such as this double.
+        """
+        registry = _LegacyRejectingRegistry()
+        plan = (
+            registry_helpers.DeviceRegistryOperation(
+                "async_update_device",
+                {
+                    "device_id": "dev-1",
+                    "remove_config_entry_id": "entry-1",
+                    "remove_config_subentry_id": None,
+                },
+            ),
+        )
+        assert (
+            registry_helpers.execute_ownership_plan(registry, plan) == "updated-dev-1"
+        )
+        assert registry.calls == [
+            {
+                "device_id": "dev-1",
+                "remove_config_entry_id": "entry-1",
+                "remove_config_subentry_id": None,
+            },
+            {"device_id": "dev-1", "remove_config_entry_id": "entry-1"},
+        ]
+
+    def test_an_unrelated_type_error_is_not_swallowed(self) -> None:
+        """Only the legacy-keyword TypeError is retried; the rest surfaces."""
+
+        class _Broken:
+            def async_update_device(self, device_id: str, **changes: Any) -> None:
+                raise TypeError("something else entirely")
+
+        plan = (
+            registry_helpers.DeviceRegistryOperation(
+                "async_update_device",
+                {"device_id": "dev-1", "new_config_entry_id": "entry-1"},
+            ),
+        )
+        with pytest.raises(TypeError, match="something else entirely"):
+            registry_helpers.execute_ownership_plan(_Broken(), plan)
+
+    def test_a_registry_without_the_update_call_raises(self) -> None:
+        """A silent skip would look exactly like a successful ownership change."""
+        plan = (
+            registry_helpers.DeviceRegistryOperation(
+                "async_update_device", {"device_id": "dev-1"}
+            ),
+        )
+        with pytest.raises(AttributeError, match="async_update_device"):
+            registry_helpers.execute_ownership_plan(SimpleNamespace(), plan)
+
+    def test_a_registry_without_the_removal_call_raises(self) -> None:
+        """Same reason, and here the unnoticed skip would leave a live device."""
+        plan = (
+            registry_helpers.DeviceRegistryOperation(
+                "async_remove_device", {"device_id": "dev-1"}
+            ),
+        )
+        with pytest.raises(AttributeError, match="async_remove_device"):
+            registry_helpers.execute_ownership_plan(SimpleNamespace(), plan)
+
 
 class _DriftedSignatureRegistry(_LegacyOnlyRegistry):
     """Has the new name but refuses the new signature."""
