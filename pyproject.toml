@@ -514,7 +514,7 @@ max-statements = 100
 
 [tool.codespell]
 skip = ".git,*.lock,*.svg,*.png,*.jpg,*.ico,ProtoDecoders,firebase_messaging,*.pyi,translations,*.proto,*_pb2.py,package-lock.json,custom_components/googlefindmy/vendor"
-ignore-words-list = "hass,nd,ot,aas,bund,trough,te,ded,checkin,alpha-numeric,re-declaring,pre-emptive,titel"
+ignore-words-list = "hass,nd,ot,aas,bund,trough,te,ded,checkin,alpha-numeric,re-declaring,pre-empt,pre-empted,pre-empting,pre-emptive,pre-emptively,pre-empts,titel"
 check-filenames = true
 
 [tool.bandit]
