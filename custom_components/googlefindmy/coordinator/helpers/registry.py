@@ -13,10 +13,10 @@ Contents:
 from __future__ import annotations
 
 import inspect
-from collections.abc import Callable, Collection, Mapping
+from collections.abc import Callable, Collection, Iterable, Mapping
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any
+from typing import Any, Final, Literal
 
 # Re-export constants used by this module's functions
 from ...const import (
@@ -26,17 +26,20 @@ from ...const import (
 
 __all__ = [
     "LEGACY_SERVICE_IDENTIFIER",
+    "NOT_GIVEN",
     "OWNERSHIP_ADD_KWARGS",
     "OWNERSHIP_REMOVE_KWARGS",
     "SERVICE_DEVICE_IDENTIFIER_PREFIX",
     "DeviceOwnership",
     "DeviceRegistryCapabilities",
     "DeviceRegistryOperation",
+    "NotGivenType",
     "OwnershipIntent",
     "build_canonical_unique_id",
     "build_entity_unique_id_candidates",
     "build_legacy_device_registry_kwargs",
     "detect_device_registry_capabilities",
+    "device_belongs_to_entry",
     "extract_canonical_device_id",
     "extract_device_display_name",
     "extract_service_subentry_ids",
@@ -97,7 +100,28 @@ def build_legacy_device_registry_kwargs(
     Mapping applied here:
     - add_config_entry_id -> config_entry_id
     - add_config_subentry_id -> config_subentry_id
-    - remove_config_subentry_id -> (dropped, not supported in legacy)
+    - remove_config_subentry_id -> dropped, it has no legacy counterpart
+
+    **The surviving half, and why it stays.** ``AGENTS.md`` forbids dropping one
+    half of the removal pair, because on a subentry-aware core
+    ``remove_config_entry_id`` alone means "remove every subentry link of this
+    entry" and deletes a device that held only one. The rule is not waived here;
+    what carries this exception is reach, not a claim that such a core has no
+    subentry links. It may well have them, under the older
+    ``config_subentry_id`` spelling, which is exactly the core this translator
+    models.
+
+    **Reach, derived from the code rather than assumed:**
+    :func:`needs_legacy_kwarg_retry` returns ``False`` immediately while
+    :attr:`DeviceRegistryCapabilities.subentry_kwarg_for_shim` resolves to
+    ``add_config_subentry_id``, that is while the signature carries no bare
+    ``config_subentry_id``. At tag ``2025.9.1`` ``async_update_device`` carries
+    ``add_config_subentry_id`` and no bare spelling, and the declared minimum is
+    that tag. This translator therefore serves registry doubles and cores below
+    the declared minimum. The behaviour it produces is pinned by
+    ``tests/test_coordinator.py::test_device_registry_wrapper_retries_with_legacy_remove_config_subentry_kwarg``;
+    if a supported core ever reintroduced the bare spelling as an alias, this
+    exception would have to be revisited rather than inherited.
 
     Version note corrected: the rename predates our declared minimum.
     Tag ``2025.9.1`` already ships ``add_config_subentry_id`` on
@@ -298,6 +322,24 @@ def detect_device_registry_capabilities(
     )
 
 
+class _Sentinel(Enum):
+    """One-member enum used as a typed "argument not given" marker.
+
+    ``None`` cannot carry that meaning here: for ``detach_subentry_id`` it is a
+    real value, namely the hub link (a device sitting directly on the entry).
+    An enum rather than a bare ``object()`` so that ``mypy --strict`` can narrow
+    on it, the same shape Home Assistant uses for ``UNDEFINED``.
+    """
+
+    NOT_GIVEN = "not_given"
+
+
+NOT_GIVEN: Final = _Sentinel.NOT_GIVEN
+
+NotGivenType = Literal[_Sentinel.NOT_GIVEN]
+"""Type of :data:`NOT_GIVEN`, for signatures that pass the marker through."""
+
+
 class OwnershipIntent(Enum):
     """What the caller wants, independent of the core version."""
 
@@ -343,7 +385,7 @@ def plan_device_ownership(  # noqa: PLR0913 - one parameter per ownership axis
     device_id: str,
     entry_id: str,
     target_subentry_id: str | None = None,
-    detach_subentry_id: str | None = None,
+    detach_subentry_id: str | None | NotGivenType = NOT_GIVEN,
     current: DeviceOwnership | None = None,
     extra: Mapping[str, Any] | None = None,
 ) -> tuple[DeviceRegistryOperation, ...]:
@@ -381,13 +423,33 @@ def plan_device_ownership(  # noqa: PLR0913 - one parameter per ownership axis
         Zero or more operations, in execution order. An empty tuple means
         "nothing to do", which is observably different from an update that
         changes nothing: it produces no deprecation report and no registry event.
+        It is only returned when there is genuinely nothing left: an ENSURE on a
+        device that already sits right still emits the update when ``extra``
+        carries metadata, because that metadata is not part of the ownership
+        question and must not disappear with it.
 
     Raises:
         ValueError: On a single-owner core, when the intent cannot be carried
             out without knowing the current ownership: DETACH always, ENSURE
             when no ``target_subentry_id`` was given.
+
+    Caller responsibility, because this function cannot check it: ENSURE on a
+    device owned by *another* config entry takes that device over, silently and
+    by design, because "make sure it sits here" says nothing about where it sat
+    before. Every call site today resolves its device through the entry-scoped
+    :func:`resolve_device_by_identifiers` or behind
+    :func:`device_belongs_to_entry`, so a foreign device never reaches it. A
+    future call site that hands over a device from a registry-wide scan would
+    pull it into our entry together with its entities. Resolve first, then
+    ENSURE.
     """
     payload: dict[str, Any] = {"device_id": device_id, **dict(extra or {})}
+
+    # DETACH always names a link; an omitted one means the hub link, which is
+    # what ``None`` meant before this parameter learned to tell the two apart.
+    detach_link: str | None = (
+        None if detach_subentry_id is NOT_GIVEN else detach_subentry_id
+    )
 
     if intent is OwnershipIntent.DETACH:
         if caps.single_owner_model:
@@ -397,10 +459,7 @@ def plan_device_ownership(  # noqa: PLR0913 - one parameter per ownership axis
                 raise ValueError(
                     "DETACH needs the current ownership; resolve the device first"
                 )
-            if (
-                current.entry_id != entry_id
-                or current.subentry_id != detach_subentry_id
-            ):
+            if current.entry_id != entry_id or current.subentry_id != detach_link:
                 # Core would not touch the device either: the link the caller
                 # wants to drop is not the link the device sits on. No-op, and
                 # explicitly not a deletion.
@@ -411,7 +470,7 @@ def plan_device_ownership(  # noqa: PLR0913 - one parameter per ownership axis
                 ),
             )
         payload["remove_config_entry_id"] = entry_id
-        payload["remove_config_subentry_id"] = detach_subentry_id
+        payload["remove_config_subentry_id"] = detach_link
         return (DeviceRegistryOperation("async_update_device", payload),)
 
     if intent is OwnershipIntent.ENSURE:
@@ -424,6 +483,14 @@ def plan_device_ownership(  # noqa: PLR0913 - one parameter per ownership axis
                     or current.subentry_id == target_subentry_id
                 )
             ):
+                if len(payload) > 1:
+                    # Ownership is already right, so no ownership keyword is
+                    # emitted. ``extra`` is a different matter: it carries the
+                    # metadata the call site wanted written (name, identifiers,
+                    # manufacturer, ``via_device_id=None``). Returning an empty
+                    # plan here would silently drop it, and the call site cannot
+                    # tell that apart from "nothing to do".
+                    return (DeviceRegistryOperation("async_update_device", payload),)
                 return ()
             if target_subentry_id is None and current is None:
                 # Omitting ``new_config_subentry_id`` is not neutral: core sets
@@ -457,12 +524,35 @@ def plan_device_ownership(  # noqa: PLR0913 - one parameter per ownership axis
         payload["new_config_subentry_id"] = target_subentry_id
         return (DeviceRegistryOperation("async_update_device", payload),)
 
-    surplus_subentry_id = (
-        detach_subentry_id
-        if detach_subentry_id is not None
-        else (current.subentry_id if current is not None else None)
-    )
-    if surplus_subentry_id != target_subentry_id:
+    # Three cases, and the third one is the reason this is not a one-liner.
+    #
+    # * A named link (including an explicit ``None`` for the hub link) is given
+    #   up as named. Reading the current subentry instead would cancel exactly
+    #   that removal whenever the device already carries the target link as
+    #   well: on a pre-2026.8 core a device holds a *set* of links, so sitting
+    #   in the target subentry and on the entry root at the same time is the
+    #   normal case this branch exists for.
+    # * Nothing named, current ownership known: the current subentry is the
+    #   surplus one.
+    # * Nothing named, current ownership unknown: **no removal at all**. Falling
+    #   back to ``None`` here would give up the hub link, which is a different
+    #   link and, when it is the only one, the device itself. This is not an
+    #   edge case but the normal state on the declared minimum core: at tag
+    #   ``2025.9.1`` a device entry carries neither ``config_entry_id`` nor
+    #   ``config_subentry_id`` (class ``DeviceEntry``, ownership fields are
+    #   ``config_entries`` and ``config_entries_subentries``), so ``current`` is
+    #   ``None`` there for every caller that does not name a link. The add half
+    #   alone is emitted, which is exactly what the pre-intent call sites did.
+    emit_removal = True
+    if detach_subentry_id is NOT_GIVEN:
+        if current is None:
+            emit_removal = False
+            surplus_subentry_id = None
+        else:
+            surplus_subentry_id = current.subentry_id
+    else:
+        surplus_subentry_id = detach_subentry_id
+    if emit_removal and surplus_subentry_id != target_subentry_id:
         # Removing the link we are about to add would cancel the move out. On a
         # pre-2026.8 core that empties the entry's subentry set, and if it was
         # the only link the device is deleted. Emit the add half alone instead.
@@ -546,6 +636,14 @@ def resolve_device_by_identifiers(
 
     legacy = getattr(dev_reg, "async_get_device", None)  # HA <= 2026.7
     if callable(legacy):
+        # A ``TypeError`` propagates here too, and that is a decision, not an
+        # oversight. The call sites that used to wrap this lookup in
+        # ``except TypeError: device = None`` swallowed a registry whose
+        # ``async_get_device`` does not take ``identifiers`` as a keyword, and
+        # turned it into "no such device". Every core from the declared minimum
+        # upward takes the keyword, so the only callers that can trigger it are
+        # registry doubles, where a silent ``None`` is the worse answer: it makes
+        # a broken double look like an empty registry.
         return legacy(identifiers=set(candidates))
     return None
 
@@ -553,6 +651,49 @@ def resolve_device_by_identifiers(
 # ---------------------------------------------------------------------------
 # Device Identifier Parsing
 # ---------------------------------------------------------------------------
+
+
+def device_belongs_to_entry(device: Any, entry_id: str | None) -> bool:
+    """Return True when ``device`` is owned by ``entry_id``.
+
+    Two core generations, one question. From Core 2026.8 a device entry names
+    its single owner in ``config_entry_id``; before that it carried a set of
+    owning entries in ``config_entries``, which does not exist there.
+
+    ``config_entries`` is **not** gone on the newer core: it survives as a
+    deprecated compatibility shim (a property, checked at tag ``2026.8.0``,
+    lines 454-463). Reading it therefore still works and is still wrong, for two
+    reasons that have nothing to do with availability. It is the deprecated
+    spelling this migration exists to remove, and on a device split from a
+    pre-migration composite it answers from ``_composite_subentries`` and can
+    name **several** entries where ``config_entry_id`` names one. Preferring
+    ``config_entry_id`` is the same deliberate narrowing that
+    :func:`resolve_device_by_identifiers` applies: an entry we do not own was
+    never a valid answer.
+
+    An unknown state answers ``False``: a device entry that describes no
+    ownership at all is not evidence of ownership.
+
+    Args:
+        device: A device registry entry, or anything with the same surface.
+        entry_id: The config entry to test for.
+
+    Returns:
+        True when the device belongs to that entry.
+    """
+    if device is None or not entry_id:
+        return False
+
+    owner = getattr(device, "config_entry_id", None)
+    if isinstance(owner, str):
+        return owner == entry_id
+
+    legacy_owners = getattr(device, "config_entries", None)
+    if isinstance(legacy_owners, Iterable) and not isinstance(
+        legacy_owners, (str, bytes)
+    ):
+        return any(candidate == entry_id for candidate in legacy_owners)
+    return False
 
 
 def parse_device_identifier(

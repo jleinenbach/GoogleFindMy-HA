@@ -27,6 +27,7 @@ this file keeps.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from typing import Any
 
@@ -64,6 +65,19 @@ class SingleOwnerDeviceEntry:
     name: str | None = None
     composite_device_id: str | None = None
     pending_move: PendingMove | None = field(default=None, compare=False)
+    # Plain descriptive fields a real ``DeviceEntry`` always carries. They play
+    # no part in the ownership rules this double exists for, but production code
+    # reads them on the way to those rules, and a double that raises
+    # ``AttributeError`` there cannot be used to test them.
+    manufacturer: str | None = None
+    model: str | None = None
+    sw_version: str | None = None
+    entry_type: Any = None
+    configuration_url: str | None = None
+    translation_key: str | None = None
+    translation_placeholders: Mapping[str, str] | None = None
+    name_by_user: str | None = None
+    via_device_id: str | None = None
 
     @property
     def config_entries(self) -> set[str]:
@@ -197,12 +211,34 @@ class SingleOwnerDeviceRegistry:
         new_config_entry_id: Any = UNDEFINED,
         new_config_subentry_id: Any = UNDEFINED,
         name: Any = UNDEFINED,
+        manufacturer: Any = UNDEFINED,
+        model: Any = UNDEFINED,
+        sw_version: Any = UNDEFINED,
+        entry_type: Any = UNDEFINED,
+        configuration_url: Any = UNDEFINED,
+        translation_key: Any = UNDEFINED,
+        translation_placeholders: Any = UNDEFINED,
+        new_identifiers: Any = UNDEFINED,
+        via_device_id: Any = UNDEFINED,
     ) -> SingleOwnerDeviceEntry | None:
         """Apply the Core 2026.8 ownership rules.
 
         Mirrors ``homeassistant.helpers.device_registry.DeviceRegistry
         .async_update_device`` as of 2026.9.1, restricted to the ownership
         branches.  Returns ``None`` when the device was deleted, matching Core.
+
+        The descriptive keywords after ``name`` are spelled out rather than
+        swallowed by ``**kwargs`` on purpose, and the binding reason is not the
+        capability profile: a var-keyword parameter does flip
+        ``accepts_var_keyword``, but none of the values this double is read for
+        would change (``single_owner_model`` stays true,
+        ``subentry_kwarg_for_update`` stays ``new_config_subentry_id``). What it
+        would break is ``_device_registry_allows_translation_update``, which
+        looks for ``translation_key`` and ``translation_placeholders`` **in the
+        parameters**: with a var-keyword it would answer ``False`` and the
+        translation path of the code under test would stop running altogether.
+        The keywords are recorded and applied, nothing more; the ownership rules
+        above are the point.
         """
         self.operations.append(
             (
@@ -309,6 +345,20 @@ class SingleOwnerDeviceRegistry:
             changes["pending_move"] = pending_move
         if name is not UNDEFINED:
             changes["name"] = name
+        for field_name, value in (
+            ("manufacturer", manufacturer),
+            ("model", model),
+            ("sw_version", sw_version),
+            ("entry_type", entry_type),
+            ("configuration_url", configuration_url),
+            ("translation_key", translation_key),
+            ("translation_placeholders", translation_placeholders),
+            ("via_device_id", via_device_id),
+        ):
+            if value is not UNDEFINED:
+                changes[field_name] = value
+        if new_identifiers is not UNDEFINED:
+            changes["identifiers"] = frozenset(new_identifiers)
 
         updated = replace(old, **changes) if changes else old
         self.devices[device_id] = updated

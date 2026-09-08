@@ -11,16 +11,29 @@ The set mirrors what production reaches on a core that reports, which is
 2026.9 and newer.  Twelve operations:
 
 * one for call pattern A (move) and one for pattern B (ensure ownership),
-* three for pattern C (detach): the two sites that send
-  ``remove_config_subentry_id=None`` *without* arming a move, plus one that
-  arms one, because the armed and the unarmed form take different Core
-  branches,
-* six for the places that reach ``async_get_device``, and
+* three for pattern C (detach): one site that sends
+  ``remove_config_subentry_id=None`` *without* arming a move, plus two forms
+  kept as reporter evidence, because the armed and the unarmed form take
+  different Core branches,
+* six for the places that reach ``async_get_device``, of which four are
+  reachable call sites today, and
 * one for the deprecated ``devices`` mapping.
+
+The counts of *reachable* sites shrink with every work package while the count
+of *operations* stays at twelve; see the paragraph below on why the six
+migrated ones stay.
 
 The production sites are named by enclosing function rather than by line
 number: line numbers drift with every unrelated edit, and a stale reference is
 worse than none.
+
+Six of the twelve carry no production site any more: AP-12 moved every
+ownership and lookup call in ``coordinator/registry.py`` onto intents. Their
+operations stay, and that is deliberate. They do not prove that the fork still
+makes the call; they prove that *Core still reports it*, which is what keeps the
+canary and the dead-entry check honest and what will catch a regression that
+brings the old form back. They are marked ``migrated in AP-12`` in place of a
+site.
 
 Two structural safeguards keep a green run from being vacuous:
 
@@ -82,8 +95,9 @@ ACCEPTED_DEPRECATIONS: tuple[AcceptedDeprecation, ...] = (
         key="ownership_kwargs",
         needle="add_config_entry_id",
         reason=(
-            "Production still speaks the pre-2026.8 kwargs; AP-10 and AP-11 only "
-            "add the intent planner, they remove no call site."
+            "Production still speaks the pre-2026.8 kwargs outside "
+            "coordinator/registry.py, which AP-12 moved onto intents; AP-10 and "
+            "AP-11 only added the planner and removed no call site."
         ),
         resolved_by="AP-17",
     ),
@@ -91,12 +105,13 @@ ACCEPTED_DEPRECATIONS: tuple[AcceptedDeprecation, ...] = (
         key="async_get_device",
         needle="`device_registry.async_get_device`",
         reason=(
-            "Six sites still call the deprecated lookup: two in services.py, "
-            "two in coordinator/registry.py, one in __init__.py and one in "
-            "config_flow.py. The shared resolver landed in AP-14 together with "
-            "the identity.py site; these six follow in AP-12, AP-13, AP-15 and "
-            "AP-16. The resolver's own legacy branch is not among them: it only "
-            "runs below core 2026.8, which does not report at all."
+            "Four sites still call the deprecated lookup: two in services.py, "
+            "one in __init__.py and one in config_flow.py. The shared resolver "
+            "landed in AP-14 with the identity.py site, and AP-12 moved the two "
+            "coordinator/registry.py sites onto it; the remaining four follow "
+            "in AP-13, AP-15 and AP-16. The resolver's own legacy branch is not "
+            "among them: it only runs below core 2026.8, which does not report "
+            "at all."
         ),
         resolved_by="AP-16",
     ),
@@ -189,22 +204,22 @@ def _operations(hass: Any) -> list[tuple[str, str, Any]]:
     return [
         (
             "pattern_a_move",
-            "coordinator/registry.py::_ensure_registry_for_devices",
+            "migrated in AP-12; kept as reporter evidence",
             _pattern_a,
         ),
         (
             "pattern_b_ensure",
-            "coordinator/registry.py::_ensure_service_device_exists",
+            "migrated in AP-12; kept as reporter evidence",
             _pattern_b,
         ),
         (
-            "pattern_c_registry_696",
-            "coordinator/registry.py::_ensure_service_device_exists (unarmed)",
+            "pattern_c_unarmed_removal",
+            "migrated in AP-12; kept as reporter evidence",
             _pattern_c("c1"),
         ),
         (
-            "pattern_c_registry_1561",
-            "coordinator/registry.py::_ensure_registry_for_devices (armed)",
+            "pattern_c_armed_removal",
+            "migrated in AP-12; kept as reporter evidence",
             _pattern_c("c2"),
         ),
         (
@@ -228,13 +243,13 @@ def _operations(hass: Any) -> list[tuple[str, str, Any]]:
             _get_device("cf6976"),
         ),
         (
-            "get_device_registry_689",
-            "coordinator/registry.py::_ensure_service_device_exists",
+            "get_device_migrated_service",
+            "migrated in AP-12; kept as reporter evidence",
             _get_device("r689"),
         ),
         (
-            "get_device_registry_1424",
-            "coordinator/registry.py::_ensure_registry_for_devices",
+            "get_device_migrated_hub",
+            "migrated in AP-12; kept as reporter evidence",
             _get_device("r1424"),
         ),
         (

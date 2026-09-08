@@ -312,7 +312,8 @@ def scan_production_tree() -> tuple[list[Finding], list[Finding]]:
 #:
 #: Measured at the starting state (commit 77d9eb97): 88 occurrences at 48 sites;
 #: after AP-11 (the compatibility shim stopped naming the old keyword): 85 at 46;
-#: after AP-14 (identity.py moved to the shared resolver): 84 at 45.  Measure it
+#: after AP-14 (identity.py moved to the shared resolver): 84 at 45; after
+#: AP-12 (coordinator/registry.py speaks intents): 47 at 34.  Measure it
 #: yourself rather than trusting the line above::
 #:
 #:     python3 -c "import ast,pathlib; t=ast.parse(pathlib.Path(
@@ -333,15 +334,9 @@ KNOWN_VIOLATIONS: dict[tuple[str, str, str], int] = {
     ): 1,
     (
         "async_get_device",
-        "coordinator/registry.py",
-        "<module>.RegistryOperations._ensure_registry_for_devices",
-    ): 1,
-    (
-        "async_get_device",
-        "coordinator/registry.py",
-        "<module>.RegistryOperations._ensure_service_device_exists",
-    ): 1,
-    ("async_get_device", "services.py", "<module>.async_rebuild_device_registry"): 2,
+        "services.py",
+        "<module>.async_rebuild_device_registry",
+    ): 2,
     (
         "config_entries",
         "__init__.py",
@@ -352,7 +347,11 @@ KNOWN_VIOLATIONS: dict[tuple[str, str, str], int] = {
         "__init__.py",
         "<module>._async_purge_unloaded_subentry_registrations",
     ): 1,
-    ("config_entries", "__init__.py", "<module>._async_refresh_device_urls"): 1,
+    (
+        "config_entries",
+        "__init__.py",
+        "<module>._async_refresh_device_urls",
+    ): 1,
     (
         "config_entries",
         "__init__.py",
@@ -368,31 +367,36 @@ KNOWN_VIOLATIONS: dict[tuple[str, str, str], int] = {
         "__init__.py",
         "<module>._async_relink_subentry_entities._resolve_service_device",
     ): 1,
-    ("config_entries", "__init__.py", "<module>._migrate_legacy_unique_ids"): 1,
-    ("config_entries", "__init__.py", "<module>._normalize_device_identifier"): 1,
-    ("config_entries", "__init__.py", "<module>._self_heal_device_registry"): 1,
-    ("config_entries", "__init__.py", "<module>.async_remove_config_entry_device"): 1,
     (
         "config_entries",
-        "coordinator/registry.py",
-        "<module>.RegistryOperations._ensure_registry_for_devices",
+        "__init__.py",
+        "<module>._migrate_legacy_unique_ids",
     ): 1,
     (
         "config_entries",
-        "coordinator/registry.py",
-        "<module>.RegistryOperations._ensure_registry_for_devices._resolve_hub_name",
+        "__init__.py",
+        "<module>._normalize_device_identifier",
     ): 1,
     (
         "config_entries",
-        "coordinator/registry.py",
-        "<module>.RegistryOperations._ensure_service_device_exists._service_entry_links",
-    ): 2,
+        "__init__.py",
+        "<module>._self_heal_device_registry",
+    ): 1,
+    (
+        "config_entries",
+        "__init__.py",
+        "<module>.async_remove_config_entry_device",
+    ): 1,
     (
         "config_entries",
         "diagnostics.py",
         "<module>.async_get_config_entry_diagnostics",
     ): 1,
-    ("config_entries", "services.py", "<module>.async_rebuild_device_registry"): 1,
+    (
+        "config_entries",
+        "services.py",
+        "<module>.async_rebuild_device_registry",
+    ): 1,
     (
         "config_entries",
         "services.py",
@@ -418,9 +422,21 @@ KNOWN_VIOLATIONS: dict[tuple[str, str, str], int] = {
         "__init__.py",
         "<module>._async_migrate_device_identifiers_to_entry_scope",
     ): 2,
-    ("devices", "__init__.py", "<module>._async_normalize_device_names"): 1,
-    ("devices", "__init__.py", "<module>._async_refresh_device_urls"): 1,
-    ("devices", "__init__.py", "<module>._async_relink_entities_for_entry"): 1,
+    (
+        "devices",
+        "__init__.py",
+        "<module>._async_normalize_device_names",
+    ): 1,
+    (
+        "devices",
+        "__init__.py",
+        "<module>._async_refresh_device_urls",
+    ): 1,
+    (
+        "devices",
+        "__init__.py",
+        "<module>._async_relink_entities_for_entry",
+    ): 1,
     (
         "devices",
         "__init__.py",
@@ -431,7 +447,11 @@ KNOWN_VIOLATIONS: dict[tuple[str, str, str], int] = {
         "__init__.py",
         "<module>._async_relink_subentry_entities._resolve_service_device",
     ): 1,
-    ("devices", "__init__.py", "<module>._migrate_legacy_unique_ids"): 1,
+    (
+        "devices",
+        "__init__.py",
+        "<module>._migrate_legacy_unique_ids",
+    ): 1,
     (
         "devices",
         "coordinator/registry.py",
@@ -442,7 +462,11 @@ KNOWN_VIOLATIONS: dict[tuple[str, str, str], int] = {
         "coordinator/subentry.py",
         "<module>.SubentryOperations._refresh_subentry_index",
     ): 1,
-    ("devices", "diagnostics.py", "<module>.async_get_config_entry_diagnostics"): 1,
+    (
+        "devices",
+        "diagnostics.py",
+        "<module>.async_get_config_entry_diagnostics",
+    ): 1,
     (
         "devices",
         "services.py",
@@ -463,36 +487,6 @@ KNOWN_VIOLATIONS: dict[tuple[str, str, str], int] = {
         "config_flow.py",
         "<module>.ConfigFlow._ensure_service_device_binding",
     ): 9,
-    (
-        "kwargs_string",
-        "coordinator/registry.py",
-        "<module>.RegistryOperations._ensure_registry_for_devices",
-    ): 10,
-    (
-        "kwargs_string",
-        "coordinator/registry.py",
-        "<module>.RegistryOperations._ensure_registry_for_devices._heal_tracker_device_subentry",
-    ): 8,
-    (
-        "kwargs_string",
-        "coordinator/registry.py",
-        "<module>.RegistryOperations._ensure_registry_for_devices._remove_hub_link",
-    ): 4,
-    (
-        "kwargs_string",
-        "coordinator/registry.py",
-        "<module>.RegistryOperations._ensure_registry_for_devices._update_device_with_kwargs",
-    ): 2,
-    (
-        "kwargs_string",
-        "coordinator/registry.py",
-        "<module>.RegistryOperations._ensure_service_device_exists",
-    ): 5,
-    (
-        "kwargs_string",
-        "coordinator/registry.py",
-        "<module>.RegistryOperations._ensure_service_device_exists._detach_service_hub_link",
-    ): 2,
     (
         "kwargs_string",
         "services.py",

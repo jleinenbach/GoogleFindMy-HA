@@ -36,6 +36,7 @@ from custom_components.googlefindmy.coordinator import (
     SubentryMetadata,
 )
 from tests.helpers import service_device_stub
+from tests.helpers.single_owner_device_registry import SingleOwnerDeviceRegistry
 
 
 def _stable_subentry_id(entry_id: str, key: str) -> str:
@@ -1145,14 +1146,9 @@ def test_frozen_registry_removes_hub_link_with_frozenset(
 
     assert created == 1
     assert frozen_registry.updated
-    removal_payload = next(
-        payload
-        for payload in frozen_registry.updated
-        if payload["remove_config_entry_id"] == entry.entry_id
-    )
-    assert removal_payload["remove_config_entry_id"] == entry.entry_id
-    assert removal_payload["remove_config_subentry_id"] is None
-
+    # End state, not keyword shape (see the note in
+    # ``test_service_device_heals_config_subentry``). The point of this test is
+    # the frozenset exposure, and that shows in the resulting link set below.
     refreshed = frozen_registry.async_get(existing.id)
     assert refreshed is not None
     subentries = refreshed.config_entries_subentries.get(entry.entry_id)
@@ -1187,17 +1183,19 @@ def test_existing_device_remains_standalone(
     )
 
     assert created == 1
-    assert fake_registry.updated[0]["via_device_id"] is None
+    assert fake_registry.updated, "Expected the existing device to be updated"
+    # The recorded write has to belong to the device under test, otherwise a
+    # cross-device mutation passes unnoticed (``tests/AGENTS.md``, registry stub
+    # checklist, point 3). Only the *payload shape* is dropped here, not the
+    # association and not the end state.
+    assert fake_registry.updated[0]["device_id"] == existing.id
+    # End state, not keyword shape (see the note in
+    # ``test_service_device_heals_config_subentry``).
     assert existing.via_device_id is None
-    assert fake_registry.updated[0]["config_subentry_id"] == entry.tracker_subentry_id
-    assert fake_registry.updated[0]["add_config_subentry_id"] is None
-    assert fake_registry.updated[0]["add_config_entry_id"] == entry.entry_id
-    assert fake_registry.updated[-1]["remove_config_entry_id"] in (entry.entry_id, None)
-    assert fake_registry.updated[-1]["remove_config_subentry_id"] in (
-        entry.tracker_subentry_id,
-        None,
-    )
     assert existing.config_subentry_id == entry.tracker_subentry_id
+    assert existing.config_entries_subentries[entry.entry_id] == {
+        entry.tracker_subentry_id
+    }
 
 
 def test_existing_device_backfills_config_subentry(
@@ -1229,18 +1227,13 @@ def test_existing_device_backfills_config_subentry(
 
     assert created == 1
     assert len(fake_registry.updated) >= 1
-    payload = fake_registry.updated[0]
-    assert payload["device_id"] == existing.id
-    assert payload["config_subentry_id"] == entry.tracker_subentry_id
-    assert payload["add_config_subentry_id"] is None
-    assert payload["add_config_entry_id"] == entry.entry_id
-    assert payload["via_device_id"] is None
-    assert fake_registry.updated[-1]["remove_config_entry_id"] in (entry.entry_id, None)
-    assert fake_registry.updated[-1]["remove_config_subentry_id"] in (
-        entry.tracker_subentry_id,
-        None,
-    )
+    assert fake_registry.updated[0]["device_id"] == existing.id
+    # End state, not keyword shape (see the note in
+    # ``test_service_device_heals_config_subentry``).
     assert existing.config_subentry_id == entry.tracker_subentry_id
+    assert existing.config_entries_subentries[entry.entry_id] == {
+        entry.tracker_subentry_id
+    }
     assert existing.via_device_id is None
 
 
@@ -1959,6 +1952,111 @@ def test_service_device_defers_unknown_config_subentry(
     assert payload["identifiers"] == {service_device_identifier(entry.entry_id)}
 
 
+class _SingleOwnerRegistryWithCreate(SingleOwnerDeviceRegistry):
+    """The shared single-owner double plus the one call it does not model.
+
+    ``_ensure_service_device_exists`` returns early unless the registry offers
+    ``async_get_or_create``, so without it the branch under test is never
+    reached. Adding it here rather than to the shared helper keeps the change
+    local to the one test that needs it; the ownership rules, which are the
+    point, still come from the shared double.
+    """
+
+    def async_get_or_create(
+        self,
+        *,
+        config_entry_id: str,
+        identifiers: set[tuple[str, str]],
+        **kwargs: Any,
+    ) -> Any:
+        existing = next(
+            (
+                device
+                for device in self.devices.values()
+                if identifiers & set(device.identifiers)
+            ),
+            None,
+        )
+        if existing is not None:
+            return existing
+        return self.add_device(
+            identifiers=identifiers,
+            config_entry_id=config_entry_id,
+            config_subentry_id=kwargs.get("config_subentry_id"),
+            name=kwargs.get("name"),
+        )
+
+
+def test_service_device_on_entry_root_is_moved_not_deleted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Healing a service device on the entry root must move it, not delete it.
+
+    On Core 2026.8 a device sitting on the entry root has that entry as its
+    single owner, so giving the entry up removes the device together with every
+    entity attached to it. The healing branch reads as "correct the subentry"
+    and must therefore state MOVE; a DETACH there is silent, plausible and
+    destructive.
+
+    Measured with a mutant: turning that one call into a DETACH fails exactly
+    this test and nothing else, so it is the only thing standing between the
+    branch and a deleted device. The nearby ``_detach_service_hub_link`` branch
+    is *not* what this covers, and it cannot be: on a single-owner core the
+    healing above always runs first and leaves no hub link behind, which makes
+    that branch unreachable there. Its own move-instead-of-detach wording is
+    forward-looking, not load-bearing today.
+    """
+
+    registry = _SingleOwnerRegistryWithCreate()
+    monkeypatch.setattr(dr, "async_get", lambda _hass: registry)
+
+    coordinator = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
+    entry = _build_entry_with_subentries("entry-root-svc")
+    _prepare_coordinator_for_registry(coordinator, entry)
+    registry.add_config_entry(
+        entry.entry_id, {entry.service_subentry_id, entry.tracker_subentry_id}
+    )
+    service_device = registry.add_device(
+        identifiers={service_device_identifier(entry.entry_id)},
+        config_entry_id=entry.entry_id,
+        config_subentry_id=None,
+    )
+
+    coordinator._ensure_service_device_exists()
+
+    survivor = registry.async_get(service_device.id)
+    assert survivor is not None, (
+        "the service device was deleted; the branch used DETACH where the "
+        "intent is MOVE"
+    )
+    assert survivor.config_subentry_id == entry.service_subentry_id
+    assert (
+        "remove_device",
+        {"device_id": service_device.id},
+    ) not in registry.operations
+
+    # The operation sequence the planner derived, not just the end state
+    # (``tests/AGENTS.md``, registry stub checklist, point 5). On a single-owner
+    # core a MOVE is an update carrying both ``new_*`` keywords, and a DETACH
+    # would be a ``remove_device``. Metadata on the same call is filtered out, so
+    # nothing but the ownership half is pinned.
+    #
+    # What this does *not* separate, measured with a mutant: MOVE from ENSURE. On
+    # a device whose current owner is known and different from the target, the
+    # planner derives the same single operation for both. The two part ways only
+    # when the current state is unknown, where ENSURE refuses. The intent that
+    # matters here is DETACH, and that one the assertion does catch.
+    ownership_ops = [
+        (name, kwargs["new_config_entry_id"], kwargs["new_config_subentry_id"])
+        for name, kwargs in registry.operations
+    ]
+    assert ownership_ops
+    assert all(
+        op == ("update_device", entry.entry_id, entry.service_subentry_id)
+        for op in ownership_ops
+    ), ownership_ops
+
+
 def test_service_device_heals_config_subentry(
     fake_registry: _FakeDeviceRegistry,
 ) -> None:
@@ -1985,17 +2083,14 @@ def test_service_device_heals_config_subentry(
     coordinator._ensure_service_device_exists()
 
     assert fake_registry.updated, "Expected device-registry healing to run"
-    payload = next(
-        update
-        for update in fake_registry.updated
-        if update.get("config_subentry_id") == entry.service_subentry_id
-    )
-    assert payload["add_config_subentry_id"] is None
-    assert payload["add_config_entry_id"] == entry.entry_id
+    # End state, not keyword shape: which keywords carry the move is the
+    # planner's business and differs by core version. What must hold is where
+    # the device ends up, and that it ends up owned by us and nowhere else.
     assert service_entry.config_subentry_id == entry.service_subentry_id
     assert service_entry.config_entries_subentries[entry.entry_id] == {
         entry.service_subentry_id
     }
+    assert entry.entry_id in service_entry.config_entries
 
 
 def test_service_device_clears_missing_service_link(
