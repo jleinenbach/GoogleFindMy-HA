@@ -352,10 +352,14 @@ async def test_shims_report_exactly_one_owner(hass: Any) -> None:
     """The compatibility shims collapse to a single entry on 2026.8+.
 
     Eight production sites read ``DeviceEntry.config_entries`` as an attribute
-    and twelve more through ``getattr``; any of them that evaluates ``len(...)``
-    or a set difference has silently lost its predicate.  Both numbers are the
-    per-rule totals of ``KNOWN_VIOLATIONS`` in
-    ``tests/test_guard_device_registry_kwargs.py``.
+    at the starting state of the migration, and twelve more through ``getattr``;
+    any of them that evaluates ``len(...)``
+    or a set difference has silently lost its predicate.  Both numbers were
+    measured at commit ``77d9eb97``, the starting state of the migration.  No
+    artefact in the tree confirms them today: the ratchet in
+    ``tests/test_guard_device_registry_kwargs.py`` is empty since ``N-22``, and
+    its chronicle records only the totals per work package, never the split by
+    rule.  They are here as the reason this test exists, not as a live figure.
     """
     snapshot = _run_case_against_core(
         hass, SUB_A1, [{"new_config_subentry_id": SUB_A2}]

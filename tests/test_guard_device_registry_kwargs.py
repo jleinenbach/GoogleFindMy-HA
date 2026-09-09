@@ -2,8 +2,10 @@
 """Static ratchet against the pre-2026.8 device registry API.
 
 Home Assistant 2026.8 made a device belong to exactly one config entry and
-subentry.  Five shapes in this repository still speak the old model, and each of
-them fails differently:
+subentry.  Five shapes in this repository spoke the old model when this gate
+landed, and each of them fails differently.  Since ``N-22`` the ratchet below is
+empty, so the list reads as the taxonomy the scanner still looks for rather than
+as an inventory of today's tree:
 
 1. the four ownership kwargs (``add_config_entry_id`` and friends),
 2. the same names as **strings**, used as dict keys or subscripts,
@@ -30,10 +32,11 @@ lists (say ``.config_entries`` on a call result) is let through and listed as
 undecidable in the failure text.  A gate that blocks on doubt gets switched off
 after the second false alarm, and a switched-off gate protects nothing.
 
-The known-violation list below is the ratchet: it holds today's sites so the
-gate is green on the day it lands, and every migration work package shrinks it.
-The counts are part of it on purpose -- without them a *new* violation could
-hide inside a function that is already listed.
+The known-violation list below is the ratchet: it held the sites of the day it
+landed so the gate was green from the start, and every migration work package
+shrank it.  Since ``N-22`` it is empty, which is the state it was built to reach.
+The counts were part of it on purpose -- without them a *new* violation could
+have hidden inside a function that was already listed.
 """
 
 from __future__ import annotations
@@ -305,10 +308,10 @@ def scan_production_tree() -> tuple[list[Finding], list[Finding]]:
 #:
 #: The ratchet.  Key is ``(rule, file, enclosing function)`` -- no line numbers,
 #: so unrelated edits do not churn it -- and the value is how many occurrences
-#: that site holds today.  The count is what makes it a ratchet rather than a
+#: that site held.  The count is what made it a ratchet rather than a
 #: whitelist: without it a *new* violation could hide inside a function that is
-#: already listed.  Every migration work package shrinks this table; nothing may
-#: ever add to it.
+#: already listed.  Every migration work package shrank this table; nothing may
+#: ever add to it.  It is empty since ``N-22``.
 #:
 #: Measured at the starting state (commit 77d9eb97): 88 occurrences at 48 sites;
 #: after AP-11 (the compatibility shim stopped naming the old keyword): 85 at 46;
@@ -318,27 +321,22 @@ def scan_production_tree() -> tuple[list[Finding], list[Finding]]:
 #: (config_flow.py speaks intents): 25 at 23; after AP-16 (__init__.py speaks
 #: intents, asks per entry and iterates through the shared helper): 4 at 4; after
 #: AP-17 (diagnostics.py asks the registry for one entry's devices, which drops
-#: the whole-mapping read and the set-shaped ownership read in one line): 2 at 2.
-#:  Measure it
-#: yourself rather than trusting the line above::
+#: the whole-mapping read and the set-shaped ownership read in one line): 2 at 2;
+#: after N-22 (the last two ``devices`` reads ask the shared iterator and the
+#: per-entry helper instead): **0 at 0**, which is the point of the ratchet.
+#:
+#: Measure the table yourself rather than trusting the chronicle above::
 #:
 #:     python3 -c "import ast,pathlib; t=ast.parse(pathlib.Path(
 #:     'tests/test_guard_device_registry_kwargs.py').read_text());
 #:     d=[ast.literal_eval(n.value) for n in ast.walk(t) if isinstance(
 #:     n, ast.AnnAssign) and getattr(n.target,'id','')=='KNOWN_VIOLATIONS'][0];
 #:     print(len(d), sum(d.values()))"
-KNOWN_VIOLATIONS: dict[tuple[str, str, str], int] = {
-    (
-        "devices",
-        "coordinator/registry.py",
-        "<module>.RegistryOperations._ensure_registry_for_devices",
-    ): 1,
-    (
-        "devices",
-        "coordinator/subentry.py",
-        "<module>.SubentryOperations._refresh_subentry_index",
-    ): 1,
-}
+#:
+#: An empty table is not the end of the gate, it is its sharpest state: from
+#: here every finding is a new site, and ``test_no_new_deprecated_registry_usage``
+#: reports it without anyone having to lower a number first.
+KNOWN_VIOLATIONS: dict[tuple[str, str, str], int] = {}
 
 
 def _current() -> dict[tuple[str, str, str], int]:

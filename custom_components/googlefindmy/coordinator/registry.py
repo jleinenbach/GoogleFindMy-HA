@@ -108,6 +108,9 @@ from .helpers.registry import (
     is_hub_device_check as _is_hub_device_check_impl,
 )
 from .helpers.registry import (
+    iter_all_devices as _iter_all_devices_impl,
+)
+from .helpers.registry import (
     match_entity_by_device_id as _match_entity_by_device_id_impl,
 )
 from .helpers.registry import (
@@ -1763,9 +1766,15 @@ class RegistryOperations(_MixinBase):
                 hub_device_names.add(normalized_base)
                 hub_devices_by_name[normalized_base] = hub_device
 
-        devices_map = getattr(dev_reg, "devices", None)
-        if isinstance(devices_map, Mapping) and hub_device_id:
-            for device_entry in devices_map.values():
+        # The collision check spans the whole registry on purpose: a sibling
+        # hanging off our hub may belong to any config entry, and narrowing this
+        # to our own entry would miss exactly the names we must not reuse. Going
+        # through the helper is what keeps that true across cores -- ``devices``
+        # is a plain mapping on the declared minimum ``2025.9.1`` and a view
+        # from ``2026.9`` on, and an ``isinstance(..., Mapping)`` guard here
+        # silently dropped the whole loop on the newer one.
+        if hub_device_id:
+            for device_entry in _iter_all_devices_impl(dev_reg):
                 if getattr(device_entry, "via_device_id", None) != hub_device_id:
                     continue
                 candidate_name = getattr(device_entry, "name_by_user", None) or getattr(

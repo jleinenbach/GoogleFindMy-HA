@@ -4,7 +4,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass, replace
 from types import MappingProxyType, SimpleNamespace
 from typing import Any, cast
@@ -1575,6 +1575,129 @@ def test_hub_name_collision_does_not_reuse_hub_device(
     assert not any("Reusing hub device" in record.message for record in caplog.records)
     assert any(
         "Disambiguated device name" in record.message for record in caplog.records
+    )
+
+
+class _DeprecatedDevicesView:
+    """Stand-in for Core 2026.9's ``_DeprecatedDeviceRegistryItemsView``.
+
+    Read at tag ``2026.9.1``: iterating yields the ``DeviceEntry`` values, while
+    the mapping surface (``values``, ``get``, subscription) still answers but is
+    reported as deprecated. The property that matters here is the one a guard
+    gets wrong: the view is **not** a ``Mapping`` subclass, so an
+    ``isinstance(..., Mapping)`` test is ``False`` and everything behind it is
+    skipped without a word.
+
+    Three deviations from the core shape, all deliberate and none of them a
+    claim about core. ``__setitem__`` is a stub necessity: the real registry
+    writes through its private container, while ``conftest.py``'s double stores
+    into ``devices`` directly. ``__contains__`` here is plain key membership,
+    where core does value membership for a ``DeviceEntry`` and only treats a
+    ``str`` as the deprecated key lookup. And nothing here *reports* the
+    deprecated use, because the double's own registry reaches the mapping
+    surface for every ``async_get``.
+
+    That last one bounds what this test proves: it discriminates the
+    ``isinstance(..., Mapping)`` guard, not the mapping surface. A regression
+    that went back to ``dev_reg.devices.values()`` would still pass here; the
+    static ratchet in ``tests/test_guard_device_registry_kwargs.py`` is what
+    catches that shape.
+    """
+
+    def __init__(self, devices: dict[str, Any]) -> None:
+        self._devices = devices
+
+    def __iter__(self) -> Iterator[Any]:
+        return iter(self._devices.values())
+
+    def __len__(self) -> int:
+        return len(self._devices)
+
+    def __getitem__(self, key: str) -> Any:
+        return self._devices[key]
+
+    def __setitem__(self, key: str, value: Any) -> None:
+        self._devices[key] = value
+
+    def __contains__(self, obj: object) -> bool:
+        return obj in self._devices
+
+    def __getattr__(self, name: str) -> Any:
+        if name.startswith("_"):
+            raise AttributeError(name)
+        return getattr(self._devices, name)
+
+
+def test_hub_name_collision_sees_siblings_when_devices_is_a_view(
+    stub_registry: Any, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A hub sibling's name is collected on Core 2026.9 as well (``N-22``).
+
+    The collision check walks the registry to learn which names the hub's own
+    children already carry. That walk used to sit behind
+    ``isinstance(dev_reg.devices, Mapping)``, which holds on the declared
+    minimum ``2025.9.1`` and is ``False`` from ``2026.9`` on, where ``devices``
+    is a view. The result was not an error but a silent loss of function: the
+    sibling was never seen, so the poll created a *second* registry device
+    carrying the same label instead of reusing the one already there.
+
+    Which of the two outcomes the walk produces depends on the sibling: one that
+    belongs to our entry and is not the hub itself is reused (measured here),
+    while a stranger's device only forces a suffix. Reuse is the stronger
+    assertion of the two, because "nothing was created" cannot be reached by
+    accident.
+
+    The hub carries a *different* name here on purpose. ``hub_device_names`` is
+    seeded from the hub itself as well, so a test that let the hub share the
+    label would pass through that seeding and never touch the walk at all --
+    which is what ``test_hub_name_collision_does_not_reuse_hub_device`` does: it
+    creates the hub alone, names it "Pixel" and never gets near the walk. The
+    tests that do walk it -- with a "Hub Anchor" hub and a sibling beside it --
+    are the three reuse cases above, and every one of them sees the mapping
+    shape only.
+    """
+
+    coordinator = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
+    entry = _build_entry_with_subentries("entry-hub-view")
+    registry = stub_registry
+    _prepare_coordinator_for_registry(coordinator, entry)
+
+    hub = registry.async_get_or_create(  # type: ignore[attr-defined]
+        config_entry_id=entry.entry_id,
+        identifiers={service_device_identifier(entry.entry_id)},
+        manufacturer=SERVICE_DEVICE_MANUFACTURER,
+        model=SERVICE_DEVICE_MODEL,
+        name="Hub Anchor",
+        config_subentry_id=entry.service_subentry_id,
+    )
+    sibling = registry.async_get_or_create(  # type: ignore[attr-defined]
+        config_entry_id=entry.entry_id,
+        identifiers={(DOMAIN, f"{entry.entry_id}:sibling")},
+        manufacturer=SERVICE_DEVICE_MANUFACTURER,
+        model=SERVICE_DEVICE_MODEL,
+        name="Pixel",
+        via_device_id=hub.id,
+        config_subentry_id=entry.tracker_subentry_id,
+    )
+
+    # Swap in the newer core's shape *after* the fixtures are in place: the
+    # double stores into ``devices`` by subscription, which the view forwards.
+    registry.devices = _DeprecatedDevicesView(registry.devices)
+
+    baseline_created = len(registry.created)
+    devices = [{"id": "view-collide", "name": "Pixel"}]
+    coordinator.data = devices
+
+    caplog.set_level("DEBUG")
+    created = coordinator._ensure_registry_for_devices(devices=devices, ignored=set())
+
+    assert created == 1
+    assert len(registry.created) == baseline_created, (
+        "the walk did not see the hub sibling, so a duplicate device was created"
+    )
+    assert any(
+        f"Reusing hub device 'Pixel' (id={sibling.id})" in record.message
+        for record in caplog.records
     )
 
 

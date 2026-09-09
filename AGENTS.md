@@ -311,6 +311,13 @@ Always keep any `from __future__` imports immediately after the module docstring
     which seeds a per-entry map token for devices of every entry);
     (c) a pass that is **entry-agnostic and owner-blind** does neither and says so
     (`_async_normalize_device_names`, the cross-entry collision check).
+    `RegistryOperations._ensure_registry_for_devices` belongs to (b) and shows why
+    the two are worth telling apart: it *collects* the names the hub's children
+    carry without any filter, because a sibling hanging off our hub may belong to
+    any entry and filtering there would miss exactly the names to avoid -- but it
+    then reads ownership per device in `_resolve_hub_name`, which is what decides
+    between reusing a device of ours and appending a suffix for a stranger's.
+    Owner-blind while gathering is not owner-blind while deciding.
     Adding an ownership filter to (b) or (c) silently stops the pass doing its job
     for every other entry, which is why the choice is written down rather than
     left to the next reader. **Superseded instruction, do not restore:**

@@ -779,25 +779,24 @@ class SubentryOperations(_MixinBase):
         # lists are read below and used by the unassigned-device merge at the end.
         stored_assigned_ids: set[str] = set()
         if device_registry is not None:
+            # Ask for *this entry's* devices instead of reading the whole
+            # registry. The index below maps our canonical ids onto registry
+            # ids, so a foreign device has no business in it, and the legacy
+            # identifier branch of ``parse_device_identifier`` cannot tell the
+            # two apart on its own: a bare ``(DOMAIN, device_id)`` tuple from
+            # another entry parses just as cleanly as ours. Asking per entry
+            # also drops two reads that no longer hold -- the ``devices``
+            # mapping, deprecated from Core 2026.9 and a view rather than a
+            # mapping there, and the private ``_entries`` attribute, which no
+            # supported core exposes.
             candidate_entries: list[Any] = []
-            raw_devices = getattr(device_registry, "devices", None)
-            if isinstance(raw_devices, Mapping):
-                candidate_entries.extend(raw_devices.values())
-            else:
-                registry_entries = getattr(device_registry, "_entries", None)
-                if isinstance(registry_entries, Mapping):
-                    candidate_entries.extend(registry_entries.values())
-
-            if not candidate_entries:
-                entry_id = self._entry_id()
-                fetch_entries = getattr(dr, "async_entries_for_config_entry", None)
-                if callable(fetch_entries) and entry_id:
-                    try:
-                        candidate_entries.extend(
-                            fetch_entries(device_registry, entry_id)
-                        )
-                    except Exception:  # defensive: stub mismatches / legacy HA versions
-                        candidate_entries = []
+            entry_id = self._entry_id()
+            fetch_entries = getattr(dr, "async_entries_for_config_entry", None)
+            if callable(fetch_entries) and entry_id:
+                try:
+                    candidate_entries.extend(fetch_entries(device_registry, entry_id))
+                except Exception:  # defensive: stub mismatches / legacy HA versions
+                    candidate_entries = []
 
             for device_entry in candidate_entries:
                 try:
