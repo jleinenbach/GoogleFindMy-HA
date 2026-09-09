@@ -52,6 +52,7 @@ __all__ = [
     "has_hub_link",
     "has_subentry_link",
     "is_hub_device_check",
+    "iter_all_devices",
     "match_entity_by_device_id",
     "needs_legacy_kwarg_retry",
     "normalize_device_name",
@@ -575,8 +576,8 @@ def execute_ownership_plan(
 ) -> Any:
     """Run the operations :func:`plan_device_ownership` produced.
 
-    This is the executor for call sites that have no coordinator instance, such
-    as the services module and the config flow. The coordinator itself keeps its
+    This is the executor for call sites that have no coordinator instance: the
+    services module, the config flow and the integration's ``__init__.py``. The coordinator itself keeps its
     own richer path (``RegistryOperations._apply_device_ownership``), which adds
     the unmigrated-keyword brake and the ``config_subentry_id`` compatibility
     shim that only its call sites need. Both paths take their keywords from the
@@ -730,7 +731,21 @@ def resolve_device_by_identifiers(
         # upward takes the keyword, so the only callers that can trigger it are
         # registry doubles, where a silent ``None`` is the worse answer: it makes
         # a broken double look like an empty registry.
-        return legacy(identifiers=set(candidates))
+        device = legacy(identifiers=set(candidates))
+        # The entry scoping has to be applied here too, and it was not until
+        # AP-16.  ``async_get_device`` searches by identifier alone, so on the
+        # declared minimum core it can hand back a device of a *different*
+        # GoogleFindMy entry that still carries the legacy unscoped identifier --
+        # exactly the cross-entry hit the docstring above says this function
+        # removes.  Applying it in the modern branch only made the promise true
+        # on 2026.8+ and false on 2025.9.1, which is where the legacy branch is
+        # the only one that runs.  A device this entry does not own is not an
+        # answer, so it is a miss, not a hit to be filtered by the caller: every
+        # call site would otherwise have to rebuild the scoping by hand, which
+        # the contract forbids (``agents/runtime_patterns/AGENTS.md``).
+        if device is None or not device_belongs_to_entry(device, entry_id):
+            return None
+        return device
     return None
 
 
@@ -828,6 +843,51 @@ def device_owning_entry_ids(device: Any) -> tuple[str, ...]:
             candidate for candidate in legacy_owners if isinstance(candidate, str)
         )
     return ()
+
+
+def iter_all_devices(dev_reg: Any) -> tuple[Any, ...]:
+    """Return every device entry in ``dev_reg``, whole registry, no filter.
+
+    Use this only where the caller genuinely needs *all* devices: a collision
+    check across entries, or a one-time normalisation pass. Whenever the answer
+    is "the devices of this config entry", call
+    ``dr.async_entries_for_config_entry(dev_reg, entry_id)`` instead; it is not
+    deprecated on any supported core and says what it means.
+
+    Why this wrapper exists rather than a bare ``dev_reg.devices.values()`` at
+    the call site: from Core 2026.9 the ``devices`` attribute is a view whose
+    *mapping* surface is deprecated (``breaks_in_ha_version="2027.9.0"``).
+    ``__getitem__``, ``values()``, ``get()`` and ``keys()`` each report; plain
+    iteration via ``__iter__`` does not, and it yields the ``DeviceEntry``
+    objects directly (checked at tag ``2026.9.0``, lines 1550-1553 and 1560).
+
+    That makes ``list(dev_reg.devices)`` right on the newer core and *wrong* on
+    the declared minimum ``2025.9.1``, where ``devices`` is an ordinary mapping
+    whose iteration yields device **ids**.  One expression, two meanings: that
+    asymmetry is why this lives in one place instead of at every call site, and
+    why the ``Mapping`` branch below is not defensive padding but the correct
+    answer on the minimum core.
+
+    Args:
+        dev_reg: The device registry, or any object with the same surface.
+
+    Returns:
+        The device entries, in the registry's own order. Empty when the registry
+        exposes no ``devices`` attribute at all.
+    """
+    devices = getattr(dev_reg, "devices", None)
+    if devices is None:
+        return ()
+
+    # ``2025.9.1``: a plain mapping, whose ``__iter__`` yields keys.
+    # ``2026.9``: a view, whose ``__iter__`` yields the entries themselves.
+    if isinstance(devices, Mapping):
+        return tuple(devices.values())
+
+    try:
+        return tuple(devices)
+    except TypeError:
+        return ()
 
 
 def read_device_ownership(device: Any) -> DeviceOwnership | None:

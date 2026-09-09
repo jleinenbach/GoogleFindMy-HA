@@ -3464,40 +3464,98 @@ async def _async_purge_unloaded_subentry_registrations(
         ent_reg.async_remove(entity.entity_id)
         removed_entities += 1
 
+    # Local imports: this module cannot import the coordinator package at module
+    # level.  ``coordinator/__init__.py`` pulls in ``..api``, whose import chain
+    # comes back to this partially initialised module (measured: ImportError on
+    # ``get_proto_decoder`` from ``decrypt_locations.py``).  That is the same
+    # circularity ``_ensure_runtime_imports`` exists for.  Importing the helper
+    # module inside the functions that use it keeps the names visible to
+    # ``mypy`` and ``ruff``, which a ``getattr`` indirection would not.
+    from .coordinator.helpers.registry import (
+        OwnershipIntent,
+        detect_device_registry_capabilities,
+        execute_ownership_plan,
+        extract_subentry_links,
+        plan_device_ownership,
+        read_device_ownership,
+    )
+
+    update_call = getattr(dev_reg, "async_update_device", None)
+    caps = (
+        detect_device_registry_capabilities(update_call)
+        if callable(update_call)
+        else None
+    )
+
     devices_for_entry = dr.async_entries_for_config_entry(dev_reg, parent_entry_id)
     for device in devices_for_entry:
-        links_raw = getattr(device, "config_entries_subentries", None)
-        linked_subentries: set[str] = set()
-        if isinstance(links_raw, Mapping):
-            linked_subentries = {
-                link
-                for link in links_raw.get(parent_entry_id, set())
-                if isinstance(link, str)
-            }
-        if config_subentry_id not in linked_subentries:
+        # ``extract_subentry_links`` reads ``config_entries_subentries`` and,
+        # when that is not a mapping, falls back to ``config_subentry_id``.  The
+        # hand-written predicate this replaced had no such fallback and skipped
+        # the device instead.  No supported core reaches the fallback (all three
+        # expose the mapping, as a field on 2025.9.1 and as a shim property from
+        # 2026.8), but a registry double can, and there it now selects a device
+        # the old shape passed over.
+        if config_subentry_id not in extract_subentry_links(device, parent_entry_id):
+            continue
+        if caps is None:  # pragma: no cover - defensive guard
+            _LOGGER.debug(
+                "[%s] Purge: device registry has no async_update_device; skipping %s",
+                parent_entry_id,
+                device.id,
+            )
             continue
 
-        dev_reg.async_update_device(
-            device_id=device.id,
-            remove_config_entry_id=parent_entry_id,
-            remove_config_subentry_id=config_subentry_id,
-        )
-        refreshed = dev_reg.async_get(device.id)
+        # The intent is DETACH on one named subentry link, never the hub link.
+        # The plan the planner derives from it differs per core, and that is the
+        # point of asking it rather than writing keywords here:
+        #
+        # * From Core 2026.8 a device has one owner, so giving it up *is* the
+        #   deletion. The planner emits ``async_remove_device`` directly, and
+        #   only after it has read the current ownership; it raises rather than
+        #   guess (``plan_device_ownership``, the DETACH branch).
+        # * Below that core it emits ``async_update_device`` with the removal
+        #   pair, and Core deletes the device only when this was its last owning
+        #   entry (tag ``2025.9.1``, lines 1174-1177). That is why no
+        #   ``async_remove_device`` is written here for the legacy path: a direct
+        #   removal would take a device another config entry still owns, and on
+        #   the declared minimum core that case is real.
+        #
+        # One deliberate divergence follows from the 2026.8 form: the direct
+        # removal bypasses Core's pending-move branch (tag ``2026.8.0``, lines
+        # 2208-2231), which would *transfer* a device whose move another call
+        # armed with ``add_config_entry_id`` instead of deleting it. This
+        # integration arms no such move on that core (the planner uses the
+        # ``new_*`` pair there), and Core cancels a move armed by a *recognised*
+        # foreign integration.  Its cancellation is not unconditional: a move
+        # whose origin is undetermined survives (tag ``2026.8.0``, lines
+        # 2222-2229, "Origins from core/tests are undetermined (None) and never
+        # cancel").  So the branch is unreachable from any move this integration
+        # or a recognisable foreign one armed, which is narrower than "always".
+        try:
+            plan = plan_device_ownership(
+                OwnershipIntent.DETACH,
+                caps=caps,
+                device_id=device.id,
+                entry_id=parent_entry_id,
+                detach_subentry_id=config_subentry_id,
+                current=read_device_ownership(device),
+            )
+        except ValueError as err:
+            # The planner refuses to guess at an ownership it cannot read.
+            _LOGGER.debug(
+                "[%s] Purge: cannot detach subentry %s from %s: %s",
+                parent_entry_id,
+                config_subentry_id,
+                device.id,
+                err,
+            )
+            continue
 
-        refreshed_links_raw = getattr(refreshed, "config_entries_subentries", None)
-        refreshed_links: set[str] = set()
-        if isinstance(refreshed_links_raw, Mapping):
-            refreshed_links = {
-                link
-                for link in refreshed_links_raw.get(parent_entry_id, set())
-                if isinstance(link, str)
-            }
-        if (
-            refreshed is not None
-            and not refreshed.config_entries
-            and not refreshed_links
-        ):
-            dev_reg.async_remove_device(device.id)
+        if not plan:
+            continue
+
+        execute_ownership_plan(dev_reg, plan)
         removed_devices += 1
 
     if removed_entities or removed_devices:
@@ -4027,9 +4085,20 @@ def _normalize_device_identifier(device: dr.DeviceEntry | Any, ident: str) -> st
 
     parts = ident.split(":")
 
-    config_entries: Collection[str] | None = getattr(device, "config_entries", None)
-    if config_entries:
-        while len(parts) > 1 and parts[0] in config_entries:
+    # Local import, see ``_async_purge_unloaded_subentry_registrations``.
+    from .coordinator.helpers.registry import device_owning_entry_ids
+
+    # Measured, and worth knowing before touching this: the strip below cannot
+    # change the return value.  It only ever removes leading segments and stops
+    # at ``len(parts) > 1``, so ``parts[-1]`` is invariant under it -- checked
+    # exhaustively over 6216 identifier/owner combinations, zero differences.
+    # It is kept, not removed, because dropping it would leave ``device``
+    # unused and force a signature change at every call site; that is a separate
+    # change, not a device-registry migration.  Do not build new behaviour on
+    # it, and do not expect a mutant of it to fail a test.
+    owning_entries = device_owning_entry_ids(device)
+    if owning_entries:
+        while len(parts) > 1 and parts[0] in owning_entries:
             parts = parts[1:]
 
     # Prefer the final segment so trackers with entry/subentry prefixes resolve
@@ -4511,11 +4580,10 @@ async def _async_relink_entities_for_entry(  # noqa: PLR0913
     The caller supplies the entity ``domain`` filter and a resolver that maps an
     entity registry entry to a target device (and optional expected subentry
     identifier). The helper guards registry acquisition across a range of Home
-    Assistant versions, normalizes the device lookup path to tolerate legacy
-    ``async_get_device`` signatures, and records a short summary once the pass
-    finishes. Callers should keep resolver logic side effect free; the helper
-    itself updates registry links when the resolver provides a valid target
-    device.
+    Assistant versions, resolves devices through the shared entry-scoped
+    resolver, and records a short summary once the pass finishes. Callers should
+    keep resolver logic side effect free; the helper itself updates registry
+    links when the resolver provides a valid target device.
     """
 
     entry_id = getattr(entry, "entry_id", "") or ""
@@ -4534,9 +4602,21 @@ async def _async_relink_entities_for_entry(  # noqa: PLR0913
         )
         return
 
+    # Local import, see ``_async_purge_unloaded_subentry_registrations``.
+    from .coordinator.helpers.registry import iter_all_devices
+
     if not getattr(entity_registry, "entities", None):
         return
-    if not getattr(device_registry, "devices", None):
+    # Readiness probe only: an empty registry has nothing to relink.  Asked
+    # through the shared helper because no call site outside the translator may
+    # touch ``device_registry.devices`` at all -- neither as a mapping nor via
+    # ``getattr`` -- and the static ratchet enforces that
+    # (``tests/test_guard_device_registry_kwargs.py``).  Note that ``__len__``
+    # itself does *not* report (tag ``2026.9.0``, lines 1553-1555), so the cost
+    # here is materialising a tuple of pointers where a length would do; that is
+    # the price of having exactly one place that knows what ``devices`` means on
+    # which core.
+    if not iter_all_devices(device_registry):
         return
 
     registry_entries = _iter_config_entry_entities(entity_registry, entry_id)
@@ -4544,42 +4624,28 @@ async def _async_relink_entities_for_entry(  # noqa: PLR0913
     def lookup_device(
         identifier: tuple[str, str], *, allow_service: bool = True
     ) -> dr.DeviceEntry | Any | None:
-        device: dr.DeviceEntry | Any | None
+        """Resolve one identifier to a device owned by this config entry.
 
-        get_device = getattr(device_registry, "async_get_device", None)
-        if callable(get_device):
-            try:
-                device = get_device(identifiers={identifier})
-            except TypeError:
-                try:
-                    device = cast(
-                        Callable[[Collection[tuple[str, str]]], Any], get_device
-                    )({identifier})
-                except TypeError:
-                    device = None
-        else:
-            device = None
+        The lookup itself lives in the shared resolver; this closure only adds
+        the service-device filter its callers ask for.  The entry scoping that
+        used to be a post-filter here (``entry_id not in device.config_entries``)
+        is now part of the lookup, and that is a narrowing in one direction only:
+        the old shape searched by identifier alone, took the *first* match and
+        then threw it away when it belonged to another entry -- so a second
+        device carrying the same identifier under *our* entry was never reached.
+        The resolver asks the registry for our entry's device directly.
 
+        See ``custom_components/googlefindmy/agents/runtime_patterns/AGENTS.md``
+        and ``docs/AI_DEPRECATIONS_GUIDE.md``, section VI: no call site may name
+        ``async_get_device``, and none may build the entry scoping by hand.
+        """
+        # Local import, see ``_async_purge_unloaded_subentry_registrations``.
+        from .coordinator.helpers.registry import resolve_device_by_identifiers
+
+        device = resolve_device_by_identifiers(
+            device_registry, (identifier,), entry_id=entry_id
+        )
         if device is None:
-            devices_iterable = getattr(device_registry, "devices", {})
-            if isinstance(devices_iterable, Mapping):
-                candidates = cast(Iterable[Any], devices_iterable.values())
-            else:
-                candidates = cast(Iterable[Any], devices_iterable) or ()
-
-            for candidate in candidates:
-                identifiers = getattr(candidate, "identifiers", None)
-                if not isinstance(identifiers, Collection):
-                    continue
-                if identifier in identifiers:
-                    device = candidate
-                    break
-
-        if device is None:
-            return None
-
-        config_entries = cast(Collection[str], getattr(device, "config_entries", ()))
-        if entry_id not in config_entries:
             return None
         if not allow_service and _device_is_service_device(device, entry_id):
             return None
@@ -4703,9 +4769,10 @@ async def _async_relink_button_devices(hass: HomeAssistant, entry: ConfigEntry) 
         lookup_device: _DeviceLookup,
         current_device: dr.DeviceEntry | Any | None,
     ) -> tuple[dr.DeviceEntry | Any, str | None] | None:
-        if current_device and entry.entry_id in getattr(
-            current_device, "config_entries", ()
-        ):
+        # Local import, see ``_async_purge_unloaded_subentry_registrations``.
+        from .coordinator.helpers.registry import device_belongs_to_entry
+
+        if current_device and device_belongs_to_entry(current_device, entry.entry_id):
             if not _device_is_service_device(current_device, entry.entry_id):
                 return None
 
@@ -4904,6 +4971,11 @@ async def _async_relink_subentry_entities(
         lookup_device: _DeviceLookup,
     ) -> dr.DeviceEntry | Any | None:
         """Return the service device assigned to the service subentry."""
+        # Local import, see ``_async_purge_unloaded_subentry_registrations``.
+        from .coordinator.helpers.registry import (
+            device_belongs_to_entry,
+            iter_all_devices,
+        )
 
         for identifier in service_identifiers:
             device = lookup_device(identifier)
@@ -4920,17 +4992,11 @@ async def _async_relink_subentry_entities(
                 continue
             return device
 
-        devices_iterable = getattr(service_device_registry, "devices", None)
-        if isinstance(devices_iterable, Mapping):
-            candidates = cast(Iterable[Any], devices_iterable.values())
-        else:
-            candidates = cast(Iterable[Any], devices_iterable) or ()
-
-        for device in candidates:
-            config_entries = cast(
-                Collection[str], getattr(device, "config_entries", ())
-            )
-            if entry_id not in config_entries:
+        # Fallback scan when the identifier lookup above found nothing.  Whole
+        # registry, then filtered to this entry, because a service device may
+        # still carry a legacy identifier the candidates do not name.
+        for device in iter_all_devices(service_device_registry):
+            if not device_belongs_to_entry(device, entry_id):
                 continue
             device_subentry = getattr(device, "config_subentry_id", None)
             if (
@@ -5826,9 +5892,7 @@ def _migrate_legacy_unique_ids(
             _LOGGER.debug("Unique ID migration failed for %s: %s", ent.entity_id, err)
 
     try:
-        for device in list(dev_reg.devices.values()):
-            if entry.entry_id not in device.config_entries:
-                continue
+        for device in dr.async_entries_for_config_entry(dev_reg, entry.entry_id):
             if (DOMAIN, "integration") in device.identifiers:
                 new_identifiers = set(device.identifiers)
                 new_identifiers.remove((DOMAIN, "integration"))
@@ -6169,15 +6233,15 @@ async def _async_migrate_device_identifiers_to_entry_scope(
         - Idempotent: already namespaced identifiers are ignored.
         - Collision-aware: if a target identifier exists, it will skip and log a warning.
     """
+    # Local import, see ``_async_purge_unloaded_subentry_registrations``.
+    from .coordinator.helpers.registry import iter_all_devices
+
     dev_reg = dr.async_get(hass)
     updated = 0
     skipped = 0
     collisions = 0
 
-    for device in list(dev_reg.devices.values()):
-        if entry.entry_id not in device.config_entries:
-            continue
-
+    for device in dr.async_entries_for_config_entry(dev_reg, entry.entry_id):
         # Keep service/integration device untouched
         if (DOMAIN, "integration") in device.identifiers or any(
             domain == DOMAIN and str(ident).startswith("integration_")
@@ -6202,7 +6266,10 @@ async def _async_migrate_device_identifiers_to_entry_scope(
 
             # Check for collision: if any other device already uses the target ident, skip
             conflict = False
-            for dev2 in dev_reg.devices.values():
+            # Re-read on every candidate on purpose: the loop above rewrites
+            # identifiers as it goes, and a snapshot taken once would not see
+            # the target this pass just created.
+            for dev2 in iter_all_devices(dev_reg):
                 if dev2.id == device.id:
                     continue
                 if target in dev2.identifiers:
@@ -7270,6 +7337,9 @@ def _self_heal_device_registry(hass: HomeAssistant, entry: MyConfigEntry) -> Non
         "[Entry=%s] Starting self-healing cleanup of device registry...",
         entry.entry_id,
     )
+    # Local import, see ``_async_purge_unloaded_subentry_registrations``.
+    from .coordinator.helpers.registry import device_belongs_to_entry
+
     dev_reg = dr.async_get(hass)
     entry_id = entry.entry_id
     correct_service_identifier = service_device_identifier(entry_id)
@@ -7292,8 +7362,14 @@ def _self_heal_device_registry(hass: HomeAssistant, entry: MyConfigEntry) -> Non
 
     healed_devices = 0
     for device in registry_devices:
-        config_entries: Collection[str] = getattr(device, "config_entries", ())
-        if entry_id not in config_entries:
+        # Defensive second check.  ``registry_devices`` comes from
+        # ``async_entries_for_config_entry``, which filters by entry, so against
+        # a faithful registry this is always true and no mutant of it fails a
+        # test.  It is not unreachable, though: the helper is resolved with
+        # ``getattr`` above, and a double that answers unfiltered makes this
+        # false.  Do not delete it as dead code on the strength of a green
+        # mutant run.
+        if not device_belongs_to_entry(device, entry_id):
             continue
 
         identifiers: Collection[tuple[str, str]] = getattr(device, "identifiers", ())
@@ -9026,9 +9102,15 @@ async def _async_normalize_device_names(hass: HomeAssistant) -> None:
     """One-time normalization: strip legacy 'Find My - ' prefix from device names."""
 
     try:
+        # Local import, see ``_async_purge_unloaded_subentry_registrations``.
+        from .coordinator.helpers.registry import iter_all_devices
+
         dev_reg = dr.async_get(hass)
         updated = 0
-        for device in list(dev_reg.devices.values()):
+        # Whole registry on purpose: this one-time pass strips a legacy name
+        # prefix from every GoogleFindMy device, including devices of entries
+        # other than the one that happens to trigger the pass.
+        for device in iter_all_devices(dev_reg):
             try:
                 if not any(
                     len(ident) == 2 and ident[0] == DOMAIN
@@ -9144,9 +9226,18 @@ async def _async_refresh_device_urls(
         entry.entry_id: entry for entry in hass.config_entries.async_entries(DOMAIN)
     }
 
+    # Local import, see ``_async_purge_unloaded_subentry_registrations``.
+    from .coordinator.helpers.registry import (
+        device_owning_entry_ids,
+        iter_all_devices,
+    )
+
     dev_reg = dr.async_get(hass)
     updated_count = 0
-    for device in dev_reg.devices.values():
+    # Whole registry on purpose: this pass refreshes the map URL of every
+    # GoogleFindMy device across all entries of the domain, and picks the owning
+    # entry per device below.
+    for device in iter_all_devices(dev_reg):
         try:
             if getattr(device, "entry_type", None) == dr.DeviceEntryType.SERVICE:
                 continue
@@ -9163,8 +9254,21 @@ async def _async_refresh_device_urls(
             ):
                 continue
 
+            # Picking the first match, and ``device_owning_entry_ids`` asks its
+            # callers to say why that is allowed.  Here it is: from Core 2026.8
+            # the tuple holds exactly one id.  Below that core it can hold
+            # several, and a device shared between two GoogleFindMy entries then
+            # gets whichever the set iteration yields first -- unchanged from
+            # before this migration, and a pre-existing wart rather than a new
+            # one.  It decides only which entry seeds the map token, and both
+            # entries can serve the device.
             entry_id = next(
-                (cid for cid in device.config_entries if cid in domain_entries), None
+                (
+                    cid
+                    for cid in device_owning_entry_ids(device)
+                    if cid in domain_entries
+                ),
+                None,
             )
             if not entry_id:
                 continue
@@ -9263,7 +9367,10 @@ async def async_remove_config_entry_device(
     - Never allow removing the integration's own "service" device (ident startswith 'integration').
     """
     _ensure_runtime_imports()
-    if entry.entry_id not in device_entry.config_entries:
+    # Local import, see ``_async_purge_unloaded_subentry_registrations``.
+    from .coordinator.helpers.registry import device_belongs_to_entry
+
+    if not device_belongs_to_entry(device_entry, entry.entry_id):
         return False
 
     raw_ident: str | None = None

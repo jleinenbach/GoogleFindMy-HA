@@ -595,6 +595,31 @@ device = resolve_device_by_identifiers(
     ((DOMAIN, f"{entry.entry_id}:{canonic_id}"), (DOMAIN, canonic_id)),
     entry_id=entry.entry_id,
 )
+
+# Walking devices. Almost always the question is "the devices of this entry",
+# and this helper answers it on every supported core without deprecation:
+for device in dr.async_entries_for_config_entry(dev_reg, entry.entry_id):
+    ...
+
+# Only where the question really is "every device in the registry" -- a
+# collision check across entries, a one-time normalisation pass -- use the
+# integration-level wrapper, then ask ownership per device:
+from custom_components.googlefindmy.coordinator.helpers.registry import (
+    device_belongs_to_entry,
+    iter_all_devices,
+)
+
+for device in iter_all_devices(dev_reg):
+    if not device_belongs_to_entry(device, entry.entry_id):
+        continue
+
+# WRONG on both counts: `.values()` is the deprecated mapping surface
+# (breaks_in_ha_version "2027.9.0"), and `list(dev_reg.devices)` -- the spelling
+# that silences it -- yields DeviceEntry objects on 2026.9 but device *ids* on
+# the declared minimum 2025.9.1. One expression, two meanings; that asymmetry is
+# what the wrapper exists for.
+for device in dev_reg.devices.values():
+    ...
 ```
 
 Two constraints on the new keywords:
@@ -627,8 +652,9 @@ site has a coordinator. The coordinator executes through
 `RegistryOperations._apply_device_ownership` in
 `custom_components/googlefindmy/coordinator/registry.py`, which adds the
 unmigrated-keyword brake and the `config_subentry_id` compatibility shim its own
-call sites need. Everywhere else -- `services.py` and `config_flow.py` --
-the executor is `execute_ownership_plan` in the helpers module. Both take their
+call sites need. Everywhere else -- `services.py`, `config_flow.py` and the
+integration's `__init__.py` -- the executor is `execute_ownership_plan` in the
+helpers module. Both take their
 keywords from the same planner and neither names an ownership keyword itself. A
 static guard,
 `tests/test_guard_device_registry_kwargs.py`, fails the build if the superseded

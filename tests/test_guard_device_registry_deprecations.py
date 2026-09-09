@@ -14,8 +14,8 @@ The set mirrors what production reaches on a core that reports, which is
 * three for pattern C (detach), all three kept as reporter evidence since
   AP-13; the armed and the unarmed form take different Core branches and are
   therefore listed separately,
-* six for the places that reach ``async_get_device``, of which one is a
-  reachable call site today, and
+* six for the places that reach ``async_get_device``, none of which is a
+  reachable call site any more since AP-16, and
 * one for the deprecated ``devices`` mapping.
 
 The counts of *reachable* sites shrink with every work package while the count
@@ -26,14 +26,24 @@ The production sites are named by enclosing function rather than by line
 number: line numbers drift with every unrelated edit, and a stale reference is
 worse than none.
 
-Ten of the twelve carry no production site any more: AP-12 moved every
+Eleven of the twelve carry no production site any more: AP-12 moved every
 ownership and lookup call in ``coordinator/registry.py`` onto intents, AP-13 did
-the same for ``services.py`` and AP-15 for ``config_flow.py``. Their operations
+the same for ``services.py``, AP-15 for ``config_flow.py`` and AP-16 for
+``__init__.py``. The twelfth, the ``devices`` mapping, still has three sites
+(``coordinator/registry.py``, ``coordinator/subentry.py``, ``diagnostics.py``). Their operations
 stay, and that is deliberate. They do not prove that the fork still
 makes the call; they prove that *Core still reports it*, which is what keeps the
 canary and the dead-entry check honest and what will catch a regression that
-brings the old form back. They are marked ``migrated in AP-12``, ``migrated in AP-13`` or ``migrated in
-AP-15`` in place of a site.
+brings the old form back. They are marked ``migrated in AP-12``, ``migrated in AP-13``, ``migrated in
+AP-15`` or ``migrated in AP-16`` in place of a site.
+
+**A caveat about what the dead-entry check can and cannot see.** It asks whether
+one of the twelve *test operations* still triggers the report, not whether
+production still makes the call. A migrated entry therefore stays green by
+construction, which is the point -- but it also means the ``reason`` text is the
+only thing telling a reader where the fork stands, and nothing checks it. Read
+the ratchet in ``tests/test_guard_device_registry_kwargs.py`` for the current
+number of production sites; it is measured, this text is written.
 
 Two structural safeguards keep a green run from being vacuous:
 
@@ -95,9 +105,13 @@ ACCEPTED_DEPRECATIONS: tuple[AcceptedDeprecation, ...] = (
         key="ownership_kwargs",
         needle="add_config_entry_id",
         reason=(
-            "Production still speaks the pre-2026.8 kwargs outside "
-            "coordinator/registry.py, which AP-12 moved onto intents; AP-10 and "
-            "AP-11 only added the planner and removed no call site."
+            "No production site names these kwargs any more (measured: the "
+            "ratchet in tests/test_guard_device_registry_kwargs.py holds zero "
+            "kwargs findings). What keeps this entry alive is the gate's own "
+            "operation _pattern_a, not production: the gate only runs from core "
+            "2026.9 on, and there the planner emits the new_* pair, so the "
+            "legacy translator never speaks these names under a reporter. See "
+            "the module docstring on what the dead-entry check can see."
         ),
         resolved_by="AP-17",
     ),
@@ -105,21 +119,23 @@ ACCEPTED_DEPRECATIONS: tuple[AcceptedDeprecation, ...] = (
         key="async_get_device",
         needle="`device_registry.async_get_device`",
         reason=(
-            "One site still calls the deprecated lookup, in __init__.py. The "
+            "No production site calls the deprecated lookup any more. The "
             "shared resolver landed in AP-14 with the identity.py site, AP-12 "
             "moved the two coordinator/registry.py sites onto it, AP-13 the two "
-            "in services.py and AP-15 the one in config_flow.py; the last one "
-            "follows in AP-16. The resolver's own legacy branch is not among "
-            "them: it only runs below core 2026.8, which does not report at all."
+            "in services.py, AP-15 the one in config_flow.py and AP-16 the last "
+            "one in __init__.py. The resolver's own legacy branch is not a site "
+            "either: it only runs below core 2026.8, which does not report at "
+            "all. Kept as reporter evidence, see the module docstring."
         ),
-        resolved_by="AP-16",
+        resolved_by="AP-17",
     ),
     AcceptedDeprecation(
         key="devices_mapping",
         needle="`device_registry.devices`",
         reason=(
-            "Six `devices.values()` sites live in __init__.py and diagnostics.py "
-            "and are migrated last."
+            "Three `devices` sites remain, in coordinator/registry.py, "
+            "coordinator/subentry.py and diagnostics.py; AP-16 removed the ones "
+            "in __init__.py. They are migrated last."
         ),
         resolved_by="AP-17",
     ),
@@ -253,12 +269,13 @@ def _operations(hass: Any) -> list[tuple[str, str, Any]]:
         ),
         (
             "get_device_init_4549",
-            "__init__.py::_async_relink_entities_for_entry.lookup_device",
+            "migrated in AP-16; kept as reporter evidence",
             _get_device("i4549"),
         ),
         (
             "devices_mapping",
-            "__init__.py and diagnostics.py, six sites",
+            "coordinator/registry.py, coordinator/subentry.py and "
+            "diagnostics.py, three sites",
             _devices_mapping,
         ),
     ]

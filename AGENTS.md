@@ -295,6 +295,34 @@ Always keep any `from __future__` imports immediately after the module docstring
     stuck or orphaned devices. A static guard,
     `tests/test_guard_device_registry_kwargs.py`, fails the build if the
     superseded keywords reappear outside the legacy translator.
+  * **Walking devices: pick the question, not the shortest expression.** When the
+    answer is "the devices of this config entry" -- which it almost always is --
+    call `dr.async_entries_for_config_entry(dev_reg, entry_id)`. It is not
+    deprecated on any supported core and it says what it means. Only where the
+    answer is genuinely "every device in the registry" (a collision check across
+    entries, a one-time normalisation pass) use `iter_all_devices(dev_reg)` from
+    `custom_components/googlefindmy/coordinator/helpers/registry.py`. Then decide
+    per call site, and write the decision down. Three shapes occur, and the
+    examples are the ones in the tree:
+    (a) a pass that acts **for one entry** filters with `device_belongs_to_entry`
+    (the service-device fallback scan in `__init__.py`);
+    (b) a pass that is **entry-agnostic but needs the owner** reads it per device
+    with `device_owning_entry_ids` and does not filter (`_async_refresh_device_urls`,
+    which seeds a per-entry map token for devices of every entry);
+    (c) a pass that is **entry-agnostic and owner-blind** does neither and says so
+    (`_async_normalize_device_names`, the cross-entry collision check).
+    Adding an ownership filter to (b) or (c) silently stops the pass doing its job
+    for every other entry, which is why the choice is written down rather than
+    left to the next reader. **Superseded instruction, do not restore:**
+    `dev_reg.devices.values()` and any other mapping access on `devices`
+    (`[...]`, `.get(...)`, `.keys()`) are deprecated from Core 2026.9
+    (`breaks_in_ha_version="2027.9.0"`, tag `2026.9.0`, line 1560). Plain
+    iteration does not report -- but it means two different things: on `2026.9`
+    it yields `DeviceEntry` objects, on the declared minimum `2025.9.1` it yields
+    device **ids**. That is why the wrapper exists and why writing
+    `list(dev_reg.devices)` at a call site is wrong even though it silences the
+    deprecation. The same static guard fails the build if a `devices` access
+    reappears outside the translator.
   * When `manifest.json` sets `"integration_type": "hub"`, expose an `async_step_hub` handler and register a `"hub"` mapping in `ConfigFlow.async_get_supported_subentry_types()` that points at the service/hub subentry flow handler. This keeps Home Assistant's "Add hub" button functional without custom UI patches.
   * Iterating `entry.subentries.items()` yields `(subentry_id, subentry)` tuples. Always select the child object's global `entry_id` when calling lifecycle helpers or emitting debug logs so identifiers stay aligned across unload fallbacks and cleanup paths.
     * Lifecycle helper checklist:

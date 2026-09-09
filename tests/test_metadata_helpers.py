@@ -268,3 +268,118 @@ async def test_periodic_refresh_reports_again_after_the_situation_changes(
         and "Skipping configuration URL refresh" in record.getMessage()
     ]
     assert len(above_debug) == 1
+
+
+@pytest.mark.asyncio
+async def test_refresh_device_urls_uses_the_owning_entry_not_the_first_domain_entry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The map token is derived from the entry that owns the device.
+
+    Two config entries of this domain, and the device belongs to the second.
+    The map token is seeded per entry, so a pass that resolved the entry from
+    the domain list rather than from the device would mint a URL the map view
+    rejects.
+
+    **What this pins and what it does not.** The pre-AP-16 code read the same
+    ownership, through ``device.config_entries``; this test is therefore green
+    on the previous state too and is a regression guard, not proof of progress.
+    Its value is that it is the only test that fails when the ownership source
+    is swapped for the domain list -- the shape a whole-registry walk invites,
+    because the entry is no longer sitting in the loop header.
+    """
+
+    fake_now = 1_209_600
+    base_url = "https://example.test"
+
+    first_entry = make_config_entry(
+        entry_id="entry-first", options={OPT_MAP_VIEW_TOKEN_EXPIRATION: True}
+    )
+    owning_entry = make_config_entry(
+        entry_id="entry-owner", options={OPT_MAP_VIEW_TOKEN_EXPIRATION: True}
+    )
+
+    hass = SimpleNamespace()
+    hass.data = {"core.uuid": "ha-uuid"}
+    hass.config_entries = SimpleNamespace(
+        async_entries=lambda domain: [first_entry, owning_entry]
+    )
+
+    monkeypatch.setattr(integration, "get_url", lambda _hass, **kwargs: base_url)
+    monkeypatch.setattr(integration.time, "time", lambda: fake_now)
+
+    registry = dr.async_get(hass)
+    device = registry.async_get_or_create(
+        config_entry_id=owning_entry.entry_id,
+        identifiers={(DOMAIN, f"{owning_entry.entry_id}:device-alpha")},
+        manufacturer="Google",
+        model="Nest",
+        name="Alpha",
+    )
+
+    await integration._async_refresh_device_urls(hass)
+
+    expected_token = map_token_hex_digest(
+        map_token_secret_seed("ha-uuid", owning_entry.entry_id, True, now=fake_now)
+    )
+    wrong_token = map_token_hex_digest(
+        map_token_secret_seed("ha-uuid", first_entry.entry_id, True, now=fake_now)
+    )
+    assert expected_token != wrong_token
+    assert device.configuration_url is not None
+    assert device.configuration_url.endswith(f"token={expected_token}")
+
+
+def test_migrate_legacy_unique_ids_scopes_the_service_device_to_this_entry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The service-device identifier migration walks this entry's devices only.
+
+    Two entries each carry the unscoped legacy identifier ``(DOMAIN,
+    "integration")`` -- the exact state this migration exists to end. Each entry
+    must namespace its own device and leave the other one alone; a pass that
+    asked the registry for the wrong entry would either migrate nothing (silent
+    no-op) or rewrite a device it does not own.
+
+    **Which core this world belongs to.** From Core 2026.8 identifiers are
+    unique only *within* a config entry, so two devices sharing ``(DOMAIN,
+    "integration")`` across entries is a state that core produces. On the
+    declared minimum ``2025.9.1`` identifiers are registry-wide unique and
+    ``async_get_or_create`` would have returned the first device instead of
+    creating a second; the stub does not deduplicate, so the fixture is only
+    reachable on the newer core. Stated because a reader would otherwise take
+    the setup for a description of both.
+
+    Green on the previous state as well -- a regression guard. It discriminates
+    against a pass that resolves the wrong entry, which is what the rewrite of
+    the loop header could have introduced.
+    """
+
+    from homeassistant.helpers import entity_registry as er
+
+    hass = SimpleNamespace(data={})
+    registry = dr.async_get(hass)
+
+    ours = registry.async_get_or_create(
+        config_entry_id="entry-ours",
+        identifiers={(DOMAIN, "integration")},
+        manufacturer="Google",
+        model="Service",
+        name="Service ours",
+    )
+    theirs = registry.async_get_or_create(
+        config_entry_id="entry-theirs",
+        identifiers={(DOMAIN, "integration")},
+        manufacturer="Google",
+        model="Service",
+        name="Service theirs",
+    )
+
+    entry = make_config_entry(entry_id="entry-ours", options={})
+    ent_reg = er.async_get(hass)
+
+    integration._migrate_legacy_unique_ids(ent_reg, registry, entry)
+
+    assert (DOMAIN, "integration_entry-ours") in ours.identifiers
+    assert (DOMAIN, "integration") not in ours.identifiers
+    assert theirs.identifiers == {(DOMAIN, "integration")}

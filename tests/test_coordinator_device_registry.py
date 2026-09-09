@@ -2741,3 +2741,258 @@ async def test_relink_helper_reassigns_buttons_and_trackers(
         sensor_entity.entity_id,
         binary_sensor_entity.entity_id,
     }
+
+
+class _RelinkEntityRegistryStub:
+    """Minimal entity registry for the relink scoping tests below."""
+
+    def __init__(self, entries: list[Any]) -> None:
+        self.entities = {entry.entity_id: entry for entry in entries}
+        self.updated: list[tuple[str, dict[str, Any]]] = []
+
+    def async_entries_for_config_entry(self, config_entry_id: str) -> tuple[Any, ...]:
+        return tuple(
+            entry
+            for entry in self.entities.values()
+            if getattr(entry, "config_entry_id", None) == config_entry_id
+        )
+
+    def async_update_entity(self, entity_id: str, **changes: Any) -> None:
+        entry = self.entities[entity_id]
+        if "device_id" in changes:
+            entry.device_id = changes["device_id"]
+        self.updated.append((entity_id, dict(changes)))
+
+
+@pytest.mark.asyncio
+async def test_relink_ignores_a_device_owned_by_a_foreign_entry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A tracker identifier under someone else's entry is not a hit.
+
+    This is the documented behaviour of the narrowing AP-16 introduced: the
+    relink pass resolves through ``resolve_device_by_identifiers``, which asks
+    the registry for *our* entry's device.  A device carrying the same
+    identifier under a different config entry -- the state a half-finished
+    migration leaves behind -- is no answer, so the entity keeps its current
+    device rather than being moved onto a stranger's.
+
+    Green on the previous state as well, where a post-filter at the call site
+    discarded the same device: a regression guard for the outcome. The test
+    that shows the *difference* is the one below.
+    """
+
+    entry = _build_entry_with_subentries("entry-scope")
+    hass = SimpleNamespace(data={})
+
+    dev_reg = SingleOwnerDeviceRegistry()
+    dev_reg.add_config_entry(entry.entry_id, {entry.tracker_subentry_id})
+    dev_reg.add_config_entry("foreign-entry", set())
+
+    service_device = dev_reg.add_device(
+        identifiers={(DOMAIN, f"integration_{entry.entry_id}")},
+        config_entry_id=entry.entry_id,
+        config_subentry_id=entry.service_subentry_id,
+        name="Service",
+    )
+    # The tracker identifier exists, but under a config entry that is not ours.
+    foreign_device = dev_reg.add_device(
+        identifiers={(DOMAIN, "abc123")},
+        config_entry_id="foreign-entry",
+        name="Someone else's tracker",
+    )
+
+    tracker_entity = SimpleNamespace(
+        entity_id="device_tracker.googlefindmy_tracker",
+        domain="device_tracker",
+        platform=DOMAIN,
+        unique_id=f"{entry.entry_id}:{entry.tracker_subentry_id}:abc123",
+        config_entry_id=entry.entry_id,
+        device_id=service_device.id,
+    )
+    ent_reg = _RelinkEntityRegistryStub([tracker_entity])
+
+    monkeypatch.setattr(dr, "async_get", lambda _hass: dev_reg)
+    monkeypatch.setattr(er, "async_get", lambda _hass: ent_reg)
+
+    await _async_relink_subentry_entities(hass, entry)
+
+    assert tracker_entity.device_id == service_device.id
+    assert ent_reg.updated == []
+    assert dev_reg.async_get(foreign_device.id) is not None
+    assert dev_reg.async_get(foreign_device.id).config_entry_id == "foreign-entry"
+
+
+@pytest.mark.asyncio
+async def test_relink_finds_our_device_when_a_foreign_one_shares_the_identifier(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Our device wins even when a foreign one carries the same identifier first.
+
+    The counterpart to the test above, and the reason the narrowing is not a
+    loss.  The shape AP-16 replaced searched by identifier alone, took the first
+    match and only then checked ownership, discarding it -- so a second device
+    carrying the same identifier under *our* entry was never reached.  Asking
+    the registry per entry has no such order dependency.
+    """
+
+    entry = _build_entry_with_subentries("entry-scope2")
+    hass = SimpleNamespace(data={})
+
+    dev_reg = SingleOwnerDeviceRegistry()
+    dev_reg.add_config_entry(entry.entry_id, {entry.tracker_subentry_id})
+    dev_reg.add_config_entry("foreign-entry", set())
+
+    service_device = dev_reg.add_device(
+        identifiers={(DOMAIN, f"integration_{entry.entry_id}")},
+        config_entry_id=entry.entry_id,
+        config_subentry_id=entry.service_subentry_id,
+        name="Service",
+    )
+    # Added first on purpose: it is the one an identifier-only scan would hit.
+    dev_reg.add_device(
+        identifiers={(DOMAIN, "abc123")},
+        config_entry_id="foreign-entry",
+        name="Someone else's tracker",
+    )
+    our_tracker = dev_reg.add_device(
+        identifiers={(DOMAIN, "abc123")},
+        config_entry_id=entry.entry_id,
+        config_subentry_id=entry.tracker_subentry_id,
+        name="Our tracker",
+    )
+
+    tracker_entity = SimpleNamespace(
+        entity_id="device_tracker.googlefindmy_tracker",
+        domain="device_tracker",
+        platform=DOMAIN,
+        unique_id=f"{entry.entry_id}:{entry.tracker_subentry_id}:abc123",
+        config_entry_id=entry.entry_id,
+        device_id=service_device.id,
+    )
+    ent_reg = _RelinkEntityRegistryStub([tracker_entity])
+
+    monkeypatch.setattr(dr, "async_get", lambda _hass: dev_reg)
+    monkeypatch.setattr(er, "async_get", lambda _hass: ent_reg)
+
+    await _async_relink_subentry_entities(hass, entry)
+
+    assert tracker_entity.device_id == our_tracker.id
+    assert [entity_id for entity_id, _ in ent_reg.updated] == [tracker_entity.entity_id]
+
+
+@pytest.mark.asyncio
+async def test_relink_does_not_adopt_a_foreign_legacy_service_device(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The service-device fallback scan stays inside this config entry.
+
+    The scan walks the whole registry because a service device may still carry
+    the unscoped legacy identifier ``(DOMAIN, "integration")``. That identifier
+    is precisely the one another entry may still carry too, so the ownership
+    filter is what keeps the scan from adopting a stranger's service device and
+    re-parenting this entry's entities onto it.
+
+    Green on the previous state as well -- the same filter was there, spelled
+    ``entry_id not in device.config_entries``. A regression guard for the
+    rewrite, not proof of a new property.
+    """
+
+    entry = _build_entry_with_subentries("entry-fallback")
+    hass = SimpleNamespace(data={})
+
+    dev_reg = SingleOwnerDeviceRegistry()
+    dev_reg.add_config_entry(entry.entry_id, {entry.tracker_subentry_id})
+    dev_reg.add_config_entry("foreign-entry", set())
+
+    # Only the foreign entry has a service device, and it carries the legacy
+    # unscoped identifier that ``_device_is_service_device`` accepts.
+    foreign_service = dev_reg.add_device(
+        identifiers={(DOMAIN, "integration")},
+        config_entry_id="foreign-entry",
+        name="Foreign service",
+    )
+    our_tracker = dev_reg.add_device(
+        identifiers={(DOMAIN, "abc123")},
+        config_entry_id=entry.entry_id,
+        config_subentry_id=entry.tracker_subentry_id,
+        name="Our tracker",
+    )
+
+    service_entity = SimpleNamespace(
+        entity_id="binary_sensor.googlefindmy_polling",
+        domain="binary_sensor",
+        platform=DOMAIN,
+        unique_id=f"{entry.entry_id}:{entry.service_subentry_id}:polling",
+        config_entry_id=entry.entry_id,
+        device_id=our_tracker.id,
+    )
+    ent_reg = _RelinkEntityRegistryStub([service_entity])
+
+    monkeypatch.setattr(dr, "async_get", lambda _hass: dev_reg)
+    monkeypatch.setattr(er, "async_get", lambda _hass: ent_reg)
+
+    await _async_relink_subentry_entities(hass, entry)
+
+    assert service_entity.device_id != foreign_service.id
+    assert [
+        entity_id
+        for entity_id, changes in ent_reg.updated
+        if changes.get("device_id") == foreign_service.id
+    ] == []
+
+
+@pytest.mark.asyncio
+async def test_button_relink_refuses_a_service_device_as_tracker_target(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A button never lands on the service device, even if it matches the id.
+
+    ``_resolve_button_target`` asks the lookup with ``allow_service=False``. The
+    case that makes the flag load-bearing is a service device that also carries
+    a tracker identifier -- a state a half-finished migration can leave behind.
+    Without the flag the button would be re-parented onto the service device and
+    the play/locate action would address the wrong thing.
+
+    The flag is unchanged by AP-16, so this is green on the previous state too.
+    It is here because the rewrite of ``lookup_device`` moved the code the flag
+    guards, and nothing else asserted it.
+    """
+
+    entry = _build_entry_with_subentries("entry-button")
+    hass = SimpleNamespace(data={})
+
+    dev_reg = SingleOwnerDeviceRegistry()
+    dev_reg.add_config_entry(
+        entry.entry_id, {entry.tracker_subentry_id, entry.service_subentry_id}
+    )
+    # One device, both roles: the service identifier and a tracker identifier.
+    service_device = dev_reg.add_device(
+        identifiers={
+            (DOMAIN, f"integration_{entry.entry_id}"),
+            (DOMAIN, "abc123"),
+        },
+        config_entry_id=entry.entry_id,
+        config_subentry_id=entry.service_subentry_id,
+        name="Service",
+    )
+
+    button_entity = SimpleNamespace(
+        entity_id="button.googlefindmy_locate",
+        domain="button",
+        platform=DOMAIN,
+        unique_id=(
+            f"{DOMAIN}_{entry.entry_id}:{entry.tracker_subentry_id}:abc123_locate"
+        ),
+        config_entry_id=entry.entry_id,
+        device_id=None,
+    )
+    ent_reg = _RelinkEntityRegistryStub([button_entity])
+
+    monkeypatch.setattr(dr, "async_get", lambda _hass: dev_reg)
+    monkeypatch.setattr(er, "async_get", lambda _hass: ent_reg)
+
+    await _async_relink_button_devices(hass, entry)
+
+    assert button_entity.device_id != service_device.id
+    assert ent_reg.updated == []

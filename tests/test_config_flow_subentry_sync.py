@@ -644,7 +644,12 @@ class _LegacyRegistryDouble:
     ``add_config_subentry_id`` and no ``new_*`` pair, which is what
     ``detect_device_registry_capabilities`` reads. Device entries of that core
     carry neither ``config_entry_id`` nor ``config_subentry_id``, so the double's
-    entries do not either.
+    entries do not either -- but they **do** carry ``config_entries``, a
+    ``set[str]`` of owning entries (tag ``2025.9.1``, line 327). Leaving that off
+    was a facade: it made the double answer "ownership unknown" to
+    ``device_belongs_to_entry``, which is a state no real device entry of that
+    core is ever in, and it hid that the resolver's legacy branch did not scope
+    its result at all.
 
     Why a local double at all, next to the shared ``SingleOwnerDeviceRegistry``:
     that one models the 2026.8 rules and therefore cannot present a legacy
@@ -836,7 +841,9 @@ def test_service_device_binding_asks_once_on_a_legacy_core(
 
     entry = _service_entry(service_subentry_id="service-subentry")
     planned = _watch_planner(monkeypatch)
-    registry = _LegacyRegistryDouble(SimpleNamespace(id="service-device"))
+    registry = _LegacyRegistryDouble(
+        SimpleNamespace(id="service-device", config_entries={"entry-1"})
+    )
     monkeypatch.setattr(config_flow.dr, "async_get", lambda hass_arg: registry)
 
     config_flow.ConfigFlow._ensure_service_device_binding(
@@ -928,7 +935,9 @@ def test_service_device_binding_names_the_hub_link_on_a_legacy_core(
 
     entry = _service_entry()
     planned = _watch_planner(monkeypatch)
-    registry = _LegacyRegistryDouble(SimpleNamespace(id="service-device"))
+    registry = _LegacyRegistryDouble(
+        SimpleNamespace(id="service-device", config_entries={"entry-1"})
+    )
     monkeypatch.setattr(config_flow.dr, "async_get", lambda hass_arg: registry)
 
     config_flow.ConfigFlow._ensure_service_device_binding(
@@ -956,7 +965,9 @@ def test_service_device_binding_hands_the_legacy_lookup_both_identifiers(
     """
 
     entry = _service_entry(service_subentry_id="service-subentry")
-    registry = _LegacyRegistryDouble(SimpleNamespace(id="service-device"))
+    registry = _LegacyRegistryDouble(
+        SimpleNamespace(id="service-device", config_entries={"entry-1"})
+    )
     monkeypatch.setattr(config_flow.dr, "async_get", lambda hass_arg: registry)
 
     config_flow.ConfigFlow._ensure_service_device_binding(

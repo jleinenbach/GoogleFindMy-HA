@@ -315,7 +315,9 @@ def scan_production_tree() -> tuple[list[Finding], list[Finding]]:
 #: after AP-14 (identity.py moved to the shared resolver): 84 at 45; after
 #: AP-12 (coordinator/registry.py speaks intents): 47 at 34; after AP-13
 #: (services.py speaks intents and asks per entry): 35 at 25; after AP-15
-#: (config_flow.py speaks intents): 25 at 23.  Measure it
+#: (config_flow.py speaks intents): 25 at 23; after AP-16 (__init__.py speaks
+#: intents, asks per entry and iterates through the shared helper): 4 at 4.
+#:  Measure it
 #: yourself rather than trusting the line above::
 #:
 #:     python3 -c "import ast,pathlib; t=ast.parse(pathlib.Path(
@@ -325,99 +327,9 @@ def scan_production_tree() -> tuple[list[Finding], list[Finding]]:
 #:     print(len(d), sum(d.values()))"
 KNOWN_VIOLATIONS: dict[tuple[str, str, str], int] = {
     (
-        "async_get_device",
-        "__init__.py",
-        "<module>._async_relink_entities_for_entry.lookup_device",
-    ): 1,
-    (
-        "config_entries",
-        "__init__.py",
-        "<module>._async_migrate_device_identifiers_to_entry_scope",
-    ): 1,
-    (
-        "config_entries",
-        "__init__.py",
-        "<module>._async_purge_unloaded_subentry_registrations",
-    ): 1,
-    (
-        "config_entries",
-        "__init__.py",
-        "<module>._async_refresh_device_urls",
-    ): 1,
-    (
-        "config_entries",
-        "__init__.py",
-        "<module>._async_relink_button_devices._resolve_button_target",
-    ): 1,
-    (
-        "config_entries",
-        "__init__.py",
-        "<module>._async_relink_entities_for_entry.lookup_device",
-    ): 1,
-    (
-        "config_entries",
-        "__init__.py",
-        "<module>._async_relink_subentry_entities._resolve_service_device",
-    ): 1,
-    (
-        "config_entries",
-        "__init__.py",
-        "<module>._migrate_legacy_unique_ids",
-    ): 1,
-    (
-        "config_entries",
-        "__init__.py",
-        "<module>._normalize_device_identifier",
-    ): 1,
-    (
-        "config_entries",
-        "__init__.py",
-        "<module>._self_heal_device_registry",
-    ): 1,
-    (
-        "config_entries",
-        "__init__.py",
-        "<module>.async_remove_config_entry_device",
-    ): 1,
-    (
         "config_entries",
         "diagnostics.py",
         "<module>.async_get_config_entry_diagnostics",
-    ): 1,
-    (
-        "devices",
-        "__init__.py",
-        "<module>._async_migrate_device_identifiers_to_entry_scope",
-    ): 2,
-    (
-        "devices",
-        "__init__.py",
-        "<module>._async_normalize_device_names",
-    ): 1,
-    (
-        "devices",
-        "__init__.py",
-        "<module>._async_refresh_device_urls",
-    ): 1,
-    (
-        "devices",
-        "__init__.py",
-        "<module>._async_relink_entities_for_entry",
-    ): 1,
-    (
-        "devices",
-        "__init__.py",
-        "<module>._async_relink_entities_for_entry.lookup_device",
-    ): 1,
-    (
-        "devices",
-        "__init__.py",
-        "<module>._async_relink_subentry_entities._resolve_service_device",
-    ): 1,
-    (
-        "devices",
-        "__init__.py",
-        "<module>._migrate_legacy_unique_ids",
     ): 1,
     (
         "devices",
@@ -434,11 +346,6 @@ KNOWN_VIOLATIONS: dict[tuple[str, str, str], int] = {
         "diagnostics.py",
         "<module>.async_get_config_entry_diagnostics",
     ): 1,
-    (
-        "kwargs",
-        "__init__.py",
-        "<module>._async_purge_unloaded_subentry_registrations",
-    ): 2,
 }
 
 

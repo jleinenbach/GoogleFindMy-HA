@@ -24,10 +24,26 @@ Nothing here should be read as "this is how to talk to a current core" -- new
 production code expresses an intent instead, see AGENTS.md, section "Device
 registry ownership".
 
-Branch budget (notes-sidecar ``helpers/registry.py``): ~75 branches across the
-19 functions listed in :data:`__all__` (the four dataclasses/enums and the
-two keyword tuples there are data, not branches, and are covered through the
-functions that read them).  Each test docstring names the function
+Coverage scope (notes-sidecar ``helpers/registry.py``): the **24 functions**
+listed in :data:`__all__` (the four dataclasses/enums and the six data names
+there are data, not branches, and are covered through the functions that read
+them).  The count is measured, not remembered::
+
+    python3 -c "import ast,pathlib; t=ast.parse(pathlib.Path(
+    'custom_components/googlefindmy/coordinator/helpers/registry.py'
+    ).read_text()); a=[ast.literal_eval(n.value) for n in ast.walk(t)
+    if isinstance(n,(ast.Assign,ast.AnnAssign)) and getattr(
+    getattr(n,'target',None) or n.targets[0],'id','')=='__all__'][0];
+    f={n.name for n in t.body if isinstance(n,ast.FunctionDef)};
+    print(len([x for x in a if x in f]))"
+
+This used to read "~75 branches across the 19 functions". The function count was
+stale (23 before this work package, 24 with ``iter_all_devices``), and the branch
+figure was never re-derived after any of them, so the heading now names the scope
+it can state and the command that measures it. A branch budget would need the
+same treatment: a number nobody re-measures is not a budget. Note that the
+command counts ``ast.FunctionDef`` only; an ``async def`` added to
+:data:`__all__` would be undercounted.  Each test docstring names the function
 and the branch the case exercises so a failing test points at the spec line,
 not the implementation.
 
@@ -1953,10 +1969,11 @@ class _DriftedSignatureRegistry(_LegacyOnlyRegistry):
 class TestResolveDeviceByIdentifiers:
     """All three core branches, the priority, and the cross-entry narrowing."""
 
+    _ENTRY_ID = "entry-1"
     _SCOPED = (_DOMAIN, "entry-1:dev-1")
     _UNSCOPED = (_DOMAIN, "dev-1")
 
-    def _modern(self, registry: Any, *, entry_id: str = "entry-1") -> Any | None:
+    def _modern(self, registry: Any, *, entry_id: str = _ENTRY_ID) -> Any | None:
         return registry_helpers.resolve_device_by_identifiers(
             registry, (self._SCOPED, self._UNSCOPED), entry_id=entry_id
         )
@@ -2035,12 +2052,50 @@ class TestResolveDeviceByIdentifiers:
         )
 
     def test_legacy_core_receives_the_whole_candidate_set(self) -> None:
-        """On the declared minimum there is only the set-based call."""
-        sentinel = object()
-        registry = _LegacyOnlyRegistry({self._UNSCOPED: sentinel})
+        """On the declared minimum there is only the set-based call.
 
-        assert self._modern(registry) is sentinel
+        The device carries ``config_entries``, because a real ``DeviceEntry`` of
+        that core does (tag ``2025.9.1``, line 327). A double without it would
+        answer "ownership unknown" to the scoping check below, a state no real
+        entry of that core is in.
+        """
+        ours = SimpleNamespace(id="ours", config_entries={self._ENTRY_ID})
+        registry = _LegacyOnlyRegistry({self._UNSCOPED: ours})
+
+        assert self._modern(registry) is ours
         assert registry.calls == [{self._SCOPED, self._UNSCOPED}]
+
+    def test_legacy_core_does_not_hand_back_another_entrys_device(self) -> None:
+        """The entry scoping holds on the branch the declared minimum runs.
+
+        ``async_get_device`` searches by identifier alone and knows nothing about
+        owning entries, so on Core 2025.9.1 it will happily return a device of a
+        *different* GoogleFindMy entry that still carries the legacy unscoped
+        identifier. Filtering that out is this function's job, not the caller's:
+        every call site would otherwise rebuild the scoping by hand, which
+        ``agents/runtime_patterns/AGENTS.md`` forbids.
+
+        Until AP-16 the scoping was applied in the modern branch only, so the
+        promise held on 2026.8+ and broke on the declared minimum -- the one core
+        where this branch is the only one that runs.
+        """
+        stranger = SimpleNamespace(id="stranger", config_entries={"entry-2"})
+        registry = _LegacyOnlyRegistry({self._UNSCOPED: stranger})
+
+        assert self._modern(registry) is None
+        assert registry.calls == [{self._SCOPED, self._UNSCOPED}]
+
+    def test_legacy_core_device_without_ownership_is_a_miss(self) -> None:
+        """A device entry that names no owner is not an answer either.
+
+        "Owned by nobody" and "does not say" are indistinguishable here, and both
+        are a miss: relinking an entity onto a device this entry does not own is
+        the failure mode, and neither state rules it out.
+        """
+        ownerless = SimpleNamespace(id="ownerless")
+        registry = _LegacyOnlyRegistry({self._UNSCOPED: ownerless})
+
+        assert self._modern(registry) is None
 
     def test_signature_drift_propagates_instead_of_rescoping_silently(self) -> None:
         """A ``TypeError`` surfaces; it is never answered with a legacy retry.
@@ -2082,3 +2137,55 @@ class TestResolveDeviceByIdentifiers:
         assert registry.calls == []
         if not legacy_core:
             assert registry.scoped_calls == []
+
+
+class TestIterAllDevices:
+    """The whole-registry walk, and the two core generations it hides.
+
+    The point of this helper is that ``dev_reg.devices`` means different things
+    on the two supported cores: a plain mapping on the declared minimum
+    ``2025.9.1``, whose iteration yields device **ids**, and a view on
+    ``2026.9``, whose iteration yields the ``DeviceEntry`` objects. Both branches
+    are exercised here because a test suite that only ever sees mapping doubles
+    would leave the branch that runs on the *newer* core unmeasured.
+    """
+
+    def test_mapping_registry_yields_the_entries_not_the_ids(self) -> None:
+        """Core 2025.9.1 shape: a mapping keyed by device id."""
+        alpha = SimpleNamespace(id="a")
+        beta = SimpleNamespace(id="b")
+        registry = SimpleNamespace(devices={"a": alpha, "b": beta})
+
+        assert registry_helpers.iter_all_devices(registry) == (alpha, beta)
+
+    def test_view_registry_yields_the_entries(self) -> None:
+        """Core 2026.9 shape: a view whose ``__iter__`` yields entries."""
+
+        class _View:
+            """Minimal stand-in for Core's ``DeviceRegistryItemsView``."""
+
+            def __init__(self, entries: list[Any]) -> None:
+                self._entries = entries
+
+            def __iter__(self):  # noqa: ANN204 - test double
+                return iter(self._entries)
+
+        alpha = SimpleNamespace(id="a")
+        registry = SimpleNamespace(devices=_View([alpha]))
+
+        assert registry_helpers.iter_all_devices(registry) == (alpha,)
+
+    def test_registry_without_devices_yields_nothing(self) -> None:
+        """A registry double that exposes no ``devices`` is empty, not an error."""
+        assert registry_helpers.iter_all_devices(SimpleNamespace()) == ()
+        assert registry_helpers.iter_all_devices(SimpleNamespace(devices=None)) == ()
+
+    def test_a_non_iterable_devices_attribute_yields_nothing(self) -> None:
+        """Defensive: a ``devices`` that is neither mapping nor iterable.
+
+        Reached by registry doubles, not by any supported core. It answers
+        "empty" rather than raising, because this helper is called from
+        one-time migration passes whose failure mode should be "did nothing",
+        not "broke setup".
+        """
+        assert registry_helpers.iter_all_devices(SimpleNamespace(devices=42)) == ()

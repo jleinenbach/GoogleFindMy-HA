@@ -384,6 +384,20 @@ class TestRegisterIdentityKey:
 # ---------------------------------------------------------------------------
 
 
+def _owned_device(device_id: str, *, entry_id: str = "entry-xyz") -> SimpleNamespace:
+    """Return a device entry as Core 2025.9.1 presents it, ownership included.
+
+    ``config_entries`` is not decoration: a real ``DeviceEntry`` of the declared
+    minimum core carries it (tag ``2025.9.1``, line 327), and
+    ``resolve_device_by_identifiers`` reads it to keep a device of a *different*
+    config entry from being handed back. A double without it answers "ownership
+    unknown", which is a state no real entry of that core is ever in, and every
+    case below would silently stop at the resolver instead of reaching the
+    branch it means to exercise.
+    """
+    return SimpleNamespace(id=device_id, config_entries={entry_id})
+
+
 class _FakeDeviceReg:
     """Minimal ``dr.async_get(hass)`` substitute for tests."""
 
@@ -495,7 +509,7 @@ class TestResetResolverOffset:
     def test_hass_data_not_dict_returns(
         self, coord: IdentityStub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        device = SimpleNamespace(id="reg-123")
+        device = _owned_device("reg-123")
         monkeypatch.setattr(dr, "async_get", lambda hass: _FakeDeviceReg(device))
         coord.hass.data = None
         coord._reset_resolver_offset("dev-1")  # must not raise
@@ -503,7 +517,7 @@ class TestResetResolverOffset:
     def test_missing_domain_bucket_returns(
         self, coord: IdentityStub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        device = SimpleNamespace(id="reg-123")
+        device = _owned_device("reg-123")
         monkeypatch.setattr(dr, "async_get", lambda hass: _FakeDeviceReg(device))
         coord.hass.data = {}
         coord._reset_resolver_offset("dev-1")  # must not raise
@@ -511,7 +525,7 @@ class TestResetResolverOffset:
     def test_non_dict_domain_bucket_returns(
         self, coord: IdentityStub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        device = SimpleNamespace(id="reg-123")
+        device = _owned_device("reg-123")
         monkeypatch.setattr(dr, "async_get", lambda hass: _FakeDeviceReg(device))
         coord.hass.data = {DOMAIN: "not-a-dict"}
         coord._reset_resolver_offset("dev-1")  # must not raise
@@ -519,7 +533,7 @@ class TestResetResolverOffset:
     def test_resolver_none_returns(
         self, coord: IdentityStub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        device = SimpleNamespace(id="reg-123")
+        device = _owned_device("reg-123")
         monkeypatch.setattr(dr, "async_get", lambda hass: _FakeDeviceReg(device))
         coord.hass.data = {DOMAIN: {DATA_EID_RESOLVER: None}}
         coord._reset_resolver_offset("dev-1")  # must not raise
@@ -527,7 +541,7 @@ class TestResetResolverOffset:
     def test_resolver_without_reset_is_noop(
         self, coord: IdentityStub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        device = SimpleNamespace(id="reg-123")
+        device = _owned_device("reg-123")
         monkeypatch.setattr(dr, "async_get", lambda hass: _FakeDeviceReg(device))
         resolver = SimpleNamespace()  # no reset_device_offset
         coord.hass.data = {DOMAIN: {DATA_EID_RESOLVER: resolver}}
@@ -536,7 +550,7 @@ class TestResetResolverOffset:
     def test_success_calls_reset_with_registry_id(
         self, coord: IdentityStub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        device = SimpleNamespace(id="reg-123")
+        device = _owned_device("reg-123")
         monkeypatch.setattr(dr, "async_get", lambda hass: _FakeDeviceReg(device))
         reset_calls: list[str] = []
         # Pass ``list.append`` directly (no wrapping lambda) to satisfy
