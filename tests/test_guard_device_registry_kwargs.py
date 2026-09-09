@@ -316,7 +316,9 @@ def scan_production_tree() -> tuple[list[Finding], list[Finding]]:
 #: AP-12 (coordinator/registry.py speaks intents): 47 at 34; after AP-13
 #: (services.py speaks intents and asks per entry): 35 at 25; after AP-15
 #: (config_flow.py speaks intents): 25 at 23; after AP-16 (__init__.py speaks
-#: intents, asks per entry and iterates through the shared helper): 4 at 4.
+#: intents, asks per entry and iterates through the shared helper): 4 at 4; after
+#: AP-17 (diagnostics.py asks the registry for one entry's devices, which drops
+#: the whole-mapping read and the set-shaped ownership read in one line): 2 at 2.
 #:  Measure it
 #: yourself rather than trusting the line above::
 #:
@@ -327,11 +329,6 @@ def scan_production_tree() -> tuple[list[Finding], list[Finding]]:
 #:     print(len(d), sum(d.values()))"
 KNOWN_VIOLATIONS: dict[tuple[str, str, str], int] = {
     (
-        "config_entries",
-        "diagnostics.py",
-        "<module>.async_get_config_entry_diagnostics",
-    ): 1,
-    (
         "devices",
         "coordinator/registry.py",
         "<module>.RegistryOperations._ensure_registry_for_devices",
@@ -340,11 +337,6 @@ KNOWN_VIOLATIONS: dict[tuple[str, str, str], int] = {
         "devices",
         "coordinator/subentry.py",
         "<module>.SubentryOperations._refresh_subentry_index",
-    ): 1,
-    (
-        "devices",
-        "diagnostics.py",
-        "<module>.async_get_config_entry_diagnostics",
     ): 1,
 }
 

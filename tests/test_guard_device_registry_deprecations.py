@@ -29,13 +29,32 @@ worse than none.
 Eleven of the twelve carry no production site any more: AP-12 moved every
 ownership and lookup call in ``coordinator/registry.py`` onto intents, AP-13 did
 the same for ``services.py``, AP-15 for ``config_flow.py`` and AP-16 for
-``__init__.py``. The twelfth, the ``devices`` mapping, still has three sites
-(``coordinator/registry.py``, ``coordinator/subentry.py``, ``diagnostics.py``). Their operations
-stay, and that is deliberate. They do not prove that the fork still
+``__init__.py``. The twelfth, the ``devices`` mapping, still has two sites
+(``coordinator/registry.py``, ``coordinator/subentry.py``); AP-17 removed the one
+in ``diagnostics.py``. The eleven migrated operations stay, and that is
+deliberate. They do not prove that the fork still
 makes the call; they prove that *Core still reports it*, which is what keeps the
 canary and the dead-entry check honest and what will catch a regression that
 brings the old form back. They are marked ``migrated in AP-12``, ``migrated in AP-13``, ``migrated in
 AP-15`` or ``migrated in AP-16`` in place of a site.
+
+Two qualifications on the ``diagnostics.py`` removal, both measured. It took
+with it the last ownership read through the set-shaped ``config_entries``
+attribute *outside the compatibility layer*: ``coordinator/helpers/registry.py``
+reads it three times on purpose, which is what a translator is for, and the
+ratchet exempts that file by name. And the two remaining ``devices`` sites are
+not merely unmigrated, they are already inert on a reporting core: both guard
+their access with ``isinstance(..., Mapping)``, and from 2026.9 the attribute
+hands out a view that is not a ``Mapping`` subclass, so the branch is skipped
+and nothing is reported from production. Their gate operations therefore carry
+the whole evidence. Measure it rather than trusting this paragraph::
+
+    python -c "from collections.abc import Mapping; \
+from homeassistant.helpers import device_registry as dr; \
+print(issubclass(dr._DeprecatedDeviceRegistryItemsView, Mapping))"
+
+On 2026.9 that prints ``False``; on 2026.8 the class does not exist and the
+attribute is a real mapping, so the branch still runs there.
 
 **A caveat about what the dead-entry check can and cannot see.** It asks whether
 one of the twelve *test operations* still triggers the report, not whether
@@ -93,7 +112,13 @@ class AcceptedDeprecation:
     #: Substring identifying the report; matched against ``report.what``.
     needle: str
     reason: str
-    #: The work package after which this entry must disappear.
+    #: The work package after which this entry must disappear -- or the marker
+    #: ``KEPT`` for an entry that is deliberately permanent.  Both of the
+    #: migrated ones below are permanent: their production site is gone, but the
+    #: *operation* is kept as reporter evidence (see the module docstring), so
+    #: rolling their date forward at every work package would state an expiry
+    #: that is never meant to arrive.  Nothing enforces this field; the
+    #: dead-entry test enforces the other direction.
     resolved_by: str
 
 
@@ -113,7 +138,7 @@ ACCEPTED_DEPRECATIONS: tuple[AcceptedDeprecation, ...] = (
             "legacy translator never speaks these names under a reporter. See "
             "the module docstring on what the dead-entry check can see."
         ),
-        resolved_by="AP-17",
+        resolved_by="KEPT",
     ),
     AcceptedDeprecation(
         key="async_get_device",
@@ -127,17 +152,24 @@ ACCEPTED_DEPRECATIONS: tuple[AcceptedDeprecation, ...] = (
             "either: it only runs below core 2026.8, which does not report at "
             "all. Kept as reporter evidence, see the module docstring."
         ),
-        resolved_by="AP-17",
+        resolved_by="KEPT",
     ),
     AcceptedDeprecation(
         key="devices_mapping",
         needle="`device_registry.devices`",
         reason=(
-            "Three `devices` sites remain, in coordinator/registry.py, "
-            "coordinator/subentry.py and diagnostics.py; AP-16 removed the ones "
-            "in __init__.py. They are migrated last."
+            "Two `devices` sites remain, in coordinator/registry.py and "
+            "coordinator/subentry.py; AP-16 removed the ones in __init__.py and "
+            "AP-17 the one in diagnostics.py. No work package of this migration "
+            "rewrites the remaining two: AP-18 arms the safety net and trims the "
+            "allowlists, it does not touch call sites. KEPT for a different "
+            "reason than the two entries above: there the production site is "
+            "gone, here two remain but are inert on a reporting core (both are "
+            "behind an `isinstance(..., Mapping)` guard that a 2026.9 view "
+            "fails, see the module docstring). This entry is what keeps the "
+            "report itself visible."
         ),
-        resolved_by="AP-17",
+        resolved_by="KEPT",
     ),
 )
 
@@ -274,8 +306,7 @@ def _operations(hass: Any) -> list[tuple[str, str, Any]]:
         ),
         (
             "devices_mapping",
-            "coordinator/registry.py, coordinator/subentry.py and "
-            "diagnostics.py, three sites",
+            "coordinator/registry.py and coordinator/subentry.py, two sites",
             _devices_mapping,
         ),
     ]
@@ -369,7 +400,10 @@ def test_no_unexpected_deprecation_is_raised(
     print("\nCurrently accepted device registry deprecations:")
     for entry in ACCEPTED_DEPRECATIONS:
         status = "observed" if entry.key in seen else "not observed"
-        print(f"  {entry.key} [{status}] until {entry.resolved_by}: {entry.reason}")
+        expiry = (
+            "permanent" if entry.resolved_by == "KEPT" else f"until {entry.resolved_by}"
+        )
+        print(f"  {entry.key} [{status}] {expiry}: {entry.reason}")
 
 
 def test_allowlist_has_no_dead_entries(
@@ -399,4 +433,27 @@ def test_allowlist_has_no_dead_entries(
     assert not dead, (
         f"allowlist entries no longer triggered by any covered operation: {dead}. "
         "Remove them, or extend the covered set if the operation was dropped."
+    )
+
+
+def test_expiry_marker_is_either_a_work_package_or_the_permanent_marker() -> None:
+    """Nothing else enforces ``resolved_by``, so at least its shape is pinned.
+
+    The field is read by exactly one place, the summary print in the gate above,
+    which renders ``KEPT`` as "permanent" and anything else as "until <value>".
+    A typo in the marker would therefore print "until KEPT" for every entry and
+    be visible only under ``pytest -s``.  This runs without Home Assistant and
+    without a reporter, so it also holds on cores where the gate itself skips.
+    """
+
+    for entry in ACCEPTED_DEPRECATIONS:
+        assert entry.resolved_by == "KEPT" or entry.resolved_by.startswith("AP-"), (
+            f"{entry.key}: resolved_by must name a work package or be KEPT, "
+            f"got {entry.resolved_by!r}"
+        )
+
+    permanent = [e.key for e in ACCEPTED_DEPRECATIONS if e.resolved_by == "KEPT"]
+    assert permanent, (
+        "no entry is marked KEPT any more; if every acceptance became temporary, "
+        "the marker and its paragraph in docs/AI_DEPRECATIONS_GUIDE.md are stale."
     )

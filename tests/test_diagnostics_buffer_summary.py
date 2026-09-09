@@ -24,6 +24,7 @@ from custom_components.googlefindmy.const import (
     OPT_LOCATION_POLL_INTERVAL,
 )
 from tests.helpers import drain_loop
+from tests.helpers.single_owner_device_registry import SingleOwnerDeviceRegistry
 
 
 class _StubDiagnosticsBuffer:
@@ -271,3 +272,135 @@ def test_diagnostics_includes_reauth_reason_when_recorded(
     assert reauth["origin"] == "polling.py:_async_update_data"
     assert reauth["counters"] == {"consecutive_transient_auth_failures": 3}
     # Mutation counter-check: skipping the wiring line drops this key entirely.
+
+
+def test_device_count_asks_the_registry_for_this_entry_only(
+    monkeypatch: pytest.MonkeyPatch,
+    single_owner_device_registry: SingleOwnerDeviceRegistry,
+) -> None:
+    """The count covers this entry's devices, not the whole registry.
+
+    What this pins and what it deliberately does not: it pins that a foreign
+    entry's device is not counted, so removing the scoping altogether turns the
+    answer from two into three.  It does **not** distinguish AP-17's helper call
+    from the pre-AP-17 expression, and no assertion on the resulting number can:
+    on a single-owner registry ``DeviceEntry.config_entries`` is derived from
+    ``config_entry_id``, so both readings return the same set on every supported
+    core.  Measured against this double: the old expression yields 2, the helper
+    yields 2, an unscoped count yields 3.  The reading itself is pinned by
+    ``test_device_count_goes_through_the_entry_scoped_helper`` below and, at the
+    tree level, by the ratchet in
+    ``tests/test_guard_device_registry_kwargs.py``.
+    """
+
+    coordinator = _StubCoordinator()
+    entry = _StubEntry(coordinator)
+    hass = _StubHass(entry, coordinator)
+
+    registry = single_owner_device_registry
+    registry.add_config_entry(entry.entry_id)
+    registry.add_config_entry("foreign-entry")
+    registry.add_device(
+        identifiers={(DOMAIN, "ours-1")}, config_entry_id=entry.entry_id
+    )
+    registry.add_device(
+        identifiers={(DOMAIN, "ours-2")}, config_entry_id=entry.entry_id
+    )
+    registry.add_device(
+        identifiers={(DOMAIN, "theirs")}, config_entry_id="foreign-entry"
+    )
+
+    async def _fake_get_integration(_hass, _domain):
+        return SimpleNamespace(name="Test Integration", version="1.2.3")
+
+    monkeypatch.setattr(diagnostics, "async_get_integration", _fake_get_integration)
+    monkeypatch.setattr(diagnostics.dr, "async_get", lambda _hass: registry)
+    monkeypatch.setattr(
+        diagnostics.er, "async_get", lambda _hass: SimpleNamespace(entities={})
+    )
+
+    payload = _run(diagnostics.async_get_config_entry_diagnostics(hass, entry))
+
+    assert payload["registries"]["device"]["devices_count"] == 2
+
+
+def test_device_count_goes_through_the_entry_scoped_helper(
+    monkeypatch: pytest.MonkeyPatch,
+    single_owner_device_registry: SingleOwnerDeviceRegistry,
+) -> None:
+    """AP-17: the reading itself, since no count can tell the two apart.
+
+    This is the only assertion here that goes red if the entry-scoped helper is
+    swapped back for a walk over the registry-wide mapping, which is what AP-17
+    removed.  It watches *which* question is asked, not how the answer is
+    spelled: the argument under test is the entry id, and a helper called for a
+    foreign entry -- or not called at all -- fails.
+    """
+
+    coordinator = _StubCoordinator()
+    entry = _StubEntry(coordinator)
+    hass = _StubHass(entry, coordinator)
+
+    registry = single_owner_device_registry
+    registry.add_config_entry(entry.entry_id)
+    registry.add_config_entry("foreign-entry")
+    registry.add_device(
+        identifiers={(DOMAIN, "ours-1")}, config_entry_id=entry.entry_id
+    )
+    # A foreign device, so the count below is not satisfied by an unscoped
+    # tally.  Without it both readings answer 1 and the second assertion is
+    # vacuous: a body that calls the helper, discards the result and counts the
+    # whole registry would keep this test green.
+    registry.add_device(
+        identifiers={(DOMAIN, "theirs")}, config_entry_id="foreign-entry"
+    )
+
+    asked_for: list[str] = []
+    real_helper = diagnostics.dr.async_entries_for_config_entry
+
+    def _spy(reg, config_entry_id):
+        asked_for.append(config_entry_id)
+        return real_helper(reg, config_entry_id)
+
+    async def _fake_get_integration(_hass, _domain):
+        return SimpleNamespace(name="Test Integration", version="1.2.3")
+
+    monkeypatch.setattr(diagnostics, "async_get_integration", _fake_get_integration)
+    monkeypatch.setattr(diagnostics.dr, "async_get", lambda _hass: registry)
+    monkeypatch.setattr(diagnostics.dr, "async_entries_for_config_entry", _spy)
+    monkeypatch.setattr(
+        diagnostics.er, "async_get", lambda _hass: SimpleNamespace(entities={})
+    )
+
+    payload = _run(diagnostics.async_get_config_entry_diagnostics(hass, entry))
+
+    assert asked_for == [entry.entry_id]
+    assert payload["registries"]["device"]["devices_count"] == 1
+
+
+def test_device_count_is_none_when_the_registry_cannot_answer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A registry that cannot answer yields ``None``, never a wrong number.
+
+    Diagnostics must not fail the whole report over one count, so the block
+    carries a broad ``except``.  This pins that the fallback is ``None`` and not
+    a silently wrong ``0``, which would read like "this entry owns no devices".
+    """
+
+    coordinator = _StubCoordinator()
+    entry = _StubEntry(coordinator)
+    hass = _StubHass(entry, coordinator)
+
+    async def _fake_get_integration(_hass, _domain):
+        return SimpleNamespace(name="Test Integration", version="1.2.3")
+
+    monkeypatch.setattr(diagnostics, "async_get_integration", _fake_get_integration)
+    monkeypatch.setattr(diagnostics.dr, "async_get", lambda _hass: SimpleNamespace())
+    monkeypatch.setattr(
+        diagnostics.er, "async_get", lambda _hass: SimpleNamespace(entities={})
+    )
+
+    payload = _run(diagnostics.async_get_config_entry_diagnostics(hass, entry))
+
+    assert payload["registries"]["device"]["devices_count"] is None

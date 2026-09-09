@@ -630,9 +630,27 @@ async def async_get_config_entry_diagnostics(
     device_registry_counts: dict[str, Any] = {}
     try:
         dev_reg = dr.async_get(hass)
-        devices_for_entry = [
-            d for d in dev_reg.devices.values() if entry.entry_id in d.config_entries
-        ]
+        # Ask the registry for this entry's devices instead of walking the
+        # registry-wide mapping and filtering by ownership.  Two deprecated
+        # reads go at once, and only one of them is reported by Core.  What
+        # reports is *using* the registry-wide container as a mapping -- from
+        # 2026.9 the ``devices`` attribute hands out a view whose container
+        # methods each raise a ``report_usage``; touching the attribute alone
+        # does not, and neither does iterating it.  The set-shaped
+        # ``DeviceEntry.config_entries`` is a plain property and reports
+        # nothing at all.  Measured on 2026.9.1, reports per expression: the
+        # attribute 0, a container method on it 1, the removed expression 1,
+        # the line below 0, ``DeviceEntry.config_entries`` 0.  The ownership
+        # read goes with it because from 2026.8 a device belongs to exactly one
+        # config entry, which makes the set a compatibility shim whose single
+        # element is derived from ``config_entry_id``.
+        #
+        # The module-level helper is the supported way to ask.  Its signature
+        # and result are the same on every supported core (2025.9.1, 2026.8.2,
+        # 2026.9.1); its body is not, and that is the point: from 2026.9 it
+        # reaches the item store through the private name, which is why asking
+        # this way does not itself trip the reporter.
+        devices_for_entry = dr.async_entries_for_config_entry(dev_reg, entry.entry_id)
         device_registry_counts["devices_count"] = len(devices_for_entry)
     except Exception:
         device_registry_counts["devices_count"] = None

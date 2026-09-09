@@ -703,9 +703,14 @@ at a time (`AP-12` to `AP-17`), and finally the removal of the transitional
 scaffolding (`AP-18` onwards). A `resolved_by="AP-nn"` field therefore reads as
 "this entry must disappear once that file has been migrated"; the accompanying
 dead-entry test enforces the other direction, so no marker can outlive its
-subject silently. The plan document itself is not part of this repository, which
-is why every marker is accompanied by a reason in plain words: the reason is the
-evidence, the marker is only an ordering hint.
+subject silently. One field value is not a work package: `resolved_by="KEPT"`
+marks an entry that is deliberately permanent, because the *operation* stays as
+evidence that Core still reports the call, whether the production site is gone
+or merely inert. Rolling such an entry's marker forward at every work package
+would state an expiry that is never meant to arrive; `KEPT` says so instead.
+The plan document itself is not part of this repository, which is why every
+marker is accompanied by a reason in plain words: the reason is the evidence,
+the marker is only an ordering hint.
 
 **Checklist tie-in:** Section V — High priority (deletion risk via
 `remove_config_entry_id`) and Medium priority (ownership keywords, ambiguous
