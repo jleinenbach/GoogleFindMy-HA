@@ -1,10 +1,14 @@
-.PHONY: bootstrap-doctoc clean clean-node-modules doctoc lint test-single test-cov test-ha test-unload translation-check check-ha-compat install install-dev
+.PHONY: bootstrap-doctoc clean clean-node-modules doctoc lint preflight test-single test-cov test-ha test-unload translation-check check-ha-compat install install-dev
 
 PYTHON ?= python3
 NPM ?= npm
 POETRY ?= poetry
 PYTEST_ARGS ?=
 PYTEST_COV_FLAGS ?= --cov-report=term-missing
+# Space-separated interpreters for `make preflight`, one per Home Assistant
+# track you want the suite to run on. Empty by default: the paths are
+# machine-local, so they belong on the command line, not in this file.
+PREFLIGHT_PYTHONS ?=
 
 # Remove DOCTOC_SENTINEL via `make clean` to force a DocToc reinstall when the cached dev dependency changes.
 DOCTOC_SENTINEL := .bootstrap/doctoc-preinstall.stamp
@@ -44,6 +48,11 @@ install-dev:
 translation-check:
 	@echo "[make translation-check] Checking for missing translation keys"
 	@$(POETRY) run python -m script.translation_key_check
+
+preflight:
+	@echo "[make preflight] Running the local preflight S1-S8 (see script/AGENTS.md)"
+	@$(PYTHON) script/local_verify.py --all \
+		$(foreach interpreter,$(PREFLIGHT_PYTHONS),--python $(interpreter))
 
 test-single:
 	@echo "[make test-single] Running pytest $(PYTEST_ARGS) $(TEST)"

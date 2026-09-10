@@ -511,7 +511,7 @@ Prefer the executable name when it is available; fall back to the module form wh
 > – review package/version updates and synchronize lock files/manifests as needed (see the "Home Assistant version & dependencies" section)
 > – rerun the relevant tests/linters after dependency updates
 >
-> *(The helper `python script/local_verify.py` covers Ruff + Pytest as a quick pass; run it in addition to—but never instead of—the mandatory steps above. Document every component you run manually.)*
+> *(The helper `python script/local_verify.py` covers Ruff + Pytest as a quick pass; run it in addition to—but never instead of—the mandatory steps above. `--all` extends it to the full local preflight and marks every stage it could not run as `NOT CHECKED` rather than silently skipping it, see `script/AGENTS.md`. Document every component you run manually.)*
 > *Hassfest validation now runs in CI via `.github/workflows/hassfest-auto-fix.yml`; rely on that workflow and re-run it from the PR UI whenever you need a fresh manifest check.*
 >
 > **optional escalation:** `PYTHONWARNINGS=error::DeprecationWarning pytest -q` *(turns new deprecations into hard failures so they cannot be overlooked—clear the root cause or document the upstream blocker before retrying without the flag).*

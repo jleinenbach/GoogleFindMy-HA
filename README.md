@@ -44,6 +44,7 @@ For the quickest way to bootstrap Home Assistant test stubs before running `pyte
 - `make test-ha` — execute the targeted regression smoke tests (`tests/test_entity_recovery_manager.py`, `tests/test_homeassistant_callback_stub_helper.py`) and then run `pytest -q --cov` for the full suite while teeing detailed output to `pytest_output.log`. Append flags such as `--maxfail=1 -k recovery` with `make test-ha PYTEST_ARGS="…"` when you need custom pytest options, or override the coverage summary with `make test-ha PYTEST_COV_FLAGS="--cov-report=term"` for slimmer output.
 - `make test-cov` — run `pytest -q --cov` with coverage reporting (output teed to `pytest_output.log`).
 - `make test-single TEST=<path>` — run a single test file with optional `PYTEST_ARGS`.
+- `make preflight` — run the full local preflight S1 to S8 before opening a pull request (format, lint, types, spelling, suite plus project coverage, patch coverage) and print every stage as `OK`, `FAILED`, `NOTE` or `NOT CHECKED` with a reason. Name one interpreter per Home Assistant track with `make preflight PREFLIGHT_PYTHONS="/track-a/bin/python /track-b/bin/python"`; the paths are machine-local, so the variable is empty by default. Details in `script/AGENTS.md`.
 - `make translation-check` — check for missing translation keys across all locale files.
 - `make check-ha-compat` — check dependency compatibility with Home Assistant.
 - `script/bootstrap_ssot_cached.sh` — stage the Home Assistant Single Source of Truth (SSoT) wheels in `.wheelhouse/ssot` and install them from the local cache. Pass `SKIP_WHEELHOUSE_REFRESH=1` to reuse the cached artifacts on subsequent bootstrap runs or `PYTHON=python3.12` to target an alternate interpreter. The helper also validates `.wheelhouse/ssot` against `script/ssot_wheel_manifest.txt` (override with `SSOT_MANIFEST=…`) so repeated runs can confirm the primary wheels are cached without re-listing the full directory.
@@ -109,6 +110,7 @@ When a dependency pin changes, delete the archive (and `.wheelhouse/`) or rerun
 - `make test-unload`: Execute the targeted unload regression suite (`tests/test_unload_subentry_cleanup.py`) to verify the parent-unload rollback path.
 - `make test-cov`: Run `pytest -q --cov` with coverage reporting (output teed to `pytest_output.log`).
 - `make test-single TEST=<path>`: Run a single test file with optional `PYTEST_ARGS`.
+- `make preflight`: Run the local preflight S1 to S8 and print the stage report; pass the tracks with `PREFLIGHT_PYTHONS="…"` (space separated, empty by default because the paths are machine-local). Unlike the other targets this one does not go through `poetry run`, because each track is its own virtualenv.
 - `make translation-check`: Check for missing translation keys across all locale files.
 - `make check-ha-compat`: Check dependency compatibility with Home Assistant via `script/check_ha_compatibility.py`.
 - `make doctoc`: Regenerate the AGENTS.md table of contents (requires Node.js; installs DocToc via `make bootstrap-doctoc`).
@@ -817,7 +819,7 @@ To contribute, please:
 2. Create a feature branch
 3. Install the development dependencies with `make install-dev` (or `poetry install --with dev,test`)
 4. Install the development hooks with `pre-commit install` and ensure `pre-commit run --all-files` passes before submitting changes. If the CLI entry points are unavailable, use the `python -m` fallbacks from the [module invocation primer](AGENTS.md#module-invocation-primer) to run the same commands reliably.
-5. Run `python script/local_verify.py` to execute the required `ruff format --check` and `pytest -q` commands together (or invoke `python script/precommit_hooks/ruff_format.py --check ...` and `pytest -q` manually if you need custom arguments).
+5. Run `python script/local_verify.py` to execute the required `ruff format --check` and `pytest -q` commands together (or invoke `python script/precommit_hooks/ruff_format.py --check ...` and `pytest -q` manually if you need custom arguments). Before opening a pull request, `python script/local_verify.py --all` runs the wider preflight (format, lint, types, spelling, suite plus project coverage, patch coverage) and reports every stage as `OK`, `FAILED`, `NOTE` or `NOT CHECKED` with a reason; see `script/AGENTS.md`.
 6. When running pytest (either through the helper script or directly) fix any failures and address every `DeprecationWarning` you encounter—rerun with `PYTHONWARNINGS=error::DeprecationWarning pytest -q` if you need help spotting new warnings.
 7. Test thoroughly with your Find My devices
 8. Submit a pull request with detailed description
