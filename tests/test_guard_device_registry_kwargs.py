@@ -1,6 +1,12 @@
 # tests/test_guard_device_registry_kwargs.py
 """Static ratchet against the pre-2026.8 device registry API.
 
+Two kinds of check live here. The larger part is an AST ratchet over the
+production tree, described below. The smaller part, at the end of the file,
+reads the three ``AGENTS.md`` contracts and holds their polarity, because the
+same migration that removed the old calls also removed the sentences that told
+an agent to write them. Both guard one rule, so they share a file.
+
 Home Assistant 2026.8 made a device belong to exactly one config entry and
 subentry.  Five shapes in this repository spoke the old model when this gate
 landed, and each of them fails differently.  Since ``N-22`` the ratchet below is
@@ -42,6 +48,7 @@ have hidden inside a function that was already listed.
 from __future__ import annotations
 
 import ast
+import re
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
@@ -420,4 +427,178 @@ def test_undecidable_constructs_are_reported_not_hidden() -> None:
         f"{len(undecidable)} undecidable constructs, up from 0 at the time the "
         "gate landed. Review them and either extend the allow lists with a "
         "verified receiver or migrate the sites."
+    )
+
+
+#: Contracts that must NAME the replacement keyword, in nearest-wins order. A
+#: rule that lives only in the root file is invisible to someone working from
+#: ``tests/``, and the component file is the nearest contract for the module
+#: this gate protects.
+_KEYWORD_FILES = (
+    "AGENTS.md",
+    "custom_components/googlefindmy/AGENTS.md",
+    "tests/AGENTS.md",
+)
+
+#: Contracts that must not CARRY the superseded advice. This is the wider set on
+#: purpose: naming the replacement is a duty of the three files above, but
+#: restoring the old rule is forbidden everywhere, and the topical files under
+#: ``custom_components/googlefindmy/agents/`` are what an agent opens first for
+#: registry work.
+_NO_LEGACY_ADVICE_GLOBS = ("AGENTS.md", "**/AGENTS.md")
+
+#: The legacy ownership keywords an instruction could tell someone to pass.
+_LEGACY_ADVICE_TARGETS = r"add_config_(?:sub)?entry_id"
+
+#: Prescriptive forms measured in this repository's own prose. The first two are
+#: verbatim from the lines the migration removed (``git log -p``); the others are
+#: the paraphrases the contracts use elsewhere for the same kind of duty, which
+#: is how a model with pre-2026.8 training data restores the rule without
+#: reusing the removed wording.
+_SUPERSEDED_WORDINGS = (
+    rf"always include (?:an |the |both )?{_LEGACY_ADVICE_TARGETS}",
+    r"must include the child entry_id",
+    rf"must (?:carry|pass|include|supply|send) (?:an |the |both )?{_LEGACY_ADVICE_TARGETS}",
+    rf"(?:always|be sure to|make sure to|ensure you) (?:pass|supply|send|set|add) (?:an |the |both )?{_LEGACY_ADVICE_TARGETS}",
+)
+
+#: Words that turn a sentence about the old keywords into a prohibition or a
+#: history note. Without this the contracts would report themselves once a
+#: pattern above is widened: they discuss the superseded rule at length in order
+#: to forbid it. Measured 2026-09-09 the filter rescues nothing in the tree, the
+#: four patterns simply do not reach any prohibition sentence today. It is kept
+#: so the pattern list can grow without the contracts turning red, and the
+#: negative samples in the positive control keep it under test.
+_PROHIBITION_MARKERS = re.compile(
+    r"\b(?:never|no longer|not |n't|superseded|deprecat|removed|stop |instead|"
+    r"forbidden|must not|do not|don't|deletes|inert|attaches nothing|"
+    r"this bullet demanded|used to)\b",
+    re.IGNORECASE,
+)
+
+#: How many consecutive lines are joined before matching. Markdown prose here is
+#: hard-wrapped, so a sentence routinely spans two lines; three covers that with
+#: margin. A window rather than a paragraph keeps the reported line number the
+#: line the match starts on, which a paragraph cannot: the largest block in
+#: these files is over 31000 characters.
+_WINDOW = 3
+
+
+def _windows(text: str) -> list[tuple[int, str]]:
+    """Return ``(line number, normalised text)`` for each sliding window.
+
+    Backticks and bold markers are dropped, whitespace is collapsed. The
+    underscore stays: it is part of every keyword this file looks for, and
+    stripping it turned ``add_config_entry_id`` into ``addconfigentryid``, which
+    no pattern matches. The positive control below caught that.
+    """
+    lines = text.splitlines()
+    out: list[tuple[int, str]] = []
+    for index in range(len(lines)):
+        joined = " ".join(lines[index : index + _WINDOW])
+        collapsed = re.sub(r"[`*]", "", joined)
+        out.append((index + 1, re.sub(r"\s+", " ", collapsed).strip()))
+    return out
+
+
+def _legacy_advice_in(text: str) -> list[tuple[int, str]]:
+    """Return every window that prescribes a superseded ownership keyword."""
+    return [
+        (line, window)
+        for line, window in _windows(text)
+        if any(re.search(p, window, re.IGNORECASE) for p in _SUPERSEDED_WORDINGS)
+        and not _PROHIBITION_MARKERS.search(window)
+    ]
+
+
+def test_the_contracts_name_the_single_owner_keyword() -> None:
+    """The three nearest contracts name the replacement API."""
+    missing = [
+        name
+        for name in _KEYWORD_FILES
+        if "new_config_subentry_id"
+        not in (_REPO_ROOT / name).read_text(encoding="utf-8")
+    ]
+    assert not missing, (
+        "the single-owner keyword is unnamed in: "
+        + ", ".join(missing)
+        + ". An agent reading only that file keeps writing the legacy quadruple."
+    )
+
+
+def test_no_contract_carries_the_superseded_advice() -> None:
+    """No ``AGENTS.md`` in the tree tells anyone to pass the old keywords.
+
+    Blind spot, stated rather than implied: this holds four measured wordings
+    and their close variants, not the meaning. A sufficiently different
+    paraphrase passes, and the prohibition filter can be defeated by a sentence
+    that both forbids and prescribes. It is a tripwire against the restoration
+    of a known sentence, not a semantic check.
+
+    Obsolete when the compatibility layer for cores below 2026.8 goes, that is
+    once the declared minimum reaches 2026.8.0 or the ``2027.8.0`` removal
+    lands: from then on the legacy keywords no longer parse and no contract can
+    usefully mention them.
+    """
+    contracts = sorted(
+        {
+            path
+            for pattern in _NO_LEGACY_ADVICE_GLOBS
+            for path in _REPO_ROOT.glob(pattern)
+            if ".git" not in path.parts
+        }
+    )
+    assert len(contracts) >= len(_KEYWORD_FILES), (
+        f"only {len(contracts)} contract files found; the globs "
+        f"{_NO_LEGACY_ADVICE_GLOBS} no longer reach the tree."
+    )
+
+    offenders = [
+        f"{path.relative_to(_REPO_ROOT)}:{line}: {window[:120]}"
+        for path in contracts
+        for line, window in _legacy_advice_in(path.read_text(encoding="utf-8"))
+    ]
+    assert not offenders, "superseded ownership advice is back:\n" + "\n".join(
+        offenders
+    )
+
+
+def test_the_superseded_wordings_still_match_what_they_describe() -> None:
+    """Positive control: an empty result must mean absence, not a dead pattern.
+
+    The samples carry the forms the check has to survive: a line break inside
+    the sentence, single and double backticks, an article before the keyword,
+    and this repository's own paraphrase of the same duty. Each of those made an
+    earlier version of these patterns miss. The negative samples guard the other
+    side, because a filter that reports the prohibitions themselves gets
+    switched off after the second false alarm.
+    """
+    positives = (
+        "always include `add_config_entry_id` (or `config_entry_id` on legacy cores)",
+        "Registry updates **must** include the child `entry_id` in every call",
+        "so Home Assistant keeps it: always include\n``add_config_entry_id`` today",
+        "always include an `add_config_entry_id` whenever a subentry is present",
+        "Every `async_update_device` call on a tracker device must carry\n"
+        "`add_config_entry_id`",
+        "be sure to pass `add_config_subentry_id` when a subentry exists",
+    )
+    unmatched = [s for s in positives if not _legacy_advice_in(s)]
+    assert not unmatched, (
+        "these superseded wordings are no longer recognised: "
+        + "; ".join(repr(s) for s in unmatched)
+    )
+
+    # Each of these matches one of the patterns above and is saved only by the
+    # prohibition filter. Samples that miss the patterns anyway would test
+    # nothing here: measured, they leave the filter green when it is deleted.
+    negatives = (
+        "Superseded, do not restore: always include `add_config_entry_id`.",
+        "Older guidance said every call must carry `add_config_entry_id`; it no "
+        "longer applies.",
+        "A call must not include `add_config_entry_id` on Core 2026.8+.",
+    )
+    false_alarms = [s for s in negatives if _legacy_advice_in(s)]
+    assert not false_alarms, (
+        "the prohibition filter let these through as advice: "
+        + "; ".join(repr(s) for s in false_alarms)
     )

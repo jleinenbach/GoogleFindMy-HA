@@ -422,15 +422,36 @@ This section summarizes the findings in a prioritized checklist.
 - [ ] `async_added_to_hass`: Review every implementation of `async_added_to_hass`. **Action:** Add `if not self.enabled: return` as the first line unless the logic must also run for disabled entities (see Section IV.2).
 - [ ] `CoverEntity` (constants): Search all cover-related files for `STATE_OPEN`, `STATE_CLOSED`, `"open"`, `"closed"`. **Action:** Replace all state checks with the `CoverState` enum (for example, `self.state == CoverState.OPEN`) (see Section II.1).
 - [ ] `CoverEntity` (implementation): Check whether your `CoverEntity` classes override the `state` property. **Action:** Refactor the code to implement `is_closed`, `is_opening`, and `is_closing` instead. Remove manual overrides of `state` (see Section II.1).
-- [ ] Device registry deletion risk: Search for `remove_config_entry_id`. **Action:** For every call, check whether an `add_config_entry_id` from the *same* integration is armed in the same or an earlier call. Without it, Core 2026.8 and newer **delete** the device instead of unlinking it. This is a behavioral change that ships without a warning on 2026.8 (see Section VI).
+- [x] Device registry deletion risk: Search for `remove_config_entry_id`. **Action:** For every call, check whether an `add_config_entry_id` from the *same* integration is armed in the same or an earlier call. Without it, Core 2026.8 and newer **delete** the device instead of unlinking it. This is a behavioral change that ships without a warning on 2026.8 (see Section VI).
 
 ### Checklist (Medium Priority – Required for Future Releases)
 
 - [ ] OAuth2 error handling: If you use OAuth2, review your `async_setup_entry` function. **Action:** Implement the `try ... except ImplementationUnavailableError ... raise ConfigEntryNotReady` pattern (deadline: 2025.12) (see Section IV.4).
 - [ ] `async_update_statistics_metadata`: If you provide statistics, locate calls to `async_update_statistics_metadata`. **Action:** Ensure that the `new_unit_class` argument is always supplied explicitly (for example, `new_unit_class=None`) (see Section II.2).
 - [ ] `Config` alias: Search for imports of `Config` from `homeassistant.core`. **Action:** Change the import path to `from homeassistant.core_config import Config` (see Section II.3).
-- [ ] Device registry ownership keywords: Search for `add_config_entry_id`, `add_config_subentry_id`, `remove_config_entry_id`, `remove_config_subentry_id`. **Action:** Express the intent instead. Move a device with `new_config_entry_id` and/or `new_config_subentry_id`, remove it with `async_remove_device` (deadline 2027.8, warnings from 2026.9; see Section VI).
-- [ ] Ambiguous device lookups: Search for `async_get_device(` and for `device_registry.devices` used as a mapping. **Action:** Replace the lookup with `async_get_device_by_identifier`, `async_get_device_by_connection` or `async_get_devices`, and replace mapping access with `async_get` or `async_entries_for_config_entry` (deadlines 2027.8 and 2027.9; see Section VI).
+- [x] Device registry ownership keywords: Search for `add_config_entry_id`, `add_config_subentry_id`, `remove_config_entry_id`, `remove_config_subentry_id`. **Action:** Express the intent instead. Move a device with `new_config_entry_id` and/or `new_config_subentry_id`, remove it with `async_remove_device` (deadline 2027.8, warnings from 2026.9; see Section VI).
+- [x] Ambiguous device lookups: Search for `async_get_device(` and for `device_registry.devices` used as a mapping. **Action:** Replace the lookup with `async_get_device_by_identifier`, `async_get_device_by_connection` or `async_get_devices`, and replace mapping access with `async_get` or `async_entries_for_config_entry` (deadlines 2027.8 and 2027.9; see Section VI).
+
+> **Status of the three device-registry items above, measured 2026-09-09 in this
+> repository.** All three are done here, which is why they are ticked; the
+> deadlines stay in their text because they describe Core, not this repository,
+> and a reader migrating another integration still needs them. What was measured:
+> the AST gate in `tests/test_guard_device_registry_kwargs.py` reports zero
+> findings over `custom_components/googlefindmy`, and zero undecidable
+> constructs on the day of measurement (that second number is a reading, not a
+> guarantee: the gate pins it at five or fewer, so a later rise to three would
+> stay green here while making this sentence stale);
+> `async_get_device(` occurs nowhere in production code; and the only remaining
+> `devices` access is the `getattr` inside `coordinator/helpers/registry.py`,
+> the compatibility layer that is allowed to speak both dialects.
+>
+> Two things deliberately remain open. First, `async_get_or_create` can still
+> move a device into a different subentry without any of the keywords above;
+> that path is observed rather than blocked, because a block there would fight
+> Home Assistant's own device creation. Second, the removal deadline `2027.8.0`
+> has not passed, so the compatibility layer that serves cores below 2026.8
+> stays. Ticking an item here means "this repository no longer produces the
+> pattern", not "Core has removed it".
 
 ### Checklist (Low Priority – Good Code Hygiene)
 

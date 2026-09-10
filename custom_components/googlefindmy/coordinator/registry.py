@@ -141,11 +141,17 @@ from .helpers.subentry import (
 _LOGGER = logging.getLogger(__name__)
 
 # Two-stage emergency brake for ownership keywords that were not migrated to
-# ``_apply_device_ownership``. In this work package it stands on "report": the
-# call is let through and only logged. AP-18 flips it to "drop" once every call
-# site speaks intents. Dropping earlier would make every intermediate commit
-# non-functional on Core 2026.8+, where the old keywords still parse.
-_OWNERSHIP_ENFORCEMENT = "report"
+# ``_apply_device_ownership``. It now stands on "drop": such a keyword is
+# removed from the call and logged as an error. Dropping only became safe once
+# every call site speaks intents; doing it earlier would have made each
+# intermediate commit non-functional on Core 2026.8+, where the old keywords
+# still parse and where ``add_``/``remove_`` together form a working move.
+# It stays a switch rather than being hard-wired: the "report" stage keeps the
+# warning/debug levels alive and under test. There is no runtime option behind
+# it; reaching that stage means editing this line or patching it in a test. A
+# test reads this constant without patching it, so an edit back to "report"
+# turns that test red instead of passing unnoticed.
+_OWNERSHIP_ENFORCEMENT = "drop"
 
 
 class RegistryOperations(_MixinBase):
@@ -221,7 +227,7 @@ class RegistryOperations(_MixinBase):
     def _report_unmigrated_ownership_kwargs(
         self, call: Callable[..., Any], kwargs: dict[str, Any]
     ) -> None:
-        """Report, and from AP-18 on drop, pre-2026.8 ownership keywords.
+        """Drop pre-2026.8 ownership keywords, or on the report stage log them.
 
         From Core 2026.8 the ``new_config_*`` keywords must not be combined with
         the ``add_``/``remove_`` pair; core raises ``HomeAssistantError``. Note
@@ -247,11 +253,11 @@ class RegistryOperations(_MixinBase):
         # A lone add_* is inert on this core. A remove_* on the owning entry is
         # not: it deletes the device. The two deserve different visibility.
         destructive = _OWNERSHIP_REMOVE_KWARGS[0] in stale
-        # Level by consequence, not by sentiment. While the switch stands on
-        # "report" nothing is altered and every remaining call site is known and
-        # listed in ``tests/test_guard_device_registry_deprecations.py``; an
-        # error per device and refresh would drown the real ones. Once the
-        # switch drops keywords the call really changes, and that must be loud.
+        # Level by consequence, not by sentiment. On the "report" stage nothing
+        # is altered, so an error per device and refresh would drown the real
+        # ones; there, a lone add_* is inert and only the remove_* form can
+        # delete. Once the switch drops keywords the call really changes, and
+        # that must be loud, which is why dropping overrides the split.
         if dropping:
             log = _LOGGER.error
         elif destructive:

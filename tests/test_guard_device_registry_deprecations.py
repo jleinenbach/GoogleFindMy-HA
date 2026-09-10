@@ -29,9 +29,9 @@ worse than none.
 Eleven of the twelve carry no production site any more: AP-12 moved every
 ownership and lookup call in ``coordinator/registry.py`` onto intents, AP-13 did
 the same for ``services.py``, AP-15 for ``config_flow.py`` and AP-16 for
-``__init__.py``. The twelfth, the ``devices`` mapping, still has two sites
-(``coordinator/registry.py``, ``coordinator/subentry.py``); AP-17 removed the one
-in ``diagnostics.py``. The eleven migrated operations stay, and that is
+``__init__.py``. The twelfth, the ``devices`` mapping, has none either since
+``N-22``: AP-17 removed the site in ``diagnostics.py``, and ``N-22`` the last two
+in ``coordinator/registry.py`` and ``coordinator/subentry.py``. The eleven migrated operations stay, and that is
 deliberate. They do not prove that the fork still
 makes the call; they prove that *Core still reports it*, which is what keeps the
 canary and the dead-entry check honest and what will catch a regression that
@@ -42,12 +42,12 @@ Two qualifications on the ``diagnostics.py`` removal, both measured. It took
 with it the last ownership read through the set-shaped ``config_entries``
 attribute *outside the compatibility layer*: ``coordinator/helpers/registry.py``
 reads it three times on purpose, which is what a translator is for, and the
-ratchet exempts that file by name. And the two remaining ``devices`` sites are
-not merely unmigrated, they are already inert on a reporting core: both guard
-their access with ``isinstance(..., Mapping)``, and from 2026.9 the attribute
-hands out a view that is not a ``Mapping`` subclass, so the branch is skipped
-and nothing is reported from production. Their gate operations therefore carry
-the whole evidence. Measure it rather than trusting this paragraph::
+ratchet exempts that file by name. And the ``devices`` mapping now has no
+production site at all: ``N-22`` rewrote the last two onto ``iter_all_devices``
+and ``async_entries_for_config_entry``. That closed a latent defect rather than
+a stylistic one, because both old sites sat behind an ``isinstance(..., Mapping)``
+guard which from 2026.9 no longer holds, so they would have gone silently
+inert. Its gate operation therefore carries the whole evidence. Measure it rather than trusting this paragraph::
 
     python -c "from collections.abc import Mapping; \
 from homeassistant.helpers import device_registry as dr; \
@@ -158,16 +158,16 @@ ACCEPTED_DEPRECATIONS: tuple[AcceptedDeprecation, ...] = (
         key="devices_mapping",
         needle="`device_registry.devices`",
         reason=(
-            "Two `devices` sites remain, in coordinator/registry.py and "
-            "coordinator/subentry.py; AP-16 removed the ones in __init__.py and "
-            "AP-17 the one in diagnostics.py. No work package of this migration "
-            "rewrites the remaining two: AP-18 arms the safety net and trims the "
-            "allowlists, it does not touch call sites. KEPT for a different "
-            "reason than the two entries above: there the production site is "
-            "gone, here two remain but are inert on a reporting core (both are "
-            "behind an `isinstance(..., Mapping)` guard that a 2026.9 view "
-            "fails, see the module docstring). This entry is what keeps the "
-            "report itself visible."
+            "No production site remains: AP-16 removed the ones in __init__.py, "
+            "AP-17 the one in diagnostics.py, and N-22 the last two, in "
+            "coordinator/registry.py and coordinator/subentry.py. Measured "
+            "2026-09-09, the only `devices` access left is the `getattr` inside "
+            "coordinator/helpers/registry.py, the compatibility layer that is "
+            "allowed to speak both dialects. KEPT all the same, and for a "
+            "different reason than the entries above: the report is raised by "
+            "this gate's own probing call, so removing the entry would turn "
+            "test_no_unexpected_deprecation_is_raised red. This entry is what "
+            "keeps the report itself visible."
         ),
         resolved_by="KEPT",
     ),
@@ -306,7 +306,7 @@ def _operations(hass: Any) -> list[tuple[str, str, Any]]:
         ),
         (
             "devices_mapping",
-            "coordinator/registry.py and coordinator/subentry.py, two sites",
+            "no production site since N-22, gate operation only",
             _devices_mapping,
         ),
     ]

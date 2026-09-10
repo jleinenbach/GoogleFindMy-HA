@@ -985,19 +985,29 @@ class TestDeviceRegistryCapabilities:
 
 
 class TestUnmigratedOwnershipBrake:
-    """Ownership keywords that bypassed the planner are reported, then dropped."""
+    """Ownership keywords that bypassed the planner are dropped and logged.
+
+    Two stages share one switch: "drop" ships, "report" is reachable only by
+    editing the constant or patching it here, and keeps its level split under
+    test rather than becoming dead code.
+    """
 
     def test_report_stage_lets_the_call_through(
         self,
         coord: RegistryStub,
         caplog: pytest.LogCaptureFixture,
+        monkeypatch: pytest.MonkeyPatch,
         single_owner_device_registry: SingleOwnerDeviceRegistry,
     ) -> None:
-        """Until AP-18 the call is unchanged; the report stays out of ERROR.
+        """On the report stage the call is unchanged and stays out of ERROR.
 
-        Every remaining call site is known and listed in the deprecation
-        allowlist, so an error per device and refresh would drown the real ones.
+        That stage is no longer what ships, so this test sets it. There is no
+        runtime option behind the constant; the stage is reached by editing it
+        or by patching it as this test does. It is kept because dropping the
+        test would leave the debug/warning branches and the ``destructive``
+        computation behind them as dead, unexercised code.
         """
+        monkeypatch.setattr(registry_mod, "_OWNERSHIP_ENFORCEMENT", "report")
         registry = _populate(single_owner_device_registry)
         with caplog.at_level("DEBUG"):
             coord._call_device_registry_api(
@@ -1006,44 +1016,69 @@ class TestUnmigratedOwnershipBrake:
             )
         assert registry.operations[-1][1]["add_config_entry_id"] == "entry-1"
         assert "passed through" in caplog.text
-        assert not [r for r in caplog.records if r.levelname == "ERROR"]
+        # The level itself, not just the absence of ERROR: a lone add_* is inert
+        # on this core, so it belongs in DEBUG. Measured: without this line,
+        # moving the branch to warning breaks no test in this class, and the
+        # whole "level by consequence" split collapses unnoticed.
+        assert [r.levelname for r in caplog.records if "Unmigrated" in r.message] == [
+            "DEBUG"
+        ]
 
     def test_drop_stage_removes_both_families_together(
-        self,
-        coord: RegistryStub,
-        monkeypatch: pytest.MonkeyPatch,
-        single_owner_device_registry: SingleOwnerDeviceRegistry,
-    ) -> None:
-        """AP-18 flips the switch; a half-dropped pair would delete a device."""
-        monkeypatch.setattr(registry_mod, "_OWNERSHIP_ENFORCEMENT", "drop")
-        registry = _populate(single_owner_device_registry)
-        coord._call_device_registry_api(
-            registry.async_update_device,
-            base_kwargs={
-                "device_id": "device-1",
-                "add_config_entry_id": "entry-1",
-                "remove_config_entry_id": "entry-1",
-                "remove_config_subentry_id": "sub-1",
-            },
-        )
-        # The device survives: without the drop, ``remove_config_entry_id`` on
-        # the owning entry would have deleted it.
-        assert registry.async_get("device-1") is not None
-        recorded = registry.operations[-1][1]
-        assert recorded["remove_config_entry_id"] is UNDEFINED
-        assert recorded["add_config_entry_id"] is UNDEFINED
-
-    def test_a_potentially_deleting_combination_is_warned(
         self,
         coord: RegistryStub,
         caplog: pytest.LogCaptureFixture,
         single_owner_device_registry: SingleOwnerDeviceRegistry,
     ) -> None:
+        """The shipped switch drops; a half-dropped pair would delete a device.
+
+        This test deliberately does not set ``_OWNERSHIP_ENFORCEMENT``. It reads
+        the value that ships, so flipping that value back to "report" turns this
+        test red instead of passing unnoticed.
+        """
+        registry = _populate(single_owner_device_registry)
+        with caplog.at_level("DEBUG"):
+            coord._call_device_registry_api(
+                registry.async_update_device,
+                base_kwargs={
+                    "device_id": "device-1",
+                    "add_config_entry_id": "entry-1",
+                    "remove_config_entry_id": "entry-1",
+                    "remove_config_subentry_id": "sub-1",
+                },
+            )
+        # The device survives: without the drop, ``remove_config_entry_id`` on
+        # the owning entry would have deleted it.
+        assert registry.async_get("device-1") is not None
+        recorded = registry.operations[-1][1]
+        # All four, named one by one. Leaving remove_config_subentry_id in place
+        # does make this test red today, but through the double raising
+        # SingleOwnerError, not through the invariant this test is named for.
+        assert recorded["remove_config_entry_id"] is UNDEFINED
+        assert recorded["remove_config_subentry_id"] is UNDEFINED
+        assert recorded["add_config_entry_id"] is UNDEFINED
+        # A dropped keyword really alters the call, so it is an error, not the
+        # warning the report stage uses. Without this the escalation is unheld:
+        # measured, leaving the drop branch at warning breaks no other test.
+        assert [r.levelname for r in caplog.records if "Unmigrated" in r.message] == [
+            "ERROR"
+        ]
+        assert "(dropped)" in caplog.text
+
+    def test_a_potentially_deleting_combination_is_warned(
+        self,
+        coord: RegistryStub,
+        caplog: pytest.LogCaptureFixture,
+        monkeypatch: pytest.MonkeyPatch,
+        single_owner_device_registry: SingleOwnerDeviceRegistry,
+    ) -> None:
         """A lone add_* is inert here, a remove_* on the owning entry deletes.
 
         Reporting both at the same level would hide the dangerous form in the
-        noise of the harmless one.
+        noise of the harmless one. The level split only exists on the report
+        stage, which the drop stage overrides, so this test selects that stage.
         """
+        monkeypatch.setattr(registry_mod, "_OWNERSHIP_ENFORCEMENT", "report")
         registry = _populate(single_owner_device_registry)
         with caplog.at_level("DEBUG"):
             coord._call_device_registry_api(
