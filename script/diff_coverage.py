@@ -213,15 +213,70 @@ def _hunk_range(header: str) -> tuple[int, int]:
         ) from error
 
 
+# git prints a non-ASCII or control byte as a backslash and three octal digits.
+_OCTAL_ESCAPE_DIGITS = 3
+
+_C_ESCAPES = {
+    "a": b"\a",
+    "b": b"\b",
+    "f": b"\f",
+    "n": b"\n",
+    "r": b"\r",
+    "t": b"\t",
+    "v": b"\v",
+    "\\": b"\\",
+    '"': b'"',
+}
+
+
+def _unquote_git_path(quoted: str) -> str:
+    """Decode a path git printed in its C-style quoted form.
+
+    With the default ``core.quotePath``, a path holding a space, a quote, a
+    control character or a non-ASCII byte arrives as ``"t\\303\\274r.py"``:
+    surrounded by double quotes, with backslash escapes and octal byte values.
+    Stripping the quotes alone leaves the escapes in place, and such a name
+    never matches the UTF-8 filename the coverage report carries, so the file
+    would be listed as uninstrumented and its changed lines silently dropped.
+    """
+
+    raw = bytearray()
+    body = quoted[1:-1]
+    index = 0
+    while index < len(body):
+        char = body[index]
+        if char != "\\":
+            raw.extend(char.encode("utf-8"))
+            index += 1
+            continue
+        index += 1
+        if index >= len(body):
+            raise MeasurementError(f"truncated escape in quoted diff path {quoted!r}")
+        escape = body[index]
+        if escape in _C_ESCAPES:
+            raw.extend(_C_ESCAPES[escape])
+            index += 1
+            continue
+        octal = body[index : index + _OCTAL_ESCAPE_DIGITS]
+        if len(octal) == _OCTAL_ESCAPE_DIGITS and all(
+            digit in "01234567" for digit in octal
+        ):
+            raw.append(int(octal, 8))
+            index += _OCTAL_ESCAPE_DIGITS
+            continue
+        raise MeasurementError(f"unknown escape in quoted diff path {quoted!r}")
+    return raw.decode("utf-8")
+
+
 def _diff_path(target: str) -> str | None:
     """Return the repository-relative path a diff header names, if it names one."""
 
     if target == "/dev/null":
         return None
-    # git quotes paths that contain spaces or non-ASCII bytes; the quotes are not
-    # part of the name and would never match a coverage entry.
+    # git quotes paths that contain spaces, quotes or non-ASCII bytes; neither
+    # the quotes nor the escapes are part of the name.
     if target.startswith('"') and target.endswith('"'):
-        target = target[1:-1]
+        target = _unquote_git_path(target)
     return target[2:] if target.startswith(("a/", "b/")) else target
 
 

@@ -449,3 +449,33 @@ def test_a_quoted_path_is_unquoted() -> None:
     assert diff_coverage.parse_diff(diff) == {
         "custom_components/googlefindmy/a b.py": {3}
     }
+
+
+def test_a_quoted_path_has_its_escapes_decoded() -> None:
+    """git's C-style quoting escapes non-ASCII bytes; the name must be decoded.
+
+    Codex finding on PR #1274: with the default ``core.quotePath`` a path such
+    as ``tür.py`` arrives as ``"t\\303\\274r.py"``. Only the decoded name
+    matches the coverage report; the raw one would be listed as uninstrumented.
+    """
+
+    diff = (
+        'diff --git "a/custom_components/googlefindmy/t\\303\\274r \\"x\\".py"'
+        ' "b/custom_components/googlefindmy/t\\303\\274r \\"x\\".py"\n'
+        '--- "a/custom_components/googlefindmy/t\\303\\274r \\"x\\".py"\n'
+        '+++ "b/custom_components/googlefindmy/t\\303\\274r \\"x\\".py"\n'
+        "@@ -1 +3,2 @@\n"
+    )
+
+    assert diff_coverage.parse_diff(diff) == {
+        'custom_components/googlefindmy/tür "x".py': {3, 4}
+    }
+
+
+def test_a_malformed_quoted_path_is_a_measurement_error() -> None:
+    """A truncated or unknown escape is reported, not guessed at."""
+
+    with pytest.raises(diff_coverage.MeasurementError):
+        diff_coverage._unquote_git_path('"a/x\\"')
+    with pytest.raises(diff_coverage.MeasurementError):
+        diff_coverage._unquote_git_path('"a/x\\q"')
