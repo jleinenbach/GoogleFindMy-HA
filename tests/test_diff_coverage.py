@@ -185,7 +185,14 @@ def test_main_resolves_the_base_through_merge_base(
     # The working tree, not cafe1234..HEAD: the coverage report is taken over
     # the working tree, and both sides of the intersection must mean the same
     # revision.
-    assert recorded[1] == ["diff", "--unified=0", "cafe1234"]
+    assert recorded[1] == [
+        "diff",
+        "--unified=0",
+        "--no-ext-diff",
+        "--src-prefix=a/",
+        "--dst-prefix=b/",
+        "cafe1234",
+    ]
     # Untracked files are part of that same working tree and are asked for
     # after the tracked diff, never instead of it.
     assert recorded[2] == ["ls-files", "--others", "--exclude-standard", "-z"]
@@ -585,12 +592,15 @@ def test_the_synthetic_diff_names_files_as_git_does(tmp_path: Path) -> None:
     The quoting is git's, not ours, so a fake would only pin what we believe
     git does. Here the same awkward names go through both paths: once as
     untracked files through ``_untracked_diff``, once staged and printed by
-    git itself. ``core.quotePath`` is set explicitly so a host configuration
-    that switched it off cannot make the test pass for the wrong reason.
+    git itself. The oracle is called with the pins ``collect_diff`` uses, over
+    a repository configured the opposite way (quoting off, mnemonic prefixes
+    on), so what is compared is git's form under the settings the tool
+    enforces, not under whatever the host happens to carry.
     """
 
     _git(tmp_path, "init", "-q")
-    _git(tmp_path, "config", "core.quotePath", "true")
+    _git(tmp_path, "config", "core.quotePath", "false")
+    _git(tmp_path, "config", "diff.mnemonicPrefix", "true")
     names = [*_AWKWARD_NAMES, "a b.py", "plain.py"]
     for name in names:
         (tmp_path / name).write_text("y = 1\ny = 2\n", encoding="utf-8")
@@ -598,7 +608,18 @@ def test_the_synthetic_diff_names_files_as_git_does(tmp_path: Path) -> None:
     synthetic = diff_coverage._untracked_diff(tmp_path)
 
     _git(tmp_path, "add", "-A")
-    real = _git(tmp_path, "diff", "--cached", "--unified=0", "--no-color")
+    real = _git(
+        tmp_path,
+        "-c",
+        "core.quotePath=true",
+        "diff",
+        "--cached",
+        "--unified=0",
+        "--no-color",
+        "--no-ext-diff",
+        "--src-prefix=a/",
+        "--dst-prefix=b/",
+    )
 
     # Positive control: git really did quote here, so the comparison is doing work.
     assert '+++ "b/' in real
@@ -614,3 +635,35 @@ def test_the_synthetic_diff_names_files_as_git_does(tmp_path: Path) -> None:
     assert sorted(headers) == sorted(
         line for line in synthetic.splitlines() if line.startswith("+++ ")
     )
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX file names")
+def test_collect_diff_is_immune_to_the_host_prefix_and_quoting_settings(
+    tmp_path: Path,
+) -> None:
+    """A developer's ``diff.mnemonicPrefix`` or ``core.quotePath`` changes nothing.
+
+    ``_diff_path`` strips ``a/`` and ``b/`` and decodes C-quoting. With the
+    prefixes renamed by configuration (``w/`` for the working tree) every
+    changed file was reported as uninstrumented; measured red before the pin.
+    ``diff.noprefix`` is harmless by comparison, an unprefixed name is taken
+    as it is, and ``core.quotePath=false`` only stops the quoting of
+    non-ASCII bytes, never of control bytes. Both settings are pinned on the
+    command line, and this repository carries the opposite of each.
+    """
+
+    _git(tmp_path, "init", "-q")
+    _git(tmp_path, "config", "user.email", "t@example.invalid")
+    _git(tmp_path, "config", "user.name", "t")
+    _git(tmp_path, "config", "diff.mnemonicPrefix", "true")
+    _git(tmp_path, "config", "core.quotePath", "false")
+    awkward = "tür.py"
+    (tmp_path / awkward).write_text("y = 1\n", encoding="utf-8")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-q", "-m", "base")
+    (tmp_path / awkward).write_text("y = 1\ny = 2\n", encoding="utf-8")
+    (tmp_path / "new\nline.py").write_text("z = 3\n", encoding="utf-8")
+
+    _base, diff = diff_coverage.collect_diff("HEAD", tmp_path)
+
+    assert diff_coverage.parse_diff(diff) == {awkward: {2}, "new\nline.py": {1}}

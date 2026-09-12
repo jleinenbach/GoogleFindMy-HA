@@ -431,8 +431,11 @@ def _run_git(args: Sequence[str], repo_root: Path) -> str:
     name holds ``\\r`` would be looked up under a name that does not exist.
     """
 
+    # The parser decodes git's C-style quoting, so that quoting is pinned here
+    # rather than left to the host's ``core.quotePath``; a developer's global
+    # ``false`` would otherwise hand the parser a raw control byte in a header.
     result = subprocess.run(
-        ["git", *args],
+        ["git", "-c", "core.quotePath=true", *args],
         check=False,
         capture_output=True,
         cwd=repo_root,
@@ -456,7 +459,21 @@ def collect_diff(base_ref: str, repo_root: Path) -> tuple[str, str]:
     # would describe a different revision: uncommitted lines would be missing
     # from the diff while their line numbers had already shifted the report.
     # Two sides of one intersection have to mean the same revision.
-    diff = _run_git(["diff", "--unified=0", base], repo_root)
+    # The header prefixes are pinned as well: ``_diff_path`` strips ``a/`` and
+    # ``b/``, and a host with ``diff.mnemonicPrefix`` or ``diff.noprefix`` set
+    # would print ``w/`` or nothing, leaving every file "uninstrumented".
+    # ``--no-ext-diff`` keeps a configured ``diff.external`` out of the same way.
+    diff = _run_git(
+        [
+            "diff",
+            "--unified=0",
+            "--no-ext-diff",
+            "--src-prefix=a/",
+            "--dst-prefix=b/",
+            base,
+        ],
+        repo_root,
+    )
     return base, diff + _untracked_diff(repo_root)
 
 
