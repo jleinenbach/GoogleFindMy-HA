@@ -249,6 +249,26 @@ def test_branch_paths_unite_the_working_tree_with_the_branch(
     }
 
 
+def test_changed_paths_include_untracked_files(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The digest clamp holds a new, unstaged file as well as an edited one.
+
+    ``git diff HEAD`` names tracked files only; a module created during the
+    branch and not yet staged would otherwise be free to change while the
+    suite runs, and the clamp would count one file fewer than the tree changed.
+    """
+
+    def _fake_capture(command: Sequence[str]) -> SimpleNamespace:
+        if command[1] == "ls-files":
+            return SimpleNamespace(returncode=0, stdout="new.py\n", stderr="")
+        return SimpleNamespace(returncode=0, stdout="edited.py\n", stderr="")
+
+    monkeypatch.setattr(local_verify, "_capture", _fake_capture)
+
+    assert local_verify._changed_paths() == ["edited.py", "new.py"]
+
+
 def test_branch_paths_survive_a_missing_merge_base(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -375,7 +395,12 @@ def test_stages_run_inside_the_repository(monkeypatch: pytest.MonkeyPatch) -> No
 
 
 def test_the_clamp_covers_staged_files(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Newly added files are staged, and the clamp has to see them."""
+    """Staged and unstaged new files alike are part of the clamp.
+
+    ``git diff HEAD`` (not the index) sees a staged addition; the ``ls-files``
+    call sees an addition that was never staged. Both are pinned here, because
+    dropping either one silently shrinks the set the clamp holds.
+    """
 
     recorded: list[Sequence[str]] = []
 
@@ -387,7 +412,10 @@ def test_the_clamp_covers_staged_files(monkeypatch: pytest.MonkeyPatch) -> None:
 
     local_verify._changed_paths()
 
-    assert recorded == [("git", "diff", "HEAD", "--name-only")]
+    assert recorded == [
+        ("git", "diff", "HEAD", "--name-only"),
+        ("git", "ls-files", "--others", "--exclude-standard"),
+    ]
 
 
 def test_the_reference_report_is_the_first_track(

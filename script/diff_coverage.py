@@ -351,7 +351,38 @@ def collect_diff(base_ref: str, repo_root: Path) -> tuple[str, str]:
     # from the diff while their line numbers had already shifted the report.
     # Two sides of one intersection have to mean the same revision.
     diff = _run_git(["diff", "--unified=0", base], repo_root)
-    return base, diff
+    return base, diff + _untracked_diff(repo_root)
+
+
+def _untracked_diff(repo_root: Path) -> str:
+    """Return a synthetic unified diff that adds every untracked file in full.
+
+    ``git diff <base>`` describes tracked files only. A file created in this
+    working tree and not yet staged is still part of the revision the coverage
+    run saw, and the report lists its statements; leaving it out of the diff
+    would let the measurement report acceptable patch coverage over a tree
+    that is smaller than the one the suite ran on. Only the headers and the
+    hunk range are produced, which is all the parser reads.
+    """
+
+    listing = _run_git(["ls-files", "--others", "--exclude-standard", "-z"], repo_root)
+    sections: list[str] = []
+    for relative in listing.split("\0"):
+        if not relative:
+            continue
+        try:
+            count = len((repo_root / relative).read_bytes().splitlines())
+        except OSError as error:
+            raise MeasurementError(
+                f"untracked file {relative!r} could not be read: {error}"
+            ) from error
+        sections.append(
+            f"diff --git a/{relative} b/{relative}\n"
+            f"--- /dev/null\n"
+            f"+++ b/{relative}\n"
+            f"@@ -0,0 +1,{count} @@\n"
+        )
+    return "".join(sections)
 
 
 def _build_parser() -> argparse.ArgumentParser:

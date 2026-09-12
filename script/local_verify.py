@@ -179,12 +179,27 @@ def _digest_of(paths: Sequence[str]) -> dict[str, str]:
 
 
 def _changed_paths() -> list[str]:
-    """Return the working-tree paths git reports as changed."""
+    """Return the working-tree paths git reports as changed or untracked.
 
-    completed = _capture(["git", "diff", "HEAD", "--name-only"])
-    if completed.returncode != 0:
-        return []
-    return [line.strip() for line in completed.stdout.splitlines() if line.strip()]
+    ``git diff HEAD`` names tracked files only. A file created in this working
+    tree and not yet staged is part of the tree the suite runs on, so the digest
+    clamp has to hold it as well; otherwise an edit to a new file during the
+    run would go unnoticed, and the clamp would report one file fewer than the
+    tree actually changed.
+    """
+
+    paths: list[str] = []
+    for command in (
+        ["git", "diff", "HEAD", "--name-only"],
+        ["git", "ls-files", "--others", "--exclude-standard"],
+    ):
+        completed = _capture(command)
+        if completed.returncode != 0:
+            continue
+        paths.extend(
+            line.strip() for line in completed.stdout.splitlines() if line.strip()
+        )
+    return sorted(set(paths))
 
 
 def _branch_paths(base: str) -> set[str]:

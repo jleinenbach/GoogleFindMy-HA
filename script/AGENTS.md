@@ -167,7 +167,9 @@ make preflight PREFLIGHT_PYTHONS="/path/to/track-a/bin/python /path/to/track-b/b
 of the lines this branch changed, how many were executed? It reads the
 Cobertura `coverage.xml` of a run over the current tree and
 `git diff --unified=0 <merge-base>` (merge base against the working tree, so both
-sides describe the revision the coverage run saw), then intersects the two. `diff-cover`
+sides describe the revision the coverage run saw; untracked files are appended
+as whole-file additions, because `git diff` alone would leave a new, unstaged
+module out of the diff while the report already lists it), then intersects the two. `diff-cover`
 is not a dependency of this repository, and a new runtime dependency for one
 measurement would be out of proportion.
 

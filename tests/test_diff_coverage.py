@@ -138,6 +138,8 @@ def _patch_git(
         recorded.append(list(args))
         if args[0] == "merge-base":
             return "cafe1234\n"
+        if args[0] == "ls-files":
+            return ""
         return diff
 
     monkeypatch.setattr(diff_coverage, "_run_git", _fake)
@@ -182,7 +184,90 @@ def test_main_resolves_the_base_through_merge_base(
     # the working tree, and both sides of the intersection must mean the same
     # revision.
     assert recorded[1] == ["diff", "--unified=0", "cafe1234"]
+    # Untracked files are part of that same working tree and are asked for
+    # after the tracked diff, never instead of it.
+    assert recorded[2] == ["ls-files", "--others", "--exclude-standard", "-z"]
     assert "base: cafe1234" in capsys.readouterr().out
+
+
+def _untracked_repo(tmp_path: Path, body: str) -> Path:
+    """Create a repository root holding one untracked, instrumented module."""
+
+    package = tmp_path / "custom_components" / "googlefindmy"
+    package.mkdir(parents=True)
+    (package / "fresh.py").write_text(body, encoding="utf-8")
+    (tmp_path / "coverage.xml").write_text(
+        _XML.replace("/repo/", f"{tmp_path.as_posix()}/")
+        .replace(
+            'name="api.py" filename="api.py"', 'name="fresh.py" filename="fresh.py"'
+        )
+        .replace('<line number="10" hits="1"/>', '<line number="1" hits="1"/>')
+        .replace('<line number="11" hits="0"/>', '<line number="2" hits="0"/>')
+        .replace('<line number="12" hits="3"/>', ""),
+        encoding="utf-8",
+    )
+    return tmp_path
+
+
+def test_an_untracked_file_enters_the_measurement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A new, unstaged module is part of the tree the suite ran on.
+
+    Codex finding on PR #1274: ``git diff <base>`` omits untracked files, so
+    their statements were listed by the coverage report but never counted as
+    changed. Here the tracked diff is empty and the only change is untracked,
+    with one covered and one uncovered statement; the result has to be 1/2,
+    not "nothing changed".
+    """
+
+    repo = _untracked_repo(tmp_path, "a = 1\nb = 2\n")
+    recorded: list[list[str]] = []
+
+    def _fake(args, repo_root):  # type: ignore[no-untyped-def]
+        recorded.append(list(args))
+        if args[0] == "merge-base":
+            return "cafe1234\n"
+        if args[0] == "ls-files":
+            return "custom_components/googlefindmy/fresh.py\0"
+        return ""
+
+    monkeypatch.setattr(diff_coverage, "_run_git", _fake)
+
+    status = diff_coverage.main(
+        ["--coverage-xml", "coverage.xml", "--repo-root", str(repo), "--threshold", "0"]
+    )
+
+    out = capsys.readouterr().out
+    assert status == diff_coverage.EXIT_OK
+    assert "RESULT: 1/2 (50.00%)" in out
+
+
+def test_an_untracked_file_that_vanished_is_a_measurement_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A listed file that cannot be read is reported, not silently skipped."""
+
+    repo = _untracked_repo(tmp_path, "a = 1\n")
+
+    def _fake(args, repo_root):  # type: ignore[no-untyped-def]
+        if args[0] == "merge-base":
+            return "cafe1234\n"
+        if args[0] == "ls-files":
+            return "custom_components/googlefindmy/gone.py\0"
+        return ""
+
+    monkeypatch.setattr(diff_coverage, "_run_git", _fake)
+
+    status = diff_coverage.main(
+        ["--coverage-xml", "coverage.xml", "--repo-root", str(repo)]
+    )
+
+    assert status == diff_coverage.EXIT_ERROR
+    assert (
+        "untracked file 'custom_components/googlefindmy/gone.py'"
+        in capsys.readouterr().err
+    )
 
 
 def test_main_signals_a_shortfall_with_its_own_status(
