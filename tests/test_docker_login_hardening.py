@@ -1013,6 +1013,25 @@ def _wait_until_ready(ready: Path) -> None:
         time.sleep(0.02)
 
 
+def _end(proc: subprocess.Popen[bytes]) -> None:
+    """Bring the outer bash down, relaying TERM first so its child can follow.
+
+    On the normal path the process has already exited and only the kill is a
+    no-op. On the failure path of ``_wait_until_ready`` a bare ``kill`` would
+    take the bash with SIGKILL, which runs no trap, and the stub child would
+    sleep on as an orphan for its full 30 s; a TERM first lets the trap relay.
+    """
+
+    if proc.poll() is None:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            pass
+    proc.kill()
+    proc.wait(timeout=15)
+
+
 def test_wait_helper_behaviourally_survives_a_child_that_outlives_one_signal(
     tmp_path: Path,
 ) -> None:
@@ -1069,8 +1088,7 @@ def test_wait_helper_behaviourally_survives_a_child_that_outlives_one_signal(
         proc.terminate()
         proc.wait(timeout=15)
     finally:
-        proc.kill()
-        proc.wait(timeout=15)
+        _end(proc)
 
     assert rc_file.exists(), "the helper never returned after the forwarded signal"
     assert rc_file.read_text().strip() == "5", (
@@ -1135,8 +1153,7 @@ def test_terminating_marker_catches_a_child_that_exits_cleanly_on_the_signal(
         proc.terminate()
         proc.wait(timeout=15)
     finally:
-        proc.kill()
-        proc.wait(timeout=15)
+        _end(proc)
 
     assert not fallthrough.exists(), (
         "a child that exited 0 on the relayed signal was treated as a normal "

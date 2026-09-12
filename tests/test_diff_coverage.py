@@ -252,6 +252,7 @@ def test_an_untracked_file_enters_the_measurement(
     assert "RESULT: 1/2 (50.00%)" in out
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX file names")
 def test_an_untracked_file_with_a_newline_in_its_name_enters_the_measurement(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -556,7 +557,9 @@ def test_quoting_a_path_round_trips_through_unquoting(name: str) -> None:
     quoted = diff_coverage._quote_git_path(f"b/{name}")
 
     assert quoted.startswith('"') and quoted.endswith('"')
-    assert "\n" not in quoted
+    # Nothing but printable ASCII may remain: a raw control byte would still
+    # decode correctly and still split or corrupt the header line.
+    assert all(" " <= char <= "~" for char in quoted), repr(quoted)
     assert diff_coverage._unquote_git_path(quoted) == f"b/{name}"
 
 
