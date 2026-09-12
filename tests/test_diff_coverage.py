@@ -9,6 +9,8 @@ reported full coverage there, it would not be measuring the thing it names.
 
 from __future__ import annotations
 
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -243,6 +245,52 @@ def test_an_untracked_file_enters_the_measurement(
     assert "RESULT: 1/2 (50.00%)" in out
 
 
+def test_an_untracked_file_with_a_newline_in_its_name_enters_the_measurement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A control character in an untracked name does not split the diff header.
+
+    Codex finding on PR #1274: the synthetic header wrote the name raw, so a
+    newline in it cut the ``+++`` line in two and the hunk was booked against
+    the first half. The coverage report escapes such a name as ``&#10;``
+    (coverage 7.15.2 does exactly that), and only the git-quoted header decodes
+    to the same string; the result has to be 1/2 for this file, not
+    "uninstrumented".
+    """
+
+    awkward = "fresh\nline.py"
+    repo = _untracked_repo(tmp_path, "a = 1\nb = 2\n")
+    (repo / "custom_components" / "googlefindmy" / "fresh.py").rename(
+        repo / "custom_components" / "googlefindmy" / awkward
+    )
+    xml = repo / "coverage.xml"
+    xml.write_text(
+        xml.read_text(encoding="utf-8").replace(
+            'name="fresh.py" filename="fresh.py"',
+            'name="fresh&#10;line.py" filename="fresh&#10;line.py"',
+        ),
+        encoding="utf-8",
+    )
+
+    def _fake(args, repo_root):  # type: ignore[no-untyped-def]
+        if args[0] == "merge-base":
+            return "cafe1234\n"
+        if args[0] == "ls-files":
+            return f"custom_components/googlefindmy/{awkward}\0"
+        return ""
+
+    monkeypatch.setattr(diff_coverage, "_run_git", _fake)
+
+    status = diff_coverage.main(
+        ["--coverage-xml", "coverage.xml", "--repo-root", str(repo), "--threshold", "0"]
+    )
+
+    out = capsys.readouterr().out
+    assert status == diff_coverage.EXIT_OK
+    assert "RESULT: 1/2 (50.00%)" in out
+    assert "uninstrumented" not in out
+
+
 def test_an_untracked_file_that_vanished_is_a_measurement_error(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -439,7 +487,7 @@ def test_a_content_line_is_not_mistaken_for_a_file_header() -> None:
 
 
 def test_a_quoted_path_is_unquoted() -> None:
-    """git quotes paths with spaces; the quotes never match a coverage entry."""
+    """A quoted header is stripped of its quotes; they never match a coverage entry."""
 
     diff = (
         'diff --git a/x "b/custom_components/googlefindmy/a b.py"\n'
@@ -479,3 +527,89 @@ def test_a_malformed_quoted_path_is_a_measurement_error() -> None:
         diff_coverage._unquote_git_path('"a/x\\"')
     with pytest.raises(diff_coverage.MeasurementError):
         diff_coverage._unquote_git_path('"a/x\\q"')
+
+
+_AWKWARD_NAMES = (
+    "new\nline.py",
+    "tab\there.py",
+    'double"quote.py',
+    "back\\slash.py",
+    "tür.py",
+    "bell\aring.py",
+    "escape\x1bkey.py",
+    "delete\x7fkey.py",
+)
+
+
+@pytest.mark.parametrize("name", _AWKWARD_NAMES, ids=repr)
+def test_quoting_a_path_round_trips_through_unquoting(name: str) -> None:
+    """Every byte class git escapes comes back as the original name."""
+
+    quoted = diff_coverage._quote_git_path(f"b/{name}")
+
+    assert quoted.startswith('"') and quoted.endswith('"')
+    assert "\n" not in quoted
+    assert diff_coverage._unquote_git_path(quoted) == f"b/{name}"
+
+
+def test_a_plain_or_spaced_path_is_not_quoted() -> None:
+    """git leaves a name without awkward bytes alone, a space included.
+
+    Measured against git 2.x with ``core.quotePath`` at its default: ``a b.py``
+    arrives as ``+++ b/a b.py`` followed by a tab, never inside quotes. Quoting
+    it here would be harmless to the parser but would not be git's form.
+    """
+
+    assert diff_coverage._quote_git_path("b/plain.py") == "b/plain.py"
+    assert diff_coverage._quote_git_path("b/a b.py") == "b/a b.py"
+
+
+def _git(repo: Path, *arguments: str) -> str:
+    """Run one git command inside ``repo`` and return its stdout."""
+
+    completed = subprocess.run(
+        ["git", *arguments],
+        check=True,
+        capture_output=True,
+        text=True,
+        cwd=str(repo),
+    )
+    return completed.stdout
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX file names")
+def test_the_synthetic_diff_names_files_as_git_does(tmp_path: Path) -> None:
+    """The untracked-file diff and a real ``git diff`` parse to the same map.
+
+    The quoting is git's, not ours, so a fake would only pin what we believe
+    git does. Here the same awkward names go through both paths: once as
+    untracked files through ``_untracked_diff``, once staged and printed by
+    git itself. ``core.quotePath`` is set explicitly so a host configuration
+    that switched it off cannot make the test pass for the wrong reason.
+    """
+
+    _git(tmp_path, "init", "-q")
+    _git(tmp_path, "config", "core.quotePath", "true")
+    names = [*_AWKWARD_NAMES, "a b.py", "plain.py"]
+    for name in names:
+        (tmp_path / name).write_text("y = 1\ny = 2\n", encoding="utf-8")
+
+    synthetic = diff_coverage._untracked_diff(tmp_path)
+
+    _git(tmp_path, "add", "-A")
+    real = _git(tmp_path, "diff", "--cached", "--unified=0", "--no-color")
+
+    # Positive control: git really did quote here, so the comparison is doing work.
+    assert '+++ "b/' in real
+    assert diff_coverage.parse_diff(synthetic) == diff_coverage.parse_diff(real)
+    assert set(diff_coverage.parse_diff(synthetic)) == set(names)
+    # The headers themselves, not only what they decode to: a raw non-ASCII
+    # byte inside the quotes decodes to the same name and would pass above.
+    # git ends an unquoted header holding a space with a tab, which the parser
+    # strips and the synthetic diff does not write.
+    headers = [
+        line.rstrip("\t") for line in real.splitlines() if line.startswith("+++ ")
+    ]
+    assert sorted(headers) == sorted(
+        line for line in synthetic.splitlines() if line.startswith("+++ ")
+    )
