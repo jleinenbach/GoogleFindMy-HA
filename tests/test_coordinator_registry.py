@@ -145,7 +145,8 @@ class TestBuildLegacyDeviceRegistryKwargs:
     four ownership kwargs are deprecated from 2026.8 and stop working in
     2027.8; a device now belongs to exactly one config entry and subentry.
     Nothing here should be read as "this is how to talk to a current Core" --
-    see AGENTS.md, section "Device registry ownership", for that.
+    see AGENTS.md, the bullet starting ``Registry updates **must not** pass``,
+    for that.
     """
 
     def test_add_config_entry_id_renamed(self) -> None:

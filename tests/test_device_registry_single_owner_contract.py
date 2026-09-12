@@ -46,7 +46,25 @@ pytestmark = pytest.mark.asyncio
 
 @pytest.fixture(autouse=True)
 def _use_real_ha_modules(use_real_homeassistant_modules: None) -> None:
-    """Compare against the real device registry, not the conftest stubs."""
+    """Compare against the real device registry, not the conftest stubs.
+
+    Skip below Core 2026.8: the cases read ``DeviceEntry.config_entry_id`` and
+    call ``async_get_device_by_identifier``, both of which arrive in 2026.8, and
+    the double encodes that core's ownership model. On the declared minimum
+    ``2025.9.1`` (the ``declared floor`` axis of ``ci.yml``) there is nothing to
+    compare against, so the module skips instead of failing with an
+    ``AttributeError`` fifteen times. The check runs here rather than in a
+    module-level ``skipif`` because ``tests/conftest.py`` stubs ``homeassistant``
+    at import time; the real registry class exists only once
+    ``use_real_homeassistant_modules`` has swapped the modules in.
+    """
+    from homeassistant.helpers import device_registry as dr
+
+    if not hasattr(dr.DeviceRegistry, "async_get_device_by_identifier"):
+        pytest.skip(
+            "this Home Assistant version predates the 2026.8 single-owner "
+            "device registry; the differential contract has no counterpart here"
+        )
 
 
 #: Symbolic names used in the cases; resolved per world to real identifiers.

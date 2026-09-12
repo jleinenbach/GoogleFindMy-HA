@@ -668,13 +668,20 @@ class _LegacyRegistryDouble:
     ``subentry_kwarg_for_update`` and ``subentry_kwarg_for_shim``.
     """
 
-    def __init__(self, device: Any) -> None:
+    def __init__(
+        self, device: Any, *, answers_to: tuple[str, str] | None = None
+    ) -> None:
         self._device = device
+        # ``None`` answers every lookup; an identifier answers only a lookup
+        # that carries it, so a test can see which spelling found the device.
+        self._answers_to = answers_to
         self.updated: list[dict[str, Any]] = []
         self.lookups: list[set[tuple[str, str]]] = []
 
     def async_get_device(self, identifiers: set[tuple[str, str]]) -> Any | None:
         self.lookups.append(set(identifiers))
+        if self._answers_to is not None and self._answers_to not in identifiers:
+            return None
         return self._device
 
     def async_update_device(
@@ -957,16 +964,20 @@ def test_service_device_binding_names_the_hub_link_on_a_legacy_core(
 def test_service_device_binding_hands_the_legacy_lookup_both_identifiers(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Below Core 2026.8 the resolver has no scoped API and passes the set on.
+    """Below Core 2026.8 the resolver has no scoped API and asks per identifier.
 
-    The order the flow builds is still stated, but it cannot decide anything
-    here; what this pins is that both spellings reach the lookup at all, which no
-    other test covers since the single-owner double answers per identifier.
+    Both spellings reach the lookup, one call each and in the order the flow
+    builds, canonical first. A single set lookup would leave the choice to the
+    registry's set iteration order; the double answers to the legacy spelling
+    only, so the canonical one is measured as asked *and* missed before it.
     """
 
     entry = _service_entry(service_subentry_id="service-subentry")
+    canonical = service_device_identifier(entry.entry_id)
+    legacy = (DOMAIN, f"{entry.entry_id}:{entry.service_subentry_id}:service")
     registry = _LegacyRegistryDouble(
-        SimpleNamespace(id="service-device", config_entries={"entry-1"})
+        SimpleNamespace(id="service-device", config_entries={"entry-1"}),
+        answers_to=legacy,
     )
     monkeypatch.setattr(config_flow.dr, "async_get", lambda hass_arg: registry)
 
@@ -977,12 +988,8 @@ def test_service_device_binding_hands_the_legacy_lookup_both_identifiers(
         service_config_subentry_id=entry.service_subentry_id,
     )
 
-    assert registry.lookups == [
-        {
-            service_device_identifier(entry.entry_id),
-            (DOMAIN, f"{entry.entry_id}:{entry.service_subentry_id}:service"),
-        }
-    ]
+    assert registry.lookups == [{canonical}, {legacy}]
+    assert [update["device_id"] for update in registry.updated] == ["service-device"]
 
 
 def test_service_device_binding_asks_the_canonical_identifier_first(

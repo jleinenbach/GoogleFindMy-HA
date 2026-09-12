@@ -375,8 +375,8 @@ def test_no_new_deprecated_registry_usage() -> None:
         + "\n".join(problems)
         + "\n\nA device belongs to exactly one config entry and subentry since "
         "Home Assistant 2026.8. Express the intent (MOVE / ENSURE / DETACH) and "
-        "let coordinator/helpers/registry.py translate it; see AGENTS.md, "
-        "section 'Device registry ownership'."
+        "let coordinator/helpers/registry.py translate it; see AGENTS.md, the "
+        "bullet starting 'Registry updates **must not** pass'."
     )
 
 

@@ -1463,7 +1463,13 @@ class _LegacyOnlyRegistry:
 
     def async_get_device(self, identifiers: set[tuple[str, str]]) -> Any | None:
         self.calls.append(set(identifiers))
-        for identifier in identifiers:
+        # Sorted, not set order: the real ``get_entry`` (tag ``2025.9.1``, lines
+        # 684-686) returns the first identifier that matches in *set* iteration
+        # order, which for the identifiers used below depends on the hash seed.
+        # Sorting puts the unscoped ``dev-1`` before ``entry-1:dev-1`` every
+        # time, so a lookup that hands over both identifiers at once meets the
+        # adverse order deterministically instead of on one run in two.
+        for identifier in sorted(identifiers):
             if (device := self._devices.get(identifier)) is not None:
                 return device
         return None
@@ -2051,8 +2057,9 @@ class TestResolveDeviceByIdentifiers:
             is stranger
         )
 
-    def test_legacy_core_receives_the_whole_candidate_set(self) -> None:
-        """On the declared minimum there is only the set-based call.
+    def test_legacy_core_is_asked_one_identifier_at_a_time(self) -> None:
+        """On the declared minimum there is only the set-based call, used per
+        identifier and in the caller's order.
 
         The device carries ``config_entries``, because a real ``DeviceEntry`` of
         that core does (tag ``2025.9.1``, line 327). A double without it would
@@ -2063,7 +2070,46 @@ class TestResolveDeviceByIdentifiers:
         registry = _LegacyOnlyRegistry({self._UNSCOPED: ours})
 
         assert self._modern(registry) is ours
-        assert registry.calls == [{self._SCOPED, self._UNSCOPED}]
+        assert registry.calls == [{self._SCOPED}, {self._UNSCOPED}]
+
+    def test_legacy_core_honours_the_candidate_priority(self) -> None:
+        """Two own devices, one per identifier: the caller's order decides.
+
+        Handed over as one set, ``async_get_device`` would return whichever
+        identifier its set iteration meets first; the double above makes that
+        the unscoped one. The scoped identifier has to win regardless, and the
+        lookup stops there.
+        """
+        scoped = SimpleNamespace(id="scoped", config_entries={self._ENTRY_ID})
+        legacy = SimpleNamespace(id="legacy", config_entries={self._ENTRY_ID})
+        registry = _LegacyOnlyRegistry({self._SCOPED: scoped, self._UNSCOPED: legacy})
+
+        assert self._modern(registry) is scoped
+        assert registry.calls == [{self._SCOPED}]
+
+    def test_legacy_core_foreign_device_does_not_shadow_the_own_one(self) -> None:
+        """A stranger on the low-priority identifier is skipped, not fatal.
+
+        With a single set lookup the stranger came back first (adverse set
+        order), failed the ownership check, and the function answered ``None``
+        although this entry's own device sat behind the scoped identifier: a
+        false miss on exactly the core where the legacy branch is the only one
+        that runs.
+        """
+        ours = SimpleNamespace(id="ours", config_entries={self._ENTRY_ID})
+        stranger = SimpleNamespace(id="stranger", config_entries={"entry-2"})
+        registry = _LegacyOnlyRegistry({self._SCOPED: ours, self._UNSCOPED: stranger})
+
+        assert self._modern(registry) is ours
+
+    def test_legacy_core_skips_a_foreign_device_and_keeps_looking(self) -> None:
+        """The stranger on the *high*-priority identifier is stepped over."""
+        ours = SimpleNamespace(id="ours", config_entries={self._ENTRY_ID})
+        stranger = SimpleNamespace(id="stranger", config_entries={"entry-2"})
+        registry = _LegacyOnlyRegistry({self._SCOPED: stranger, self._UNSCOPED: ours})
+
+        assert self._modern(registry) is ours
+        assert registry.calls == [{self._SCOPED}, {self._UNSCOPED}]
 
     def test_legacy_core_does_not_hand_back_another_entrys_device(self) -> None:
         """The entry scoping holds on the branch the declared minimum runs.
@@ -2083,7 +2129,7 @@ class TestResolveDeviceByIdentifiers:
         registry = _LegacyOnlyRegistry({self._UNSCOPED: stranger})
 
         assert self._modern(registry) is None
-        assert registry.calls == [{self._SCOPED, self._UNSCOPED}]
+        assert registry.calls == [{self._SCOPED}, {self._UNSCOPED}]
 
     def test_legacy_core_device_without_ownership_is_a_miss(self) -> None:
         """A device entry that names no owner is not an answer either.

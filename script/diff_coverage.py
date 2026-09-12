@@ -5,8 +5,8 @@
 Codecov reports a patch status on every pull request; this script answers the
 same question locally, without adding ``diff-cover`` as a dependency. It reads a
 Cobertura ``coverage.xml`` (the per-line hit list that ``pytest --cov-report=xml``
-writes) and ``git diff --unified=0 <base>..HEAD`` (the changed line numbers), then
-intersects the two.
+writes) and ``git diff --unified=0 <base>`` (the changed line numbers, merge base
+against the working tree), then intersects the two.
 
 Three decisions keep the number comparable to Codecov rather than merely
 plausible:

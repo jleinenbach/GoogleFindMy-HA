@@ -1008,8 +1008,9 @@ core does not test the integration, it tests the double. Background:
 Tests that touch a device- or entity-registry write path are to use the
 `device_registry_deprecations` fixture. It records every `report_usage` call raised
 during the test instead of swallowing it, and a new recorded deprecation is a
-**failure**, not noise. The fixture does not exist yet; it arrives with the
-conversion of the registry double described above. Two reasons this fixture exists rather than a log filter:
+**failure**, not noise. The fixture lives in `tests/conftest.py` (search for
+`def device_registry_deprecations`) and is `autouse`, so every test already runs
+under it. Two reasons this fixture exists rather than a log filter:
 the stub in `tests/conftest.py` currently installs a no-op `report_usage` (search
 for `def report_usage`), which makes this whole class of findings invisible, and the
 fixture is what replaces it; and the interesting deprecations here carry

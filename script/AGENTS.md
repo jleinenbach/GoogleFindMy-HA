@@ -166,7 +166,8 @@ make preflight PREFLIGHT_PYTHONS="/path/to/track-a/bin/python /path/to/track-b/b
 `script/diff_coverage.py` answers the question Codecov asks on a pull request:
 of the lines this branch changed, how many were executed? It reads the
 Cobertura `coverage.xml` of a run over the current tree and
-`git diff --unified=0 <merge-base>..HEAD`, then intersects the two. `diff-cover`
+`git diff --unified=0 <merge-base>` (merge base against the working tree, so both
+sides describe the revision the coverage run saw), then intersects the two. `diff-cover`
 is not a dependency of this repository, and a new runtime dependency for one
 measurement would be out of proportion.
 

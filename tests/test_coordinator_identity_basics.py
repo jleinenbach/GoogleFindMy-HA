@@ -486,8 +486,14 @@ class TestResetResolverOffset:
         fake_reg = _FakeDeviceReg(device=None)
         monkeypatch.setattr(dr, "async_get", lambda hass: fake_reg)
         coord._reset_resolver_offset("dev-1")
-        # The lookup was attempted with both identifier shapes.
-        assert fake_reg.calls == [{(DOMAIN, "entry-xyz:dev-1"), (DOMAIN, "dev-1")}]
+        # The lookup was attempted with both identifier shapes, one per call
+        # and scoped first: a legacy core answers a set lookup in set iteration
+        # order, which would let a foreign device on the unscoped identifier
+        # shadow this entry's own device on the scoped one.
+        assert fake_reg.calls == [
+            {(DOMAIN, "entry-xyz:dev-1")},
+            {(DOMAIN, "dev-1")},
+        ]
 
     def test_a_modern_core_is_queried_per_identifier_and_scoped(
         self, coord: IdentityStub, monkeypatch: pytest.MonkeyPatch

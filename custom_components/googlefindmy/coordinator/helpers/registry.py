@@ -731,21 +731,34 @@ def resolve_device_by_identifiers(
         # upward takes the keyword, so the only callers that can trigger it are
         # registry doubles, where a silent ``None`` is the worse answer: it makes
         # a broken double look like an empty registry.
-        device = legacy(identifiers=set(candidates))
-        # The entry scoping has to be applied here too, and it was not until
-        # AP-16.  ``async_get_device`` searches by identifier alone, so on the
-        # declared minimum core it can hand back a device of a *different*
-        # GoogleFindMy entry that still carries the legacy unscoped identifier --
-        # exactly the cross-entry hit the docstring above says this function
-        # removes.  Applying it in the modern branch only made the promise true
-        # on 2026.8+ and false on 2025.9.1, which is where the legacy branch is
-        # the only one that runs.  A device this entry does not own is not an
-        # answer, so it is a miss, not a hit to be filtered by the caller: every
-        # call site would otherwise have to rebuild the scoping by hand, which
-        # the contract forbids (``agents/runtime_patterns/AGENTS.md``).
-        if device is None or not device_belongs_to_entry(device, entry_id):
-            return None
-        return device
+        # One identifier per call, in the caller's order. Handing the whole
+        # candidate set to ``async_get_device`` would leave two things to the
+        # registry's set iteration order (``get_entry`` returns the first
+        # identifier that matches, tag ``2025.9.1``, lines 684-686): which of
+        # two *own* devices wins, and whether a *foreign* device on the
+        # low-priority identifier shadows the own device on the high-priority
+        # one. The second case turned into a false miss: the foreign hit was
+        # filtered out below, and the own device was never looked up.
+        for identifier in candidates:
+            device = legacy(identifiers={identifier})
+            if device is None:
+                continue
+            # The entry scoping has to be applied here too, and it was not
+            # until AP-16.  ``async_get_device`` searches by identifier alone,
+            # so on the declared minimum core it can hand back a device of a
+            # *different* GoogleFindMy entry that still carries the legacy
+            # unscoped identifier -- exactly the cross-entry hit the docstring
+            # above says this function removes.  Applying it in the modern
+            # branch only made the promise true on 2026.8+ and false on
+            # 2025.9.1, which is where the legacy branch is the only one that
+            # runs.  A device this entry does not own is not an answer, so it
+            # is skipped like a miss, not a hit to be filtered by the caller:
+            # every call site would otherwise have to rebuild the scoping by
+            # hand, which the contract forbids
+            # (``agents/runtime_patterns/AGENTS.md``).
+            if device_belongs_to_entry(device, entry_id):
+                return device
+        return None
     return None
 
 

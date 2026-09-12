@@ -177,7 +177,8 @@ def test_refresh_device_urls_uses_entry_scoped_tokens(
     assert "ha-service" not in device_registry.updated
 
 
-def test_refresh_device_urls_uses_the_queried_entry_not_the_device_shim(
+@pytest.mark.asyncio
+async def test_refresh_device_urls_uses_the_queried_entry_not_the_device_shim(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The owning entry comes from the query, not from the device's own list.
@@ -235,14 +236,11 @@ def test_refresh_device_urls_uses_the_queried_entry_not_the_device_shim(
     monkeypatch.setattr(services, "get_url", lambda hass, **kwargs: base_url)
     monkeypatch.setattr(services.time, "time", lambda: fake_now)
 
-    async def _run_refresh() -> None:
-        await services.async_register_services(hass, ctx)
-        handler = hass.services.registered[
-            (const.DOMAIN, const.SERVICE_REFRESH_DEVICE_URLS)
-        ]
-        await handler(ServiceCall({}))
-
-    asyncio.run(_run_refresh())
+    await services.async_register_services(hass, ctx)
+    handler = hass.services.registered[
+        (const.DOMAIN, const.SERVICE_REFRESH_DEVICE_URLS)
+    ]
+    await handler(ServiceCall({}))
 
     expected = const.map_token_hex_digest(
         const.map_token_secret_seed("ha-uuid", "entry-1", False)
@@ -254,7 +252,8 @@ def test_refresh_device_urls_uses_the_queried_entry_not_the_device_shim(
     assert foreign not in device_registry.updated["ha-dev-1"]
 
 
-def test_refresh_device_urls_ignores_a_device_owned_by_a_foreign_entry(
+@pytest.mark.asyncio
+async def test_refresh_device_urls_ignores_a_device_owned_by_a_foreign_entry(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A device carrying our identifier but owned by nobody of ours is left alone.
@@ -305,14 +304,11 @@ def test_refresh_device_urls_ignores_a_device_owned_by_a_foreign_entry(
     monkeypatch.setattr(services, "get_url", lambda hass, **kwargs: base_url)
     monkeypatch.setattr(services.time, "time", lambda: fake_now)
 
-    async def _run_refresh() -> None:
-        await services.async_register_services(hass, ctx)
-        handler = hass.services.registered[
-            (const.DOMAIN, const.SERVICE_REFRESH_DEVICE_URLS)
-        ]
-        await handler(ServiceCall({}))
-
-    asyncio.run(_run_refresh())
+    await services.async_register_services(hass, ctx)
+    handler = hass.services.registered[
+        (const.DOMAIN, const.SERVICE_REFRESH_DEVICE_URLS)
+    ]
+    await handler(ServiceCall({}))
 
     assert device_registry.updated == {}
 
@@ -439,7 +435,8 @@ def test_refresh_device_urls_skips_when_base_url_is_none(
     assert devices["ha-dev-1"].configuration_url == "https://existing.test"
 
 
-def test_refresh_device_urls_visits_a_shared_device_once(
+@pytest.mark.asyncio
+async def test_refresh_device_urls_visits_a_shared_device_once(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A device hanging on two of our entries is written once, not twice.
@@ -500,14 +497,11 @@ def test_refresh_device_urls_visits_a_shared_device_once(
     monkeypatch.setattr(services, "get_url", lambda hass, **kwargs: base_url)
     monkeypatch.setattr(services.time, "time", lambda: fake_now)
 
-    async def _run_refresh() -> None:
-        await services.async_register_services(hass, ctx)
-        handler = hass.services.registered[
-            (const.DOMAIN, const.SERVICE_REFRESH_DEVICE_URLS)
-        ]
-        await handler(ServiceCall({}))
-
-    asyncio.run(_run_refresh())
+    await services.async_register_services(hass, ctx)
+    handler = hass.services.registered[
+        (const.DOMAIN, const.SERVICE_REFRESH_DEVICE_URLS)
+    ]
+    await handler(ServiceCall({}))
 
     expected = const.map_token_hex_digest(
         const.map_token_secret_seed("ha-uuid", "entry-1", False)

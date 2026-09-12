@@ -22,6 +22,9 @@ from custom_components.googlefindmy.const import (
     TRACKER_SUBENTRY_KEY,
     service_device_identifier,
 )
+from custom_components.googlefindmy.coordinator.helpers.registry import (
+    resolve_device_by_identifiers,
+)
 from tests.conftest import COORDINATOR_CONSUMER_MODULES
 
 try:
@@ -337,8 +340,11 @@ async def test_devices_and_entities_registered(  # noqa: PLR0913, PLR0915
         # longer unique across config entries. The scoped lookup asks the
         # question this assertion actually means -- is the device registered
         # *for this entry* -- and it is what the assertion checked all along.
-        device_entry = device_registry.async_get_device_by_identifier(
-            identifier, entry.entry_id
+        # Through the shared resolver, not ``async_get_device_by_identifier``
+        # directly: that method arrives in 2026.8, and this test also runs on
+        # the declared minimum (the ``declared floor`` axis of ``ci.yml``).
+        device_entry = resolve_device_by_identifiers(
+            device_registry, (identifier,), entry_id=entry.entry_id
         )
         assert device_entry is not None, f"Device {device['id']} missing from registry"
         assert device_entry.entry_type != dr.DeviceEntryType.SERVICE
@@ -354,8 +360,8 @@ async def test_devices_and_entities_registered(  # noqa: PLR0913, PLR0915
     assert tracker_entities, "Tracker entities should be registered for devices"
 
     service_identifier = service_device_identifier(entry.entry_id)
-    service_device = device_registry.async_get_device_by_identifier(
-        service_identifier, entry.entry_id
+    service_device = resolve_device_by_identifiers(
+        device_registry, (service_identifier,), entry_id=entry.entry_id
     )
     assert service_device is not None, "Integration service device missing"
     assert service_device.entry_type == dr.DeviceEntryType.SERVICE
