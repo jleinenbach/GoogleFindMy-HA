@@ -167,15 +167,41 @@ def _tool_version(interpreter: str, module: str) -> str:
     return text.splitlines()[0].strip()
 
 
+MISSING_DIGEST = "<missing>"
+
+
 def _digest_of(paths: Sequence[str]) -> dict[str, str]:
-    """Return a SHA-256 digest per existing path, relative to the repository."""
+    """Return a SHA-256 digest per path, relative to the repository.
+
+    A path that does not exist is recorded as ``MISSING_DIGEST`` rather than
+    left out. Leaving it out made a deletion during the run invisible: a file
+    clean at the start is absent from the first snapshot, its deletion puts it
+    on the second path list, and dropping it there again made both snapshots
+    agree on "nothing changed" while the tree the suite ran on had lost a file.
+    """
 
     digests: dict[str, str] = {}
     for name in paths:
         candidate = REPO_ROOT / name
         if candidate.is_file():
             digests[name] = hashlib.sha256(candidate.read_bytes()).hexdigest()
+        else:
+            digests[name] = MISSING_DIGEST
     return digests
+
+
+def _nul_separated(stdout: str) -> list[str]:
+    """Split ``-z`` output of git into paths, dropping the trailing empty entry.
+
+    ``-z`` is the only form in which git hands over a path verbatim. Without it
+    ``core.quotePath`` (on by default) C-quotes any name with a non-ASCII or
+    control byte, ``"t\\303\\274r.py"`` for ``tür.py``, and a consumer that
+    hashes or looks up that literal string is measuring a file that does not
+    exist. ``script/diff_coverage.py`` decodes that quoting for the diff header
+    it parses; here the quoting is avoided at the source instead.
+    """
+
+    return [entry for entry in stdout.split("\0") if entry]
 
 
 def _changed_paths() -> list[str]:
@@ -190,15 +216,13 @@ def _changed_paths() -> list[str]:
 
     paths: list[str] = []
     for command in (
-        ["git", "diff", "HEAD", "--name-only"],
-        ["git", "ls-files", "--others", "--exclude-standard"],
+        ["git", "diff", "HEAD", "--name-only", "-z"],
+        ["git", "ls-files", "--others", "--exclude-standard", "-z"],
     ):
         completed = _capture(command)
         if completed.returncode != 0:
             continue
-        paths.extend(
-            line.strip() for line in completed.stdout.splitlines() if line.strip()
-        )
+        paths.extend(_nul_separated(completed.stdout))
     return sorted(set(paths))
 
 
@@ -215,12 +239,10 @@ def _branch_paths(base: str) -> set[str]:
     if merge_base.returncode != 0 or not merge_base.stdout.strip():
         return paths
     completed = _capture(
-        ["git", "diff", "--name-only", f"{merge_base.stdout.strip()}..HEAD"]
+        ["git", "diff", "--name-only", "-z", f"{merge_base.stdout.strip()}..HEAD"]
     )
     if completed.returncode == 0:
-        paths.update(
-            line.strip() for line in completed.stdout.splitlines() if line.strip()
-        )
+        paths.update(_nul_separated(completed.stdout))
     return paths
 
 

@@ -238,7 +238,7 @@ def test_branch_paths_unite_the_working_tree_with_the_branch(
     def _fake_capture(command: Sequence[str]) -> SimpleNamespace:
         if command[1] == "merge-base":
             return SimpleNamespace(returncode=0, stdout="cafe1234\n", stderr="")
-        return SimpleNamespace(returncode=0, stdout="committed.py\n", stderr="")
+        return SimpleNamespace(returncode=0, stdout="committed.py\0", stderr="")
 
     monkeypatch.setattr(local_verify, "_capture", _fake_capture)
     monkeypatch.setattr(local_verify, "_changed_paths", lambda: ["uncommitted.py"])
@@ -261,8 +261,8 @@ def test_changed_paths_include_untracked_files(
 
     def _fake_capture(command: Sequence[str]) -> SimpleNamespace:
         if command[1] == "ls-files":
-            return SimpleNamespace(returncode=0, stdout="new.py\n", stderr="")
-        return SimpleNamespace(returncode=0, stdout="edited.py\n", stderr="")
+            return SimpleNamespace(returncode=0, stdout="new.py\0", stderr="")
+        return SimpleNamespace(returncode=0, stdout="edited.py\0", stderr="")
 
     monkeypatch.setattr(local_verify, "_capture", _fake_capture)
 
@@ -282,6 +282,94 @@ def test_branch_paths_survive_a_missing_merge_base(
     monkeypatch.setattr(local_verify, "_changed_paths", lambda: ["uncommitted.py"])
 
     assert local_verify._branch_paths("origin/main") == {"uncommitted.py"}
+
+
+def _git(repo: Path, *arguments: str) -> str:
+    """Run one git command inside ``repo`` and return its stripped stdout."""
+
+    completed = subprocess.run(
+        ["git", *arguments],
+        check=True,
+        capture_output=True,
+        text=True,
+        cwd=str(repo),
+    )
+    return completed.stdout.strip()
+
+
+def test_git_paths_arrive_verbatim_under_the_default_quoting(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A name git would C-quote reaches the clamp and the branch set as itself.
+
+    Codex finding on PR #1274: with the default ``core.quotePath`` a changed
+    or untracked ``tür.py`` came back as ``"t\\303\\274r.py"``; the digest
+    helper then looked up that literal, found nothing, and the file dropped out
+    of both snapshots. The probe runs real git rather than a fake, because the
+    quoting is git's, not ours, and a fake would only pin what we believe git
+    does. ``core.quotePath`` is set explicitly so a host configuration that
+    switched it off cannot make this test pass for the wrong reason.
+    """
+
+    awkward = 'tür "x".py'
+    _git(tmp_path, "init", "-q", "-b", "base")
+    _git(tmp_path, "config", "core.quotePath", "true")
+    _git(tmp_path, "config", "user.email", "t@example.invalid")
+    _git(tmp_path, "config", "user.name", "t")
+    (tmp_path / "plain.py").write_text("x = 1\n", encoding="utf-8")
+    _git(tmp_path, "add", "plain.py")
+    _git(tmp_path, "commit", "-q", "-m", "base")
+    _git(tmp_path, "checkout", "-q", "-b", "work")
+    (tmp_path / awkward).write_text("y = 2\n", encoding="utf-8")
+    _git(tmp_path, "add", "--", awkward)
+    _git(tmp_path, "commit", "-q", "-m", "awkward")
+    (tmp_path / awkward).write_text("y = 3\n", encoding="utf-8")
+    (tmp_path / "größe.py").write_text("z = 4\n", encoding="utf-8")
+    monkeypatch.setattr(local_verify, "REPO_ROOT", tmp_path)
+
+    # Positive control: git really does quote here, so the -z form is doing work.
+    assert _git(tmp_path, "diff", "HEAD", "--name-only").startswith('"')
+
+    assert local_verify._changed_paths() == sorted([awkward, "größe.py"])
+    assert local_verify._branch_paths("base") == {awkward, "größe.py"}
+
+
+def test_a_missing_path_is_recorded_not_dropped(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The snapshot keeps a path that has no file behind it, marked as missing."""
+
+    (tmp_path / "present.py").write_text("x = 1\n", encoding="utf-8")
+    monkeypatch.setattr(local_verify, "REPO_ROOT", tmp_path)
+
+    digests = local_verify._digest_of(["present.py", "gone.py"])
+
+    assert set(digests) == {"present.py", "gone.py"}
+    assert digests["gone.py"] == local_verify.MISSING_DIGEST
+    assert digests["present.py"] != local_verify.MISSING_DIGEST
+
+
+def test_a_deletion_during_the_run_discards_it(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A file clean at the start and deleted during the suite trips the clamp.
+
+    Codex finding on PR #1274: the first snapshot does not know the file (it
+    was clean), the second path list names it (git sees the deletion), and a
+    digest helper that skipped missing files produced an empty second snapshot
+    too, so ``before == after`` read as "unchanged" for a run whose tree had
+    lost a source file.
+    """
+
+    listings = iter([[], ["gone.py"]])
+    monkeypatch.setattr(local_verify, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(local_verify, "_changed_paths", lambda: next(listings))
+    monkeypatch.setattr(local_verify, "_run_command", lambda _command: 0)
+
+    returncode, note = local_verify._run_suite("/a/python", tmp_path / "c.xml")
+
+    assert returncode == 1
+    assert "discarded" in note
 
 
 def test_the_documented_direct_invocation_starts() -> None:
@@ -413,8 +501,8 @@ def test_the_clamp_covers_staged_files(monkeypatch: pytest.MonkeyPatch) -> None:
     local_verify._changed_paths()
 
     assert recorded == [
-        ("git", "diff", "HEAD", "--name-only"),
-        ("git", "ls-files", "--others", "--exclude-standard"),
+        ("git", "diff", "HEAD", "--name-only", "-z"),
+        ("git", "ls-files", "--others", "--exclude-standard", "-z"),
     ]
 
 
