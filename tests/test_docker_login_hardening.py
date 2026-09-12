@@ -998,8 +998,8 @@ def _wait_until_ready(ready: Path) -> None:
     that must already own a handler when the signal lands; otherwise the
     default action kills it and the test measures interpreter start-up time,
     not the helper under test. A fixed ``sleep(0.5)`` was that measurement:
-    it passed on an idle machine and failed 2 of 8 runs at a load average
-    above 7 (PR #1274, ``EE-137``). The child writes ``ready`` right after
+    it passed on an idle machine and failed under load during the preflight
+    runs of PR #1274. The child writes ``ready`` right after
     ``signal.signal``, so the wait ends the moment the handler exists and
     never earlier; the ceiling only turns a hung child into a failure.
     """

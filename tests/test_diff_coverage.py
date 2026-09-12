@@ -260,10 +260,10 @@ def test_an_untracked_file_with_a_newline_in_its_name_enters_the_measurement(
 
     Codex finding on PR #1274: the synthetic header wrote the name raw, so a
     newline in it cut the ``+++`` line in two and the hunk was booked against
-    the first half. The coverage report escapes such a name as ``&#10;``
-    (coverage 7.15.2 does exactly that), and only the git-quoted header decodes
-    to the same string; the result has to be 1/2 for this file, not
-    "uninstrumented".
+    the first half. The XML writer coverage.py uses escapes such a name as
+    ``&#10;`` (measured with coverage 7.15.2 on Python 3.13 and 3.14), and
+    only the git-quoted header decodes to the same string; the result has to
+    be 1/2 for this file, not "uninstrumented".
     """
 
     awkward = "fresh\nline.py"
