@@ -150,8 +150,8 @@ Always keep any `from __future__` imports immediately after the module docstring
 
 * [`tests/AGENTS.md`](tests/AGENTS.md) — Home Assistant config flow test stubs, helpers, discovery/update scaffolding details, **and** the package-layout note that requires package-relative imports now that `tests/` ships with an `__init__.py`. Also documents the coordinator device-registry expectations for `via_device` tuple handling so future stub updates remain aligned with Home Assistant 2025.10. The `_ensure_button_dependencies()` helper in `tests/test_button_setup.py` already prepares sufficient stubs to `import custom_components.googlefindmy.button`, so tests can reference coordinator attributes directly without reloading source snippets.
 * [`docs/CONFIG_SUBENTRIES_HANDBOOK.md`](docs/CONFIG_SUBENTRIES_HANDBOOK.md) — Full Home Assistant 2025.7+ handbook covering the architecture, config flow factories, lifecycle routing, discovery patterns, translation rules, and peer-review checklist for configuration subentries. Keep code and tests aligned with this contract. When adding concise checklists or reminders beneath an existing subsection, anchor the new block with a `####` heading so the handbook's navigation keeps the guidance grouped with its parent topic. Mirror this heading-level rule in other documentation unless a directory-specific `AGENTS.md` states otherwise.
-* [`docs/AI_DEPRECATIONS_GUIDE.md`](docs/AI_DEPRECATIONS_GUIDE.md) — Core 2025.10/2025.11 technical migration playbook for deprecations, breaking changes, and behavioral shifts. Treat its critical checklist as mandatory when touching affected APIs.
-  * Section VIII.D contains the new device/entity registry troubleshooting playbooks. Reference them whenever you touch `_async_setup_subentry`, registry rebuild services, or device cleanup helpers, and summarize the relevant diagnostics in your PR description.
+* [`docs/AI_DEPRECATIONS_GUIDE.md`](docs/AI_DEPRECATIONS_GUIDE.md) — Core 2025.10 through 2026.9 technical migration playbook for deprecations, breaking changes, and behavioral shifts. Treat its critical checklist as mandatory when touching affected APIs.
+  * Section VI of [`docs/CONFIG_SUBENTRIES_HANDBOOK.md`](docs/CONFIG_SUBENTRIES_HANDBOOK.md) ("Troubleshooting `ValueError` & Regressions") carries the device/entity registry troubleshooting playbooks. Reference them whenever you touch `_async_setup_subentry`, registry rebuild services, or device cleanup helpers, and summarize the relevant diagnostics in your PR description. For device *ownership* changes read `docs/AI_DEPRECATIONS_GUIDE.md`, section VI, first: from Core 2026.8 a device belongs to a single config entry and a single subentry, and the old keywords changed meaning rather than name.
 * **Self-healing helpers:** `_async_self_heal_duplicate_entities()` in `custom_components/googlefindmy/__init__.py` documents the existing duplicate-entity cleanup flow; review it alongside the new `EntityRecoveryManager` when designing additional recovery logic.
 
 ### Home Assistant helper signature changelog
@@ -169,7 +169,93 @@ Always keep any `from __future__` imports immediately after the module docstring
 * [Language policy (English-only docs)](#language-policy)
 * [Docstrings & typing expectations (§11.1)](#docstrings--typing)
 * **README developer guidance:** Place any new development workflow notes (linting, testing, tooling commands) directly under the `### Continuous integration checks` section in `README.md`. Use a top-level `###` heading for repository-wide topics and `####` subheadings for individual command lists so contributor documentation stays grouped in one location.
-* **Tracker device linkage:** Tracker entities rely on Home Assistant's automatic parent-device assignment for the `TRACKER_SUBENTRY_KEY`. Do not introduce manual `via_device` pointers for tracker `DeviceInfo` payloads; only service-level entities may declare `via_device` tuples when modelling nested hardware chains documented upstream. When updating tracker devices via `async_update_device`, always include `add_config_entry_id` (or `config_entry_id` on legacy cores) whenever a tracker subentry identifier is present so Home Assistant keeps the device associated with its config entry.
+* **Tracker device linkage:** Tracker entities rely on Home Assistant's automatic
+  parent-device assignment for the `TRACKER_SUBENTRY_KEY`. Do not introduce manual
+  `via_device` pointers for tracker `DeviceInfo` payloads; only service-level entities
+  may declare `via_device` tuples when modelling nested hardware chains documented
+  upstream.
+
+  **Superseded instruction, do not restore.** Up to and including 1.7.15.14 this
+  bullet demanded that
+  every `async_update_device` call on a tracker device carry `add_config_entry_id`
+  (or `config_entry_id` on legacy cores) whenever a tracker subentry identifier was
+  present. That instruction is wrong from Home Assistant Core 2026.8 onwards. If you
+  are about to add `add_config_entry_id` to a call because it "keeps the device
+  associated with its config entry", stop: that is the superseded rule resurfacing.
+
+  **Why it changed.** From Core 2026.8 a device belongs to exactly one config entry
+  and exactly one config subentry. `add_config_entry_id` no longer attaches anything.
+  It records a transient pending move which is only carried out by a later
+  `remove_config_entry_id` issued by the same integration; on its own it is a no-op
+  when the device already belongs to the entry. Symmetrically,
+  `remove_config_entry_id` on the owning entry *deletes* the device when no pending
+  move is armed (`homeassistant/helpers/device_registry.py` at tag `2026.8.0`, line
+  2231). Both keywords are deprecated with `breaks_in_ha_version="2027.8.0"`, but the
+  behavioural change is the part that bites today, not the warning: on 2026.8 the new
+  behaviour ships **without** any log output, because the `report_usage` call for
+  these keywords only arrives in Core 2026.9 (tag `2026.9.0`, line 3741). A quiet log
+  is therefore not evidence that a call is still correct.
+
+  **Current rule.** Express the intent, never the keywords. Call
+  `RegistryOperations._apply_device_ownership(...)` with one of
+  `OwnershipIntent.MOVE` (put the device into this subentry),
+  `OwnershipIntent.ENSURE` (make sure the device sits where we think it does) or
+  `OwnershipIntent.DETACH` (give the device up). The single translation point is
+  `plan_device_ownership` in
+  `custom_components/googlefindmy/coordinator/helpers/registry.py`. It maps the
+  intent onto `new_config_subentry_id` (Core 2026.8.0 and newer, see
+  `homeassistant/helpers/device_registry.py` at tag `2026.8.0`, lines 2063-2064),
+  onto the `remove_*`/`add_*` quadruple (every core at or above our declared
+  minimum: `add_config_subentry_id` is already present at tag `2025.9.1`, line
+  1014), or onto `async_remove_device`. Write the intent at the call site, and
+  let the planner choose the keywords.
+
+  **Version clamp.** `hacs.json` and `pyproject.toml` declare `2025.9.1` as the
+  minimum supported core. Raising it only helps at `2026.8.0`, the single release
+  that introduces all four replacement APIs (`new_config_entry_id`,
+  `new_config_subentry_id`, `async_get_device_by_identifier`, `async_get_devices`);
+  every release up to and including `2026.7.0` has none of them. That raise is not
+  permitted before **six months after the 2026.8.0 release date**; check the
+  release date on the Home Assistant release notes before proposing it, and do
+  not carry a hard-coded date forward. The new keywords do not exist on the
+  declared minimum, so the switch is a runtime signature probe
+  (`detect_device_registry_capabilities`), not a version string comparison. Do not
+  replace it with a version check and do not delete the **legacy ownership branch**
+  as "dead code": it is the only branch that runs on the declared minimum. It is not
+  the same thing as the *subentry keyword naming* branch in
+  `_device_registry_config_subentry_kwarg_name`, whose legacy side serves no
+  supported core at all because that rename predates our minimum; see
+  `docs/AI_DEPRECATIONS_GUIDE.md`, section VI.
+
+  **Before and after.**
+
+  ```python
+  # WRONG from Core 2026.8 on. What this call does depends on the device's current
+  # ownership, which is exactly why it is unsafe. Device already in that subentry:
+  # pure no-op. Device in a different subentry of the same entry: the add only arms
+  # a pending move and the remove condition does not match, so nothing is applied.
+  # Device sitting on the entry with no subentry: the remove condition matches and
+  # the move IS carried out. One call, three outcomes, no warning before Core 2026.9.
+  dev_reg.async_update_device(
+      device_id=device.id,
+      add_config_entry_id=entry.entry_id,
+      add_config_subentry_id=tracker_subentry_id,
+      remove_config_entry_id=entry.entry_id,
+      remove_config_subentry_id=None,
+  )
+
+  # RIGHT: state the intent, let the planner pick the keywords per core version
+  self._apply_device_ownership(
+      dev_reg,
+      intent=OwnershipIntent.MOVE,
+      device_id=device.id,
+      entry_id=entry.entry_id,
+      target_subentry_id=tracker_subentry_id,
+      device=device,
+  )
+  ```
+
+  Background and deadlines: `docs/AI_DEPRECATIONS_GUIDE.md`, section VI.
 * **Config entry version source of truth:** Use `custom_components/googlefindmy/const.py::CONFIG_ENTRY_VERSION` whenever flows, migrations, or tests need the integration's config-entry version. Do not introduce duplicate version constants in other modules.
 * [`docs/AI_MAINTENANCE_TASKLIST.md`](docs/AI_MAINTENANCE_TASKLIST.md) — Continuous QA checklist for the agent covering manifest hygiene, translation discipline, blocking I/O guards, and service consistency.
 * [`tests/helpers/README.md`](tests/helpers/README.md) — Quick index of ad-hoc debugging helpers (for example, the stub coordinator builder). Skim before adding new utilities so helper guidance stays centralized.
@@ -183,7 +269,67 @@ Always keep any `from __future__` imports immediately after the module docstring
   * Service-level diagnostics (`binary_sensor`, diagnostic `sensor` entities, repairs counters, etc.) **must** pass `SERVICE_SUBENTRY_KEY` when constructing entities **and** expose `device_info = service_device_info(include_subentry_identifier=True)`. This guarantees every diagnostic entity binds to the same service device + config subentry pair so Home Assistant keeps the hub grouped in the device registry.
   * Per-device platforms (`device_tracker`, per-device `sensor` entities such as `last_seen`, `button` actions, future tracker-scoped entities) **must** pass `TRACKER_SUBENTRY_KEY`, publish tracker-specific identifiers in `device_info`, and rely on Home Assistant's automatic device association—do **not** add manual `via_device` tuples for tracker devices.
   * Subentry setup validation now lives alongside `_async_setup_new_subentries` in `custom_components/googlefindmy/__init__.py` with coverage in `tests/test_subentry_setup_trigger.py`; skim those guards when adjusting child setup or registry checks.
-  * Registry updates **must** include the child `entry_id` in every `async_update_device` or equivalent call (`add_config_entry_id` for 2025.7+, `config_entry_id` for legacy cores). Log the `(entry_id, device_id, identifiers)` tuple in debug builds to catch mismatches early; mirror the Section VIII.D playbooks when triaging stuck or orphaned devices.
+  * Registry updates **must not** pass `add_config_entry_id`,
+    `add_config_subentry_id`, `remove_config_entry_id` or
+    `remove_config_subentry_id`. The former rule on this line ("include the child
+    `entry_id` in every `async_update_device` call, `add_config_entry_id` for
+    2025.7+, `config_entry_id` for legacy cores") is superseded and must not be
+    reintroduced. From Core 2026.8 a device has a single owning entry and a single
+    owning subentry, so there is nothing to add: `add_config_entry_id` on its own
+    changes nothing but arms a deferred move that a later
+    `remove_config_entry_id` completes, and `remove_config_entry_id` on the
+    owning entry deletes the device unless such a move is armed. Never drop or
+    add just one half of that pair: it turns a working move into a deletion.
+    Route every ownership change through
+    `_apply_device_ownership` / `plan_device_ownership`, which selects
+    `new_config_subentry_id`, the legacy quadruple or `async_remove_device`
+    depending on the signature of the installed core (minimum `2025.9.1`, so the
+    legacy branch stays). `plan_device_ownership` is the one translation point
+    and has no alternative; the executor depends on where you are. With a
+    coordinator in hand, call `_apply_device_ownership`. Without one (`services.py`,
+    `config_flow.py`), build the plan and run it through `execute_ownership_plan`
+    in the same helpers module. Never name an ownership keyword at a call site
+    either way. Keep logging the `(entry_id, device_id, identifiers)`
+    tuple in debug builds to catch mismatches early, and mirror the troubleshooting
+    playbooks in `docs/CONFIG_SUBENTRIES_HANDBOOK.md`, Section VI, when triaging
+    stuck or orphaned devices. A static guard,
+    `tests/test_guard_device_registry_kwargs.py`, fails the build if the
+    superseded keywords reappear outside the legacy translator.
+  * **Walking devices: pick the question, not the shortest expression.** When the
+    answer is "the devices of this config entry" -- which it almost always is --
+    call `dr.async_entries_for_config_entry(dev_reg, entry_id)`. It is not
+    deprecated on any supported core and it says what it means. Only where the
+    answer is genuinely "every device in the registry" (a collision check across
+    entries, a one-time normalisation pass) use `iter_all_devices(dev_reg)` from
+    `custom_components/googlefindmy/coordinator/helpers/registry.py`. Then decide
+    per call site, and write the decision down. Three shapes occur, and the
+    examples are the ones in the tree:
+    (a) a pass that acts **for one entry** filters with `device_belongs_to_entry`
+    (the service-device fallback scan in `__init__.py`);
+    (b) a pass that is **entry-agnostic but needs the owner** reads it per device
+    with `device_owning_entry_ids` and does not filter (`_async_refresh_device_urls`,
+    which seeds a per-entry map token for devices of every entry);
+    (c) a pass that is **entry-agnostic and owner-blind** does neither and says so
+    (`_async_normalize_device_names`, the cross-entry collision check).
+    `RegistryOperations._ensure_registry_for_devices` belongs to (b) and shows why
+    the two are worth telling apart: it *collects* the names the hub's children
+    carry without any filter, because a sibling hanging off our hub may belong to
+    any entry and filtering there would miss exactly the names to avoid -- but it
+    then reads ownership per device in `_resolve_hub_name`, which is what decides
+    between reusing a device of ours and appending a suffix for a stranger's.
+    Owner-blind while gathering is not owner-blind while deciding.
+    Adding an ownership filter to (b) or (c) silently stops the pass doing its job
+    for every other entry, which is why the choice is written down rather than
+    left to the next reader. **Superseded instruction, do not restore:**
+    `dev_reg.devices.values()` and any other mapping access on `devices`
+    (`[...]`, `.get(...)`, `.keys()`) are deprecated from Core 2026.9
+    (`breaks_in_ha_version="2027.9.0"`, tag `2026.9.0`, line 1560). Plain
+    iteration does not report -- but it means two different things: on `2026.9`
+    it yields `DeviceEntry` objects, on the declared minimum `2025.9.1` it yields
+    device **ids**. That is why the wrapper exists and why writing
+    `list(dev_reg.devices)` at a call site is wrong even though it silences the
+    deprecation. The same static guard fails the build if a `devices` access
+    reappears outside the translator.
   * When `manifest.json` sets `"integration_type": "hub"`, expose an `async_step_hub` handler and register a `"hub"` mapping in `ConfigFlow.async_get_supported_subentry_types()` that points at the service/hub subentry flow handler. This keeps Home Assistant's "Add hub" button functional without custom UI patches.
   * Iterating `entry.subentries.items()` yields `(subentry_id, subentry)` tuples. Always select the child object's global `entry_id` when calling lifecycle helpers or emitting debug logs so identifiers stay aligned across unload fallbacks and cleanup paths.
     * Lifecycle helper checklist:
@@ -194,7 +340,7 @@ Always keep any `from __future__` imports immediately after the module docstring
 
 #### Deprecations & migrations
 
-* [`docs/AI_DEPRECATIONS_GUIDE.md`](docs/AI_DEPRECATIONS_GUIDE.md) — Core 2025.10/2025.11 migration playbook for breaking changes, API removals, and checklist-driven refactors.
+* [`docs/AI_DEPRECATIONS_GUIDE.md`](docs/AI_DEPRECATIONS_GUIDE.md) — Core 2025.10 through 2026.9 migration playbook for breaking changes, API removals, and checklist-driven refactors.
 * [`custom_components/googlefindmy/NovaApi`](custom_components/googlefindmy/NovaApi) — Nova helpers, request builders, and protobuf serializers. Keep protobuf imports inside `if TYPE_CHECKING:` guards when the dependency is only needed for type annotations so startup stays fast on constrained devices.
 * `custom_components/googlefindmy/Auth/firebase_messaging/**` — Firebase messaging modules share the `JSONDict` and `MutableJSONMapping` aliases defined alongside the implementations. Prefer these aliases over ad-hoc `dict[str, Any]`/`Mapping[str, object]` annotations when describing payloads, responses, or task metadata. When new helpers consume nested JSON, extend the aliases or introduce additional `TypeAlias` definitions in the same module so every constructor or attribute keeps explicit container parameters for mypy strict runs. When referencing stub-only overlays (for example, `protobuf_typing`), wrap the import inside an `if TYPE_CHECKING:` guard and alias to the runtime class otherwise so production code never depends on non-existent modules.
   * **FCM HTTP fatal classifier (PR #169 / #1086):** When `fcm_install`, `fcm_register`, `fcm_refresh_install_token`, `gcm_check_in`, or `gcm_register` encounter a status in `_FATAL_HTTP_STATUSES` (401, 404) that persists past their retry budget, they must raise `FcmRegisterHTTPError(status=N)` instead of returning `None`. The caller side in `Auth/fcm_receiver_ha.py::_raise_if_fatal_http_error` mirrors `_raise_if_fatal_client_error`: the `except FcmRegisterHTTPError` block in `_register_for_fcm_entry` MUST appear before the generic `except (TimeoutError, RuntimeError, Exception)` block so the 401 path triggers `_invalidate_fcm_tokens()` and the 404 retry budget instead of the transient-RuntimeError fallthrough. Helpers that follow this status surface must opt into the same classifier by populating a numeric status cache (see `gcm_register`'s `last_fatal_status: int | None`) and re-raising from it — do not introduce alternative escalation paths such as substring matching against the logger output, which couples the defense to the log message format. The numeric cache MUST follow **last-wins** semantics, and the classification SSOT MUST be the **HTTP status** of each response, not the branch identity or the response body shape. Every alternative response branch in the retry loop re-assigns the cache to `int(status) if int(status) in _FATAL_HTTP_STATUSES else None` (the network-exception branch is the only exception: no HTTP status is available, so the cache is cleared to `None`). This mirrors the long-standing `last_error` update discipline. Two related failure modes have surfaced and are now pinned by regression tests in `tests/test_fcm_register.py`: (a) **Stale fatal across non-fatal followups** — a retry that gets a non-fatal followup (transient 5xx, structured `Error=` body, network exception) after an earlier 401/404 MUST clear the cache so the post-loop classifier reflects the FINAL attempt, not the first fatal seen (Codex finding on PR #1087 commit `559afde82f`); (b) **Body-shape misclassification** — the structured `Error=...` body branch MUST NOT unconditionally clear the cache. The server CAN return a structured error body together with a fatal HTTP status (401/404); the body shape is orthogonal to the auth/endpoint classification used by the caller. Classify from the HTTP status, not from "this is the error_code branch" (Codex finding on PR #1087 commit `7a89e2e321`).
@@ -318,6 +464,7 @@ Prefer the executable name when it is available; fall back to the module form wh
 * **Voluptuous defaults:** When schema defaults need to reference runtime values (for example, Home zone coordinates), prefer callable defaults rather than eagerly captured constants. Tests that validate option-flow defaults should coerce callables to their resolved values before asserting to avoid brittle comparisons across environments.
 * **Contributor guidance hygiene.** Verify that root and scoped `AGENTS.md` files remain accurate. When code or tests touch related automation or guidance, review and update the impacted `.github` workflows/templates, shared test utilities, and documentation so they stay current.
   * **Mypy override ordering.** Append new strictly-typed modules to the override list in `pyproject.toml` in alphabetical order so future reviews can spot additions quickly.
+  * **Codespell ignore list.** Add a word to `[tool.codespell] ignore-words-list` in `pyproject.toml` when the reports it causes outweigh the detection lost tree-wide; `tests/test_guard_prose_contract.py` carries that trade and its measured counts.
   * **Test scaffolding reference.** The Home Assistant config flow stubs and helper behaviors for tests are documented in [`tests/AGENTS.md`](tests/AGENTS.md); point future contributors there whenever discovery/update helpers change.
   * **Task scheduling helpers.** Home Assistant-style test doubles for `async_create_task` may accept only `(coro)` without keyword arguments like `name`. Design scheduling wrappers so they gracefully handle both signatures and still attach error-handling callbacks when a task object is returned.
   * **Discovery callbacks.** Reuse `ha_typing.callback` for new discovery helper callbacks so strict mypy keeps enforcing the typed decorator instead of drifting back to untyped shims.
@@ -364,7 +511,7 @@ Prefer the executable name when it is available; fall back to the module form wh
 > – review package/version updates and synchronize lock files/manifests as needed (see the "Home Assistant version & dependencies" section)
 > – rerun the relevant tests/linters after dependency updates
 >
-> *(The helper `python script/local_verify.py` covers Ruff + Pytest as a quick pass; run it in addition to—but never instead of—the mandatory steps above. Document every component you run manually.)*
+> *(The helper `python script/local_verify.py` covers Ruff + Pytest as a quick pass; run it in addition to—but never instead of—the mandatory steps above. `--all` extends it to the full local preflight and marks every stage it could not run as `NOT CHECKED` rather than silently skipping it, see `script/AGENTS.md`. Document every component you run manually.)*
 > *Hassfest validation now runs in CI via `.github/workflows/hassfest-auto-fix.yml`; rely on that workflow and re-run it from the PR UI whenever you need a fresh manifest check.*
 >
 > **optional escalation:** `PYTHONWARNINGS=error::DeprecationWarning pytest -q` *(turns new deprecations into hard failures so they cannot be overlooked—clear the root cause or document the upstream blocker before retrying without the flag).*
@@ -533,8 +680,8 @@ For any work that migrates entity-registry records during reload/startup flows, 
 
 ### 3.7 Device registry healing checklist
 
-1. **Trigger conditions.** Only heal when a registry lookup returns an existing `DeviceEntry` with an incorrect or missing `config_subentry_id`, name, or support flag. Read the latest object via `dev_reg.async_get_device` (or list iteration) immediately before scheduling the update so debug logs can reference the authoritative identifiers.
-2. **Apply updates via `async_update_device`.** Do not rely on `async_get_or_create` to mutate existing devices. Instead, call `dev_reg.async_update_device(device.id, config_subentry_id=..., **extra_fields)` and always capture the returned entry (the helper returns a *new* object). Treat the previous `device` reference as stale and overwrite it with the returned instance before continuing.
+1. **Trigger conditions.** Only heal when a registry lookup returns an existing `DeviceEntry` with an incorrect or missing `config_subentry_id`, name, or support flag. Read the latest object immediately before scheduling the update so debug logs can reference the authoritative identifiers. Use `dev_reg.async_get(device_id)` when you already hold the registry id, and `resolve_device_by_identifiers(dev_reg, candidates, entry_id=...)` from `custom_components/googlefindmy/coordinator/helpers/registry.py` when you only hold identifiers. **Superseded instruction, do not restore:** up to and including 1.7.15.14 this bullet named `dev_reg.async_get_device` and "list iteration". `async_get_device` is deprecated from Core 2026.9 (`breaks_in_ha_version="2027.8.0"`) and is already ambiguous from 2026.8 on, because identifiers are only unique *within* a config entry. "List iteration" meant iterating `dev_reg.devices` as a mapping, which is deprecated separately (`"2027.9.0"`); iterating the result of `async_entries_for_config_entry(...)` is not deprecated and stays the right way to walk this entry's devices. Reaching for the deprecated pair because "the healing checklist says so" is that superseded rule resurfacing; see `docs/AI_DEPRECATIONS_GUIDE.md`, section VI.
+2. **Apply updates via `async_update_device`.** Do not rely on `async_get_or_create` to mutate existing devices. Instead, state the ownership as an intent (`plan_device_ownership(...)` + `execute_ownership_plan(...)` from `custom_components/googlefindmy/coordinator/helpers/registry.py`, see bullet 1) and pass only the non-ownership fields to `dev_reg.async_update_device(device.id, **extra_fields)`; `async_update_device` takes no `config_subentry_id` keyword on any supported core (2026.8.2 knows `add_`/`new_`/`remove_config_subentry_id` only, and those are exactly the keywords the intent layer exists to hide). Always capture the returned entry (the helper returns a *new* object). Treat the previous `device` reference as stale and overwrite it with the returned instance before continuing.
 3. **Bookkeeping and metrics.** Count each successful heal exactly once—after `async_update_device` returns—and log the `(entry_id, device_id, identifiers, config_subentry_id)` tuple at debug level. Surface aggregate counters in telemetry or diagnostics helpers when applicable so regression tests can assert how many devices were corrected.
 4. **`_heal_tracker_device_subentry` contract.** The helper returns a tuple `(device_entry, healed)` where `device_entry` is the freshest registry object (even if no heal occurred) and `healed` flags whether an update was applied. Always propagate the refreshed `device_entry` for downstream work (name updates, via-device clearing, identifier merges) and base counters/logs on the boolean flag so heals do not masquerade as extra creations.
 

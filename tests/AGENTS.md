@@ -978,11 +978,45 @@ and the newer tuple form so regression tests can assert that the integration
 leaves both fields unset for tracker entries.
 
 For shared Home Assistant registry stubs referenced across multiple modules,
-start with [`_StubDeviceRegistry` in `tests/conftest.py`](tests/conftest.py#L1035-L1196).
-The helper documents the canonical keyword support (`add_config_entry_id`,
-`remove_config_entry_id`, `add_config_subentry_id`, `remove_config_subentry_id`)
-and records each payload so coordinator- and service-level tests observe the
-same removal behavior.
+start with the `_StubDeviceRegistry` class in [`tests/conftest.py`](tests/conftest.py)
+(search for `class _StubDeviceRegistry`; do not cite a line range here, it rots on
+the next edit). The helper **must** model the **single-owner** device registry of
+Home Assistant Core 2026.8 and newer: a device belongs to exactly one config entry
+and exactly one config subentry, exposed as `config_entry_id` and
+`config_subentry_id`. Check the class before you rely on that: at the time this
+paragraph was written the helper in the tree still kept `config_entries` as a set
+and `config_entries_subentries` as a dict of sets, and it knew none of the
+replacement keywords. Converting it is a separate, pending change; until it lands,
+read the rules below as the target and the class as the exception.
+It records each payload so coordinator- and service-level tests observe the same
+ownership behavior. Once converted it is to accept `new_config_entry_id` and
+`new_config_subentry_id` on a core that carries the replacement API and apply them as
+an immediate move, and to accept the legacy quadruple on a core at the declared
+minimum (`2025.9.1`). Which of the two a test sees is a property of the capability
+profile under test, so assert the resulting ownership, never the keyword.
+
+Do **not** reintroduce a double that models the pre-2026.8 many-to-many mapping.
+Such a double is what hid this migration: it accepted `add_config_entry_id`,
+`remove_config_entry_id`, `add_config_subentry_id` and `remove_config_subentry_id`
+and answered them as set operations, so a suite that was in fact calling a
+superseded API stayed green. A double whose semantics differ from the supported
+core does not test the integration, it tests the double. Background:
+`docs/AI_DEPRECATIONS_GUIDE.md`, section VI.
+
+### Deprecation recording
+
+Tests that touch a device- or entity-registry write path are to use the
+`device_registry_deprecations` fixture. It records every `report_usage` call raised
+during the test instead of swallowing it, and a new recorded deprecation is a
+**failure**, not noise. The fixture lives in `tests/conftest.py` (search for
+`def device_registry_deprecations`) and is `autouse`, so every test already runs
+under it. Two reasons this fixture exists rather than a log filter:
+the stub in `tests/conftest.py` currently installs a no-op `report_usage` (search
+for `def report_usage`), which makes this whole class of findings invisible, and the
+fixture is what replaces it; and the interesting deprecations here carry
+`core_behavior=ReportBehavior.ERROR`, so whether they raise or merely log depends
+on whether a `custom_components/` frame is on the stack, which is a property of the
+test rather than of the production code.
 
 When expanding purge or cleanup coverage, mirror Home Assistant's registry
 helper API surface (including `async_entries_for_config_entry` and
@@ -1019,11 +1053,24 @@ following to preserve migration coverage:
    service-subentry identifier (see `_service_subentry_identifier(...)`) so
    future expectations stay aligned with the coordinator's registry updates.
 5. **Playbook parity** — Whenever a regression test targets creation, reload,
-   or cleanup logic, mirror the diagnostics from Section VIII.D of
-   `docs/CONFIG_SUBENTRIES_HANDBOOK.md`. Assert that registry helpers capture
-   the `(entry_id, device_id, identifiers)` tuple and that `add_config_entry_id`
-   (or `config_entry_id`) is forwarded, ensuring the documentation and tests
-   stay synchronized.
+   or cleanup logic, stay consistent with Section VI
+   ("Troubleshooting `ValueError` & Regressions") of
+   `docs/CONFIG_SUBENTRIES_HANDBOOK.md`. Do not expect a large playbook there: it
+   is two symptom/cause/fix entries, on repeated `async_forward_entry_setups` and
+   on subentry devices that fail to delete. For device *ownership* questions the
+   reference is `docs/AI_DEPRECATIONS_GUIDE.md`, section VI, not the handbook. Assert that registry helpers capture
+   the `(entry_id, device_id, identifiers)` tuple, and assert the observed
+   `OwnershipIntent` together with the operation sequence the planner derived
+   from it. Do **not** assert that `add_config_entry_id` (or `config_entry_id`)
+   is forwarded: that assertion pins a superseded API and would keep the old
+   call alive. The keywords are an implementation detail of
+   `plan_device_ownership`, chosen from the signature of the installed core; the
+   intent is the contract. One exception, and only one: a test of an **executor**
+   (`execute_ownership_plan`, `_call_device_registry_api`) may assert the
+   keywords, because an executor picks none of its own, forwards what the planner
+   already chose, and owns no resulting ownership that could be asserted instead.
+   A test of a **call site** may not. See `docs/AI_DEPRECATIONS_GUIDE.md`,
+   section VI.
 
 ## Translation alignment checks
 

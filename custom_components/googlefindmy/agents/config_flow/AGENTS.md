@@ -102,6 +102,37 @@ Add similar guards whenever a new optional attribute becomes relevant so future 
   )
   ```
 
+## Device ownership in flow code
+
+The config flow binds the service device itself. Any such binding is an **ownership**
+change, and from Home Assistant Core 2026.8 a device belongs to exactly one config
+entry and exactly one config subentry. Do not pass `add_config_entry_id`,
+`add_config_subentry_id`, `remove_config_entry_id` or `remove_config_subentry_id`
+from flow code: on a modern core the first only arms a deferred move, and the third
+*deletes* the device when the removed subentry is the one the device sits on and no
+such move is armed.
+
+Where to route it depends on what the flow has at hand. When the coordinator is
+reachable, go through its ownership entry point. When it is not (the flow has a
+coordinator-less fallback path that calls `dev_reg.async_update_device`
+directly), call the pure planner `plan_device_ownership` from
+`custom_components/googlefindmy/coordinator/helpers/registry.py` and run the
+operations it returns through `execute_ownership_plan` in the same module;
+neither needs `hass` nor a coordinator instance. Import that helper module inside
+the function that uses it, never at module scope: the import runs
+`coordinator/__init__.py`, which loads the full API graph, and the flow-only import
+path must not depend on that graph ("Integration module imports" above). There are
+two executors and that
+is deliberate, because not every call site has a coordinator; what stays single
+is the *translation*. What must
+**not** happen is a third hand-written keyword translation in `config_flow.py`. One
+used to live there, a `TypeError` retry that renamed `add_config_*` to `config_*`;
+it was removed in AP-15, and its rename produced a keyword no supported core takes
+(`async_update_device` has no bare `config_subentry_id` at tag 2025.9.1, 2026.8.0
+or 2026.9.0). Do not restore it: an error message is not a signature, and the
+planner reads the signature.
+Background and deadlines: `docs/AI_DEPRECATIONS_GUIDE.md`, section VI.
+
 ## Cross-reference checklist
 
 * [`docs/CONFIG_SUBENTRIES_HANDBOOK.md`](../../../docs/CONFIG_SUBENTRIES_HANDBOOK.md) — Mirrors this guide's subentry-flow reminders and now tracks every AGENT link. Update both documents together whenever setup/unload contracts, discovery affordances, or reconfigure hooks change.

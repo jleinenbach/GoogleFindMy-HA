@@ -142,7 +142,7 @@ class RegistryStub(RegistryOperations):
         self.data = data if data is not None else []
 
         # Caches populated lazily by the mixin.
-        self._device_registry_config_subentry_kwarg_cache = None
+        self._device_registry_capability_cache = None
         self._device_registry_supports_translation_update = None
         self._device_names: dict[str, str] | None = None
 

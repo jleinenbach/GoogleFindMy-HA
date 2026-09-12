@@ -6858,6 +6858,11 @@ class ConfigFlow(
             if service_obj is not None:
                 service_config_subentry_id = getattr(service_obj, "subentry_id", None)
 
+        # Unlike the steps above this one is not wrapped: a failure here means
+        # the service device did not reach the subentry the repair just created,
+        # and a repair step that reports success on a half-applied state is worse
+        # than one that surfaces the error. The coordinator path inside swallows
+        # its own failure and falls back; what reaches here is the fallback's.
         ConfigFlow._ensure_service_device_binding(
             hass,
             entry,
@@ -6958,32 +6963,56 @@ class ConfigFlow(
         coordinator: Any | None,
         service_config_subentry_id: str | None,
     ) -> None:
-        """Ensure the service device metadata reflects the latest subentry mapping."""
+        """Move the service device into the subentry the mapping now names.
+
+        ``service_config_subentry_id`` is where the device shall sit; ``None``
+        means the entry root (the hub link). Both are ordinary targets of the
+        same MOVE intent, and the keywords that express it are chosen from the
+        installed registry signature, never written out here. Contract:
+        ``agents/config_flow/AGENTS.md``, "Device ownership in flow code".
+        """
 
         if hass is None or entry is None:
             return
 
+        # Imported here and not at module scope: ``coordinator/__init__.py``
+        # eagerly imports the API with its crypto and network dependencies, and
+        # the config flow must stay importable on the flow-only path even when
+        # that graph does not (``agents/config_flow/AGENTS.md``, "Integration
+        # module imports"). A local import keeps the names visible to mypy.
+        from .coordinator.helpers.registry import (
+            OwnershipIntent,
+            detect_device_registry_capabilities,
+            execute_ownership_plan,
+            plan_device_ownership,
+            resolve_device_by_identifiers,
+        )
+
         dev_reg = dr.async_get(hass)
-        if not hasattr(dev_reg, "async_update_device"):
+        update_call = getattr(dev_reg, "async_update_device", None)
+        if not callable(update_call):
             return
 
-        identifiers: set[tuple[str, str]] = {service_device_identifier(entry.entry_id)}
+        # Per-entry identifier first, the subentry-scoped one second, because the
+        # stable form survives a subentry change and the scoped one goes stale
+        # with it. Both are registered today (``service_device_info`` emits the
+        # scoped one for eight platform sites). From Core 2026.8 the resolver
+        # walks that order and scopes each lookup to the entry; below it there is
+        # no replacement API, so it still passes the set on and the old
+        # iteration-order behaviour remains. The order is therefore a guarantee
+        # on the newer core and an expression of intent on the older one, the
+        # same wording as the coordinator's own lookup.
+        candidates: tuple[tuple[str, str], ...] = (
+            service_device_identifier(entry.entry_id),
+        )
         if service_config_subentry_id is not None:
-            identifiers.add(
-                (DOMAIN, f"{entry.entry_id}:{service_config_subentry_id}:service")
+            candidates += (
+                (DOMAIN, f"{entry.entry_id}:{service_config_subentry_id}:service"),
             )
 
-        get_device = getattr(dev_reg, "async_get_device", None)
-        device: Any | None = None
-        if callable(get_device):
-            try:
-                device = get_device(identifiers=identifiers)
-            except TypeError:
-                try:
-                    device = get_device(identifiers)
-                except TypeError:  # pragma: no cover - defensive guard
-                    device = None
-
+        device = resolve_device_by_identifiers(
+            dev_reg, candidates, entry_id=entry.entry_id
+        )
         if device is None:
             return
 
@@ -6991,57 +7020,72 @@ class ConfigFlow(
         if device_id is None:
             return
 
-        update_kwargs: dict[str, Any] = {
-            "device_id": device_id,
-            "config_subentry_id": service_config_subentry_id,
-        }
-        if service_config_subentry_id is not None:
-            update_kwargs["add_config_entry_id"] = entry.entry_id
-
-        call_api = getattr(coordinator, "_call_device_registry_api", None)
-        if callable(call_api):
+        # Binding the service device is an ownership change, so the flow states
+        # an intent and lets ``plan_device_ownership`` choose the keywords for
+        # the installed core. MOVE, not ENSURE: the caller may be clearing a
+        # stale subentry link, and ENSURE with an empty target would leave that
+        # link in place.
+        apply_ownership = getattr(coordinator, "_apply_device_ownership", None)
+        if callable(apply_ownership):
             try:
-                call_api(dev_reg.async_update_device, base_kwargs=update_kwargs)
+                apply_ownership(
+                    dev_reg,
+                    intent=OwnershipIntent.MOVE,
+                    device_id=device_id,
+                    entry_id=entry.entry_id,
+                    target_subentry_id=service_config_subentry_id,
+                    # ``device`` is deliberately not handed over, for the same
+                    # reason ``current`` is not handed to the planner below: the
+                    # coordinator would read the ownership from it and, on a
+                    # non-single-owner capability profile, plan a
+                    # ``remove_config_entry_id``/``remove_config_subentry_id``
+                    # pair. MOVE does not need it either way -- the coordinator
+                    # skips its own lookup for this intent.
+                )
                 return
             except Exception as err:  # noqa: BLE001 - defensive guard
                 _LOGGER.debug(
                     "Service device binding via coordinator helper failed: %s", err
                 )
 
-        try:
-            dev_reg.async_update_device(**update_kwargs)
-        except TypeError as err:
-            err_str = str(err)
-            needs_fallback = False
-            if (
-                "add_config_entry_id" in update_kwargs
-                and "add_config_entry_id" in err_str
-            ):
-                needs_fallback = True
-            if (
-                "add_config_subentry_id" in update_kwargs
-                and "add_config_subentry_id" in err_str
-            ):
-                needs_fallback = True
-
-            if not needs_fallback:
-                raise
-
-            fallback_kwargs = dict(update_kwargs)
-            if "add_config_entry_id" in fallback_kwargs:
-                fallback_kwargs["config_entry_id"] = fallback_kwargs.pop(
-                    "add_config_entry_id"
-                )
-            if "add_config_subentry_id" in fallback_kwargs:
-                fallback_kwargs["config_subentry_id"] = fallback_kwargs.pop(
-                    "add_config_subentry_id"
-                )
-
-            _LOGGER.debug(
-                "Retrying direct device registry update with legacy kwargs after %s",
-                err,
-            )
-            dev_reg.async_update_device(**fallback_kwargs)
+        # Reached on two ways: no coordinator at all, or the coordinator path
+        # raised above. The retry after a failure is safe because a MOVE plan is
+        # exactly one operation and setting the same ownership twice is a no-op;
+        # a multi-operation plan would have to be resumed rather than replanned
+        # from the snapshot taken before the first attempt.
+        #
+        # Same translation, different executor. What
+        # used to stand here was a hand-written ``TypeError`` retry that renamed
+        # ``add_config_*`` to ``config_*``. That rename produced a keyword no
+        # supported core has: ``async_update_device`` takes no bare
+        # ``config_subentry_id`` at tag 2025.9.1, 2026.8.0 or 2026.9.0. The
+        # planner asks the installed signature instead of guessing from an error
+        # message. See ``agents/config_flow/AGENTS.md``, "Device ownership in
+        # flow code".
+        execute_ownership_plan(
+            dev_reg,
+            plan_device_ownership(
+                OwnershipIntent.MOVE,
+                caps=detect_device_registry_capabilities(update_call),
+                device_id=device_id,
+                entry_id=entry.entry_id,
+                target_subentry_id=service_config_subentry_id,
+                # ``current`` is deliberately not passed. On a single-owner core
+                # MOVE does not read it, and on the declared minimum a device
+                # entry describes no ownership, so it would be ``None`` anyway;
+                # measured, it changes nothing on any supported core. What it
+                # would change is the degraded case: an unreadable
+                # ``async_update_device`` signature yields the all-false profile,
+                # where a known ``current`` emits
+                # ``remove_config_entry_id`` + ``remove_config_subentry_id``
+                # while the adding half degrades to a bare
+                # ``add_config_entry_id`` naming the entry that already owns the
+                # device, which arms no pending move. On a 2026.8 registry the
+                # unmatched removal pair is the deletion. This call site never
+                # emitted a ``remove_*`` keyword before, and neither of its two
+                # paths starts now.
+            ),
+        )
 
     async def _async_sync_feature_subentries(
         self,

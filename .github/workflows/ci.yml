@@ -427,7 +427,7 @@ jobs:
                 else
                   echo "ℹ️ **Spelling suggestions (non-blocking):**"
                   echo ""
-                  echo "These are informational only. Add false positives to \`pyproject.toml\` ignore-words-list."
+                  echo "These are informational only. Add a false positive to \`pyproject.toml\` ignore-words-list when the reports it causes outweigh the detection lost tree-wide (see \`AGENTS.md\`)."
                   echo ""
                   echo '```'
                   cat codespell_output.txt

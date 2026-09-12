@@ -30,6 +30,9 @@ from custom_components.googlefindmy.const import (
     TRACKER_SUBENTRY_KEY,
     service_device_identifier,
 )
+from custom_components.googlefindmy.coordinator.helpers.registry import (
+    resolve_device_by_identifiers,
+)
 from custom_components.googlefindmy.entity import GoogleFindMyDeviceEntity
 from tests.conftest import COORDINATOR_CONSUMER_MODULES
 
@@ -357,7 +360,12 @@ async def test_integration_device_info_uses_service_device(
         if entry_obj is not entry or "binary_sensor" not in normalized:
             return
         identifier = service_device_identifier(entry_obj.entry_id)
-        service_device = device_registry.async_get_device({identifier})
+        # Scoped lookup through the shared resolver: see the comment in
+        # test_device_entity_registration (the direct 2026.8 method does not
+        # exist on the declared minimum this test also runs on).
+        service_device = resolve_device_by_identifiers(
+            device_registry, (identifier,), entry_id=entry_obj.entry_id
+        )
         if service_device is None:
             return
         for sensor_key in ("auth_status", "polling"):
@@ -413,7 +421,9 @@ async def test_integration_device_info_uses_service_device(
         assert isinstance(identifier, str) and identifier
 
     service_identifier = service_device_identifier(entry.entry_id)
-    service_device = device_registry.async_get_device({service_identifier})
+    service_device = resolve_device_by_identifiers(
+        device_registry, (service_identifier,), entry_id=entry.entry_id
+    )
     assert service_device is not None
 
     async def _register_service_entities(

@@ -552,8 +552,14 @@ class TestRefreshUrlRedaction:
             name_by_user=None,
         )
         update_mock = mock.Mock()
+        # The handler asks per config entry instead of scanning the whole
+        # registry, so the double answers that question rather than exposing a
+        # ``devices`` mapping.
         fake_reg = SimpleNamespace(
-            devices={"devid": device}, async_update_device=update_mock
+            async_update_device=update_mock,
+            async_entries_for_config_entry=lambda entry_id: (
+                [device] if entry_id in device.config_entries else []
+            ),
         )
         monkeypatch.setattr(services.dr, "async_get", lambda _h: fake_reg)
         monkeypatch.setattr(services, "get_url", lambda *a, **k: "http://ha.local:8123")

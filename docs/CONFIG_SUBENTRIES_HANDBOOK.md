@@ -471,6 +471,24 @@ async def async_setup_entry(
 
 To ensure `async_remove_subentry` cleans up devices, the Device Registry entry must be associated with the `config_subentry_id`.
 
+> **Core 2026.8 and newer: the association is single-valued.** A device belongs to
+> exactly one config entry and exactly one config subentry, held in
+> `DeviceEntry.config_entry_id` and `DeviceEntry.config_subentry_id`. The older
+> `config_entries_subentries` mapping survives only as a compatibility shim that
+> always reports one pair, and it is marked for removal in Core 2027.8. Two rules
+> follow for the manual paths described below. First, a manual correction through
+> `async_update_device` is only permitted as `new_config_subentry_id` (or
+> `new_config_entry_id` together with it); these keywords arrive in Core 2026.8.0 and
+> must not be combined with `add_config_entry_id`, `add_config_subentry_id`,
+> `remove_config_entry_id` or `remove_config_subentry_id`, which raises
+> `HomeAssistantError`. Second, the old quadruple is not merely deprecated but
+> changed in meaning: `add_config_entry_id` alone attaches nothing, and
+> `remove_config_entry_id` on the owning entry **deletes** the device unless a
+> deferred move from the same integration is armed. Since this repository still
+> supports Core `2025.9.1`, pick the form through the shared planner
+> (`plan_device_ownership`) instead of writing either form directly. Full reasoning,
+> core line references and deadlines: `docs/AI_DEPRECATIONS_GUIDE.md`, section VI.
+
 **Option 1: Via `async_add_entities` (If supported by EntityComponent)**
 If the `AddEntitiesCallback` signature supports `config_subentry_id`, call `async_add_entities(entities, config_subentry_id=subentry.subentry_id)`.
 

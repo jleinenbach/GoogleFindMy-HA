@@ -260,10 +260,12 @@ def pytest_runtest_setup(item: pytest.Item) -> None:
     pytest_socket.socket_allow_hosts(["127.0.0.1", "::1", "localhost"])
 
 
+from tests.helpers import deprecation_recorder as _deprecation_recorder
 from tests.helpers import (
     install_homeassistant_core_callback_stub,
     install_homeassistant_network_stub,
 )
+from tests.helpers import single_owner_device_registry as _single_owner_registry
 from tests.helpers.config_entries_stub import install_config_entries_stubs
 from tests.helpers.constants import load_googlefindmy_const_module
 
@@ -2467,6 +2469,13 @@ def use_real_homeassistant_modules() -> Iterable[None]:
 
         _aiohttp_client._async_make_resolver = _async_make_resolver  # type: ignore[attr-defined]
 
+    # The real modules were just re-imported, which discards every binding the
+    # deprecation recorder made against the stubbed ones.  Re-install it here so
+    # tests running under this fixture still observe ``report_usage`` calls;
+    # without this the recorder can only stay silent, and silence looks exactly
+    # like "no deprecation".  See tests/helpers/deprecation_recorder.py.
+    _deprecation_recorder.rebind_active()
+
     try:
         yield
     finally:
@@ -2474,3 +2483,37 @@ def use_real_homeassistant_modules() -> Iterable[None]:
             if name.startswith("homeassistant"):
                 del sys.modules[name]
         sys.modules.update(saved_modules)
+
+
+@pytest.fixture(autouse=True)
+def device_registry_deprecations(
+    monkeypatch: pytest.MonkeyPatch,
+) -> Iterable[_deprecation_recorder.DeprecationRecorder]:
+    """Record every ``report_usage`` call raised while a test runs.
+
+    Autouse so that no test can opt out of being observed; the recorded list is
+    only inspected where a test asks for this fixture by name.  The recorder
+    delegates to the original callable, so behaviour is unchanged: a deprecated
+    Core call made from outside ``custom_components/`` still raises, which two
+    tests in this repository depend on.
+    """
+    recorder = _deprecation_recorder.DeprecationRecorder()
+    _deprecation_recorder.install_recorder(monkeypatch, recorder)
+    try:
+        yield recorder
+    finally:
+        _deprecation_recorder.reset_active()
+
+
+@pytest.fixture
+def single_owner_device_registry() -> _single_owner_registry.SingleOwnerDeviceRegistry:
+    """Return a device registry double implementing the Core 2026.8+ rules.
+
+    Opt-in, not autouse: ``_StubDeviceRegistry`` still models the pre-2026.8
+    multi-owner world and is what several hundred existing assertions expect.
+    Switching everything at once would conflate a behaviour migration with a
+    test-harness migration.  New assertions about single ownership use this
+    fixture; ``tests/test_device_registry_single_owner_contract.py`` proves it
+    matches real Core.
+    """
+    return _single_owner_registry.SingleOwnerDeviceRegistry()

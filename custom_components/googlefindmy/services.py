@@ -53,6 +53,16 @@ from .const import (
     map_token_secret_seed,
     service_device_identifier,
 )
+from .coordinator.helpers.registry import (
+    OwnershipIntent,
+    detect_device_registry_capabilities,
+    device_belongs_to_entry,
+    device_owning_entry_ids,
+    execute_ownership_plan,
+    plan_device_ownership,
+    read_device_ownership,
+    resolve_device_by_identifiers,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -110,40 +120,101 @@ async def async_rebuild_device_registry(hass: HomeAssistant, call: ServiceCall) 
         _LOGGER.warning("Device registry cleanup skipped: No entries bucket found.")
         return
 
+    capability_cache: dict[int, Any] = {}
+
+    def _registry_capabilities(update_call: Any) -> Any:
+        """Return the capability profile for ``update_call``, probed once.
+
+        The contract calls this choice one that is "made once, behind a
+        signature probe" (``docs/AI_DEPRECATIONS_GUIDE.md``, section VI), and
+        the coordinator caches it for the same reason. Without the cache this
+        service runs ``inspect.signature`` once per device of every entry.
+        """
+        key = id(update_call)
+        cached = capability_cache.get(key)
+        if cached is None:
+            cached = detect_device_registry_capabilities(update_call)
+            capability_cache[key] = cached
+        return cached
+
     def _detach_hub_link_from_device(
         device_id: str,
         *,
+        device: Any,
         context_label: str,
         error_log_template: str,
     ) -> bool:
-        """Remove the hub link from ``device_id`` with legacy kwarg support."""
+        """Give up this entry's hub link on ``device_id``.
+
+        The intent is DETACH on the hub link, that is the link of a device
+        sitting directly on the config entry rather than in one of its
+        subentries. ``plan_device_ownership`` turns it into the keywords the
+        installed core understands; this function never names them. See
+        ``AGENTS.md``, "Registry updates", and ``docs/AI_DEPRECATIONS_GUIDE.md``,
+        section VI.
+
+        ``device`` is not optional and not a convenience. From Core 2026.8 a
+        device has a single owning entry, so giving that entry up removes the
+        device and every entity on it. The planner therefore refuses to act on
+        an ownership state it cannot read, and the device entry is where that
+        state is read from. Both call sites already hold it.
+
+        Args:
+            device_id: The device to detach.
+            device: The device registry entry for ``device_id``.
+            context_label: What the device is, for the debug log.
+            error_log_template: Log template taking (entry_id, device_id, error).
+
+        Returns:
+            True when the detach was carried out or the core had nothing to do,
+            False when the registry call failed.
+        """
+
+        update_call = getattr(dev_reg, "async_update_device", None)
+        if not callable(update_call):  # pragma: no cover - defensive guard
+            _LOGGER.error(
+                error_log_template,
+                entry_id,
+                device_id,
+                "device registry has no async_update_device",
+            )
+            return False
+
+        # Unknown ownership and "owned by nobody" are two different statements,
+        # and on a single-owner core the difference decides between a refusal
+        # and a deletion. ``read_device_ownership`` draws that line and carries
+        # the reasoning about the two half-known shapes.
+        current = read_device_ownership(device)
 
         try:
-            dev_reg.async_update_device(
-                device_id,
-                remove_config_entry_id=entry_id,
-                remove_config_subentry_id=None,
+            plan = plan_device_ownership(
+                OwnershipIntent.DETACH,
+                caps=_registry_capabilities(update_call),
+                device_id=device_id,
+                entry_id=entry_id,
+                # Named rather than omitted so the intent is readable here. On
+                # the DETACH path the two are equivalent: the planner maps an
+                # omitted argument onto ``None`` right away. The distinction
+                # carries weight on the legacy MOVE path, not on this one.
+                detach_subentry_id=None,
+                current=current,
             )
-        except TypeError as err:
-            if "remove_config_subentry_id" not in str(err):
-                _LOGGER.error(error_log_template, entry_id, device_id, err)
-                return False
+        except ValueError as err:
+            # The planner refuses to guess. Reported, never attempted.
+            _LOGGER.error(error_log_template, entry_id, device_id, err)
+            return False
+
+        if not plan:
             _LOGGER.debug(
-                "[%s] Hub Cleanup: Retrying device registry update for %s %s without remove_config_subentry_id after %s",
+                "[%s] Hub Cleanup: %s %s does not sit on the hub link; nothing to detach",
                 entry_id,
                 context_label,
                 device_id,
-                err,
             )
-            try:
-                dev_reg.async_update_device(
-                    device_id,
-                    remove_config_entry_id=entry_id,
-                )
-            except Exception as retry_err:  # pragma: no cover - defensive guard
-                _LOGGER.error(error_log_template, entry_id, device_id, retry_err)
-                return False
             return True
+
+        try:
+            execute_ownership_plan(dev_reg, plan)
         except Exception as err:  # pragma: no cover - defensive guard
             _LOGGER.error(error_log_template, entry_id, device_id, err)
             return False
@@ -266,16 +337,10 @@ async def async_rebuild_device_registry(hass: HomeAssistant, call: ServiceCall) 
             fallback = getattr(device, "config_subentry_id", None)
             if isinstance(fallback, str):
                 normalized.add(fallback)
-            elif fallback is None:
-                linked_entries = getattr(device, "config_entries", None)
-                if isinstance(linked_entries, Iterable):
-                    for candidate_entry_id in linked_entries:
-                        if (
-                            isinstance(candidate_entry_id, str)
-                            and candidate_entry_id == target_entry_id
-                        ):
-                            normalized.add(None)
-                            break
+            elif fallback is None and device_belongs_to_entry(device, target_entry_id):
+                # No subentry of ours, but the entry owns the device: that is
+                # the hub link, which this set spells ``None``.
+                normalized.add(None)
 
         return normalized
 
@@ -351,7 +416,9 @@ async def async_rebuild_device_registry(hass: HomeAssistant, call: ServiceCall) 
 
         # 1. Find the correct Service Device ID
         service_device_ident = service_device_identifier(entry_id)
-        service_device = dev_reg.async_get_device(identifiers={service_device_ident})
+        service_device = resolve_device_by_identifiers(
+            dev_reg, (service_device_ident,), entry_id=entry_id
+        )
         service_device_id = getattr(service_device, "id", None)
         service_meta = None
         get_metadata = getattr(coordinator, "get_subentry_metadata", None)
@@ -374,8 +441,8 @@ async def async_rebuild_device_registry(hass: HomeAssistant, call: ServiceCall) 
             # Try to ensure it exists before continuing
             try:
                 coordinator._ensure_service_device_exists()
-                service_device = dev_reg.async_get_device(
-                    identifiers={service_device_ident}
+                service_device = resolve_device_by_identifiers(
+                    dev_reg, (service_device_ident,), entry_id=entry_id
                 )
                 service_device_id = getattr(service_device, "id", None)
                 if not service_device_id:
@@ -411,6 +478,7 @@ async def async_rebuild_device_registry(hass: HomeAssistant, call: ServiceCall) 
             )
             if _detach_hub_link_from_device(
                 service_device_id,
+                device=service_device,
                 context_label="service device",
                 error_log_template="[%s] Hub Cleanup: Failed to detach hub entry from service device %s: %s",
             ):
@@ -529,11 +597,10 @@ async def async_rebuild_device_registry(hass: HomeAssistant, call: ServiceCall) 
                     if correct_tracker_subentry_id in normalized_subentries:
                         tracker_linked_entry_ids.add(normalized_entry_id)
 
-            raw_links: set[str] = getattr(device, "config_entries", set()) or set()
             linked_entry_ids = {
-                str(link_entry_id)
-                for link_entry_id in raw_links
-                if isinstance(link_entry_id, str) and link_entry_id
+                link_entry_id
+                for link_entry_id in device_owning_entry_ids(device)
+                if link_entry_id
             }
 
             has_hub_link = entry_id in linked_entry_ids
@@ -583,6 +650,7 @@ async def async_rebuild_device_registry(hass: HomeAssistant, call: ServiceCall) 
                 )
             if _detach_hub_link_from_device(
                 device.id,
+                device=device,
                 context_label="device",
                 error_log_template="[%s] Hub Cleanup: Failed to detach hub entry from device %s: %s",
             ):
@@ -801,7 +869,7 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
         dev_reg = dr.async_get(hass)
         dev = dev_reg.async_get(device_id)
         if dev:
-            for entry_id in dev.config_entries:
+            for entry_id in device_owning_entry_ids(dev):
                 entry = _entry_for_id(hass, entry_id)
                 # Prefer entry.runtime_data (2026 standard), then entries bucket.
                 runtime = getattr(entry, "runtime_data", None)
@@ -1212,7 +1280,12 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
                     prefix = f"{entry_id}:"
                     if ident_str.startswith(prefix):
                         ident_str = ident_str[len(prefix) :]
-                elif ":" in ident_str:
+                elif ":" in ident_str:  # pragma: no cover - no caller reaches it
+                    # Unreachable since the scan asks per config entry: the only
+                    # caller always passes a key of ``entries_by_id``, which is
+                    # never empty. Kept for a caller that does not know the
+                    # owner, of which there is none today; measured, not assumed
+                    # (``grep -n _canonical_identifier`` finds one call site).
                     candidate, remainder = ident_str.split(":", 1)
                     if candidate in entries_by_id:
                         ident_str = remainder
@@ -1223,45 +1296,57 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
 
         dev_reg = dr.async_get(hass)
         updated_count = 0
-        for device in getattr(dev_reg, "devices", {}).values():
-            identifiers: set[tuple[str, str]] = (
-                getattr(device, "identifiers", set()) or set()
-            )
-            if not any(domain == DOMAIN for domain, _ in identifiers):
-                continue
+        seen_device_ids: set[str] = set()
+        # Ask per entry instead of scanning the whole registry. Two things
+        # change with that, both deliberate. The owning entry is now read from
+        # the query rather than guessed from the device: the previous loop took
+        # the first of ``config_entries`` that was ours and otherwise the first
+        # one at all, so a device owned by a foreign integration could be given
+        # one of our map URLs signed with a token seeded from that foreign entry
+        # id. And a device that carries our identifier while belonging to no
+        # GoogleFindMy entry is no longer touched at all; it is registry
+        # residue, not one of our devices. ``async_entries_for_config_entry``
+        # exists unchanged at tag ``2025.9.1`` and at ``2026.9.0``, so this
+        # needs no capability switch.
+        for owner_entry_id in entries_by_id:
+            for device in dr.async_entries_for_config_entry(dev_reg, owner_entry_id):
+                # Below 2026.8 a device can hang on two of our entries at once.
+                # The first entry asked wins, and its prefix is the one
+                # ``_canonical_identifier`` strips. The choice was arbitrary
+                # before as well (set iteration order), so this is not a change
+                # in outcome, only in determinism.
+                if device.id in seen_device_ids:
+                    continue
+                seen_device_ids.add(device.id)
 
-            if _device_is_service(device):
-                continue
-
-            config_entry_ids = list(getattr(device, "config_entries", None) or [])
-            owner_entry_id: str | None = None
-            for candidate in config_entry_ids:
-                candidate_str = str(candidate)
-                if candidate_str in entries_by_id:
-                    owner_entry_id = candidate_str
-                    break
-                if owner_entry_id is None:
-                    owner_entry_id = candidate_str
-
-            canonical_id = _canonical_identifier(device, owner_entry_id)
-            if not canonical_id:
-                continue
-
-            auth_token = _token_for_entry(owner_entry_id)
-            new_config_url = (
-                f"{base_url}/api/googlefindmy/map/{canonical_id}?token={auth_token}"
-            )
-            dev_reg.async_update_device(
-                device_id=device.id,
-                configuration_url=new_config_url,
-            )
-            updated_count += 1
-            if ctx.get("redact_url_token"):
-                _LOGGER.debug(
-                    "Updated URL for device %s: %s",
-                    device.name_by_user or device.name,
-                    ctx["redact_url_token"](new_config_url),
+                identifiers: set[tuple[str, str]] = (
+                    getattr(device, "identifiers", set()) or set()
                 )
+                if not any(domain == DOMAIN for domain, _ in identifiers):
+                    continue
+
+                if _device_is_service(device):
+                    continue
+
+                canonical_id = _canonical_identifier(device, owner_entry_id)
+                if not canonical_id:
+                    continue
+
+                auth_token = _token_for_entry(owner_entry_id)
+                new_config_url = (
+                    f"{base_url}/api/googlefindmy/map/{canonical_id}?token={auth_token}"
+                )
+                dev_reg.async_update_device(
+                    device_id=device.id,
+                    configuration_url=new_config_url,
+                )
+                updated_count += 1
+                if ctx.get("redact_url_token"):
+                    _LOGGER.debug(
+                        "Updated URL for device %s: %s",
+                        device.name_by_user or device.name,
+                        ctx["redact_url_token"](new_config_url),
+                    )
 
         _LOGGER.info("Refreshed URLs for %d Google Find My devices", updated_count)
 
@@ -1333,8 +1418,7 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
                     missing_devices.append(device_id)
                     continue
 
-                config_entries = getattr(device, "config_entries", None) or []
-                _extend_target_entries(str(entry_id) for entry_id in config_entries)
+                _extend_target_entries(device_owning_entry_ids(device))
 
             if missing_devices:
                 _LOGGER.warning(

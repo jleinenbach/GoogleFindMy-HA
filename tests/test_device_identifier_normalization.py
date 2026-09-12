@@ -24,6 +24,7 @@ from custom_components.googlefindmy.const import (
     coerce_ignored_mapping,
 )
 from custom_components.googlefindmy.coordinator import GoogleFindMyCoordinator
+from tests.helpers.config_entries_stub import make_config_entry
 from tests.helpers.config_flow import ConfigEntriesDomainUniqueIdLookupMixin
 
 IGNORED_AT_PRIMARY = 1234
@@ -233,3 +234,57 @@ def test_coerce_ignored_mapping_survives_invalid_ignored_at(bad_value: object) -
     ignored_at = metadata["ignored_at"]
     assert isinstance(ignored_at, int)
     assert ignored_at > 1
+
+
+@pytest.mark.asyncio
+async def test_async_remove_config_entry_device_refuses_a_foreign_device() -> None:
+    """The delete hook answers ``False`` for a device this entry does not own.
+
+    Home Assistant calls this hook with whatever device the user pressed delete
+    on. Answering ``True`` lets Core remove the device record and every entity
+    on it, so the ownership question is the first thing the hook asks -- and the
+    only thing standing between a mis-routed call and someone else's device.
+
+    Green on the previous state as well, which read ``entry.entry_id not in
+    device_entry.config_entries``: a regression guard for the rewrite. The
+    companion test below is the one the previous state fails.
+    """
+
+    entry = make_config_entry(entry_id="entry-1", options={}, title="Test Entry")
+    hass = SimpleNamespace(config_entries=_ConfigEntriesStub(), data={DOMAIN: {}})
+
+    foreign_device = SimpleNamespace(
+        config_entries={"entry-2"},
+        identifiers=((DOMAIN, "entry-2:device-999"),),
+        name_by_user=None,
+        name="Someone else's device",
+    )
+
+    assert await async_remove_config_entry_device(hass, entry, foreign_device) is False
+    assert entry.options == {}
+
+
+@pytest.mark.asyncio
+async def test_async_remove_config_entry_device_refuses_a_device_of_unknown_ownership() -> (
+    None
+):
+    """A device entry that names no owner at all is not ours either.
+
+    ``device_owning_entry_ids`` cannot tell "owned by nobody" from "does not say"
+    and returns an empty tuple for both. Either way the answer here is the same:
+    refuse. The two statements only need to be told apart where a deletion is
+    *planned*, which is the planner's job, not this hook's.
+    """
+
+    entry = make_config_entry(entry_id="entry-1", options={}, title="Test Entry")
+    hass = SimpleNamespace(config_entries=_ConfigEntriesStub(), data={DOMAIN: {}})
+
+    ownerless_device = SimpleNamespace(
+        identifiers=((DOMAIN, "device-999"),),
+        name_by_user=None,
+        name="Ownerless",
+    )
+
+    assert (
+        await async_remove_config_entry_device(hass, entry, ownerless_device) is False
+    )

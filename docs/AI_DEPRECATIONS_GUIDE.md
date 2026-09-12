@@ -1,8 +1,8 @@
-# AI Deprecations: Technical Analysis and Migration Guide (Core 2025.10/2025.11)
+# AI Deprecations: Technical Analysis and Migration Guide (Core 2025.10 through 2026.9)
 
 ## I. Introduction: Purpose and Scope
 
-This document serves as a technical guide for developers of Home Assistant integrations, especially custom components. It analyzes the recent and upcoming breaking changes and API deprecations introduced with Core versions 2025.10 and 2025.11 or whose deadlines are approaching. The goal is to provide an in-depth analysis that goes beyond the official release notes. It documents the changes, the Home Assistant Core team's motivations, potential migration pitfalls, and recommended best practices to ensure compatibility and robustness. The analysis is based on developer blogs, Core changelogs, and a review of specific code changes and issue tickets.
+This document serves as a technical guide for developers of Home Assistant integrations, especially custom components. It analyzes the recent and upcoming breaking changes and API deprecations introduced from Core 2025.10 through 2026.9, or whose deadlines are approaching. The goal is to provide an in-depth analysis that goes beyond the official release notes. It documents the changes, the Home Assistant Core team's motivations, potential migration pitfalls, and recommended best practices to ensure compatibility and robustness. The analysis is based on developer blogs, Core changelogs, and a review of specific code changes and issue tickets.
 
 Use this guide alongside the official release notes and Home Assistant developer documentation. Each section explains the technical background, shows legacy vs. migrated code, and closes with an explicit checklist hook so you can track the necessary work in Section V.
 
@@ -26,6 +26,7 @@ Use this guide alongside the official release notes and Home Assistant developer
 | Active now | Temperature conversion | Use `TemperatureDeltaConverter` for deltas | [III.2](#2-temperature-conversion-temperatureconverterconvert_interval) |
 | Released in 2025.10 | Entity services | Register platform services via `async_register_platform_entity_service` in `async_setup` | [IV.3](#3-registration-of-platform-entity-services-new-api-pattern) |
 | Released in 2025.11 | API translations | `get_services` no longer returns action translations; fetch via `frontend/get_translations` | [IV.5](#5-api-endpoints-removal-of-service-translations-websocketrest) |
+| Behavior change in 2026.8, warnings from 2026.9, deadline 2027.8 | Device registry | A device belongs to one config entry and one subentry; `add_config_entry_id`/`remove_config_entry_id` change meaning, `async_get_device` is deprecated | [VI](#vi-device-registry-single-ownership-of-devices-core-20268) |
 
 ### Critical migration tables
 
@@ -421,12 +422,36 @@ This section summarizes the findings in a prioritized checklist.
 - [ ] `async_added_to_hass`: Review every implementation of `async_added_to_hass`. **Action:** Add `if not self.enabled: return` as the first line unless the logic must also run for disabled entities (see Section IV.2).
 - [ ] `CoverEntity` (constants): Search all cover-related files for `STATE_OPEN`, `STATE_CLOSED`, `"open"`, `"closed"`. **Action:** Replace all state checks with the `CoverState` enum (for example, `self.state == CoverState.OPEN`) (see Section II.1).
 - [ ] `CoverEntity` (implementation): Check whether your `CoverEntity` classes override the `state` property. **Action:** Refactor the code to implement `is_closed`, `is_opening`, and `is_closing` instead. Remove manual overrides of `state` (see Section II.1).
+- [x] Device registry deletion risk: Search for `remove_config_entry_id`. **Action:** For every call, check whether an `add_config_entry_id` from the *same* integration is armed in the same or an earlier call. Without it, Core 2026.8 and newer **delete** the device instead of unlinking it. This is a behavioral change that ships without a warning on 2026.8 (see Section VI).
 
 ### Checklist (Medium Priority – Required for Future Releases)
 
 - [ ] OAuth2 error handling: If you use OAuth2, review your `async_setup_entry` function. **Action:** Implement the `try ... except ImplementationUnavailableError ... raise ConfigEntryNotReady` pattern (deadline: 2025.12) (see Section IV.4).
 - [ ] `async_update_statistics_metadata`: If you provide statistics, locate calls to `async_update_statistics_metadata`. **Action:** Ensure that the `new_unit_class` argument is always supplied explicitly (for example, `new_unit_class=None`) (see Section II.2).
 - [ ] `Config` alias: Search for imports of `Config` from `homeassistant.core`. **Action:** Change the import path to `from homeassistant.core_config import Config` (see Section II.3).
+- [x] Device registry ownership keywords: Search for `add_config_entry_id`, `add_config_subentry_id`, `remove_config_entry_id`, `remove_config_subentry_id`. **Action:** Express the intent instead. Move a device with `new_config_entry_id` and/or `new_config_subentry_id`, remove it with `async_remove_device` (deadline 2027.8, warnings from 2026.9; see Section VI).
+- [x] Ambiguous device lookups: Search for `async_get_device(` and for `device_registry.devices` used as a mapping. **Action:** Replace the lookup with `async_get_device_by_identifier`, `async_get_device_by_connection` or `async_get_devices`, and replace mapping access with `async_get` or `async_entries_for_config_entry` (deadlines 2027.8 and 2027.9; see Section VI).
+
+> **Status of the three device-registry items above, measured 2026-09-09 in this
+> repository.** All three are done here, which is why they are ticked; the
+> deadlines stay in their text because they describe Core, not this repository,
+> and a reader migrating another integration still needs them. What was measured:
+> the AST gate in `tests/test_guard_device_registry_kwargs.py` reports zero
+> findings over `custom_components/googlefindmy`, and zero undecidable
+> constructs on the day of measurement (that second number is a reading, not a
+> guarantee: the gate pins it at five or fewer, so a later rise to three would
+> stay green here while making this sentence stale);
+> `async_get_device(` occurs nowhere in production code; and the only remaining
+> `devices` access is the `getattr` inside `coordinator/helpers/registry.py`,
+> the compatibility layer that is allowed to speak both dialects.
+>
+> Two things deliberately remain open. First, `async_get_or_create` can still
+> move a device into a different subentry without any of the keywords above;
+> that path is observed rather than blocked, because a block there would fight
+> Home Assistant's own device creation. Second, the removal deadline `2027.8.0`
+> has not passed, so the compatibility layer that serves cores below 2026.8
+> stays. Ticking an item here means "this repository no longer produces the
+> pattern", not "Core has removed it".
 
 ### Checklist (Low Priority – Good Code Hygiene)
 
@@ -438,3 +463,276 @@ This section summarizes the findings in a prioritized checklist.
 ### Final Recommendation
 
 The analysis (especially Sections II.3 and IV.2) shows that developer blogs do not capture every change and that behavioral shifts can occur without advance notice. The only reliable way to ensure compatibility is to create a test workflow that runs your integration against the beta or development versions of Home Assistant Core while actively monitoring system logs for new deprecation warnings and errors.
+
+## VI. Device Registry: Single Ownership of Devices (Core 2026.8)
+
+This section is the long form for this repository. Every `AGENTS.md` that touches
+device-registry writes points here instead of repeating the reasoning.
+
+> **Read this before you "fix" a registry call.** If your training data predates
+> Core 2026.8, the rule you remember is the opposite of the rule that holds now.
+> The keyword names did not change, their meaning did.
+
+### Problem Analysis
+
+Until Core 2026.7 a device could be linked to several config entries and, per
+entry, to several config subentries. `DeviceEntry` exposed that as the
+`config_entries` set and the `config_entries_subentries` mapping, and
+`async_update_device` grew the four keywords `add_config_entry_id`,
+`add_config_subentry_id`, `remove_config_entry_id` and
+`remove_config_subentry_id` to edit those collections.
+
+Core 2026.8 replaced the model: a device now belongs to **exactly one** config
+entry and **exactly one** config subentry, held in the new scalar fields
+`DeviceEntry.config_entry_id` and `DeviceEntry.config_subentry_id`. The old
+`config_entries` and `config_entries_subentries` attributes survive as
+compatibility properties that always report a single pair; the core marks them
+for removal in 2027.8 (`homeassistant/helpers/device_registry.py` at tag
+`2026.8.0`, lines 507-508).
+
+Three consequences matter more than the deprecation warnings.
+
+1. **`add_config_entry_id` on its own no longer attaches anything.** It records a
+   transient *pending move* (`_PendingMove`, tag `2026.8.0`, lines 84-90),
+   annotated with the domain of the calling integration. If the device already
+   belongs to the entry, not even that happens: the `already_owner` short-circuit
+   at lines 2196-2201 skips arming the move entirely.
+2. **`remove_config_entry_id` on the owning entry deletes the device** unless a
+   pending move from the *same* integration is armed. The branch is explicit:
+   `self.async_remove_device(device_id); return None` (tag `2026.8.0`, line 2231).
+   A removal issued by a different integration cancels the move rather than
+   silently transferring the device (lines 2216-2228).
+3. **Neither of these is announced on 2026.8.** The runtime `report_usage` calls
+   only arrive in Core 2026.9: for the four keywords at tag `2026.9.0`, line 3741
+   (`breaks_in_ha_version="2027.8.0"`), for `async_get_device` at line 1967
+   (`2027.8.0`), for `device_registry.devices` used as a mapping at line 1560
+   (`2027.9.0`), and for a silent subentry move through `async_get_or_create` at
+   line 2479 (`2027.8.0`). On 2026.8 the behavior is already new and the log is
+   still quiet. **Do not use "no warning in the log" as evidence that a call is
+   still correct.**
+
+The replacement API arrives in the same release that changes the model, and only
+there: `new_config_entry_id` and `new_config_subentry_id` on
+`async_update_device` (tag `2026.8.0`, lines 2063-2064),
+`async_get_device_by_identifier` (line 1558),
+`async_get_device_by_connection` (line 1571) and `async_get_devices` (line 1584).
+Every release up to and including `2026.7.0` has none of them; measured by grepping
+`homeassistant/helpers/device_registry.py` at the tags `2025.9.1`, `2025.10.0`,
+`2025.11.0`, `2026.1.0`, `2026.3.0`, `2026.5.0` and `2026.7.0` for all four names,
+zero hits in each.
+
+### Version clamp for this repository
+
+`hacs.json` and `pyproject.toml` declare **`2025.9.1`** as the minimum supported
+core, so the replacement API cannot be assumed present. Note also what `2025.9.1`
+already contains: `async_update_device` there accepts `add_config_subentry_id`
+(tag `2025.9.1`, line 1014) and no longer accepts `config_subentry_id` at all
+(signature at line 1009). Any comment claiming that the rename happened in
+`2025.11` is wrong; the rename predates our own minimum.
+
+Raising the minimum only helps at `2026.8.0`, the single release that introduces
+all four replacement APIs. Until then the switch has to be a **runtime signature
+probe**, not a version string comparison. Do not delete the **legacy ownership
+branch** (the one that emits the `add_*`/`remove_*` quadruple instead of
+`new_config_subentry_id`) as "dead code": it is the only branch that runs on the
+declared minimum.
+
+Do not confuse it with a second, unrelated legacy branch in the same file. The
+*subentry keyword naming* switch in
+`RegistryOperations._device_registry_config_subentry_kwarg_name` picks between
+`config_subentry_id` and `add_config_subentry_id`. That rename predates our
+declared minimum, so **its** legacy side serves no supported core at all, only
+registry doubles in tests. One switch is live on the minimum, the other is not;
+"the legacy branch" is therefore never a sufficient description.
+
+### Faulty Code (what a pre-2026.8 model produces)
+
+```python
+# WRONG from Core 2026.8 on.
+# On 2026.8+ this is a no-op when the device already sits in that entry and
+# subentry, and it only *arms* a pending move when it does not; nothing is applied
+# by this call either way. Silent: no warning before Core 2026.9.
+dev_reg.async_update_device(
+    device_id=device.id,
+    add_config_entry_id=entry.entry_id,
+    add_config_subentry_id=tracker_subentry_id,
+)
+
+# WRONG from Core 2026.8 on, and destructive in exactly one of two cases.
+# The removal branch only runs when the removed subentry IS the one the device sits
+# in. With remove_config_subentry_id=None that means: for a device sitting on the
+# entry with no subentry, this DELETES the device and all of its entities; for a
+# device sitting in a subentry, the condition does not match and the call does
+# nothing at all. Read the device's current ownership before writing this.
+dev_reg.async_update_device(
+    device_id=device.id,
+    remove_config_entry_id=entry.entry_id,
+    remove_config_subentry_id=None,
+)
+
+# WRONG from Core 2026.9 on (deprecated), and ambiguous from 2026.8 on:
+# identifiers are no longer unique across config entries.
+device = dev_reg.async_get_device({(DOMAIN, canonic_id)})
+```
+
+### Correct Migration Path (New Code)
+
+```python
+# Move a device into a subentry of an entry we own: one immediate operation.
+dev_reg.async_update_device(
+    device_id=device.id,
+    new_config_entry_id=entry.entry_id,
+    new_config_subentry_id=tracker_subentry_id,
+)
+
+# Move within the owning entry: the subentry keyword alone is enough.
+dev_reg.async_update_device(
+    device_id=device.id,
+    new_config_subentry_id=tracker_subentry_id,
+)
+
+# Give the device up. In the single-owner model there is no "unlink": giving up
+# ownership IS removal, so resolve the device's current ownership FIRST and only
+# remove when the link you mean to drop is the link it actually sits on. If the
+# current ownership is unknown, refuse instead of guessing.
+dev_reg.async_remove_device(device.id)
+
+# Unambiguous lookup, scoped to the entry that owns the device. This is what
+# Core offers; it exists only from 2026.8.0 on. In THIS integration do not call
+# it from a new call site -- go through the shared resolver below, which also
+# covers the declared minimum core and owns the identifier priority.
+device = dev_reg.async_get_device_by_identifier(
+    (DOMAIN, canonic_id), entry.entry_id
+)
+
+# The integration-level form. One translation point for lookups, the way
+# plan_device_ownership is the one translation point for ownership.
+from custom_components.googlefindmy.coordinator.helpers.registry import (
+    resolve_device_by_identifiers,
+)
+
+device = resolve_device_by_identifiers(
+    dev_reg,
+    ((DOMAIN, f"{entry.entry_id}:{canonic_id}"), (DOMAIN, canonic_id)),
+    entry_id=entry.entry_id,
+)
+
+# Walking devices. Almost always the question is "the devices of this entry",
+# and this helper answers it on every supported core without deprecation:
+for device in dr.async_entries_for_config_entry(dev_reg, entry.entry_id):
+    ...
+
+# Only where the question really is "every device in the registry" -- a
+# collision check across entries, a one-time normalisation pass -- use the
+# integration-level wrapper, then ask ownership per device:
+from custom_components.googlefindmy.coordinator.helpers.registry import (
+    device_belongs_to_entry,
+    iter_all_devices,
+)
+
+for device in iter_all_devices(dev_reg):
+    if not device_belongs_to_entry(device, entry.entry_id):
+        continue
+
+# WRONG on both counts: `.values()` is the deprecated mapping surface
+# (breaks_in_ha_version "2027.9.0"), and `list(dev_reg.devices)` -- the spelling
+# that silences it -- yields DeviceEntry objects on 2026.9 but device *ids* on
+# the declared minimum 2025.9.1. One expression, two meanings; that asymmetry is
+# what the wrapper exists for.
+for device in dev_reg.devices.values():
+    ...
+```
+
+Two constraints on the new keywords:
+
+* `new_config_entry_id` and `new_config_subentry_id` **must not** be combined with
+  the old keywords. The explicit guard covers `add_config_entry_id` and
+  `remove_config_entry_id` and raises `HomeAssistantError` (tag `2026.8.0`, the
+  `raise` at line 2136, message at 2137-2138). The two subentry keywords are caught
+  earlier and separately: `add_config_subentry_id` without `add_config_entry_id`
+  raises at line 2099, `remove_config_subentry_id` without `remove_config_entry_id`
+  at line 2117. So every mixed form fails, but not all of them at the same guard and
+  not with the same message.
+* Never drop or add just one half of an `add_*`/`remove_*` pair when adapting old
+  code. Dropping the `add_*` half of a working move turns it into a deletion, by
+  exactly the branch at line 2231.
+* A `DETACH` is not expressible as a keyword at all. Before removing, load the
+  device (`async_get(device_id)`, which is not deprecated) and compare its
+  `config_entry_id` and `config_subentry_id` against the link you want to drop.
+  They match: remove. They differ: do nothing, because the old code did nothing
+  either. The current ownership is unavailable: raise, do not remove. Deleting on a
+  guess costs the user a device and all of its entities.
+
+Because this repository supports cores without the new keywords, the choice is
+made once, behind a signature probe, and the call sites state an **intent**
+(`MOVE`, `ENSURE`, `DETACH`) rather than keywords. The single translation point in
+this integration is `plan_device_ownership` in
+`custom_components/googlefindmy/coordinator/helpers/registry.py`. Translation is
+the part that must not be duplicated; execution is not, because not every call
+site has a coordinator. The coordinator executes through
+`RegistryOperations._apply_device_ownership` in
+`custom_components/googlefindmy/coordinator/registry.py`, which adds the
+unmigrated-keyword brake and the `config_subentry_id` compatibility shim its own
+call sites need. Everywhere else -- `services.py`, `config_flow.py` and the
+integration's `__init__.py` -- the executor is `execute_ownership_plan` in the
+helpers module. Both take their
+keywords from the same planner and neither names an ownership keyword itself. A
+static guard,
+`tests/test_guard_device_registry_kwargs.py`, fails the build if the superseded
+keywords reappear outside the legacy translator.
+
+### Store migration: what happens to existing installations
+
+The 2026.8 store migration rewrites devices that the old model allowed and the new
+one forbids.
+
+* A device linked to **several config entries** is **split** into one device per
+  entry. Each split gets a fresh `id`, and `composite_device_id` on the split
+  points at the pre-migration device id (tag `2026.8.0`, lines 878-885), so stored
+  references such as automations or fired events keep resolving.
+* A device linked to **several subentries within one entry** is **collapsed** onto
+  a single subentry.
+
+Two practical effects follow. A stored device id may now name a *composite* rather
+than a registered device, and `async_update_device` refuses identity-rewriting or
+moving arguments for such a composite and reports the caller (tag `2026.8.0`,
+line 2789). And a lookup that used to return "the" device may legitimately return
+a different split than before, which is why the entry-scoped lookups exist.
+
+### One forward note about Core 2026.9
+
+Core 2026.9 adds a main/child device distinction. There,
+`async_get_device_by_identifier` searches **main devices only**, and a child
+device is found through `async_get_child_device_by_identifier` (tag `2026.9.0`,
+lines 1999-2021). A child device is created exclusively through
+`async_get_or_create_child(..., parent_device_id=...)`; this integration calls
+neither that method nor sets `parent_device_id` anywhere, so every device it
+owns is a main device and the lookups above are complete. Note that `via_device`
+is **not** the same relation: it records a network topology hint on a main
+device and does not turn it into a child. If the integration ever registers real
+child devices, the distinction has to be revisited at every lookup call site.
+
+### About the `AP-nn` markers in tests and comments
+
+Several tests, ratchets and allowlists in this repository carry markers of the
+form `AP-nn` in their reasons and expiry fields. They name the work packages of
+the migration that this section describes, in the order the migration executes
+them: contracts first (`AP-01` to `AP-04`), then the test infrastructure that
+makes the deprecations observable (`AP-05` to `AP-09`), then the capability
+switch and the intent planner (`AP-10`, `AP-11`), then the call sites one file
+at a time (`AP-12` to `AP-17`), and finally the removal of the transitional
+scaffolding (`AP-18` onwards). A `resolved_by="AP-nn"` field therefore reads as
+"this entry must disappear once that file has been migrated"; the accompanying
+dead-entry test enforces the other direction, so no marker can outlive its
+subject silently. One field value is not a work package: `resolved_by="KEPT"`
+marks an entry that is deliberately permanent, because the *operation* stays as
+evidence that Core still reports the call, whether the production site is gone
+or merely inert. Rolling such an entry's marker forward at every work package
+would state an expiry that is never meant to arrive; `KEPT` says so instead.
+The plan document itself is not part of this repository, which is why every
+marker is accompanied by a reason in plain words: the reason is the evidence,
+the marker is only an ordering hint.
+
+**Checklist tie-in:** Section V — High priority (deletion risk via
+`remove_config_entry_id`) and Medium priority (ownership keywords, ambiguous
+lookups).

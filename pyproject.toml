@@ -293,7 +293,13 @@ line-ending = "auto"
 exclude = ["*.md"]
 
 [tool.pytest.ini_options]
-addopts = ["-q", "--cov", "--cov-report=term"]
+# No -q here on purpose: -q counts up. Every documented invocation already
+# supplies its own (`pytest -q` in AGENTS.md and README.md, the Makefile
+# targets, both CI jobs, script/local_verify.py), and a second one makes
+# pytest drop its summary line, so a red run would show FAILED lines but
+# never say how many tests failed. Measured on 2026-09-12: with one -q the
+# summary line is printed, with two it is not.
+addopts = ["--cov", "--cov-report=term"]
 testpaths = ["tests"]
 asyncio_mode = "auto"
 filterwarnings = [
@@ -514,7 +520,7 @@ max-statements = 100
 
 [tool.codespell]
 skip = ".git,*.lock,*.svg,*.png,*.jpg,*.ico,ProtoDecoders,firebase_messaging,*.pyi,translations,*.proto,*_pb2.py,package-lock.json,custom_components/googlefindmy/vendor"
-ignore-words-list = "hass,nd,ot,aas,bund,trough,te,ded,checkin,alpha-numeric,re-declaring,pre-emptive,titel"
+ignore-words-list = "hass,nd,ot,aas,bund,trough,te,ded,checkin,alpha-numeric,re-declaring,pre-empt,pre-empted,pre-empting,pre-emptive,pre-emptively,pre-empts,titel"
 check-filenames = true
 
 [tool.bandit]

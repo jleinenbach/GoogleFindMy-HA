@@ -1,15 +1,49 @@
 # tests/test_coordinator_helpers_registry.py
 """Branch-Coverage tests for ``coordinator.helpers.registry``.
 
-The 16 public helpers in
-:mod:`custom_components.googlefindmy.coordinator.helpers.registry` are pure
-functions: no Home-Assistant runtime, no I/O, no module-level globals beyond
-re-exported constants.  These tests exercise every documented branch via the
+The 19 public helper functions in
+:mod:`custom_components.googlefindmy.coordinator.helpers.registry` hold no
+state: no I/O, no module-level globals beyond re-exported constants.  Eighteen
+of them are pure; ``resolve_device_by_identifiers`` is the exception and takes a
+live device registry, because the lookup it replaces is the one thing that must
+not be rebuilt per call site.  These tests exercise every documented branch via
+the
 Aniche-style Specification -> Boundary -> Structural progression
 (PLAN_GFM_TEST_EXPANSION_SPRINT.md AP-1.1a).
 
-Branch budget (notes-sidecar ``helpers/registry.py``): ~70 branches across the
-16 functions listed in :data:`__all__`.  Each test docstring names the function
+Scope note (Core 2026.8 device registry change): these tests pin the behaviour
+of *this translator*, not the Core API. Its renaming branch
+(``add_config_entry_id`` -> ``config_entry_id``) serves registry doubles rather
+than any supported core: tag 2025.9.1, the declared minimum, already ships the
+``add_*`` spelling. Its ownership branch, which emits the ``add_*``/``remove_*``
+quadruple, is live on that minimum and is what keeps it alive.
+
+Since Core 2026.8 a device belongs to exactly one config entry and subentry;
+the four ownership kwargs are deprecated there and stop working in 2027.8.
+Nothing here should be read as "this is how to talk to a current core" -- new
+production code expresses an intent instead, see AGENTS.md, section "Device
+registry ownership".
+
+Coverage scope (notes-sidecar ``helpers/registry.py``): the **24 functions**
+listed in :data:`__all__` (the four dataclasses/enums and the six data names
+there are data, not branches, and are covered through the functions that read
+them).  The count is measured, not remembered::
+
+    python3 -c "import ast,pathlib; t=ast.parse(pathlib.Path(
+    'custom_components/googlefindmy/coordinator/helpers/registry.py'
+    ).read_text()); a=[ast.literal_eval(n.value) for n in ast.walk(t)
+    if isinstance(n,(ast.Assign,ast.AnnAssign)) and getattr(
+    getattr(n,'target',None) or n.targets[0],'id','')=='__all__'][0];
+    f={n.name for n in t.body if isinstance(n,ast.FunctionDef)};
+    print(len([x for x in a if x in f]))"
+
+This used to read "~75 branches across the 19 functions". The function count was
+stale (23 before this work package, 24 with ``iter_all_devices``), and the branch
+figure was never re-derived after any of them, so the heading now names the scope
+it can state and the command that measures it. A branch budget would need the
+same treatment: a number nobody re-measures is not a budget. Note that the
+command counts ``ast.FunctionDef`` only; an ``async def`` added to
+:data:`__all__` would be undercounted.  Each test docstring names the function
 and the branch the case exercises so a failing test points at the spec line,
 not the implementation.
 
@@ -20,11 +54,15 @@ attributed to the integration package, not to a re-export shim.
 
 from __future__ import annotations
 
+import inspect
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
+from custom_components.googlefindmy.coordinator.helpers import (
+    registry as registry_helpers,
+)
 from custom_components.googlefindmy.coordinator.helpers.registry import (
     LEGACY_SERVICE_IDENTIFIER,
     SERVICE_DEVICE_IDENTIFIER_PREFIX,
@@ -1028,3 +1066,1190 @@ class TestReexportedConstants:
         """Both re-exports must remain ``str`` to keep helpers' contracts."""
         assert isinstance(LEGACY_SERVICE_IDENTIFIER, str)
         assert isinstance(SERVICE_DEVICE_IDENTIFIER_PREFIX, str)
+
+
+# ---------------------------------------------------------------------------
+# Core 2026.8 single-owner migration (AP-09).
+#
+# These classes describe helpers that AP-10 introduces.  Until then the symbols
+# do not exist, so the classes skip: every commit has to be green on its own,
+# which rules out landing a red test and fixing it two commits later.  A plain
+# ``pytest.importorskip`` is not enough here -- the module already exists, only
+# the names inside it are missing -- so the guard checks the attributes.
+# ---------------------------------------------------------------------------
+
+_NEW_SYMBOLS = (
+    "DeviceRegistryCapabilities",
+    "detect_device_registry_capabilities",
+    "OwnershipIntent",
+    "DeviceOwnership",
+    "plan_device_ownership",
+)
+
+_missing_symbols = [
+    name for name in _NEW_SYMBOLS if not hasattr(registry_helpers, name)
+]
+_needs_ap10 = pytest.mark.skipif(
+    bool(_missing_symbols),
+    reason=f"AP-10 has not landed yet; missing: {', '.join(_missing_symbols)}",
+)
+
+
+def _profile(**parameters: object) -> object:
+    """Build a callable whose signature carries exactly ``parameters``.
+
+    The detector reads ``inspect.signature``, which honours ``__signature__``,
+    so the keyword-only parameters are declared on a plain function instead of
+    being compiled from source.
+    """
+
+    def _call(device_id: object, **kwargs: object) -> None:
+        return None
+
+    _call.__signature__ = inspect.Signature(
+        [
+            inspect.Parameter("device_id", inspect.Parameter.POSITIONAL_OR_KEYWORD),
+            *(
+                inspect.Parameter(name, inspect.Parameter.KEYWORD_ONLY, default=None)
+                for name in parameters
+            ),
+        ]
+    )
+    return _call
+
+
+@_needs_ap10
+class TestDetectDeviceRegistryCapabilities:
+    """The capability profile is read from the signature, never from a version.
+
+    Version strings lie: a fork, a backport or a patched core can carry any
+    number.  The signature is the thing the call actually has to satisfy.
+    """
+
+    def test_core_2025_9_profile(self) -> None:
+        """The declared minimum: add_* present, new_* absent."""
+        caps = registry_helpers.detect_device_registry_capabilities(
+            _profile(
+                add_config_entry_id=None,
+                add_config_subentry_id=None,
+                remove_config_entry_id=None,
+                remove_config_subentry_id=None,
+            )
+        )
+        assert caps.single_owner_model is False
+        assert caps.subentry_kwarg_for_update == "add_config_subentry_id"
+
+    def test_core_2025_11_profile(self) -> None:
+        """Same shape as 2025.9 for our purposes; kept as a separate pin.
+
+        The repository long believed the rename happened in 2025.11.  It did
+        not -- 2025.9.1 already ships ``add_config_subentry_id``.  This case
+        exists so that belief cannot quietly return: both profiles must yield
+        the same answer.
+        """
+        caps = registry_helpers.detect_device_registry_capabilities(
+            _profile(add_config_entry_id=None, add_config_subentry_id=None)
+        )
+        assert caps.single_owner_model is False
+        assert caps.subentry_kwarg_for_update == "add_config_subentry_id"
+
+    def test_core_2026_8_profile(self) -> None:
+        """From 2026.8 the new_* keywords exist and the model is single-owner."""
+        caps = registry_helpers.detect_device_registry_capabilities(
+            _profile(
+                new_config_entry_id=None,
+                new_config_subentry_id=None,
+                add_config_entry_id=None,
+                add_config_subentry_id=None,
+                remove_config_entry_id=None,
+                remove_config_subentry_id=None,
+            )
+        )
+        assert caps.single_owner_model is True
+        assert caps.subentry_kwarg_for_update == "new_config_subentry_id"
+
+    def test_var_keyword_fallback(self) -> None:
+        """A ``**kwargs`` signature accepts anything, so assume the legacy name.
+
+        Test doubles are the realistic case here.  Guessing "single owner"
+        instead would send ``new_config_subentry_id`` at a double that silently
+        swallows it, and the test would pass while production broke.
+        """
+
+        def _call(device_id: object, **kwargs: object) -> None:
+            return None
+
+        caps = registry_helpers.detect_device_registry_capabilities(_call)
+        assert caps.accepts_var_keyword is True
+        assert caps.single_owner_model is False
+        assert caps.subentry_kwarg_for_update == "config_subentry_id"
+        assert caps.subentry_kwarg_for_shim == "config_subentry_id"
+
+    def test_a_half_new_signature_is_not_single_owner(self) -> None:
+        """Both new keywords or neither: a partial double is not a core.
+
+        The two switches must agree.  If ``subentry_kwarg_for_update`` answered
+        ``new_config_subentry_id`` here while ``single_owner_model`` said False,
+        the legacy ENSURE branch would emit ``add_config_entry_id`` next to
+        ``new_config_subentry_id`` -- the combination Core 2026.8+ rejects.
+        """
+        caps = registry_helpers.detect_device_registry_capabilities(
+            _profile(
+                new_config_subentry_id=None,
+                add_config_entry_id=None,
+                add_config_subentry_id=None,
+            )
+        )
+        assert caps.single_owner_model is False
+        assert caps.subentry_kwarg_for_update == "add_config_subentry_id"
+
+    def test_a_signature_without_any_subentry_keyword_yields_none(self) -> None:
+        """No spelling at all means no keyword, not a guessed one."""
+        caps = registry_helpers.detect_device_registry_capabilities(
+            _profile(add_config_entry_id=None, remove_config_entry_id=None)
+        )
+        assert caps.subentry_kwarg_for_update is None
+
+    def test_unreadable_signature_degrades_to_empty_profile(self) -> None:
+        """A callable without an introspectable signature must not crash."""
+        caps = registry_helpers.detect_device_registry_capabilities(object())
+        assert caps.single_owner_model is False
+
+
+@_needs_ap10
+class TestPlanDeviceOwnership:
+    """Intent x capability profile, with the deletion risk pinned explicitly."""
+
+    @staticmethod
+    def _modern() -> object:
+        return registry_helpers.detect_device_registry_capabilities(
+            _profile(
+                new_config_entry_id=None,
+                new_config_subentry_id=None,
+                add_config_entry_id=None,
+                add_config_subentry_id=None,
+                remove_config_entry_id=None,
+                remove_config_subentry_id=None,
+            )
+        )
+
+    @staticmethod
+    def _legacy() -> object:
+        return registry_helpers.detect_device_registry_capabilities(
+            _profile(
+                add_config_entry_id=None,
+                add_config_subentry_id=None,
+                remove_config_entry_id=None,
+                remove_config_subentry_id=None,
+            )
+        )
+
+    def test_ensure_on_correct_owner_is_an_empty_plan(self) -> None:
+        """Already owned means no operation at all, not a harmless no-op call.
+
+        An empty tuple is observably different from an update that changes
+        nothing: it produces no deprecation report and no registry event.
+        """
+        plan = registry_helpers.plan_device_ownership(
+            registry_helpers.OwnershipIntent.ENSURE,
+            caps=self._modern(),
+            device_id="dev-1",
+            entry_id="entry-1",
+            target_subentry_id="sub-1",
+            current=registry_helpers.DeviceOwnership("entry-1", "sub-1"),
+        )
+        assert plan == ()
+
+    def test_ensure_on_correct_owner_still_writes_extra_metadata(self) -> None:
+        """Right ownership silences the ownership keywords, not the metadata.
+
+        The call sites bundle metadata with the ownership intent: name,
+        identifiers, manufacturer, ``via_device_id=None``. An empty plan would
+        drop all of it whenever the device happened to sit correctly, and the
+        caller cannot distinguish that from "nothing to do".
+        """
+        (operation,) = registry_helpers.plan_device_ownership(
+            registry_helpers.OwnershipIntent.ENSURE,
+            caps=self._modern(),
+            device_id="dev-1",
+            entry_id="entry-1",
+            target_subentry_id="sub-1",
+            current=registry_helpers.DeviceOwnership("entry-1", "sub-1"),
+            extra={"name": "Tracker", "via_device_id": None},
+        )
+        assert operation.method == "async_update_device"
+        assert operation.kwargs == {
+            "device_id": "dev-1",
+            "name": "Tracker",
+            "via_device_id": None,
+        }
+
+    def test_ensure_on_modern_core_uses_new_keywords(self) -> None:
+        """A device owned elsewhere is moved with the new keywords."""
+        (operation,) = registry_helpers.plan_device_ownership(
+            registry_helpers.OwnershipIntent.ENSURE,
+            caps=self._modern(),
+            device_id="dev-1",
+            entry_id="entry-1",
+            target_subentry_id="sub-1",
+            current=registry_helpers.DeviceOwnership("entry-other", None),
+        )
+        assert operation.method == "async_update_device"
+        assert operation.kwargs["new_config_entry_id"] == "entry-1"
+        assert operation.kwargs["new_config_subentry_id"] == "sub-1"
+
+    def test_ensure_on_legacy_core_uses_add_keywords(self) -> None:
+        """Below 2026.8 the same intent still speaks the add_* dialect."""
+        (operation,) = registry_helpers.plan_device_ownership(
+            registry_helpers.OwnershipIntent.ENSURE,
+            caps=self._legacy(),
+            device_id="dev-1",
+            entry_id="entry-1",
+            target_subentry_id="sub-1",
+        )
+        assert operation.kwargs["add_config_entry_id"] == "entry-1"
+        assert operation.kwargs["add_config_subentry_id"] == "sub-1"
+
+    def test_ensure_without_target_on_a_known_foreign_owner_takes_the_root(
+        self,
+    ) -> None:
+        """With a known current owner the entry root is a decision, not a guess.
+
+        Core resets the subentry alongside the new entry, so this is what
+        "we own it, no subentry named" means on a single-owner core.  It is only
+        allowed because ``current`` is known; without it the planner refuses.
+        """
+        (operation,) = registry_helpers.plan_device_ownership(
+            registry_helpers.OwnershipIntent.ENSURE,
+            caps=self._modern(),
+            device_id="dev-1",
+            entry_id="entry-1",
+            current=registry_helpers.DeviceOwnership("entry-other", "sub-x"),
+        )
+        assert operation.kwargs["new_config_entry_id"] == "entry-1"
+        assert "new_config_subentry_id" not in operation.kwargs
+
+    def test_ensure_without_target_on_a_legacy_core_only_adds_the_entry(
+        self,
+    ) -> None:
+        """Below 2026.8 an add without a subentry is a plain hub link."""
+        (operation,) = registry_helpers.plan_device_ownership(
+            registry_helpers.OwnershipIntent.ENSURE,
+            caps=self._legacy(),
+            device_id="dev-1",
+            entry_id="entry-1",
+        )
+        assert operation.kwargs["add_config_entry_id"] == "entry-1"
+        assert "add_config_subentry_id" not in operation.kwargs
+
+    def test_legacy_move_on_a_registry_without_subentries_omits_the_keyword(
+        self,
+    ) -> None:
+        """A core that knows no subentry keyword gets none invented for it."""
+        caps = registry_helpers.detect_device_registry_capabilities(
+            _profile(add_config_entry_id=None, remove_config_entry_id=None)
+        )
+        (operation,) = registry_helpers.plan_device_ownership(
+            registry_helpers.OwnershipIntent.MOVE,
+            caps=caps,
+            device_id="dev-1",
+            entry_id="entry-1",
+            target_subentry_id="sub-2",
+            detach_subentry_id="sub-1",
+        )
+        assert set(operation.kwargs) == {
+            "device_id",
+            "remove_config_entry_id",
+            "remove_config_subentry_id",
+            "add_config_entry_id",
+        }
+        assert operation.kwargs["remove_config_subentry_id"] == "sub-1"
+
+    def test_detach_on_matching_link_removes_the_device(self) -> None:
+        """On a single-owner core, dropping the only link deletes the device.
+
+        This is not a design choice, it is what core does; the plan just makes
+        it visible at the call site instead of hiding it behind a kwarg.
+        """
+        (operation,) = registry_helpers.plan_device_ownership(
+            registry_helpers.OwnershipIntent.DETACH,
+            caps=self._modern(),
+            device_id="dev-1",
+            entry_id="entry-1",
+            detach_subentry_id=None,
+            current=registry_helpers.DeviceOwnership("entry-1", None),
+        )
+        assert operation.method == "async_remove_device"
+        assert operation.kwargs == {"device_id": "dev-1"}
+
+    def test_detach_on_mismatched_subentry_is_empty(self) -> None:
+        """The device sits in a subentry, the caller drops the hub link: no-op.
+
+        Measured against core in
+        ``tests/test_device_registry_single_owner_contract.py``: core does
+        nothing here.  Turning it into a deletion would destroy a device and all
+        its entities -- the single most expensive mistake this migration can
+        make, and the reason DETACH compares both levels.
+        """
+        plan = registry_helpers.plan_device_ownership(
+            registry_helpers.OwnershipIntent.DETACH,
+            caps=self._modern(),
+            device_id="dev-1",
+            entry_id="entry-1",
+            detach_subentry_id=None,
+            current=registry_helpers.DeviceOwnership("entry-1", "sub-1"),
+        )
+        assert plan == ()
+
+    def test_detach_without_known_state_refuses(self) -> None:
+        """Unknown ownership must raise, never fall back to deleting."""
+        with pytest.raises(ValueError, match="current ownership"):
+            registry_helpers.plan_device_ownership(
+                registry_helpers.OwnershipIntent.DETACH,
+                caps=self._modern(),
+                device_id="dev-1",
+                entry_id="entry-1",
+                current=None,
+            )
+
+    def test_detach_on_legacy_core_uses_remove_keywords(self) -> None:
+        """Below 2026.8 detaching stays a kwargs update and deletes nothing."""
+        (operation,) = registry_helpers.plan_device_ownership(
+            registry_helpers.OwnershipIntent.DETACH,
+            caps=self._legacy(),
+            device_id="dev-1",
+            entry_id="entry-1",
+            detach_subentry_id="sub-1",
+        )
+        assert operation.method == "async_update_device"
+        assert operation.kwargs["remove_config_entry_id"] == "entry-1"
+        assert operation.kwargs["remove_config_subentry_id"] == "sub-1"
+
+    def test_move_on_modern_core_sends_both_new_keywords(self) -> None:
+        """Both keywords together: the subentry is resolved against the target.
+
+        Sending ``new_config_subentry_id`` alone makes core resolve it against
+        the *old* owning entry and raise when the device still belongs there.
+        """
+        (operation,) = registry_helpers.plan_device_ownership(
+            registry_helpers.OwnershipIntent.MOVE,
+            caps=self._modern(),
+            device_id="dev-1",
+            entry_id="entry-1",
+            target_subentry_id="sub-2",
+        )
+        assert operation.kwargs["new_config_entry_id"] == "entry-1"
+        assert operation.kwargs["new_config_subentry_id"] == "sub-2"
+
+    def test_move_on_legacy_core_drops_the_named_link_only(self) -> None:
+        """The legacy move removes the link it was told to, not the current one.
+
+        ``_heal_tracker_device_subentry`` drops one specific surplus link per
+        iteration; a plan that always removed ``current.subentry_id`` would make
+        that healing loop spin without effect on the declared minimum.
+        """
+        (operation,) = registry_helpers.plan_device_ownership(
+            registry_helpers.OwnershipIntent.MOVE,
+            caps=self._legacy(),
+            device_id="dev-1",
+            entry_id="entry-1",
+            target_subentry_id="sub-2",
+            detach_subentry_id="sub-surplus",
+            current=registry_helpers.DeviceOwnership(None, "sub-1"),
+        )
+        assert operation.kwargs["remove_config_subentry_id"] == "sub-surplus"
+        assert operation.kwargs["add_config_entry_id"] == "entry-1"
+        assert operation.kwargs["add_config_subentry_id"] == "sub-2"
+
+
+# ---------------------------------------------------------------------------
+# resolve_device_by_identifiers -- the single device lookup point (AP-14)
+# ---------------------------------------------------------------------------
+
+
+class _LegacyOnlyRegistry:
+    """A pre-2026.8 registry: identifier sets, no entry scoping.
+
+    Mirrors the shape the integration met up to Core 2026.7 and still meets on
+    the declared minimum ``2025.9.1``: one ``async_get_device`` taking a set,
+    with no notion of an owning entry.
+    """
+
+    def __init__(self, devices: dict[tuple[str, str], Any]) -> None:
+        self._devices = devices
+        self.calls: list[set[tuple[str, str]]] = []
+
+    def async_get_device(self, identifiers: set[tuple[str, str]]) -> Any | None:
+        self.calls.append(set(identifiers))
+        # Sorted, not set order: the real ``get_entry`` (tag ``2025.9.1``, lines
+        # 684-686) returns the first identifier that matches in *set* iteration
+        # order, which for the identifiers used below depends on the hash seed.
+        # Sorting puts the unscoped ``dev-1`` before ``entry-1:dev-1`` every
+        # time, so a lookup that hands over both identifiers at once meets the
+        # adverse order deterministically instead of on one run in two.
+        for identifier in sorted(identifiers):
+            if (device := self._devices.get(identifier)) is not None:
+                return device
+        return None
+
+
+class _BothApisRegistry(_LegacyOnlyRegistry):
+    """Carries both lookup APIs at once, which no real core does.
+
+    Deliberately unrealistic, and the only shape that can observe the "no
+    fallback after a modern miss" rule: against a registry that has the modern
+    API alone, dropping the guard is invisible because the legacy branch finds
+    no callable to call.
+    """
+
+    def __init__(
+        self, devices: dict[tuple[str, str], Any], *, owner: str = "entry-1"
+    ) -> None:
+        super().__init__(devices)
+        self._owner = owner
+        self.scoped_calls: list[tuple[tuple[str, str], str]] = []
+
+    def async_get_device_by_identifier(
+        self, identifier: tuple[str, str], config_entry_id: str
+    ) -> Any | None:
+        self.scoped_calls.append((identifier, config_entry_id))
+        if config_entry_id != self._owner:
+            return None
+        return self._devices.get(identifier)
+
+
+class TestDetachSubentryIdIsNotTheSameAsOmittingIt:
+    """``None`` names the hub link; leaving the argument out names nothing.
+
+    Both used to collapse into one value, and the collapse was not academic: on
+    a pre-2026.8 core a device holds a *set* of links, so it can sit in the
+    tracker subentry and on the entry root at the same time. That is precisely
+    when the hub link has to go, and precisely when reading the current subentry
+    instead of the named ``None`` cancels the removal out.
+    """
+
+    @staticmethod
+    def _legacy() -> Any:
+        return registry_helpers.detect_device_registry_capabilities(
+            _profile(
+                add_config_entry_id=None,
+                add_config_subentry_id=None,
+                remove_config_entry_id=None,
+                remove_config_subentry_id=None,
+            )
+        )
+
+    def test_explicit_none_removes_the_hub_link(self) -> None:
+        """The device already sits in the target and must still lose the root."""
+        (operation,) = registry_helpers.plan_device_ownership(
+            registry_helpers.OwnershipIntent.MOVE,
+            caps=self._legacy(),
+            device_id="dev-1",
+            entry_id="entry-1",
+            target_subentry_id="sub-1",
+            detach_subentry_id=None,
+            current=registry_helpers.DeviceOwnership("entry-1", "sub-1"),
+        )
+        assert operation.kwargs["remove_config_entry_id"] == "entry-1"
+        assert operation.kwargs["remove_config_subentry_id"] is None
+        assert operation.kwargs["add_config_subentry_id"] == "sub-1"
+
+    def test_omitting_it_reads_the_current_subentry(self) -> None:
+        """Without a named link the planner falls back to what it can see."""
+        (operation,) = registry_helpers.plan_device_ownership(
+            registry_helpers.OwnershipIntent.MOVE,
+            caps=self._legacy(),
+            device_id="dev-1",
+            entry_id="entry-1",
+            target_subentry_id="sub-2",
+            current=registry_helpers.DeviceOwnership("entry-1", "sub-1"),
+        )
+        assert operation.kwargs["remove_config_subentry_id"] == "sub-1"
+
+    def test_omitting_it_on_a_device_already_in_place_removes_nothing(self) -> None:
+        """The fallback must not cancel the move it is supposed to complete."""
+        (operation,) = registry_helpers.plan_device_ownership(
+            registry_helpers.OwnershipIntent.MOVE,
+            caps=self._legacy(),
+            device_id="dev-1",
+            entry_id="entry-1",
+            target_subentry_id="sub-1",
+            current=registry_helpers.DeviceOwnership("entry-1", "sub-1"),
+        )
+        assert "remove_config_entry_id" not in operation.kwargs
+
+    def test_named_hub_link_is_given_up_even_without_a_known_owner(self) -> None:
+        """The combination the declared minimum core really produces.
+
+        ``_remove_hub_link`` and ``_detach_service_hub_link`` name the link
+        (``None``) and hand over a device entry that, at tag ``2025.9.1``,
+        describes no ownership at all. ``current`` is therefore ``None`` while a
+        link *is* named, and the removal must still go out. Every other case in
+        this class either supplies ``current`` or names nothing, so a regression
+        that folded the two conditions into one would slip past them.
+        """
+        (operation,) = registry_helpers.plan_device_ownership(
+            registry_helpers.OwnershipIntent.MOVE,
+            caps=self._legacy(),
+            device_id="dev-1",
+            entry_id="entry-1",
+            target_subentry_id="sub-1",
+            detach_subentry_id=None,
+        )
+        assert operation.kwargs["remove_config_entry_id"] == "entry-1"
+        assert operation.kwargs["remove_config_subentry_id"] is None
+
+    def test_unknown_ownership_and_no_named_link_removes_nothing(self) -> None:
+        """The declared minimum core lands here, and it must not be guessed at.
+
+        At tag ``2025.9.1`` a device entry has no ``config_entry_id`` and no
+        ``config_subentry_id``, so ``current`` is ``None`` for every caller that
+        does not name a link. Falling back to ``None`` would give up the hub
+        link, which is a different link from the one the caller has in mind and,
+        when it is the only one, the device itself. Only the add half goes out,
+        which is what the call sites did before they spoke intents.
+        """
+        (operation,) = registry_helpers.plan_device_ownership(
+            registry_helpers.OwnershipIntent.MOVE,
+            caps=self._legacy(),
+            device_id="dev-1",
+            entry_id="entry-1",
+            target_subentry_id="sub-1",
+        )
+        assert "remove_config_entry_id" not in operation.kwargs
+        assert "remove_config_subentry_id" not in operation.kwargs
+        assert operation.kwargs["add_config_entry_id"] == "entry-1"
+        assert operation.kwargs["add_config_subentry_id"] == "sub-1"
+
+    def test_detach_still_treats_an_omitted_link_as_the_hub_link(self) -> None:
+        """DETACH names a link by definition; omitting it keeps the old meaning."""
+        (operation,) = registry_helpers.plan_device_ownership(
+            registry_helpers.OwnershipIntent.DETACH,
+            caps=self._legacy(),
+            device_id="dev-1",
+            entry_id="entry-1",
+        )
+        assert operation.kwargs["remove_config_subentry_id"] is None
+
+
+class TestDeviceBelongsToEntry:
+    """One question, two core generations, and an unknown state that says no."""
+
+    def test_modern_entry_matches(self) -> None:
+        """From 2026.8 the single owner is named in ``config_entry_id``."""
+        assert registry_helpers.device_belongs_to_entry(
+            SimpleNamespace(config_entry_id="entry-1"), "entry-1"
+        )
+
+    def test_modern_entry_mismatches(self) -> None:
+        """A device owned by someone else is not ours."""
+        assert not registry_helpers.device_belongs_to_entry(
+            SimpleNamespace(config_entry_id="entry-other"), "entry-1"
+        )
+
+    def test_legacy_set_matches(self) -> None:
+        """Below 2026.8 ownership is a set, and membership is the question."""
+        assert registry_helpers.device_belongs_to_entry(
+            SimpleNamespace(config_entry_id=None, config_entries={"entry-1", "x"}),
+            "entry-1",
+        )
+
+    def test_legacy_set_mismatches(self) -> None:
+        """A set that does not contain us answers no."""
+        assert not registry_helpers.device_belongs_to_entry(
+            SimpleNamespace(config_entry_id=None, config_entries={"x"}), "entry-1"
+        )
+
+    def test_unknown_state_is_not_ownership(self) -> None:
+        """A device entry that describes nothing is not evidence of ownership."""
+        assert not registry_helpers.device_belongs_to_entry(
+            SimpleNamespace(), "entry-1"
+        )
+
+    def test_a_string_is_not_a_set_of_owners(self) -> None:
+        """``config_entries`` holding a string must not match character-wise.
+
+        A string is iterable, so without the explicit exclusion the membership
+        test walks its characters. The entry id here is one character long,
+        which is what makes the difference observable at all: with a longer id
+        the character walk happens to find nothing and the bug hides.
+        """
+        assert not registry_helpers.device_belongs_to_entry(
+            SimpleNamespace(config_entry_id=None, config_entries="x"), "x"
+        )
+
+    @pytest.mark.parametrize("entry_id", [None, ""])
+    def test_no_entry_id_answers_no(self, entry_id: str | None) -> None:
+        """Without an entry to test for there is nothing to confirm."""
+        assert not registry_helpers.device_belongs_to_entry(
+            SimpleNamespace(config_entry_id="entry-1"), entry_id
+        )
+
+    def test_none_device_answers_no(self) -> None:
+        """A missing device owns nothing."""
+        assert not registry_helpers.device_belongs_to_entry(None, "entry-1")
+
+    def test_empty_modern_owner_falls_through_to_the_shim(self) -> None:
+        """An empty ``config_entry_id`` names nobody and must not shadow the shim.
+
+        The twin assertion to
+        ``TestDeviceOwningEntryIds::test_empty_modern_owner_falls_through_to_the_shim``.
+        The two accessors are documented as a pair, so they have to read the same
+        shape the same way.
+        """
+        assert registry_helpers.device_belongs_to_entry(
+            SimpleNamespace(config_entry_id="", config_entries={"entry-1"}), "entry-1"
+        )
+
+
+class TestDeviceOwningEntryIds:
+    """The set-returning counterpart, same two core generations."""
+
+    def test_modern_entry_is_the_single_owner(self) -> None:
+        """From 2026.8 there is exactly one owner, so the tuple holds one id."""
+        assert registry_helpers.device_owning_entry_ids(
+            SimpleNamespace(config_entry_id="entry-1")
+        ) == ("entry-1",)
+
+    def test_modern_entry_wins_over_the_shim(self) -> None:
+        """``config_entry_id`` is preferred even when the shim disagrees.
+
+        The shim can name several entries on a device split from a
+        pre-migration composite; the single owner is the answer we want.
+        """
+        assert registry_helpers.device_owning_entry_ids(
+            SimpleNamespace(
+                config_entry_id="entry-1", config_entries={"entry-1", "entry-2"}
+            )
+        ) == ("entry-1",)
+
+    def test_legacy_set_yields_every_owner(self) -> None:
+        """Below 2026.8 a device can belong to several entries at once."""
+        assert set(
+            registry_helpers.device_owning_entry_ids(
+                SimpleNamespace(config_entry_id=None, config_entries={"a", "b"})
+            )
+        ) == {"a", "b"}
+
+    def test_unknown_state_yields_nothing(self) -> None:
+        """A device entry that describes no ownership answers with an empty tuple."""
+        assert registry_helpers.device_owning_entry_ids(SimpleNamespace()) == ()
+
+    def test_none_device_yields_nothing(self) -> None:
+        """A missing device owns nothing."""
+        assert registry_helpers.device_owning_entry_ids(None) == ()
+
+    def test_a_string_is_not_a_set_of_owners(self) -> None:
+        """``config_entries`` holding a string must not be walked character-wise.
+
+        Without the explicit exclusion a two-character id would come back as two
+        one-character "entries", which every caller would then treat as owners.
+        """
+        assert (
+            registry_helpers.device_owning_entry_ids(
+                SimpleNamespace(config_entry_id=None, config_entries="ab")
+            )
+            == ()
+        )
+
+    def test_non_string_members_are_dropped(self) -> None:
+        """Only string ids are owners; anything else cannot name a config entry."""
+        assert registry_helpers.device_owning_entry_ids(
+            SimpleNamespace(config_entry_id=None, config_entries=["a", None, 7])
+        ) == ("a",)
+
+    def test_empty_modern_owner_falls_through_to_the_shim(self) -> None:
+        """An empty ``config_entry_id`` names nobody and must not shadow the shim."""
+        assert registry_helpers.device_owning_entry_ids(
+            SimpleNamespace(config_entry_id="", config_entries={"entry-1"})
+        ) == ("entry-1",)
+
+
+class TestReadDeviceOwnership:
+    """Unknown ownership and "owned by nobody" must stay distinguishable."""
+
+    def test_no_device_is_unknown(self) -> None:
+        """A caller that resolved nothing knows nothing."""
+        assert registry_helpers.read_device_ownership(None) is None
+
+    def test_an_entry_without_either_field_is_unknown(self) -> None:
+        """The declared minimum core's shape: neither field, so no answer.
+
+        Returning an empty ``DeviceOwnership`` here would read as "owned by
+        nobody" and let a DETACH proceed on a guess.
+        """
+        assert registry_helpers.read_device_ownership(SimpleNamespace(id="d")) is None
+
+    def test_a_modern_entry_answers_both_axes(self) -> None:
+        """Core 2026.8 carries both fields."""
+        ownership = registry_helpers.read_device_ownership(
+            SimpleNamespace(config_entry_id="entry-1", config_subentry_id="sub-1")
+        )
+        assert ownership == registry_helpers.DeviceOwnership("entry-1", "sub-1")
+
+    def test_a_modern_entry_on_the_hub_link_answers_none_for_the_subentry(
+        self,
+    ) -> None:
+        """Sitting directly on the entry is a known state, not an unknown one."""
+        ownership = registry_helpers.read_device_ownership(
+            SimpleNamespace(config_entry_id="entry-1", config_subentry_id=None)
+        )
+        assert ownership == registry_helpers.DeviceOwnership("entry-1", None)
+
+    def test_only_the_subentry_field_yields_an_owner_of_none(self) -> None:
+        """First half-known shape: no owner, so no entry matches it."""
+        assert registry_helpers.read_device_ownership(
+            SimpleNamespace(config_subentry_id="sub-1")
+        ) == registry_helpers.DeviceOwnership(None, "sub-1")
+
+    def test_only_the_entry_field_yields_the_hub_link(self) -> None:
+        """Second half-known shape, and it is not the mirror of the first.
+
+        The absent subentry reads as ``None``, which *is* the hub link, so a
+        DETACH planned from this state answers with the removal. That asymmetry
+        is the reason this function documents both shapes instead of calling
+        them equivalent.
+        """
+        assert registry_helpers.read_device_ownership(
+            SimpleNamespace(config_entry_id="entry-1")
+        ) == registry_helpers.DeviceOwnership("entry-1", None)
+
+
+class _RecordingUpdateRegistry:
+    """Modern registry double that records what it was asked to do."""
+
+    def __init__(self) -> None:
+        self.updates: list[dict[str, Any]] = []
+        self.removed: list[str] = []
+
+    def async_update_device(
+        self,
+        device_id: str,
+        *,
+        new_config_entry_id: Any = None,
+        new_config_subentry_id: Any = None,
+        name: Any = None,
+    ) -> str:
+        self.updates.append(
+            {
+                "device_id": device_id,
+                "new_config_entry_id": new_config_entry_id,
+                "new_config_subentry_id": new_config_subentry_id,
+                "name": name,
+            }
+        )
+        return f"updated-{device_id}"
+
+    def async_remove_device(self, device_id: str) -> None:
+        self.removed.append(device_id)
+
+
+class _LegacyRejectingRegistry:
+    """Pre-2026.8 registry that refuses ``remove_config_subentry_id``."""
+
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    def async_update_device(self, device_id: str, **changes: Any) -> str:
+        self.calls.append({"device_id": device_id, **changes})
+        if "remove_config_subentry_id" in changes:
+            raise TypeError("unexpected keyword argument 'remove_config_subentry_id'")
+        return f"updated-{device_id}"
+
+
+class TestExecuteOwnershipPlan:
+    """The executor for call sites without a coordinator.
+
+    These tests assert keywords, which ``tests/AGENTS.md`` otherwise forbids
+    ("assert the resulting ownership, never the keyword"). The rule is aimed at
+    tests of *call sites*, where a keyword assertion pins a superseded API and
+    keeps it alive. This function is not a call site: it chooses no keyword, it
+    forwards what the planner already chose, and it owns no device whose
+    resulting ownership could be asserted instead. What is under test here is the
+    forwarding and its failure modes, and the keywords are the only observable
+    it has. The ownership outcomes are asserted where they arise, against
+    ``SingleOwnerDeviceRegistry`` in :class:`TestPlanDeviceOwnership` and in the
+    service tests.
+    """
+
+    def test_update_operation_is_forwarded_verbatim(self) -> None:
+        """Every keyword the planner chose reaches the registry unchanged."""
+        registry = _RecordingUpdateRegistry()
+        plan = (
+            registry_helpers.DeviceRegistryOperation(
+                "async_update_device",
+                {
+                    "device_id": "dev-1",
+                    "new_config_entry_id": "entry-1",
+                    "new_config_subentry_id": "sub-1",
+                },
+            ),
+        )
+        assert (
+            registry_helpers.execute_ownership_plan(registry, plan) == "updated-dev-1"
+        )
+        assert registry.updates == [
+            {
+                "device_id": "dev-1",
+                "new_config_entry_id": "entry-1",
+                "new_config_subentry_id": "sub-1",
+                "name": None,
+            }
+        ]
+
+    def test_removal_operation_returns_none(self) -> None:
+        """After a removal there is no device left to return."""
+        registry = _RecordingUpdateRegistry()
+        plan = (
+            registry_helpers.DeviceRegistryOperation(
+                "async_remove_device", {"device_id": "dev-1"}
+            ),
+        )
+        assert registry_helpers.execute_ownership_plan(registry, plan) is None
+        assert registry.removed == ["dev-1"]
+
+    def test_empty_plan_touches_nothing(self) -> None:
+        """An empty plan is "nothing to do", not "do something harmless"."""
+        registry = _RecordingUpdateRegistry()
+        assert registry_helpers.execute_ownership_plan(registry, ()) is None
+        assert registry.updates == []
+        assert registry.removed == []
+
+    def test_legacy_signature_triggers_the_shared_retry(self) -> None:
+        """A core that rejects the new keyword gets the translated call.
+
+        This is the retry that used to be hand-written in ``services.py``. It
+        serves no core at or above the declared minimum ``2025.9.1``, which
+        already accepts ``remove_config_subentry_id``; the branch exists for
+        signatures that do not, such as this double.
+        """
+        registry = _LegacyRejectingRegistry()
+        plan = (
+            registry_helpers.DeviceRegistryOperation(
+                "async_update_device",
+                {
+                    "device_id": "dev-1",
+                    "remove_config_entry_id": "entry-1",
+                    "remove_config_subentry_id": None,
+                },
+            ),
+        )
+        assert (
+            registry_helpers.execute_ownership_plan(registry, plan) == "updated-dev-1"
+        )
+        assert registry.calls == [
+            {
+                "device_id": "dev-1",
+                "remove_config_entry_id": "entry-1",
+                "remove_config_subentry_id": None,
+            },
+            {"device_id": "dev-1", "remove_config_entry_id": "entry-1"},
+        ]
+
+    def test_an_unrelated_type_error_is_not_swallowed(self) -> None:
+        """Only the legacy-keyword TypeError is retried; the rest surfaces."""
+
+        class _Broken:
+            def async_update_device(self, device_id: str, **changes: Any) -> None:
+                raise TypeError("something else entirely")
+
+        plan = (
+            registry_helpers.DeviceRegistryOperation(
+                "async_update_device",
+                {"device_id": "dev-1", "new_config_entry_id": "entry-1"},
+            ),
+        )
+        with pytest.raises(TypeError, match="something else entirely"):
+            registry_helpers.execute_ownership_plan(_Broken(), plan)
+
+    def test_a_registry_without_the_update_call_raises(self) -> None:
+        """A silent skip would look exactly like a successful ownership change."""
+        plan = (
+            registry_helpers.DeviceRegistryOperation(
+                "async_update_device", {"device_id": "dev-1"}
+            ),
+        )
+        with pytest.raises(AttributeError, match="async_update_device"):
+            registry_helpers.execute_ownership_plan(SimpleNamespace(), plan)
+
+    def test_a_registry_without_the_removal_call_raises(self) -> None:
+        """Same reason, and here the unnoticed skip would leave a live device."""
+        plan = (
+            registry_helpers.DeviceRegistryOperation(
+                "async_remove_device", {"device_id": "dev-1"}
+            ),
+        )
+        with pytest.raises(AttributeError, match="async_remove_device"):
+            registry_helpers.execute_ownership_plan(SimpleNamespace(), plan)
+
+
+class _DriftedSignatureRegistry(_LegacyOnlyRegistry):
+    """Has the new name but refuses the new signature."""
+
+    def async_get_device_by_identifier(self, *args: Any, **kwargs: Any) -> Any:
+        raise TypeError("unexpected signature")
+
+
+class TestResolveDeviceByIdentifiers:
+    """All three core branches, the priority, and the cross-entry narrowing."""
+
+    _ENTRY_ID = "entry-1"
+    _SCOPED = (_DOMAIN, "entry-1:dev-1")
+    _UNSCOPED = (_DOMAIN, "dev-1")
+
+    def _modern(self, registry: Any, *, entry_id: str = _ENTRY_ID) -> Any | None:
+        return registry_helpers.resolve_device_by_identifiers(
+            registry, (self._SCOPED, self._UNSCOPED), entry_id=entry_id
+        )
+
+    def test_scoped_identifier_wins_over_the_legacy_one(
+        self, single_owner_device_registry: Any
+    ) -> None:
+        """Both identifiers resolve; the caller's order decides, not the registry."""
+        registry = single_owner_device_registry
+        registry.add_config_entry("entry-1")
+        scoped = registry.add_device(
+            identifiers={self._SCOPED}, config_entry_id="entry-1"
+        )
+        legacy = registry.add_device(
+            identifiers={self._UNSCOPED}, config_entry_id="entry-1"
+        )
+
+        assert self._modern(registry) is scoped
+        assert legacy.id != scoped.id
+
+    def test_legacy_identifier_is_used_when_the_scoped_one_is_absent(
+        self, single_owner_device_registry: Any
+    ) -> None:
+        """A not-yet-migrated installation is still found."""
+        registry = single_owner_device_registry
+        registry.add_config_entry("entry-1")
+        legacy = registry.add_device(
+            identifiers={self._UNSCOPED}, config_entry_id="entry-1"
+        )
+
+        assert self._modern(registry) is legacy
+
+    def test_a_miss_returns_none(self, single_owner_device_registry: Any) -> None:
+        """Exhausting the candidates is an answer, not an exception."""
+        registry = single_owner_device_registry
+        registry.add_config_entry("entry-1")
+
+        assert self._modern(registry) is None
+
+    def test_a_modern_miss_does_not_fall_back_to_the_legacy_call(self) -> None:
+        """Retrying unscoped after a scoped miss would undo the entry scoping.
+
+        Measured against a registry carrying both APIs, because that is the
+        only shape in which dropping the guard changes an observable result.
+        """
+        stranger = object()
+        registry = _BothApisRegistry({self._UNSCOPED: stranger}, owner="entry-2")
+
+        assert self._modern(registry) is None
+        assert registry.calls == []
+        assert registry.scoped_calls == [
+            (self._SCOPED, "entry-1"),
+            (self._UNSCOPED, "entry-1"),
+        ]
+
+    def test_a_device_of_another_entry_is_not_returned(
+        self, single_owner_device_registry: Any
+    ) -> None:
+        """The deliberate narrowing: identifiers are unique per entry only.
+
+        Two GoogleFindMy entries can both carry the legacy unscoped identifier.
+        Before the entry scoping, which one a set lookup returned depended on
+        iteration order.
+        """
+        registry = single_owner_device_registry
+        registry.add_config_entry("entry-1")
+        registry.add_config_entry("entry-2")
+        stranger = registry.add_device(
+            identifiers={self._UNSCOPED}, config_entry_id="entry-2"
+        )
+
+        assert self._modern(registry) is None
+        assert (
+            registry.async_get_device_by_identifier(self._UNSCOPED, "entry-2")
+            is stranger
+        )
+
+    def test_legacy_core_is_asked_one_identifier_at_a_time(self) -> None:
+        """On the declared minimum there is only the set-based call, used per
+        identifier and in the caller's order.
+
+        The device carries ``config_entries``, because a real ``DeviceEntry`` of
+        that core does (tag ``2025.9.1``, line 327). A double without it would
+        answer "ownership unknown" to the scoping check below, a state no real
+        entry of that core is in.
+        """
+        ours = SimpleNamespace(id="ours", config_entries={self._ENTRY_ID})
+        registry = _LegacyOnlyRegistry({self._UNSCOPED: ours})
+
+        assert self._modern(registry) is ours
+        assert registry.calls == [{self._SCOPED}, {self._UNSCOPED}]
+
+    def test_legacy_core_honours_the_candidate_priority(self) -> None:
+        """Two own devices, one per identifier: the caller's order decides.
+
+        Handed over as one set, ``async_get_device`` would return whichever
+        identifier its set iteration meets first; the double above makes that
+        the unscoped one. The scoped identifier has to win regardless, and the
+        lookup stops there.
+        """
+        scoped = SimpleNamespace(id="scoped", config_entries={self._ENTRY_ID})
+        legacy = SimpleNamespace(id="legacy", config_entries={self._ENTRY_ID})
+        registry = _LegacyOnlyRegistry({self._SCOPED: scoped, self._UNSCOPED: legacy})
+
+        assert self._modern(registry) is scoped
+        assert registry.calls == [{self._SCOPED}]
+
+    def test_legacy_core_foreign_device_does_not_shadow_the_own_one(self) -> None:
+        """A stranger on the low-priority identifier is skipped, not fatal.
+
+        With a single set lookup the stranger came back first (adverse set
+        order), failed the ownership check, and the function answered ``None``
+        although this entry's own device sat behind the scoped identifier: a
+        false miss on exactly the core where the legacy branch is the only one
+        that runs.
+        """
+        ours = SimpleNamespace(id="ours", config_entries={self._ENTRY_ID})
+        stranger = SimpleNamespace(id="stranger", config_entries={"entry-2"})
+        registry = _LegacyOnlyRegistry({self._SCOPED: ours, self._UNSCOPED: stranger})
+
+        assert self._modern(registry) is ours
+
+    def test_legacy_core_skips_a_foreign_device_and_keeps_looking(self) -> None:
+        """The stranger on the *high*-priority identifier is stepped over."""
+        ours = SimpleNamespace(id="ours", config_entries={self._ENTRY_ID})
+        stranger = SimpleNamespace(id="stranger", config_entries={"entry-2"})
+        registry = _LegacyOnlyRegistry({self._SCOPED: stranger, self._UNSCOPED: ours})
+
+        assert self._modern(registry) is ours
+        assert registry.calls == [{self._SCOPED}, {self._UNSCOPED}]
+
+    def test_legacy_core_does_not_hand_back_another_entrys_device(self) -> None:
+        """The entry scoping holds on the branch the declared minimum runs.
+
+        ``async_get_device`` searches by identifier alone and knows nothing about
+        owning entries, so on Core 2025.9.1 it will happily return a device of a
+        *different* GoogleFindMy entry that still carries the legacy unscoped
+        identifier. Filtering that out is this function's job, not the caller's:
+        every call site would otherwise rebuild the scoping by hand, which
+        ``agents/runtime_patterns/AGENTS.md`` forbids.
+
+        Until AP-16 the scoping was applied in the modern branch only, so the
+        promise held on 2026.8+ and broke on the declared minimum -- the one core
+        where this branch is the only one that runs.
+        """
+        stranger = SimpleNamespace(id="stranger", config_entries={"entry-2"})
+        registry = _LegacyOnlyRegistry({self._UNSCOPED: stranger})
+
+        assert self._modern(registry) is None
+        assert registry.calls == [{self._SCOPED}, {self._UNSCOPED}]
+
+    def test_legacy_core_device_without_ownership_is_a_miss(self) -> None:
+        """A device entry that names no owner is not an answer either.
+
+        "Owned by nobody" and "does not say" are indistinguishable here, and both
+        are a miss: relinking an entity onto a device this entry does not own is
+        the failure mode, and neither state rules it out.
+        """
+        ownerless = SimpleNamespace(id="ownerless")
+        registry = _LegacyOnlyRegistry({self._UNSCOPED: ownerless})
+
+        assert self._modern(registry) is None
+
+    def test_signature_drift_propagates_instead_of_rescoping_silently(self) -> None:
+        """A ``TypeError`` surfaces; it is never answered with a legacy retry.
+
+        Retrying unscoped would undo the entry scoping and hand back a device of
+        a different config entry, and the repository already rules that modern
+        registries surface their ``TypeError`` rather than being rewritten into
+        a legacy call.
+        """
+        sentinel = object()
+        registry = _DriftedSignatureRegistry({self._SCOPED: sentinel})
+
+        with pytest.raises(TypeError):
+            self._modern(registry)
+        assert registry.calls == []
+
+    def test_a_registry_with_neither_api_yields_none(self) -> None:
+        """No lookup surface at all is survivable, not an exception."""
+        assert self._modern(SimpleNamespace()) is None
+
+    @pytest.mark.parametrize("legacy_core", [False, True])
+    def test_no_candidates_is_a_miss_on_either_core(self, legacy_core: bool) -> None:
+        """An empty priority list must not degrade into an unscoped lookup.
+
+        Both cores are exercised: on a legacy registry an unguarded empty tuple
+        would reach ``async_get_device(identifiers=set())``, a deprecated call
+        searching for nothing that the caller never asked for.
+        """
+        registry: Any = _LegacyOnlyRegistry({})
+        if not legacy_core:
+            registry = _BothApisRegistry({})
+
+        assert (
+            registry_helpers.resolve_device_by_identifiers(
+                registry, (), entry_id="entry-1"
+            )
+            is None
+        )
+        assert registry.calls == []
+        if not legacy_core:
+            assert registry.scoped_calls == []
+
+
+class TestIterAllDevices:
+    """The whole-registry walk, and the two core generations it hides.
+
+    The point of this helper is that ``dev_reg.devices`` means different things
+    on the two supported cores: a plain mapping on the declared minimum
+    ``2025.9.1``, whose iteration yields device **ids**, and a view on
+    ``2026.9``, whose iteration yields the ``DeviceEntry`` objects. Both branches
+    are exercised here because a test suite that only ever sees mapping doubles
+    would leave the branch that runs on the *newer* core unmeasured.
+    """
+
+    def test_mapping_registry_yields_the_entries_not_the_ids(self) -> None:
+        """Core 2025.9.1 shape: a mapping keyed by device id."""
+        alpha = SimpleNamespace(id="a")
+        beta = SimpleNamespace(id="b")
+        registry = SimpleNamespace(devices={"a": alpha, "b": beta})
+
+        assert registry_helpers.iter_all_devices(registry) == (alpha, beta)
+
+    def test_view_registry_yields_the_entries(self) -> None:
+        """Core 2026.9 shape: a view whose ``__iter__`` yields entries."""
+
+        class _View:
+            """Minimal stand-in for Core's ``DeviceRegistryItemsView``."""
+
+            def __init__(self, entries: list[Any]) -> None:
+                self._entries = entries
+
+            def __iter__(self):  # noqa: ANN204 - test double
+                return iter(self._entries)
+
+        alpha = SimpleNamespace(id="a")
+        registry = SimpleNamespace(devices=_View([alpha]))
+
+        assert registry_helpers.iter_all_devices(registry) == (alpha,)
+
+    def test_registry_without_devices_yields_nothing(self) -> None:
+        """A registry double that exposes no ``devices`` is empty, not an error."""
+        assert registry_helpers.iter_all_devices(SimpleNamespace()) == ()
+        assert registry_helpers.iter_all_devices(SimpleNamespace(devices=None)) == ()
+
+    def test_a_non_iterable_devices_attribute_yields_nothing(self) -> None:
+        """Defensive: a ``devices`` that is neither mapping nor iterable.
+
+        Reached by registry doubles, not by any supported core. It answers
+        "empty" rather than raising, because this helper is called from
+        one-time migration passes whose failure mode should be "did nothing",
+        not "broke setup".
+        """
+        assert registry_helpers.iter_all_devices(SimpleNamespace(devices=42)) == ()

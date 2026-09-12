@@ -4,7 +4,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass, replace
 from types import MappingProxyType, SimpleNamespace
 from typing import Any, cast
@@ -36,6 +36,7 @@ from custom_components.googlefindmy.coordinator import (
     SubentryMetadata,
 )
 from tests.helpers import service_device_stub
+from tests.helpers.single_owner_device_registry import SingleOwnerDeviceRegistry
 
 
 def _stable_subentry_id(entry_id: str, key: str) -> str:
@@ -1145,14 +1146,9 @@ def test_frozen_registry_removes_hub_link_with_frozenset(
 
     assert created == 1
     assert frozen_registry.updated
-    removal_payload = next(
-        payload
-        for payload in frozen_registry.updated
-        if payload["remove_config_entry_id"] == entry.entry_id
-    )
-    assert removal_payload["remove_config_entry_id"] == entry.entry_id
-    assert removal_payload["remove_config_subentry_id"] is None
-
+    # End state, not keyword shape (see the note in
+    # ``test_service_device_heals_config_subentry``). The point of this test is
+    # the frozenset exposure, and that shows in the resulting link set below.
     refreshed = frozen_registry.async_get(existing.id)
     assert refreshed is not None
     subentries = refreshed.config_entries_subentries.get(entry.entry_id)
@@ -1187,17 +1183,19 @@ def test_existing_device_remains_standalone(
     )
 
     assert created == 1
-    assert fake_registry.updated[0]["via_device_id"] is None
+    assert fake_registry.updated, "Expected the existing device to be updated"
+    # The recorded write has to belong to the device under test, otherwise a
+    # cross-device mutation passes unnoticed (``tests/AGENTS.md``, registry stub
+    # checklist, point 3). Only the *payload shape* is dropped here, not the
+    # association and not the end state.
+    assert fake_registry.updated[0]["device_id"] == existing.id
+    # End state, not keyword shape (see the note in
+    # ``test_service_device_heals_config_subentry``).
     assert existing.via_device_id is None
-    assert fake_registry.updated[0]["config_subentry_id"] == entry.tracker_subentry_id
-    assert fake_registry.updated[0]["add_config_subentry_id"] is None
-    assert fake_registry.updated[0]["add_config_entry_id"] == entry.entry_id
-    assert fake_registry.updated[-1]["remove_config_entry_id"] in (entry.entry_id, None)
-    assert fake_registry.updated[-1]["remove_config_subentry_id"] in (
-        entry.tracker_subentry_id,
-        None,
-    )
     assert existing.config_subentry_id == entry.tracker_subentry_id
+    assert existing.config_entries_subentries[entry.entry_id] == {
+        entry.tracker_subentry_id
+    }
 
 
 def test_existing_device_backfills_config_subentry(
@@ -1229,18 +1227,13 @@ def test_existing_device_backfills_config_subentry(
 
     assert created == 1
     assert len(fake_registry.updated) >= 1
-    payload = fake_registry.updated[0]
-    assert payload["device_id"] == existing.id
-    assert payload["config_subentry_id"] == entry.tracker_subentry_id
-    assert payload["add_config_subentry_id"] is None
-    assert payload["add_config_entry_id"] == entry.entry_id
-    assert payload["via_device_id"] is None
-    assert fake_registry.updated[-1]["remove_config_entry_id"] in (entry.entry_id, None)
-    assert fake_registry.updated[-1]["remove_config_subentry_id"] in (
-        entry.tracker_subentry_id,
-        None,
-    )
+    assert fake_registry.updated[0]["device_id"] == existing.id
+    # End state, not keyword shape (see the note in
+    # ``test_service_device_heals_config_subentry``).
     assert existing.config_subentry_id == entry.tracker_subentry_id
+    assert existing.config_entries_subentries[entry.entry_id] == {
+        entry.tracker_subentry_id
+    }
     assert existing.via_device_id is None
 
 
@@ -1582,6 +1575,129 @@ def test_hub_name_collision_does_not_reuse_hub_device(
     assert not any("Reusing hub device" in record.message for record in caplog.records)
     assert any(
         "Disambiguated device name" in record.message for record in caplog.records
+    )
+
+
+class _DeprecatedDevicesView:
+    """Stand-in for Core 2026.9's ``_DeprecatedDeviceRegistryItemsView``.
+
+    Read at tag ``2026.9.1``: iterating yields the ``DeviceEntry`` values, while
+    the mapping surface (``values``, ``get``, subscription) still answers but is
+    reported as deprecated. The property that matters here is the one a guard
+    gets wrong: the view is **not** a ``Mapping`` subclass, so an
+    ``isinstance(..., Mapping)`` test is ``False`` and everything behind it is
+    skipped without a word.
+
+    Three deviations from the core shape, all deliberate and none of them a
+    claim about core. ``__setitem__`` is a stub necessity: the real registry
+    writes through its private container, while ``conftest.py``'s double stores
+    into ``devices`` directly. ``__contains__`` here is plain key membership,
+    where core does value membership for a ``DeviceEntry`` and only treats a
+    ``str`` as the deprecated key lookup. And nothing here *reports* the
+    deprecated use, because the double's own registry reaches the mapping
+    surface for every ``async_get``.
+
+    That last one bounds what this test proves: it discriminates the
+    ``isinstance(..., Mapping)`` guard, not the mapping surface. A regression
+    that went back to ``dev_reg.devices.values()`` would still pass here; the
+    static ratchet in ``tests/test_guard_device_registry_kwargs.py`` is what
+    catches that shape.
+    """
+
+    def __init__(self, devices: dict[str, Any]) -> None:
+        self._devices = devices
+
+    def __iter__(self) -> Iterator[Any]:
+        return iter(self._devices.values())
+
+    def __len__(self) -> int:
+        return len(self._devices)
+
+    def __getitem__(self, key: str) -> Any:
+        return self._devices[key]
+
+    def __setitem__(self, key: str, value: Any) -> None:
+        self._devices[key] = value
+
+    def __contains__(self, obj: object) -> bool:
+        return obj in self._devices
+
+    def __getattr__(self, name: str) -> Any:
+        if name.startswith("_"):
+            raise AttributeError(name)
+        return getattr(self._devices, name)
+
+
+def test_hub_name_collision_sees_siblings_when_devices_is_a_view(
+    stub_registry: Any, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A hub sibling's name is collected on Core 2026.9 as well (``N-22``).
+
+    The collision check walks the registry to learn which names the hub's own
+    children already carry. That walk used to sit behind
+    ``isinstance(dev_reg.devices, Mapping)``, which holds on the declared
+    minimum ``2025.9.1`` and is ``False`` from ``2026.9`` on, where ``devices``
+    is a view. The result was not an error but a silent loss of function: the
+    sibling was never seen, so the poll created a *second* registry device
+    carrying the same label instead of reusing the one already there.
+
+    Which of the two outcomes the walk produces depends on the sibling: one that
+    belongs to our entry and is not the hub itself is reused (measured here),
+    while a stranger's device only forces a suffix. Reuse is the stronger
+    assertion of the two, because "nothing was created" cannot be reached by
+    accident.
+
+    The hub carries a *different* name here on purpose. ``hub_device_names`` is
+    seeded from the hub itself as well, so a test that let the hub share the
+    label would pass through that seeding and never touch the walk at all --
+    which is what ``test_hub_name_collision_does_not_reuse_hub_device`` does: it
+    creates the hub alone, names it "Pixel" and never gets near the walk. The
+    tests that do walk it -- with a "Hub Anchor" hub and a sibling beside it --
+    are the three reuse cases above, and every one of them sees the mapping
+    shape only.
+    """
+
+    coordinator = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
+    entry = _build_entry_with_subentries("entry-hub-view")
+    registry = stub_registry
+    _prepare_coordinator_for_registry(coordinator, entry)
+
+    hub = registry.async_get_or_create(  # type: ignore[attr-defined]
+        config_entry_id=entry.entry_id,
+        identifiers={service_device_identifier(entry.entry_id)},
+        manufacturer=SERVICE_DEVICE_MANUFACTURER,
+        model=SERVICE_DEVICE_MODEL,
+        name="Hub Anchor",
+        config_subentry_id=entry.service_subentry_id,
+    )
+    sibling = registry.async_get_or_create(  # type: ignore[attr-defined]
+        config_entry_id=entry.entry_id,
+        identifiers={(DOMAIN, f"{entry.entry_id}:sibling")},
+        manufacturer=SERVICE_DEVICE_MANUFACTURER,
+        model=SERVICE_DEVICE_MODEL,
+        name="Pixel",
+        via_device_id=hub.id,
+        config_subentry_id=entry.tracker_subentry_id,
+    )
+
+    # Swap in the newer core's shape *after* the fixtures are in place: the
+    # double stores into ``devices`` by subscription, which the view forwards.
+    registry.devices = _DeprecatedDevicesView(registry.devices)
+
+    baseline_created = len(registry.created)
+    devices = [{"id": "view-collide", "name": "Pixel"}]
+    coordinator.data = devices
+
+    caplog.set_level("DEBUG")
+    created = coordinator._ensure_registry_for_devices(devices=devices, ignored=set())
+
+    assert created == 1
+    assert len(registry.created) == baseline_created, (
+        "the walk did not see the hub sibling, so a duplicate device was created"
+    )
+    assert any(
+        f"Reusing hub device 'Pixel' (id={sibling.id})" in record.message
+        for record in caplog.records
     )
 
 
@@ -1959,6 +2075,111 @@ def test_service_device_defers_unknown_config_subentry(
     assert payload["identifiers"] == {service_device_identifier(entry.entry_id)}
 
 
+class _SingleOwnerRegistryWithCreate(SingleOwnerDeviceRegistry):
+    """The shared single-owner double plus the one call it does not model.
+
+    ``_ensure_service_device_exists`` returns early unless the registry offers
+    ``async_get_or_create``, so without it the branch under test is never
+    reached. Adding it here rather than to the shared helper keeps the change
+    local to the one test that needs it; the ownership rules, which are the
+    point, still come from the shared double.
+    """
+
+    def async_get_or_create(
+        self,
+        *,
+        config_entry_id: str,
+        identifiers: set[tuple[str, str]],
+        **kwargs: Any,
+    ) -> Any:
+        existing = next(
+            (
+                device
+                for device in self.devices.values()
+                if identifiers & set(device.identifiers)
+            ),
+            None,
+        )
+        if existing is not None:
+            return existing
+        return self.add_device(
+            identifiers=identifiers,
+            config_entry_id=config_entry_id,
+            config_subentry_id=kwargs.get("config_subentry_id"),
+            name=kwargs.get("name"),
+        )
+
+
+def test_service_device_on_entry_root_is_moved_not_deleted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Healing a service device on the entry root must move it, not delete it.
+
+    On Core 2026.8 a device sitting on the entry root has that entry as its
+    single owner, so giving the entry up removes the device together with every
+    entity attached to it. The healing branch reads as "correct the subentry"
+    and must therefore state MOVE; a DETACH there is silent, plausible and
+    destructive.
+
+    Measured with a mutant: turning that one call into a DETACH fails exactly
+    this test and nothing else, so it is the only thing standing between the
+    branch and a deleted device. The nearby ``_detach_service_hub_link`` branch
+    is *not* what this covers, and it cannot be: on a single-owner core the
+    healing above always runs first and leaves no hub link behind, which makes
+    that branch unreachable there. Its own move-instead-of-detach wording is
+    forward-looking, not load-bearing today.
+    """
+
+    registry = _SingleOwnerRegistryWithCreate()
+    monkeypatch.setattr(dr, "async_get", lambda _hass: registry)
+
+    coordinator = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
+    entry = _build_entry_with_subentries("entry-root-svc")
+    _prepare_coordinator_for_registry(coordinator, entry)
+    registry.add_config_entry(
+        entry.entry_id, {entry.service_subentry_id, entry.tracker_subentry_id}
+    )
+    service_device = registry.add_device(
+        identifiers={service_device_identifier(entry.entry_id)},
+        config_entry_id=entry.entry_id,
+        config_subentry_id=None,
+    )
+
+    coordinator._ensure_service_device_exists()
+
+    survivor = registry.async_get(service_device.id)
+    assert survivor is not None, (
+        "the service device was deleted; the branch used DETACH where the "
+        "intent is MOVE"
+    )
+    assert survivor.config_subentry_id == entry.service_subentry_id
+    assert (
+        "remove_device",
+        {"device_id": service_device.id},
+    ) not in registry.operations
+
+    # The operation sequence the planner derived, not just the end state
+    # (``tests/AGENTS.md``, registry stub checklist, point 5). On a single-owner
+    # core a MOVE is an update carrying both ``new_*`` keywords, and a DETACH
+    # would be a ``remove_device``. Metadata on the same call is filtered out, so
+    # nothing but the ownership half is pinned.
+    #
+    # What this does *not* separate, measured with a mutant: MOVE from ENSURE. On
+    # a device whose current owner is known and different from the target, the
+    # planner derives the same single operation for both. The two part ways only
+    # when the current state is unknown, where ENSURE refuses. The intent that
+    # matters here is DETACH, and that one the assertion does catch.
+    ownership_ops = [
+        (name, kwargs["new_config_entry_id"], kwargs["new_config_subentry_id"])
+        for name, kwargs in registry.operations
+    ]
+    assert ownership_ops
+    assert all(
+        op == ("update_device", entry.entry_id, entry.service_subentry_id)
+        for op in ownership_ops
+    ), ownership_ops
+
+
 def test_service_device_heals_config_subentry(
     fake_registry: _FakeDeviceRegistry,
 ) -> None:
@@ -1985,17 +2206,14 @@ def test_service_device_heals_config_subentry(
     coordinator._ensure_service_device_exists()
 
     assert fake_registry.updated, "Expected device-registry healing to run"
-    payload = next(
-        update
-        for update in fake_registry.updated
-        if update.get("config_subentry_id") == entry.service_subentry_id
-    )
-    assert payload["add_config_subentry_id"] is None
-    assert payload["add_config_entry_id"] == entry.entry_id
+    # End state, not keyword shape: which keywords carry the move is the
+    # planner's business and differs by core version. What must hold is where
+    # the device ends up, and that it ends up owned by us and nowhere else.
     assert service_entry.config_subentry_id == entry.service_subentry_id
     assert service_entry.config_entries_subentries[entry.entry_id] == {
         entry.service_subentry_id
     }
+    assert entry.entry_id in service_entry.config_entries
 
 
 def test_service_device_clears_missing_service_link(
@@ -2646,3 +2864,409 @@ async def test_relink_helper_reassigns_buttons_and_trackers(
         sensor_entity.entity_id,
         binary_sensor_entity.entity_id,
     }
+
+
+class _RelinkEntityRegistryStub:
+    """Minimal entity registry for the relink scoping tests below."""
+
+    def __init__(self, entries: list[Any]) -> None:
+        self.entities = {entry.entity_id: entry for entry in entries}
+        self.updated: list[tuple[str, dict[str, Any]]] = []
+
+    def async_entries_for_config_entry(self, config_entry_id: str) -> tuple[Any, ...]:
+        return tuple(
+            entry
+            for entry in self.entities.values()
+            if getattr(entry, "config_entry_id", None) == config_entry_id
+        )
+
+    def async_update_entity(self, entity_id: str, **changes: Any) -> None:
+        entry = self.entities[entity_id]
+        if "device_id" in changes:
+            entry.device_id = changes["device_id"]
+        self.updated.append((entity_id, dict(changes)))
+
+
+@pytest.mark.asyncio
+async def test_relink_ignores_a_device_owned_by_a_foreign_entry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A tracker identifier under someone else's entry is not a hit.
+
+    This is the documented behaviour of the narrowing AP-16 introduced: the
+    relink pass resolves through ``resolve_device_by_identifiers``, which asks
+    the registry for *our* entry's device.  A device carrying the same
+    identifier under a different config entry -- the state a half-finished
+    migration leaves behind -- is no answer, so the entity keeps its current
+    device rather than being moved onto a stranger's.
+
+    Green on the previous state as well, where a post-filter at the call site
+    discarded the same device: a regression guard for the outcome. The test
+    that shows the *difference* is the one below.
+    """
+
+    entry = _build_entry_with_subentries("entry-scope")
+    hass = SimpleNamespace(data={})
+
+    dev_reg = SingleOwnerDeviceRegistry()
+    dev_reg.add_config_entry(entry.entry_id, {entry.tracker_subentry_id})
+    dev_reg.add_config_entry("foreign-entry", set())
+
+    service_device = dev_reg.add_device(
+        identifiers={(DOMAIN, f"integration_{entry.entry_id}")},
+        config_entry_id=entry.entry_id,
+        config_subentry_id=entry.service_subentry_id,
+        name="Service",
+    )
+    # The tracker identifier exists, but under a config entry that is not ours.
+    foreign_device = dev_reg.add_device(
+        identifiers={(DOMAIN, "abc123")},
+        config_entry_id="foreign-entry",
+        name="Someone else's tracker",
+    )
+
+    tracker_entity = SimpleNamespace(
+        entity_id="device_tracker.googlefindmy_tracker",
+        domain="device_tracker",
+        platform=DOMAIN,
+        unique_id=f"{entry.entry_id}:{entry.tracker_subentry_id}:abc123",
+        config_entry_id=entry.entry_id,
+        device_id=service_device.id,
+    )
+    ent_reg = _RelinkEntityRegistryStub([tracker_entity])
+
+    monkeypatch.setattr(dr, "async_get", lambda _hass: dev_reg)
+    monkeypatch.setattr(er, "async_get", lambda _hass: ent_reg)
+
+    await _async_relink_subentry_entities(hass, entry)
+
+    assert tracker_entity.device_id == service_device.id
+    assert ent_reg.updated == []
+    assert dev_reg.async_get(foreign_device.id) is not None
+    assert dev_reg.async_get(foreign_device.id).config_entry_id == "foreign-entry"
+
+
+@pytest.mark.asyncio
+async def test_relink_finds_our_device_when_a_foreign_one_shares_the_identifier(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Our device wins even when a foreign one carries the same identifier first.
+
+    The counterpart to the test above, and the reason the narrowing is not a
+    loss.  The shape AP-16 replaced searched by identifier alone, took the first
+    match and only then checked ownership, discarding it -- so a second device
+    carrying the same identifier under *our* entry was never reached.  Asking
+    the registry per entry has no such order dependency.
+    """
+
+    entry = _build_entry_with_subentries("entry-scope2")
+    hass = SimpleNamespace(data={})
+
+    dev_reg = SingleOwnerDeviceRegistry()
+    dev_reg.add_config_entry(entry.entry_id, {entry.tracker_subentry_id})
+    dev_reg.add_config_entry("foreign-entry", set())
+
+    service_device = dev_reg.add_device(
+        identifiers={(DOMAIN, f"integration_{entry.entry_id}")},
+        config_entry_id=entry.entry_id,
+        config_subentry_id=entry.service_subentry_id,
+        name="Service",
+    )
+    # Added first on purpose: it is the one an identifier-only scan would hit.
+    dev_reg.add_device(
+        identifiers={(DOMAIN, "abc123")},
+        config_entry_id="foreign-entry",
+        name="Someone else's tracker",
+    )
+    our_tracker = dev_reg.add_device(
+        identifiers={(DOMAIN, "abc123")},
+        config_entry_id=entry.entry_id,
+        config_subentry_id=entry.tracker_subentry_id,
+        name="Our tracker",
+    )
+
+    tracker_entity = SimpleNamespace(
+        entity_id="device_tracker.googlefindmy_tracker",
+        domain="device_tracker",
+        platform=DOMAIN,
+        unique_id=f"{entry.entry_id}:{entry.tracker_subentry_id}:abc123",
+        config_entry_id=entry.entry_id,
+        device_id=service_device.id,
+    )
+    ent_reg = _RelinkEntityRegistryStub([tracker_entity])
+
+    monkeypatch.setattr(dr, "async_get", lambda _hass: dev_reg)
+    monkeypatch.setattr(er, "async_get", lambda _hass: ent_reg)
+
+    await _async_relink_subentry_entities(hass, entry)
+
+    assert tracker_entity.device_id == our_tracker.id
+    assert [entity_id for entity_id, _ in ent_reg.updated] == [tracker_entity.entity_id]
+
+
+@pytest.mark.asyncio
+async def test_relink_does_not_adopt_a_foreign_legacy_service_device(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The service-device fallback scan stays inside this config entry.
+
+    The scan walks the whole registry because a service device may still carry
+    the unscoped legacy identifier ``(DOMAIN, "integration")``. That identifier
+    is precisely the one another entry may still carry too, so the ownership
+    filter is what keeps the scan from adopting a stranger's service device and
+    re-parenting this entry's entities onto it.
+
+    Green on the previous state as well -- the same filter was there, spelled
+    ``entry_id not in device.config_entries``. A regression guard for the
+    rewrite, not proof of a new property.
+    """
+
+    entry = _build_entry_with_subentries("entry-fallback")
+    hass = SimpleNamespace(data={})
+
+    dev_reg = SingleOwnerDeviceRegistry()
+    dev_reg.add_config_entry(entry.entry_id, {entry.tracker_subentry_id})
+    dev_reg.add_config_entry("foreign-entry", set())
+
+    # Only the foreign entry has a service device, and it carries the legacy
+    # unscoped identifier that ``_device_is_service_device`` accepts.
+    foreign_service = dev_reg.add_device(
+        identifiers={(DOMAIN, "integration")},
+        config_entry_id="foreign-entry",
+        name="Foreign service",
+    )
+    our_tracker = dev_reg.add_device(
+        identifiers={(DOMAIN, "abc123")},
+        config_entry_id=entry.entry_id,
+        config_subentry_id=entry.tracker_subentry_id,
+        name="Our tracker",
+    )
+
+    service_entity = SimpleNamespace(
+        entity_id="binary_sensor.googlefindmy_polling",
+        domain="binary_sensor",
+        platform=DOMAIN,
+        unique_id=f"{entry.entry_id}:{entry.service_subentry_id}:polling",
+        config_entry_id=entry.entry_id,
+        device_id=our_tracker.id,
+    )
+    ent_reg = _RelinkEntityRegistryStub([service_entity])
+
+    monkeypatch.setattr(dr, "async_get", lambda _hass: dev_reg)
+    monkeypatch.setattr(er, "async_get", lambda _hass: ent_reg)
+
+    await _async_relink_subentry_entities(hass, entry)
+
+    assert service_entity.device_id != foreign_service.id
+    assert [
+        entity_id
+        for entity_id, changes in ent_reg.updated
+        if changes.get("device_id") == foreign_service.id
+    ] == []
+
+
+@pytest.mark.asyncio
+async def test_button_relink_refuses_a_service_device_as_tracker_target(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A button never lands on the service device, even if it matches the id.
+
+    ``_resolve_button_target`` asks the lookup with ``allow_service=False``. The
+    case that makes the flag load-bearing is a service device that also carries
+    a tracker identifier -- a state a half-finished migration can leave behind.
+    Without the flag the button would be re-parented onto the service device and
+    the play/locate action would address the wrong thing.
+
+    The flag is unchanged by AP-16, so this is green on the previous state too.
+    It is here because the rewrite of ``lookup_device`` moved the code the flag
+    guards, and nothing else asserted it.
+    """
+
+    entry = _build_entry_with_subentries("entry-button")
+    hass = SimpleNamespace(data={})
+
+    dev_reg = SingleOwnerDeviceRegistry()
+    dev_reg.add_config_entry(
+        entry.entry_id, {entry.tracker_subentry_id, entry.service_subentry_id}
+    )
+    # One device, both roles: the service identifier and a tracker identifier.
+    service_device = dev_reg.add_device(
+        identifiers={
+            (DOMAIN, f"integration_{entry.entry_id}"),
+            (DOMAIN, "abc123"),
+        },
+        config_entry_id=entry.entry_id,
+        config_subentry_id=entry.service_subentry_id,
+        name="Service",
+    )
+
+    button_entity = SimpleNamespace(
+        entity_id="button.googlefindmy_locate",
+        domain="button",
+        platform=DOMAIN,
+        unique_id=(
+            f"{DOMAIN}_{entry.entry_id}:{entry.tracker_subentry_id}:abc123_locate"
+        ),
+        config_entry_id=entry.entry_id,
+        device_id=None,
+    )
+    ent_reg = _RelinkEntityRegistryStub([button_entity])
+
+    monkeypatch.setattr(dr, "async_get", lambda _hass: dev_reg)
+    monkeypatch.setattr(er, "async_get", lambda _hass: ent_reg)
+
+    await _async_relink_button_devices(hass, entry)
+
+    assert button_entity.device_id != service_device.id
+    assert ent_reg.updated == []
+
+
+def test_service_device_stale_service_link_is_detached_by_a_move(
+    fake_registry: _FakeDeviceRegistry,
+) -> None:
+    """A service link the entry no longer knows is detached, never bare-removed.
+
+    Codecov finding on PR #1274: the detach arm of the service-device sync was
+    rewritten by the migration and had no test on either side of it. The device
+    sits on a service subentry the entry has since replaced; the coordinator
+    cannot resolve a current service subentry, so the sync moves the device to
+    the entry root and names the stale link as the one to detach.
+    """
+
+    coordinator = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
+    entry = _build_entry_with_subentries("entry-stale-service-link")
+    _prepare_coordinator_for_registry(coordinator, entry)
+
+    coordinator._ensure_service_device_exists()
+    service_ident = service_device_identifier(entry.entry_id)
+    service_entry = next(
+        device
+        for device in fake_registry.devices
+        if service_ident in device.identifiers
+    )
+    stale_id = entry.service_subentry_id
+    assert stale_id is not None
+    assert service_entry.config_entries_subentries[entry.entry_id] == {stale_id}
+
+    # The entry now names a service subentry the registry has not caught up
+    # with; the sync defers it and is left with no current service subentry.
+    entry.service_subentry_id = "service-not-yet-in-registry"
+    fake_registry.updated.clear()
+    coordinator._service_device_ready = False
+
+    coordinator._ensure_service_device_exists()
+
+    assert fake_registry.updated, "the stale link must be rewritten, not left alone"
+    payload = fake_registry.updated[-1]
+    assert payload["device_id"] == service_entry.id
+    assert stale_id not in service_entry.config_entries_subentries[entry.entry_id]
+    assert None in service_entry.config_entries_subentries[entry.entry_id]
+    assert service_entry.config_subentry_id is None
+
+
+def test_service_device_hub_link_survives_the_move_on_a_legacy_core_and_is_detached(
+    fake_registry: _FakeDeviceRegistry,
+) -> None:
+    """Legacy counterpart of ``test_service_device_on_entry_root_is_moved_not_deleted``.
+
+    Below Core 2026.8 ``add_config_subentry_id`` is a set union
+    (``device_registry.py``, the ``elif add_config_subentry_id not in ...``
+    arm, and the ``_FakeDeviceRegistry`` double mirrors that), so a plain add
+    would leave a root-linked service device with ``{None, subentry}``. The
+    healing step must therefore name the hub link as the one to detach in the
+    very same MOVE, and it must not fall back to a bare removal. Measured
+    while writing this: the healing branch is what runs here, the later
+    ``_detach_service_hub_link`` branch is not reached on this core either.
+    """
+
+    coordinator = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
+    entry = _build_entry_with_subentries("entry-legacy-root-svc")
+    _prepare_coordinator_for_registry(coordinator, entry)
+
+    service_ident = service_device_identifier(entry.entry_id)
+    existing_service = _FakeDeviceEntry(
+        identifiers={service_ident, _service_subentry_identifier(entry)},
+        config_entry_id=entry.entry_id,
+        name=None,
+        manufacturer=SERVICE_DEVICE_MANUFACTURER,
+        model=SERVICE_DEVICE_MODEL,
+        sw_version=INTEGRATION_VERSION,
+        entry_type=dr.DeviceEntryType.SERVICE,
+        translation_key=SERVICE_DEVICE_TRANSLATION_KEY,
+        translation_placeholders={},
+        config_subentry_id=None,
+    )
+    assert existing_service.config_entries_subentries[entry.entry_id] == {None}
+    fake_registry.devices.append(existing_service)
+
+    coordinator._ensure_service_device_exists()
+
+    assert existing_service in fake_registry.devices, "the device was deleted"
+    assert existing_service.config_entries_subentries[entry.entry_id] == {
+        entry.service_subentry_id
+    }
+    assert existing_service.config_subentry_id == entry.service_subentry_id
+    detaches = [
+        payload
+        for payload in fake_registry.updated
+        if payload.get("remove_config_entry_id") == entry.entry_id
+        and payload.get("remove_config_subentry_id") is None
+        and "remove_config_subentry_id" in payload
+    ]
+    assert len(detaches) == 1, fake_registry.updated
+    assert detaches[0]["add_config_subentry_id"] == entry.service_subentry_id
+
+
+def test_service_device_update_retries_without_translation_when_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A registry that rejects translation kwargs on update gets a second, bare write.
+
+    The create-path rejection is covered by
+    ``test_service_device_translation_rejection_is_fatal``; this is the update
+    path of the same double, where the sync retries without the translation
+    keys and marks the registry as not supporting them before the backfill
+    through ``async_get_or_create`` raises for the same reason.
+    """
+
+    _FakeDeviceEntry._counter = 0
+    if not hasattr(dr, "DeviceEntryType"):
+        monkeypatch.setattr(
+            dr,
+            "DeviceEntryType",
+            SimpleNamespace(SERVICE="service"),
+            raising=False,
+        )
+    registry = _TranslationRejectingRegistry()
+    monkeypatch.setattr(dr, "async_get", lambda _hass: registry)
+
+    coordinator = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
+    entry = _build_entry_with_subentries("entry-translation-update")
+    _prepare_coordinator_for_registry(coordinator, entry)
+
+    service_ident = service_device_identifier(entry.entry_id)
+    existing_service = _FakeDeviceEntry(
+        identifiers={service_ident, _service_subentry_identifier(entry)},
+        config_entry_id=entry.entry_id,
+        name=None,
+        manufacturer=SERVICE_DEVICE_MANUFACTURER,
+        model=SERVICE_DEVICE_MODEL,
+        sw_version=INTEGRATION_VERSION,
+        entry_type=dr.DeviceEntryType.SERVICE,
+        translation_key=None,
+        translation_placeholders=None,
+        config_subentry_id=entry.service_subentry_id,
+    )
+    registry.devices.append(existing_service)
+    # The signature probe said yes (cached), the call says no: that is the
+    # gap the retry exists for.
+    coordinator._device_registry_supports_translation_update = True
+
+    with pytest.raises(TypeError):
+        coordinator._ensure_service_device_exists()
+
+    assert registry.update_attempts == [
+        {"has_translation_key": True, "has_translation_placeholders": True},
+        {"has_translation_key": False, "has_translation_placeholders": False},
+    ]
+    assert coordinator._device_registry_supports_translation_update is False

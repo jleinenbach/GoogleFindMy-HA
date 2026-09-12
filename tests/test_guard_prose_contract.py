@@ -64,7 +64,23 @@ is left as is on purpose. The CI job is non-blocking (``continue-on-error: true`
 the pre-commit hook is not, so a local ``pre-commit run`` flags this file exactly as it
 flags its sibling. Widening ``[tool.codespell] ignore-words-list`` would hide the
 real English typos that several of those words shadow, across the whole tree, which is a
-worse trade than ten lines in a report the CI does not gate on.
+worse trade than the eleven report lines this file draws, ten of them from that list and
+one from the sample at the bottom.
+
+That list is a trade, not a rule, and the ``Write lint summary`` step in
+``.github/workflows/ci.yml`` points a contributor at it: an entry buys quiet in the
+report and pays with detection across the whole tree. It is worth it where the word
+shadows nothing, and where it shadows a real typo only for a name the tree cannot avoid,
+which is why ``hass`` sits on it and the words below do not. The hyphenated ``pre-empt``
+family is the cheap case: the 2.4.3 dictionary maps all six members to the American
+spelling, and neither half is a typo target of its own, so the entries cost only the
+split itself, which two files write the other way
+(``docs/TRIGGER_MECHANISMS.md``, ``tests/test_eid_resolver_executor_offload.py``). Three
+of the six have no occurrence here today and are listed to close the family. Two limits
+worth knowing before reusing this: the pinned 2.2.6 build carries only ``pre-empt`` in
+its dictionary, and the sharper tool for a single mention, a line-scoped ignore
+directive, arrived after the ``rev`` pinned in ``.pre-commit-config.yaml``, so that route
+starts by lifting the pin.
 
 Note this paragraph cannot name those typo pairs: this guard reads its own docstring, so
 writing the German half of such a pair here turns the file red. The same reflex applies

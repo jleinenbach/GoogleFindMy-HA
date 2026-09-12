@@ -384,6 +384,20 @@ class TestRegisterIdentityKey:
 # ---------------------------------------------------------------------------
 
 
+def _owned_device(device_id: str, *, entry_id: str = "entry-xyz") -> SimpleNamespace:
+    """Return a device entry as Core 2025.9.1 presents it, ownership included.
+
+    ``config_entries`` is not decoration: a real ``DeviceEntry`` of the declared
+    minimum core carries it (tag ``2025.9.1``, line 327), and
+    ``resolve_device_by_identifiers`` reads it to keep a device of a *different*
+    config entry from being handed back. A double without it answers "ownership
+    unknown", which is a state no real entry of that core is ever in, and every
+    case below would silently stop at the resolver instead of reaching the
+    branch it means to exercise.
+    """
+    return SimpleNamespace(id=device_id, config_entries={entry_id})
+
+
 class _FakeDeviceReg:
     """Minimal ``dr.async_get(hass)`` substitute for tests."""
 
@@ -396,6 +410,51 @@ class _FakeDeviceReg:
     ) -> SimpleNamespace | None:
         self.calls.append(set(identifiers or set()))
         return self._device
+
+
+class _ScopedDeviceReg:
+    """A Core 2026.8+ substitute: one identifier plus the owning entry id."""
+
+    def __init__(self, owned: dict[tuple[str, str], SimpleNamespace]) -> None:
+        self._owned = owned
+        self.calls: list[tuple[tuple[str, str], str]] = []
+
+    def async_get_device_by_identifier(
+        self, identifier: tuple[str, str], config_entry_id: str
+    ) -> SimpleNamespace | None:
+        self.calls.append((identifier, config_entry_id))
+        return self._owned.get(identifier)
+
+
+class TestResolveRegistryDevice:
+    """The thin caller owns exactly one thing: the candidate order.
+
+    The lookup itself is covered in
+    ``tests/test_coordinator_helpers_registry.py``; what is asserted here is
+    that ``identity.py`` asks for the entry-scoped identifier first and passes
+    its own entry id as the ownership scope.
+    """
+
+    def test_the_entry_scoped_identifier_is_asked_for_first(
+        self, coord: IdentityStub
+    ) -> None:
+        scoped = SimpleNamespace(id="reg-scoped")
+        registry = _ScopedDeviceReg({(DOMAIN, "entry-xyz:dev-1"): scoped})
+
+        assert coord._resolve_registry_device(registry, "entry-xyz", "dev-1") is scoped
+        assert registry.calls == [((DOMAIN, "entry-xyz:dev-1"), "entry-xyz")]
+
+    def test_the_legacy_identifier_follows_when_the_scoped_one_misses(
+        self, coord: IdentityStub
+    ) -> None:
+        legacy = SimpleNamespace(id="reg-legacy")
+        registry = _ScopedDeviceReg({(DOMAIN, "dev-1"): legacy})
+
+        assert coord._resolve_registry_device(registry, "entry-xyz", "dev-1") is legacy
+        assert registry.calls == [
+            ((DOMAIN, "entry-xyz:dev-1"), "entry-xyz"),
+            ((DOMAIN, "dev-1"), "entry-xyz"),
+        ]
 
 
 class TestResetResolverOffset:
@@ -427,13 +486,36 @@ class TestResetResolverOffset:
         fake_reg = _FakeDeviceReg(device=None)
         monkeypatch.setattr(dr, "async_get", lambda hass: fake_reg)
         coord._reset_resolver_offset("dev-1")
-        # The lookup was attempted with both identifier shapes.
-        assert fake_reg.calls == [{(DOMAIN, "entry-xyz:dev-1"), (DOMAIN, "dev-1")}]
+        # The lookup was attempted with both identifier shapes, one per call
+        # and scoped first: a legacy core answers a set lookup in set iteration
+        # order, which would let a foreign device on the unscoped identifier
+        # shadow this entry's own device on the scoped one.
+        assert fake_reg.calls == [
+            {(DOMAIN, "entry-xyz:dev-1")},
+            {(DOMAIN, "dev-1")},
+        ]
+
+    def test_a_modern_core_is_queried_per_identifier_and_scoped(
+        self, coord: IdentityStub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """From Core 2026.8 the same reset runs through the scoped lookup.
+
+        The legacy assertion above keeps the pre-2026.8 shape alive; without
+        this counterpart the whole method would only ever be exercised against
+        a registry the supported cores are leaving behind.
+        """
+        registry = _ScopedDeviceReg({})
+        monkeypatch.setattr(dr, "async_get", lambda hass: registry)
+        coord._reset_resolver_offset("dev-1")
+        assert registry.calls == [
+            ((DOMAIN, "entry-xyz:dev-1"), "entry-xyz"),
+            ((DOMAIN, "dev-1"), "entry-xyz"),
+        ]
 
     def test_hass_data_not_dict_returns(
         self, coord: IdentityStub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        device = SimpleNamespace(id="reg-123")
+        device = _owned_device("reg-123")
         monkeypatch.setattr(dr, "async_get", lambda hass: _FakeDeviceReg(device))
         coord.hass.data = None
         coord._reset_resolver_offset("dev-1")  # must not raise
@@ -441,7 +523,7 @@ class TestResetResolverOffset:
     def test_missing_domain_bucket_returns(
         self, coord: IdentityStub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        device = SimpleNamespace(id="reg-123")
+        device = _owned_device("reg-123")
         monkeypatch.setattr(dr, "async_get", lambda hass: _FakeDeviceReg(device))
         coord.hass.data = {}
         coord._reset_resolver_offset("dev-1")  # must not raise
@@ -449,7 +531,7 @@ class TestResetResolverOffset:
     def test_non_dict_domain_bucket_returns(
         self, coord: IdentityStub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        device = SimpleNamespace(id="reg-123")
+        device = _owned_device("reg-123")
         monkeypatch.setattr(dr, "async_get", lambda hass: _FakeDeviceReg(device))
         coord.hass.data = {DOMAIN: "not-a-dict"}
         coord._reset_resolver_offset("dev-1")  # must not raise
@@ -457,7 +539,7 @@ class TestResetResolverOffset:
     def test_resolver_none_returns(
         self, coord: IdentityStub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        device = SimpleNamespace(id="reg-123")
+        device = _owned_device("reg-123")
         monkeypatch.setattr(dr, "async_get", lambda hass: _FakeDeviceReg(device))
         coord.hass.data = {DOMAIN: {DATA_EID_RESOLVER: None}}
         coord._reset_resolver_offset("dev-1")  # must not raise
@@ -465,7 +547,7 @@ class TestResetResolverOffset:
     def test_resolver_without_reset_is_noop(
         self, coord: IdentityStub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        device = SimpleNamespace(id="reg-123")
+        device = _owned_device("reg-123")
         monkeypatch.setattr(dr, "async_get", lambda hass: _FakeDeviceReg(device))
         resolver = SimpleNamespace()  # no reset_device_offset
         coord.hass.data = {DOMAIN: {DATA_EID_RESOLVER: resolver}}
@@ -474,7 +556,7 @@ class TestResetResolverOffset:
     def test_success_calls_reset_with_registry_id(
         self, coord: IdentityStub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        device = SimpleNamespace(id="reg-123")
+        device = _owned_device("reg-123")
         monkeypatch.setattr(dr, "async_get", lambda hass: _FakeDeviceReg(device))
         reset_calls: list[str] = []
         # Pass ``list.append`` directly (no wrapping lambda) to satisfy
