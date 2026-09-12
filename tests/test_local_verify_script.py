@@ -236,11 +236,15 @@ def test_branch_paths_unite_the_working_tree_with_the_branch(
     """Committed and uncommitted work are both part of "what this branch touched"."""
 
     def _fake_capture(command: Sequence[str]) -> SimpleNamespace:
-        if command[1] == "merge-base":
-            return SimpleNamespace(returncode=0, stdout="cafe1234\n", stderr="")
-        return SimpleNamespace(returncode=0, stdout="committed.py\0", stderr="")
+        assert command[1] == "merge-base"
+        return SimpleNamespace(returncode=0, stdout="cafe1234\n", stderr="")
+
+    def _fake_capture_raw(command: Sequence[str]) -> SimpleNamespace:
+        assert "-z" in command
+        return SimpleNamespace(returncode=0, stdout=b"committed.py\0", stderr=b"")
 
     monkeypatch.setattr(local_verify, "_capture", _fake_capture)
+    monkeypatch.setattr(local_verify, "_capture_raw", _fake_capture_raw)
     monkeypatch.setattr(local_verify, "_changed_paths", lambda: ["uncommitted.py"])
 
     assert local_verify._branch_paths("origin/main") == {
@@ -259,12 +263,12 @@ def test_changed_paths_include_untracked_files(
     suite runs, and the clamp would count one file fewer than the tree changed.
     """
 
-    def _fake_capture(command: Sequence[str]) -> SimpleNamespace:
+    def _fake_capture_raw(command: Sequence[str]) -> SimpleNamespace:
         if command[1] == "ls-files":
-            return SimpleNamespace(returncode=0, stdout="new.py\0", stderr="")
-        return SimpleNamespace(returncode=0, stdout="edited.py\0", stderr="")
+            return SimpleNamespace(returncode=0, stdout=b"new.py\0", stderr=b"")
+        return SimpleNamespace(returncode=0, stdout=b"edited.py\0", stderr=b"")
 
-    monkeypatch.setattr(local_verify, "_capture", _fake_capture)
+    monkeypatch.setattr(local_verify, "_capture_raw", _fake_capture_raw)
 
     assert local_verify._changed_paths() == ["edited.py", "new.py"]
 
@@ -332,6 +336,29 @@ def test_git_paths_arrive_verbatim_under_the_default_quoting(
 
     assert local_verify._changed_paths() == sorted([awkward, "größe.py"])
     assert local_verify._branch_paths("base") == {awkward, "größe.py"}
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX file names")
+def test_a_carriage_return_in_a_path_survives_the_capture(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A name holding ``\\r`` reaches the clamp as itself, not as ``\\n``.
+
+    ``subprocess.run(text=True)`` reads stdout through the universal-newline
+    layer, which turns a lone carriage return into a newline. ``-z`` hands
+    the name over verbatim, and that byte is the name; translated, the clamp
+    hashed ``cr\\nx.py`` and recorded a file that does not exist. Real git
+    again, because the listing is git's and the translation is the text
+    layer's; a fake with a string would sit on the wrong side of it.
+    """
+
+    awkward = "cr\rx.py"
+    _git(tmp_path, "init", "-q")
+    (tmp_path / awkward).write_text("y = 1\n", encoding="utf-8")
+    monkeypatch.setattr(local_verify, "REPO_ROOT", tmp_path)
+
+    assert local_verify._changed_paths() == [awkward]
+    assert local_verify._digest_of([awkward])[awkward] != local_verify.MISSING_DIGEST
 
 
 def test_a_missing_path_is_recorded_not_dropped(
@@ -492,11 +519,11 @@ def test_the_clamp_covers_staged_files(monkeypatch: pytest.MonkeyPatch) -> None:
 
     recorded: list[Sequence[str]] = []
 
-    def _fake_capture(command: Sequence[str]) -> SimpleNamespace:
+    def _fake_capture_raw(command: Sequence[str]) -> SimpleNamespace:
         recorded.append(tuple(command))
-        return SimpleNamespace(returncode=0, stdout="", stderr="")
+        return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
 
-    monkeypatch.setattr(local_verify, "_capture", _fake_capture)
+    monkeypatch.setattr(local_verify, "_capture_raw", _fake_capture_raw)
 
     local_verify._changed_paths()
 

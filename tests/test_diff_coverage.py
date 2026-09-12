@@ -531,6 +531,7 @@ def test_a_malformed_quoted_path_is_a_measurement_error() -> None:
 
 _AWKWARD_NAMES = (
     "new\nline.py",
+    "carriage\rreturn.py",
     "tab\there.py",
     'double"quote.py',
     "back\\slash.py",

@@ -423,21 +423,26 @@ def format_report(result: DiffCoverage, threshold: float) -> str:
 
 
 def _run_git(args: Sequence[str], repo_root: Path) -> str:
-    """Run a git command inside the repository and return its stdout."""
+    """Run a git command inside the repository and return its stdout.
+
+    The output is read as bytes and decoded here, not through ``text=True``:
+    the text layer translates every carriage return into a newline, and the
+    ``-z`` listing of untracked files carries names verbatim, so a file whose
+    name holds ``\\r`` would be looked up under a name that does not exist.
+    """
 
     result = subprocess.run(
         ["git", *args],
         check=False,
         capture_output=True,
-        text=True,
         cwd=repo_root,
     )
     if result.returncode != 0:
         raise MeasurementError(
             f"git {' '.join(args)} failed with status {result.returncode}: "
-            f"{result.stderr.strip()}"
+            f"{result.stderr.decode('utf-8', errors='replace').strip()}"
         )
-    return result.stdout
+    return result.stdout.decode("utf-8")
 
 
 def collect_diff(base_ref: str, repo_root: Path) -> tuple[str, str]:

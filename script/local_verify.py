@@ -157,6 +157,31 @@ def _capture(command: Sequence[str]) -> subprocess.CompletedProcess[str]:
         )
 
 
+def _capture_raw(command: Sequence[str]) -> subprocess.CompletedProcess[bytes]:
+    """Run a command quietly and return its output untranslated.
+
+    ``_capture`` reads through the text layer, which turns every carriage
+    return into a newline; that is right for prose and wrong for a ``-z``
+    path list, where the bytes are the name. A file called ``cr\\rx.py`` came
+    back as ``cr\\nx.py``, and the digest clamp recorded a file that does not
+    exist. Path listings come through here, everything read as prose through
+    ``_capture``.
+    """
+
+    try:
+        return subprocess.run(
+            command,
+            check=False,
+            capture_output=True,
+            cwd=str(REPO_ROOT),
+            timeout=CAPTURE_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired:
+        return subprocess.CompletedProcess(
+            list(command), returncode=124, stdout=b"", stderr=b"timed out"
+        )
+
+
 def _tool_version(interpreter: str, module: str) -> str:
     """Return the reported version of a module-invoked tool."""
 
@@ -190,7 +215,7 @@ def _digest_of(paths: Sequence[str]) -> dict[str, str]:
     return digests
 
 
-def _nul_separated(stdout: str) -> list[str]:
+def _nul_separated(stdout: bytes) -> list[str]:
     """Split ``-z`` output of git into paths, dropping the trailing empty entry.
 
     ``-z`` is the only form in which git hands over a path verbatim. Without it
@@ -198,10 +223,12 @@ def _nul_separated(stdout: str) -> list[str]:
     control byte, ``"t\\303\\274r.py"`` for ``tür.py``, and a consumer that
     hashes or looks up that literal string is measuring a file that does not
     exist. ``script/diff_coverage.py`` decodes that quoting for the diff header
-    it parses; here the quoting is avoided at the source instead.
+    it parses; here the quoting is avoided at the source instead. The input is
+    bytes for the same reason: read as text, a carriage return in a name would
+    already have become a newline.
     """
 
-    return [entry for entry in stdout.split("\0") if entry]
+    return [entry.decode("utf-8") for entry in stdout.split(b"\0") if entry]
 
 
 def _changed_paths() -> list[str]:
@@ -219,7 +246,7 @@ def _changed_paths() -> list[str]:
         ["git", "diff", "HEAD", "--name-only", "-z"],
         ["git", "ls-files", "--others", "--exclude-standard", "-z"],
     ):
-        completed = _capture(command)
+        completed = _capture_raw(command)
         if completed.returncode != 0:
             continue
         paths.extend(_nul_separated(completed.stdout))
@@ -238,7 +265,7 @@ def _branch_paths(base: str) -> set[str]:
     paths = set(_changed_paths())
     if merge_base.returncode != 0 or not merge_base.stdout.strip():
         return paths
-    completed = _capture(
+    completed = _capture_raw(
         ["git", "diff", "--name-only", "-z", f"{merge_base.stdout.strip()}..HEAD"]
     )
     if completed.returncode == 0:
