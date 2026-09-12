@@ -172,13 +172,6 @@ from .const import (
     coerce_ignored_mapping,
     service_device_identifier,
 )
-from .coordinator.helpers.registry import (
-    OwnershipIntent,
-    detect_device_registry_capabilities,
-    execute_ownership_plan,
-    plan_device_ownership,
-    resolve_device_by_identifiers,
-)
 from .email_utils import normalize_email, normalize_email_or_default, unique_account_id
 from .entry_reload_gate import (
     entry_reload_is_hopeless as _entry_reload_is_hopeless,
@@ -6981,6 +6974,19 @@ class ConfigFlow(
 
         if hass is None or entry is None:
             return
+
+        # Imported here and not at module scope: ``coordinator/__init__.py``
+        # eagerly imports the API with its crypto and network dependencies, and
+        # the config flow must stay importable on the flow-only path even when
+        # that graph does not (``agents/config_flow/AGENTS.md``, "Integration
+        # module imports"). A local import keeps the names visible to mypy.
+        from .coordinator.helpers.registry import (
+            OwnershipIntent,
+            detect_device_registry_capabilities,
+            execute_ownership_plan,
+            plan_device_ownership,
+            resolve_device_by_identifiers,
+        )
 
         dev_reg = dr.async_get(hass)
         update_call = getattr(dev_reg, "async_update_device", None)

@@ -54,6 +54,7 @@ attributed to the integration package, not to a re-export shim.
 
 from __future__ import annotations
 
+import inspect
 from types import SimpleNamespace
 from typing import Any
 
@@ -1095,11 +1096,26 @@ _needs_ap10 = pytest.mark.skipif(
 
 
 def _profile(**parameters: object) -> object:
-    """Build a callable whose signature carries exactly ``parameters``."""
-    names = ", ".join(f"{name}=None" for name in parameters)
-    namespace: dict[str, object] = {}
-    exec(f"def _call(device_id, *, {names}):\n    return None\n", namespace)  # noqa: S102
-    return namespace["_call"]
+    """Build a callable whose signature carries exactly ``parameters``.
+
+    The detector reads ``inspect.signature``, which honours ``__signature__``,
+    so the keyword-only parameters are declared on a plain function instead of
+    being compiled from source.
+    """
+
+    def _call(device_id: object, **kwargs: object) -> None:
+        return None
+
+    _call.__signature__ = inspect.Signature(
+        [
+            inspect.Parameter("device_id", inspect.Parameter.POSITIONAL_OR_KEYWORD),
+            *(
+                inspect.Parameter(name, inspect.Parameter.KEYWORD_ONLY, default=None)
+                for name in parameters
+            ),
+        ]
+    )
+    return _call
 
 
 @_needs_ap10
@@ -1159,9 +1175,11 @@ class TestDetectDeviceRegistryCapabilities:
         instead would send ``new_config_subentry_id`` at a double that silently
         swallows it, and the test would pass while production broke.
         """
-        namespace: dict[str, object] = {}
-        exec("def _call(device_id, **kwargs):\n    return None\n", namespace)  # noqa: S102
-        caps = registry_helpers.detect_device_registry_capabilities(namespace["_call"])
+
+        def _call(device_id: object, **kwargs: object) -> None:
+            return None
+
+        caps = registry_helpers.detect_device_registry_capabilities(_call)
         assert caps.accepts_var_keyword is True
         assert caps.single_owner_model is False
         assert caps.subentry_kwarg_for_update == "config_subentry_id"

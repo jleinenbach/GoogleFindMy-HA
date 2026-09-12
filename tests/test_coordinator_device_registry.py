@@ -3119,3 +3119,154 @@ async def test_button_relink_refuses_a_service_device_as_tracker_target(
 
     assert button_entity.device_id != service_device.id
     assert ent_reg.updated == []
+
+
+def test_service_device_stale_service_link_is_detached_by_a_move(
+    fake_registry: _FakeDeviceRegistry,
+) -> None:
+    """A service link the entry no longer knows is detached, never bare-removed.
+
+    Codecov finding on PR #1274: the detach arm of the service-device sync was
+    rewritten by the migration and had no test on either side of it. The device
+    sits on a service subentry the entry has since replaced; the coordinator
+    cannot resolve a current service subentry, so the sync moves the device to
+    the entry root and names the stale link as the one to detach.
+    """
+
+    coordinator = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
+    entry = _build_entry_with_subentries("entry-stale-service-link")
+    _prepare_coordinator_for_registry(coordinator, entry)
+
+    coordinator._ensure_service_device_exists()
+    service_ident = service_device_identifier(entry.entry_id)
+    service_entry = next(
+        device
+        for device in fake_registry.devices
+        if service_ident in device.identifiers
+    )
+    stale_id = entry.service_subentry_id
+    assert stale_id is not None
+    assert service_entry.config_entries_subentries[entry.entry_id] == {stale_id}
+
+    # The entry now names a service subentry the registry has not caught up
+    # with; the sync defers it and is left with no current service subentry.
+    entry.service_subentry_id = "service-not-yet-in-registry"
+    fake_registry.updated.clear()
+    coordinator._service_device_ready = False
+
+    coordinator._ensure_service_device_exists()
+
+    assert fake_registry.updated, "the stale link must be rewritten, not left alone"
+    payload = fake_registry.updated[-1]
+    assert payload["device_id"] == service_entry.id
+    assert stale_id not in service_entry.config_entries_subentries[entry.entry_id]
+    assert None in service_entry.config_entries_subentries[entry.entry_id]
+    assert service_entry.config_subentry_id is None
+
+
+def test_service_device_hub_link_survives_the_move_on_a_legacy_core_and_is_detached(
+    fake_registry: _FakeDeviceRegistry,
+) -> None:
+    """Legacy counterpart of ``test_service_device_on_entry_root_is_moved_not_deleted``.
+
+    Below Core 2026.8 ``add_config_subentry_id`` is a set union
+    (``device_registry.py``, the ``elif add_config_subentry_id not in ...``
+    arm, and the ``_FakeDeviceRegistry`` double mirrors that), so a plain add
+    would leave a root-linked service device with ``{None, subentry}``. The
+    healing step must therefore name the hub link as the one to detach in the
+    very same MOVE, and it must not fall back to a bare removal. Measured
+    while writing this: the healing branch is what runs here, the later
+    ``_detach_service_hub_link`` branch is not reached on this core either.
+    """
+
+    coordinator = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
+    entry = _build_entry_with_subentries("entry-legacy-root-svc")
+    _prepare_coordinator_for_registry(coordinator, entry)
+
+    service_ident = service_device_identifier(entry.entry_id)
+    existing_service = _FakeDeviceEntry(
+        identifiers={service_ident, _service_subentry_identifier(entry)},
+        config_entry_id=entry.entry_id,
+        name=None,
+        manufacturer=SERVICE_DEVICE_MANUFACTURER,
+        model=SERVICE_DEVICE_MODEL,
+        sw_version=INTEGRATION_VERSION,
+        entry_type=dr.DeviceEntryType.SERVICE,
+        translation_key=SERVICE_DEVICE_TRANSLATION_KEY,
+        translation_placeholders={},
+        config_subentry_id=None,
+    )
+    assert existing_service.config_entries_subentries[entry.entry_id] == {None}
+    fake_registry.devices.append(existing_service)
+
+    coordinator._ensure_service_device_exists()
+
+    assert existing_service in fake_registry.devices, "the device was deleted"
+    assert existing_service.config_entries_subentries[entry.entry_id] == {
+        entry.service_subentry_id
+    }
+    assert existing_service.config_subentry_id == entry.service_subentry_id
+    detaches = [
+        payload
+        for payload in fake_registry.updated
+        if payload.get("remove_config_entry_id") == entry.entry_id
+        and payload.get("remove_config_subentry_id") is None
+        and "remove_config_subentry_id" in payload
+    ]
+    assert len(detaches) == 1, fake_registry.updated
+    assert detaches[0]["add_config_subentry_id"] == entry.service_subentry_id
+
+
+def test_service_device_update_retries_without_translation_when_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A registry that rejects translation kwargs on update gets a second, bare write.
+
+    The create-path rejection is covered by
+    ``test_service_device_translation_rejection_is_fatal``; this is the update
+    path of the same double, where the sync retries without the translation
+    keys and marks the registry as not supporting them before the backfill
+    through ``async_get_or_create`` raises for the same reason.
+    """
+
+    _FakeDeviceEntry._counter = 0
+    if not hasattr(dr, "DeviceEntryType"):
+        monkeypatch.setattr(
+            dr,
+            "DeviceEntryType",
+            SimpleNamespace(SERVICE="service"),
+            raising=False,
+        )
+    registry = _TranslationRejectingRegistry()
+    monkeypatch.setattr(dr, "async_get", lambda _hass: registry)
+
+    coordinator = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
+    entry = _build_entry_with_subentries("entry-translation-update")
+    _prepare_coordinator_for_registry(coordinator, entry)
+
+    service_ident = service_device_identifier(entry.entry_id)
+    existing_service = _FakeDeviceEntry(
+        identifiers={service_ident, _service_subentry_identifier(entry)},
+        config_entry_id=entry.entry_id,
+        name=None,
+        manufacturer=SERVICE_DEVICE_MANUFACTURER,
+        model=SERVICE_DEVICE_MODEL,
+        sw_version=INTEGRATION_VERSION,
+        entry_type=dr.DeviceEntryType.SERVICE,
+        translation_key=None,
+        translation_placeholders=None,
+        config_subentry_id=entry.service_subentry_id,
+    )
+    registry.devices.append(existing_service)
+    # The signature probe said yes (cached), the call says no: that is the
+    # gap the retry exists for.
+    coordinator._device_registry_supports_translation_update = True
+
+    with pytest.raises(TypeError):
+        coordinator._ensure_service_device_exists()
+
+    assert registry.update_attempts == [
+        {"has_translation_key": True, "has_translation_placeholders": True},
+        {"has_translation_key": False, "has_translation_placeholders": False},
+    ]
+    assert coordinator._device_registry_supports_translation_update is False

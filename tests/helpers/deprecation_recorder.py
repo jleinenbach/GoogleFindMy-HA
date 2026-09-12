@@ -33,7 +33,7 @@ from __future__ import annotations
 import sys
 import traceback
 from dataclasses import dataclass, field
-from types import ModuleType
+from types import CodeType, FunctionType, ModuleType
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -253,9 +253,14 @@ def call_from_integration_frame(func: Any, /, *args: Any, **kwargs: Any) -> Any:
     alternative would be adding test-only helpers to production code.
     """
     source = "def _invoke(func, args, kwargs):\n    return func(*args, **kwargs)\n"
-    namespace: dict[str, Any] = {}
-    exec(compile(source, PROBE_FILENAME, "exec"), namespace)  # noqa: S102
-    return namespace["_invoke"](func, args, kwargs)
+    module_code = compile(source, PROBE_FILENAME, "exec")
+    # Instantiate the function straight from its code object: the frame gets
+    # ``PROBE_FILENAME`` as ``co_filename`` without executing module-level code.
+    trampoline_code = next(
+        const for const in module_code.co_consts if isinstance(const, CodeType)
+    )
+    trampoline = FunctionType(trampoline_code, {})
+    return trampoline(func, args, kwargs)
 
 
 def bind_into(

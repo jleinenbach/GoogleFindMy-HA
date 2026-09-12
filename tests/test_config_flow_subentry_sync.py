@@ -753,7 +753,10 @@ def _watch_planner(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
         calls.append({"intent": intent, "operations": operations, **kwargs})
         return operations
 
-    monkeypatch.setattr(config_flow, "plan_device_ownership", _spy)
+    # ``config_flow`` imports the planner inside the binding function (the
+    # flow-only import path must not load ``coordinator/__init__.py``), so the
+    # name is bound from ``registry_helpers`` at call time and is patched there.
+    monkeypatch.setattr(registry_helpers, "plan_device_ownership", _spy)
     return calls
 
 

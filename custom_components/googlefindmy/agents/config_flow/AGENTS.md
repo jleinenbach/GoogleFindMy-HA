@@ -118,7 +118,11 @@ coordinator-less fallback path that calls `dev_reg.async_update_device`
 directly), call the pure planner `plan_device_ownership` from
 `custom_components/googlefindmy/coordinator/helpers/registry.py` and run the
 operations it returns through `execute_ownership_plan` in the same module;
-neither needs `hass` nor a coordinator instance. There are two executors and that
+neither needs `hass` nor a coordinator instance. Import that helper module inside
+the function that uses it, never at module scope: the import runs
+`coordinator/__init__.py`, which loads the full API graph, and the flow-only import
+path must not depend on that graph ("Integration module imports" above). There are
+two executors and that
 is deliberate, because not every call site has a coordinator; what stays single
 is the *translation*. What must
 **not** happen is a third hand-written keyword translation in `config_flow.py`. One

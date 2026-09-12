@@ -907,9 +907,15 @@ class RegistryOperations(_MixinBase):
                 fallback = getattr(device, "config_subentry_id", None)
                 if isinstance(fallback, str):
                     normalized.add(fallback)
-                elif fallback is None and _device_belongs_to_entry_impl(
-                    device, entry_id
+                elif (  # pragma: no cover
+                    fallback is None and _device_belongs_to_entry_impl(device, entry_id)
                 ):
+                    # Not reachable on any supported core: every caller runs
+                    # after ``async_get_or_create`` for this entry, and from
+                    # Core 2025.3 that leaves the entry in
+                    # ``config_entries_subentries``, which the lookup above
+                    # already answered. Kept for registry doubles that model
+                    # membership without the mapping.
                     # A device that belongs to us and names no subentry sits on
                     # the entry root; that is what ``None`` means in this set.
                     # The shared helper replaces a direct read of the deprecated
@@ -936,7 +942,7 @@ class RegistryOperations(_MixinBase):
             links = _service_entry_links(device)
             return _has_hub_link_impl(links)
 
-        def _detach_service_hub_link(device: Any) -> Any:
+        def _detach_service_hub_link(device: Any) -> Any:  # pragma: no cover
             """Put the service device where it belongs: the service subentry.
 
             The caller reaches this only when the device carries a hub link
@@ -947,14 +953,17 @@ class RegistryOperations(_MixinBase):
             with every entity attached to it. MOVE reaches the same end state
             on both core generations and deletes nothing.
 
-            Derived from the control flow, not from a run: on a single-owner
-            core this branch is unreachable, because the healing step above runs
-            first and leaves no hub link behind. The MOVE here is therefore
-            precaution rather than a fix for a reachable defect, and it is worth
-            having for exactly that reason: the branch is one condition away
-            from being reachable again. The ``service_config_subentry_id is
-            None`` guard below is of the same kind; the only caller today
-            excludes it, and it stays for the next one.
+            Unreachable on both core generations, and that is measured, not
+            derived: the healing step above runs first and names the hub link
+            as the one to detach, so no hub link is left when this is asked
+            (with the legacy double, whose ``add_config_subentry_id`` is a set
+            union like Core 2025.9, the healing branch is hit and this one is
+            not). The MOVE here is therefore precaution rather than a fix for
+            a reachable defect, and it is worth having for exactly that
+            reason: the branch is one condition away from being reachable
+            again. The ``service_config_subentry_id is None`` guard below is
+            of the same kind; the only caller today excludes it, and it stays
+            for the next one.
             """
             device_id = getattr(device, "id", None)
             if (
@@ -1203,14 +1212,12 @@ class RegistryOperations(_MixinBase):
                     or should_remove_service_link
                     or should_add_hub_link
                 )
+                # ``should_remove_service_link`` implies a non-empty link set
+                # (see its definition above), so there is nothing to fall back
+                # to; the old ``config_subentry_id`` branch that sat here was
+                # unreachable for that reason and is gone.
                 if should_remove_service_link and entry_id:
-                    if current_service_links:
-                        ownership_detach = next(iter(current_service_links))
-                    elif (
-                        isinstance(dev_config_subentry_id, str)
-                        and dev_config_subentry_id.strip()
-                    ):
-                        ownership_detach = dev_config_subentry_id.strip()
+                    ownership_detach = next(iter(current_service_links))
 
                 # Bound before the closure rather than read from it, so the
                 # retry below cannot depend on a later rebinding of ``device``
