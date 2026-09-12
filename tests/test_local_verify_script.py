@@ -581,17 +581,18 @@ def test_the_verdict_counts_the_stages_that_did_not_run() -> None:
 def test_the_suite_command_duplicates_no_configured_flag(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """Two flags must come from pyproject alone, for two different reasons.
+    """Two flags are pinned to exactly one source each, for two different reasons.
 
     ``--cov-fail-under``: the floor lives in ``[tool.coverage.report]`` and is
     clamped against CI there; a copy here would sit outside that clamp.
 
-    ``-q``: it counts up. ``addopts`` already carries one, so a second one makes
-    pytest drop its summary line, and the report this stage hands a reviewer
-    would name neither the number of tests nor the number of failures. The
-    verdict would stay correct (it reads the exit status) while the evidence
-    quietly disappeared. Measured on 2026-09-10: with one ``-q`` the summary
-    line is printed, with two it is not.
+    ``-q``: it counts up. The suite command supplies exactly one, and
+    ``addopts`` carries none, because a second one makes pytest drop its
+    summary line, and the report this stage hands a reviewer would name
+    neither the number of tests nor the number of failures. The verdict
+    would stay correct (it reads the exit status) while the evidence quietly
+    disappeared. Measured on 2026-09-10 and again on 2026-09-12: with one
+    ``-q`` the summary line is printed, with two it is not.
     """
 
     recorded: list[Sequence[str]] = []
@@ -604,11 +605,12 @@ def test_the_suite_command_duplicates_no_configured_flag(
     local_verify._run_suite("/a/python", tmp_path / "c.xml")
 
     assert not any("--cov-fail-under" in argument for argument in recorded[0])
-    assert "-q" not in recorded[0]
+    assert list(recorded[0]).count("-q") == 1
     assert "--quiet" not in recorded[0]
 
-    # The premise of the omission, pinned: if addopts ever loses its own -q, the
-    # stage stops being quiet and this test should say so rather than pass on.
+    # The premise of the single -q, pinned: if addopts ever grows one again, the
+    # stage runs with -qq and loses its summary line, and this test should say
+    # so rather than pass on.
     try:
         import tomllib
     except ModuleNotFoundError:  # pragma: no cover - py<3.11 path
@@ -624,7 +626,8 @@ def test_the_suite_command_duplicates_no_configured_flag(
         .get("ini_options", {})
         .get("addopts", [])
     )
-    assert "-q" in addopts
+    assert "-q" not in addopts
+    assert "--quiet" not in addopts
 
 
 def test_the_stages_that_cannot_run_here_do_not_move_the_status(

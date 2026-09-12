@@ -55,8 +55,8 @@ preflight:
 		$(foreach interpreter,$(PREFLIGHT_PYTHONS),--python $(interpreter))
 
 test-single:
-	@echo "[make test-single] Running pytest $(PYTEST_ARGS) $(TEST)"
-	@$(POETRY) run pytest $(PYTEST_ARGS) $(TEST)
+	@echo "[make test-single] Running pytest -q $(PYTEST_ARGS) $(TEST)"
+	@$(POETRY) run pytest -q $(PYTEST_ARGS) $(TEST)
 
 test-cov:
 	@echo "[make test-cov] Running pytest -q --cov with coverage"
@@ -64,7 +64,7 @@ test-cov:
 
 test-ha:
 	@echo "[make test-ha] Running targeted Home Assistant regression smoke tests"
-	@$(POETRY) run pytest $(PYTEST_ARGS) \
+	@$(POETRY) run pytest -q $(PYTEST_ARGS) \
 			tests/test_entity_recovery_manager.py \
 			tests/test_homeassistant_callback_stub_helper.py
 	@echo "[make test-ha] Executing full-suite coverage run (see pytest_output.log for details)"

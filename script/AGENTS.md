@@ -94,7 +94,7 @@ report: a stage that could not run must never look like a stage that passed.
 | S2 lint | `python -m ruff check .` | `OK`, `FAILED`, `NOT CHECKED` without ruff |
 | S3 types | `python -m mypy --strict --install-types --non-interactive` | `OK`, `FAILED`, `NOT CHECKED` without mypy |
 | S4 spelling | `python -m codespell_lib` | `OK`, `NOTE`, `NOT CHECKED` when the tool is absent |
-| S5 suite and project coverage | `pytest --cov` per track; no own `-q`, because `addopts` already carries one and a second would drop the summary line | `OK`, `FAILED`, `NOT CHECKED` |
+| S5 suite and project coverage | `pytest -q --cov` per track; exactly one `-q`, supplied by the script, because `addopts` carries none and a second one would drop the summary line | `OK`, `FAILED`, `NOT CHECKED` |
 | S6 patch coverage | `script/diff_coverage.py` | `OK`, `NOTE`, `FAILED`, `NOT CHECKED` |
 | S7 security scans | bandit, semgrep, pip-audit | `NOT CHECKED`, with the measured presence of each tool |
 | S8 manifest | hassfest | `NOT CHECKED`, with the measured presence of Docker |

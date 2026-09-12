@@ -318,12 +318,13 @@ def _run_suite(interpreter: str, xml_path: Path) -> tuple[int, str]:
         interpreter,
         "-m",
         "pytest",
-        # No -q here on purpose. [tool.pytest.ini_options] addopts in
-        # pyproject.toml already carries one, and -q counts up: a second one
-        # makes pytest drop its summary line, so the report this stage is meant
-        # to hand a reviewer would name neither the number of tests nor the
-        # number of failures. The verdict would stay correct (it reads the exit
-        # status) while the evidence quietly disappeared.
+        # Exactly one -q, and it is this one. [tool.pytest.ini_options] addopts
+        # in pyproject.toml carries none on purpose, and -q counts up: a second
+        # one makes pytest drop its summary line, so the report this stage is
+        # meant to hand a reviewer would name neither the number of tests nor
+        # the number of failures. The verdict would stay correct (it reads the
+        # exit status) while the evidence quietly disappeared.
+        "-q",
         "--no-header",
         "-p",
         "no:cacheprovider",
