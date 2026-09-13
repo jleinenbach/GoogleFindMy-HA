@@ -110,6 +110,77 @@ _MAP_COPY_HELPER_JS = """
         }
 """
 
+# Tile layer of the map, in two variants. Defined as plain (non-f) strings so
+# their literal JS braces and the Leaflet placeholders ``{z}``/``{x}``/``{y}``/
+# ``{token}`` need no doubling; ``_tile_layer_js`` fills the ``__GFMY_*__``
+# placeholders and the result is interpolated into the f-string template via a
+# single ``{tile_layer_js}`` placeholder.
+#
+# Fallback (any Core without ``map_tiles``): tiles come straight from
+# OpenStreetMap as before. The URL is the one hostname the OSMF tile usage
+# policy names; ``referrerPolicy: 'origin'`` identifies the requests without
+# leaking the page path (and its token).
+_MAP_TILE_LAYER_OSM_JS = """L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            attribution: '__GFMY_ATTRIBUTION__',
+            referrerPolicy: 'origin'
+        }).addTo(map);"""
+
+# Proxy (Core >= 2026.9 with ``map_tiles``): tiles are fetched from this
+# instance, which forwards them to OpenStreetMap with an application
+# User-Agent, a contact address and a cache. The URL is root-relative, so it
+# works behind a reverse proxy and through Nabu Casa, and no referrer policy is
+# needed because nothing leaves the origin. Leaflet substitutes ``{token}`` from
+# the layer options on every request, which is what makes a refreshed token
+# take effect without rebuilding the layer.
+_MAP_TILE_LAYER_PROXY_JS = """var gfmyTileLayer = L.tileLayer('__GFMY_TILE_URL__', {
+            attribution: '__GFMY_ATTRIBUTION__',
+            maxNativeZoom: __GFMY_MAX_NATIVE_ZOOM__,
+            token: __GFMY_TILE_TOKEN__
+        }).addTo(map);
+        var GFMY_TILE_TOKEN_REFRESH_THROTTLE_MS = 30000;
+        var gfmyLastTileTokenRefresh = 0;
+        // An <img> exposes no status, so a 403 from a rotated token is only
+        // visible as tileerror; throttled like the frontend (30 s); an
+        // unchanged token means the failure was not the token, so no redraw.
+        gfmyTileLayer.on('tileerror', function () {
+            var now = Date.now();
+            if (now - gfmyLastTileTokenRefresh < GFMY_TILE_TOKEN_REFRESH_THROTTLE_MS) {
+                return;
+            }
+            gfmyLastTileTokenRefresh = now;
+            var shareToken = new URL(window.location).searchParams.get('token');
+            if (!shareToken) {
+                return;
+            }
+            fetch('__GFMY_REFRESH_PATH__?token=' + encodeURIComponent(shareToken), { cache: 'no-store' })
+                .then(function (response) {
+                    if (!response.ok) {
+                        return null;
+                    }
+                    return response.json();
+                })
+                .then(function (body) {
+                    if (body && typeof body.token === 'string' && body.token !== gfmyTileLayer.options.token) {
+                        gfmyTileLayer.options.token = body.token;
+                        gfmyTileLayer.redraw();
+                    }
+                })
+                .catch(function () {});
+        });"""
+
+
+def _tile_layer_js(token: str | None) -> str:
+    """Return the tile layer script for the page: proxy with a token, else OSM."""
+    if token is None:
+        return _MAP_TILE_LAYER_OSM_JS.replace("__GFMY_ATTRIBUTION__", _OSM_ATTRIBUTION)
+    return (
+        _MAP_TILE_LAYER_PROXY_JS.replace("__GFMY_TILE_URL__", _MAP_TILES_RASTER_URL)
+        .replace("__GFMY_ATTRIBUTION__", _OSM_ATTRIBUTION)
+        .replace("__GFMY_MAX_NATIVE_ZOOM__", str(_MAP_TILES_RASTER_MAX_NATIVE_ZOOM))
+        .replace("__GFMY_TILE_TOKEN__", json.dumps(token))
+        .replace("__GFMY_REFRESH_PATH__", _MAP_TILES_TOKEN_REFRESH_PATH)
+    )
+
 
 def _plus_code_for(lat: float, lon: float) -> str | None:
     """Return the full 10-digit Plus Code for a coordinate, or None if invalid.
@@ -936,6 +1007,7 @@ class GoogleFindMyMapView(HomeAssistantView):
         language = _resolve_language(self.hass)
         labels = resolve_map_labels(language)
         labels_json = json.dumps(labels)
+        tile_layer_js = _tile_layer_js(_map_tiles_access_token(self.hass))
         html_attrs = f'lang="{escape(language or "en")}"'
         if is_rtl(language):
             html_attrs += ' dir="rtl"'
@@ -1016,10 +1088,7 @@ class GoogleFindMyMapView(HomeAssistantView):
     <script>{_leaflet_asset("leaflet.js")}</script>
     <script>
         var map = L.map('map').setView([{center_lat}, {center_lon}], 13);
-        L.tileLayer('https://{{s}}.tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png', {{
-            attribution: '© OpenStreetMap contributors',
-            referrerPolicy: 'origin'
-        }}).addTo(map);
+        {tile_layer_js}
 
         var locations = {locations_json};
         var markers = L.layerGroup().addTo(map);
