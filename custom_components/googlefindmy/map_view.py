@@ -8,6 +8,7 @@ import json
 import logging
 import math
 import time
+from collections.abc import Mapping, Sequence
 from datetime import datetime, timedelta
 from html import escape
 from pathlib import Path
@@ -108,6 +109,94 @@ _MAP_COPY_HELPER_JS = """
             gfmyFlashCopied(iconEl);
         }
 """
+
+# Tile layer of the map, in two variants. Defined as plain (non-f) strings so
+# their literal JS braces and the Leaflet placeholders ``{z}``/``{x}``/``{y}``/
+# ``{token}`` need no doubling; ``_tile_layer_js`` fills the ``__GFMY_*__``
+# placeholders and the result is interpolated into the f-string template via a
+# single ``{tile_layer_js}`` placeholder.
+#
+# Fallback (any Core without ``map_tiles``): tiles come straight from
+# OpenStreetMap as before. The URL is the one hostname the OSMF tile usage
+# policy names; ``referrerPolicy: 'origin'`` identifies the requests without
+# leaking the page path (and its token).
+_MAP_TILE_LAYER_OSM_JS = """L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            attribution: '__GFMY_ATTRIBUTION__',
+            referrerPolicy: 'origin'
+        }).addTo(map);"""
+
+# Proxy (Core >= 2026.9 with ``map_tiles``): tiles are fetched from this
+# instance, which forwards them to OpenStreetMap with an application
+# User-Agent, a contact address and a cache. The URL is root-relative, so it
+# works behind a reverse proxy and through Nabu Casa. ``referrerPolicy:
+# 'origin'`` is set here as on the direct layer, although Core already serves
+# the page with ``Referrer-Policy: no-referrer``
+# (``homeassistant.components.http.headers``), so the tile requests carry no
+# ``Referer`` at all under that header. The explicit policy keeps the property
+# independent of Core's header: without it, a browser default of
+# ``strict-origin-when-cross-origin`` would send the full page URL, share token
+# included, once per tile into any access log.
+# Leaflet substitutes ``{token}`` from the layer options on every request,
+# which is what makes a refreshed token take effect without rebuilding the
+# layer.
+_MAP_TILE_LAYER_PROXY_JS = """var gfmyTileLayer = L.tileLayer('__GFMY_TILE_URL__', {
+            attribution: '__GFMY_ATTRIBUTION__',
+            maxNativeZoom: __GFMY_MAX_NATIVE_ZOOM__,
+            referrerPolicy: 'origin',
+            token: __GFMY_TILE_TOKEN__
+        }).addTo(map);
+        var GFMY_TILE_TOKEN_REFRESH_THROTTLE_MS = 30000;
+        var gfmyLastTileTokenRefresh = 0;
+        // An <img> exposes no status, so a 403 from a rotated token is only
+        // visible as tileerror; throttled like the frontend (30 s); an
+        // unchanged token means the failure was not the token, so no redraw.
+        gfmyTileLayer.on('tileerror', function () {
+            var now = Date.now();
+            if (now - gfmyLastTileTokenRefresh < GFMY_TILE_TOKEN_REFRESH_THROTTLE_MS) {
+                return;
+            }
+            gfmyLastTileTokenRefresh = now;
+            var shareToken = new URL(window.location).searchParams.get('token');
+            if (!shareToken) {
+                return;
+            }
+            // The share token travels in a header, not in the URL, so it does
+            // not end up in the request line of an access log; the referrer
+            // policy mirrors the tile layer (Core's page header already sends
+            // no referrer, this keeps it so without depending on it).
+            fetch('__GFMY_REFRESH_PATH__', {
+                cache: 'no-store',
+                referrerPolicy: 'origin',
+                headers: { '__GFMY_TOKEN_HEADER__': shareToken }
+            })
+                .then(function (response) {
+                    if (!response.ok) {
+                        return null;
+                    }
+                    return response.json();
+                })
+                .then(function (body) {
+                    if (body && typeof body.token === 'string' && body.token !== gfmyTileLayer.options.token) {
+                        gfmyTileLayer.options.token = body.token;
+                        gfmyTileLayer.redraw();
+                    }
+                })
+                .catch(function () {});
+        });"""
+
+
+def _tile_layer_js(token: str | None) -> str:
+    """Return the tile layer script for the page: proxy with a token, else OSM."""
+    if token is None:
+        return _MAP_TILE_LAYER_OSM_JS.replace("__GFMY_ATTRIBUTION__", _OSM_ATTRIBUTION)
+    return (
+        _MAP_TILE_LAYER_PROXY_JS.replace("__GFMY_TILE_URL__", _MAP_TILES_RASTER_URL)
+        .replace("__GFMY_ATTRIBUTION__", _OSM_ATTRIBUTION)
+        .replace("__GFMY_MAX_NATIVE_ZOOM__", str(_MAP_TILES_RASTER_MAX_NATIVE_ZOOM))
+        .replace("__GFMY_TILE_TOKEN__", json.dumps(token))
+        .replace("__GFMY_REFRESH_PATH__", _MAP_TILES_TOKEN_REFRESH_PATH)
+        .replace("__GFMY_TOKEN_HEADER__", _MAP_TILES_TOKEN_HEADER)
+    )
 
 
 def _plus_code_for(lat: float, lon: float) -> str | None:
@@ -398,6 +487,33 @@ def _leaflet_asset(name: str) -> str:
         ) from None
 
 
+# Home Assistant Core >= 2026.9 ships the system component ``map_tiles``, which
+# proxies OpenStreetMap tiles with an application User-Agent and a server-side
+# cache. It publishes no Python API; the only runtime coupling is the key under
+# which it stores its short-lived query tokens in ``hass.data``. That key
+# mirrors ``homeassistant.components.map_tiles.const.DATA_ACCESS_TOKENS``
+# (a ``HassKey``, which is a ``str`` at runtime) and is pinned by the contract
+# test in ``tests/test_map_view_tiles.py``.
+_MAP_TILES_DATA_KEY = "map_tiles"
+_MAP_TILES_RASTER_URL = "/api/map_tiles/raster/{z}/{x}/{y}.png?token={token}"
+# The Core raster proxy answers 404 above this zoom level.
+_MAP_TILES_RASTER_MAX_NATIVE_ZOOM = 19
+# Same wording as the Core map (attribution with the copyright link the OSMF
+# attribution guidelines ask for); shared by the proxy and the fallback layer.
+_OSM_ATTRIBUTION = (
+    '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
+    " contributors"
+)
+# Share-token guarded endpoint that hands the current Core token to a page that
+# outlived the token rotation (see GoogleFindMyMapTilesTokenView).
+_MAP_TILES_TOKEN_REFRESH_PATH = "/api/googlefindmy/map_tiles_token"
+# Request header carrying the map share token to the refresh endpoint. A header
+# rather than a query parameter keeps the credential out of the request line
+# that HTTP servers and reverse proxies log; not ``Authorization``, because the
+# Home Assistant auth middleware would try to read that as a Home Assistant
+# token.
+_MAP_TILES_TOKEN_HEADER = "X-GoogleFindMy-Map-Token"
+
 # The map URL carries its access token in the query string, so every response of
 # this view is as sensitive as the link itself. `no-store` keeps it out of shared
 # browser and proxy caches, `noindex, nofollow` keeps it out of search engines on
@@ -503,6 +619,37 @@ def _resolve_entry_by_token(
         if auth_token in accepted:
             return entry, accepted
     return None, None
+
+
+def _map_tiles_access_token(hass: Any) -> str | None:
+    """Return the newest Core ``map_tiles`` access token, or ``None`` to fall back.
+
+    Core (>= 2026.9) keeps a short deque of hex tokens under
+    ``hass.data[_MAP_TILES_DATA_KEY]`` (mirrors
+    ``homeassistant.components.map_tiles.const.DATA_ACCESS_TOKENS``) and rotates
+    them every 30 minutes; the last element is the current one.
+
+    Fail-open rule: anything that is not a non-empty sequence of ASCII
+    alphanumeric strings (no ``data``, missing key, empty deque, a bare string,
+    a non-string element, a token with unexpected characters) yields ``None``
+    and the map keeps loading tiles directly from OpenStreetMap as before. The
+    alphanumeric check is also what keeps the token safe to embed in the page.
+    The token is never logged.
+    """
+    data = getattr(hass, "data", None)
+    if not isinstance(data, Mapping):
+        return None
+    tokens = data.get(_MAP_TILES_DATA_KEY)
+    if isinstance(tokens, (str, bytes)) or not isinstance(tokens, Sequence):
+        return None
+    if not tokens:
+        return None
+    token = tokens[-1]
+    if not isinstance(token, str) or not token:
+        return None
+    if not token.isascii() or not token.isalnum():
+        return None
+    return token
 
 
 # ------------------------------- Map View -----------------------------------
@@ -883,6 +1030,7 @@ class GoogleFindMyMapView(HomeAssistantView):
         language = _resolve_language(self.hass)
         labels = resolve_map_labels(language)
         labels_json = json.dumps(labels)
+        tile_layer_js = _tile_layer_js(_map_tiles_access_token(self.hass))
         html_attrs = f'lang="{escape(language or "en")}"'
         if is_rtl(language):
             html_attrs += ' dir="rtl"'
@@ -963,10 +1111,7 @@ class GoogleFindMyMapView(HomeAssistantView):
     <script>{_leaflet_asset("leaflet.js")}</script>
     <script>
         var map = L.map('map').setView([{center_lat}, {center_lon}], 13);
-        L.tileLayer('https://{{s}}.tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png', {{
-            attribution: '© OpenStreetMap contributors',
-            referrerPolicy: 'origin'
-        }}).addTo(map);
+        {tile_layer_js}
 
         var locations = {locations_json};
         var markers = L.layerGroup().addTo(map);
@@ -1204,3 +1349,49 @@ class GoogleFindMyMapRedirectView(HomeAssistantView):
         _LOGGER.debug("Relative redirect prepared for device_id=%s", device_id)
 
         raise web.HTTPFound(location=redirect_url, headers=NO_STORE_HEADERS)
+
+
+# ------------------------- Map Tiles Token View ------------------------------
+
+
+class GoogleFindMyMapTilesTokenView(HomeAssistantView):
+    """Hand the current Core ``map_tiles`` token to a page that outlived its own.
+
+    Core rotates the token every 30 minutes and keeps two, so a page that has
+    been open for longer (a shared family link left open in a phone browser)
+    starts getting 403 for its tiles. The page then asks here, once per 30 s at
+    most, and swaps the token into its tile layer without a reload, keeping
+    zoom, position and popups.
+
+    Trust boundary: the caller proves possession of a valid map share token
+    (the same check as the map page itself), sent in the
+    ``X-GoogleFindMy-Map-Token`` request header so that it does not appear in
+    the request line of access logs; in return it gets a Core token
+    that grants nothing but tile fetches through this instance's proxy, which
+    the map page already exposes in its HTML. Auth is checked before the proxy
+    is looked for, so an unauthenticated caller cannot probe whether the proxy
+    exists. 401 is returned, not raised, exactly like the map view, so the
+    HTTP ban middleware does not count it. Nothing is logged.
+    """
+
+    url = "/api/googlefindmy/map_tiles_token"
+    name = "api:googlefindmy:map_tiles_token"
+    requires_auth = False
+
+    def __init__(self, hass: HomeAssistant) -> None:
+        """Bind the Home Assistant instance to the token view."""
+        super().__init__()
+        self.hass = hass
+
+    async def get(self, request: web.Request) -> web.Response:
+        """Return ``{"token": ...}`` for a valid share token, 401 or 404 otherwise."""
+        auth_token = request.headers.get(_MAP_TILES_TOKEN_HEADER)
+        if not auth_token:
+            return web.Response(status=401, headers=NO_STORE_HEADERS)
+        entry, _accepted = _resolve_entry_by_token(self.hass, auth_token)
+        if entry is None:
+            return web.Response(status=401, headers=NO_STORE_HEADERS)
+        token = _map_tiles_access_token(self.hass)
+        if token is None:
+            return web.Response(status=404, headers=NO_STORE_HEADERS)
+        return web.json_response({"token": token}, headers=NO_STORE_HEADERS)

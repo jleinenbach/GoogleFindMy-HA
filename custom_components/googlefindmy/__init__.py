@@ -365,6 +365,9 @@ if TYPE_CHECKING:
         GoogleFindMyMapRedirectView as GoogleFindMyMapRedirectViewType,
     )
     from .map_view import (
+        GoogleFindMyMapTilesTokenView as GoogleFindMyMapTilesTokenViewType,
+    )
+    from .map_view import (
         GoogleFindMyMapView as GoogleFindMyMapViewType,
     )
     from .NovaApi.ExecuteAction.LocateTracker.location_request import (
@@ -376,6 +379,7 @@ if TYPE_CHECKING:
     DiscoveryManager = DiscoveryManagerType
     GoogleFindMyMapView = GoogleFindMyMapViewType
     GoogleFindMyMapRedirectView = GoogleFindMyMapRedirectViewType
+    GoogleFindMyMapTilesTokenView = GoogleFindMyMapTilesTokenViewType
     async_register_services = AsyncRegisterServicesType
     async_initialize_discovery_runtime = AsyncInitializeDiscoveryRuntimeType
     api_register_fcm_provider = ApiRegisterFcmProviderType
@@ -416,6 +420,9 @@ else:
     )
     GoogleFindMyMapRedirectView: type[Any] = cast(
         type[Any], type("GoogleFindMyMapRedirectViewPlaceholder", (object,), {})
+    )
+    GoogleFindMyMapTilesTokenView: type[Any] = cast(
+        type[Any], type("GoogleFindMyMapTilesTokenViewPlaceholder", (object,), {})
     )
 
     api_register_fcm_provider: Callable[
@@ -502,6 +509,7 @@ def _ensure_runtime_imports() -> None:
     global DiscoveryManager
     global GoogleFindMyMapView
     global GoogleFindMyMapRedirectView
+    global GoogleFindMyMapTilesTokenView
 
     if _RUNTIME_IMPORTS_LOADED:
         return
@@ -534,6 +542,9 @@ def _ensure_runtime_imports() -> None:
         GoogleFindMyMapRedirectView as _GoogleFindMyMapRedirectView,
     )
     from .map_view import (
+        GoogleFindMyMapTilesTokenView as _GoogleFindMyMapTilesTokenView,
+    )
+    from .map_view import (
         GoogleFindMyMapView as _GoogleFindMyMapView,
     )
     from .services import (  # noqa: E402
@@ -551,6 +562,7 @@ def _ensure_runtime_imports() -> None:
     DiscoveryManager = _DiscoveryManager
     GoogleFindMyMapView = _GoogleFindMyMapView
     GoogleFindMyMapRedirectView = _GoogleFindMyMapRedirectView
+    GoogleFindMyMapTilesTokenView = _GoogleFindMyMapTilesTokenView
 
     _RUNTIME_IMPORTS_LOADED = True
 
@@ -8873,6 +8885,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
 
         map_redirect_view_instance = GoogleFindMyMapRedirectView(hass)
         hass.http.register_view(map_redirect_view_instance)
+
+        map_tiles_token_view_instance = GoogleFindMyMapTilesTokenView(hass)
+        hass.http.register_view(map_tiles_token_view_instance)
         bucket["views_registered"] = True
         _LOGGER.debug("Registered map views")
 

@@ -610,21 +610,34 @@ configuration.
 - Authentication tokens are securely cached
 - All GPS coordinates are processed locally. The integration itself sends no
   location data anywhere except to Google, which is where it comes from.
-- **The exceptions, and they are yours to trigger.** Opening a Map View page
-  makes your browser talk to two third parties:
-  - **Map tiles** from OpenStreetMap (`https://{s}.tile.openstreetmap.org/...`).
-    The page fits its view to *all* locations it shows, so with the default
-    history window the requested area is the area your device moved through
-    during that window, not just its current position. The requests carry no
-    device name, no account and no coordinates as such, but the requested tiles
-    do describe that area.
-  - **The Leaflet library** from `unpkg.com`, which the page currently loads to
-    draw the map. That request carries no location data at all, only the fact
-    that the page was opened. It is being removed in favour of a copy shipped
-    with the integration.
+- **The exception, and it is yours to trigger.** Opening a Map View page
+  loads **map tiles** from OpenStreetMap, and which party OpenStreetMap sees
+  depends on your Core version. The page detects that at runtime; the minimum
+  Core version above does not change:
+  - **Core 2026.9 or newer** ships the `map_tiles` integration (a dependency of
+    `frontend`, so it is loaded in every standard installation). The page then
+    requests its tiles from your own instance (`/api/map_tiles/raster/...`),
+    and the instance forwards them to OpenStreetMap with Home Assistant's
+    application `User-Agent` and contact address, through a server-side cache.
+    OpenStreetMap sees your instance, not your browser's address and not your
+    installation URL (which the direct path below reveals through the referrer
+    when you open the page through Nabu Casa or another public hostname).
+  - **Older Cores** keep the previous behaviour: the browser fetches the tiles
+    directly from `https://tile.openstreetmap.org/...` with
+    `referrerPolicy: 'origin'`, so OpenStreetMap sees the browser's address and
+    the origin of the page, but not its path and not the access token in it.
 
-  Nothing is requested while no Map View page is open, and no other page of this
-  integration loads either.
+  On both paths the page fits its view to *all* locations it shows, so with
+  the default history window the requested area is the area your device moved
+  through during that window, not just its current position. The requests carry
+  no device name, no account and no coordinates as such, but the requested
+  tiles do describe that area, now as seen from the instance on the proxy path
+  and from the browser on the direct path.
+
+  The Leaflet library that draws the map is shipped with the integration and
+  embedded inline in the page: no CDN is contacted. Nothing is requested while
+  no Map View page is open, and no other page of this integration loads
+  either.
 
 ## Security considerations
 
@@ -637,7 +650,7 @@ configuration.
 | The location history of every tracker | Home Assistant's recorder database (`home-assistant_v2.db` by default) | Not written by this integration but by Home Assistant, recording the entities it creates, including the recorder-only `last_latitude`/`last_longitude` attributes the Map View reads back (`map_view.py`, `get_significant_states`). It is kept for as long as your `recorder` `purge_keep_days` says, and it travels with any backup that includes the database (Home Assistant's backup manager offers that as a choice; a recorder pointed at an external database is not in the backup at all). Exclude the entities under `recorder:` if you do not want that history |
 | The pasted bundle and the OAuth token | Also the config entry (`.storage/core.config_entries`) | On **initial setup** they are moved into the token cache on the first successful start and removed from the entry. Two cases keep them there indefinitely: a setup that fails before that point, and any later credential replacement (reauth or the options flow), because `config_flow.py` → `_persist_secrets_bundle` writes them back and the reload then finds a primed cache and skips the removal (`__init__.py`, the `legacy_cache_primed` branch). The copy lives beside the token cache in the same `.storage` directory, so it widens no trust boundary, and the diagnostics download redacts it |
 | Derived tokens (AAS, ADM, SPOT), FCM push identity, the shared key and the owner key | Same per-entry storage file | Refreshed automatically; the long-lived ones are what make the integration work after a restart |
-| The Map View access token | Derived on demand from the instance UUID and the entry id, and carried inside each device's `configuration_url` in `.storage/core.device_registry` | Treat that URL as long-lived bearer material: the map view is not behind Home Assistant's login, so whoever holds the link sees the device's location. The token authenticates the **config entry**, not one device (`map_view.py` → `_resolve_entry_by_token`), so a recipient who knows another device id of the same account can substitute it in the path. With the default `map_view_token_expiration` (off) the token never expires |
+| The Map View access token | Derived on demand from the instance UUID and the entry id, and carried inside each device's `configuration_url` in `.storage/core.device_registry` | Treat that URL as long-lived bearer material: the map view is not behind Home Assistant's login, so whoever holds the link sees the device's location. The token authenticates the **config entry**, not one device (`map_view.py` → `_resolve_entry_by_token`), so a recipient who knows another device id of the same account can substitute it in the path. With the default `map_view_token_expiration` (off) the token never expires. On Core 2026.9 or newer a page opened with this token can also fetch the current map tiles access token of Core's `map_tiles` proxy (`/api/googlefindmy/map_tiles_token`, same share-token check as the page itself, with the share token sent in the `X-GoogleFindMy-Map-Token` request header rather than in the URL, so it does not land in access logs), which grants nothing but the tile and map resources of that proxy (raster and vector tiles, TileJSON, glyphs, sprites; as of Core 2026.9), rotates every 30 minutes and is already embedded in the page's HTML |
 
 `secrets.json` is **not** part of the running integration. It is produced by the
 manual command-line login, and if you paste its contents, no file by that name

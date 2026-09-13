@@ -46,7 +46,10 @@ _ENGLISH_EXACT_FORMS = (
 # Deliberately source-language / non-translatable; must survive every render.
 _ALWAYS_PRESENT = (
     "<b>Plus Code:</b>",  # Google brand name (proper noun)
-    "© OpenStreetMap contributors",  # map attribution
+    # map attribution, Core wording with copyright link (two markers, one for
+    # the link and one for the wording, so neither can silently drop)
+    'href="https://www.openstreetmap.org/copyright"',
+    "OpenStreetMap</a> contributors",
 )
 
 

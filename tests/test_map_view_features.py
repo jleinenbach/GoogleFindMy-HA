@@ -6,6 +6,8 @@ import importlib
 import json
 import re
 import sys
+from collections import deque
+from collections.abc import Sequence
 from datetime import datetime
 from types import ModuleType, SimpleNamespace
 from typing import Any
@@ -110,8 +112,13 @@ class _StubState:
 
 
 class _StubHass:
-    def __init__(self, entries: list[Any]) -> None:
+    def __init__(
+        self, entries: list[Any], *, map_tiles_tokens: Sequence[str] | None = None
+    ) -> None:
         self.data: dict[str, Any] = {"core.uuid": "test-ha"}
+        if map_tiles_tokens is not None:
+            # Shape of Core's ``map_tiles`` token store (newest last).
+            self.data["map_tiles"] = deque(map_tiles_tokens, maxlen=2)
         self.config_entries = _StubConfigEntries(entries)
 
     async def async_add_executor_job(self, func: Any, *args: Any) -> Any:
@@ -1197,6 +1204,49 @@ async def test_rendered_page_loads_nothing_from_a_cdn(
     assert "L.circleMarker" in page
     # tiles remain external and remain the only external request
     assert "tile.openstreetmap.org" in page
+
+
+@pytest.mark.asyncio
+async def test_get_serves_tiles_through_core_proxy_when_available(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With Core's ``map_tiles`` token store present, tiles go through the proxy.
+
+    Same setup as the CDN test; the only difference is the token deque in
+    ``hass.data``. The page then has no external request left at all.
+    """
+
+    device_id = "device123"
+    coordinator = SimpleNamespace(data=[{"id": device_id, "name": "Test Device"}])
+    entry = make_config_entry(entry_id="entry-id", runtime_data=coordinator)
+    hass = _StubHass([entry], map_tiles_tokens=["a" * 64, "b" * 64])
+
+    monkeypatch.setattr(map_view, "_resolve_coordinator_class", lambda: SimpleNamespace)
+
+    registry_entry = _StubRegistryEntry(
+        entity_id="device_tracker.device123",
+        unique_id=f"{entry.entry_id}:{device_id}",
+        config_entry_id=entry.entry_id,
+    )
+    monkeypatch.setattr(
+        map_view.er, "async_get", lambda _hass: _StubEntityRegistry([registry_entry])
+    )
+    _install_history_stub(
+        monkeypatch, registry_entry.entity_id, _StubState(latitude=10.0, longitude=20.0)
+    )
+
+    ha_uuid = hass.data["core.uuid"]
+    token = map_token_hex_digest(map_token_secret_seed(ha_uuid, entry.entry_id, False))
+
+    response = await map_view.GoogleFindMyMapView(hass).get(
+        SimpleNamespace(query={"token": token}), device_id=device_id
+    )
+    page = response.text
+
+    assert response.headers["Cache-Control"] == "no-store"
+    assert "/api/map_tiles/raster/{z}/{x}/{y}.png?token={token}" in page
+    assert 'token: "' + "b" * 64 + '"' in page
+    assert "tile.openstreetmap.org" not in page
 
 
 @pytest.mark.asyncio
