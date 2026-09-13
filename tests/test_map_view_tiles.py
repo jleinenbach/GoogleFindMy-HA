@@ -9,8 +9,9 @@ tile layer in one of two ways:
 
 * **Proxy branch:** when ``hass.data["map_tiles"]`` holds a token deque, the
   page loads ``/api/map_tiles/raster/{z}/{x}/{y}.png?token=...`` (root-relative,
-  same origin, ``referrerPolicy: 'origin'`` as on the direct layer, so the
-  page URL with its share token is never sent as ``Referer`` even if Core's
+  same origin, ``referrerPolicy: 'no-referrer'``, stricter than the ``'origin'``
+  of the direct layer because this instance needs no identifying referrer, so
+  the page URL with its share token is never sent as ``Referer`` even if Core's
   page-wide ``Referrer-Policy: no-referrer`` header were to change) and
   refreshes the token through a
   share-token guarded endpoint when tiles start failing; the share token
@@ -196,9 +197,18 @@ def test_proxy_branch_uses_core_tiles(monkeypatch: pytest.MonkeyPatch) -> None:
     assert _OLD_TOKEN not in html
     assert "tile.openstreetmap.org" not in html
     # Core serves the page with ``Referrer-Policy: no-referrer``; the tile layer
-    # and the refresh fetch pin ``origin`` on top, so the page URL (with the
-    # share token) is never sent as Referer regardless of that header
-    assert html.count("referrerPolicy: 'origin'") == 2
+    # pins ``no-referrer`` on top (same origin, nothing to identify) and the
+    # refresh fetch ``origin``, so the page URL (with the share token) is never
+    # sent as Referer regardless of that header. Pinned separately: a single
+    # count could not tell the two policies apart.
+    assert html.count("referrerPolicy: 'no-referrer'") == 1
+    assert html.count("referrerPolicy: 'origin'") == 1
+    # ... and in that order: the layer options come before the error handler
+    # that holds the fetch (``partition`` guards its own separator, so a
+    # missing handler cannot turn this into a whole-page search).
+    layer_js, handler_marker, _ = html.partition("gfmyTileLayer.on('tileerror'")
+    assert handler_marker
+    assert "referrerPolicy: 'no-referrer'," in layer_js
     # Leaflet substitutes ``{token}`` from the options; the Core route rejects
     # zoom levels above 19.
     assert "maxNativeZoom: 19" in html

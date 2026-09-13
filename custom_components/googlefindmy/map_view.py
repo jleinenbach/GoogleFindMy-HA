@@ -129,11 +129,12 @@ _MAP_TILE_LAYER_OSM_JS = """L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/
 # instance, which forwards them to OpenStreetMap with an application
 # User-Agent, a contact address and a cache. The URL is root-relative, so it
 # works behind a reverse proxy and through Nabu Casa. ``referrerPolicy:
-# 'origin'`` is set here as on the direct layer, although Core already serves
-# the page with ``Referrer-Policy: no-referrer``
-# (``homeassistant.components.http.headers``), so the tile requests carry no
-# ``Referer`` at all under that header. The explicit policy keeps the property
-# independent of Core's header: without it, a browser default of
+# 'no-referrer'`` is stricter than the ``'origin'`` of the direct layer: the
+# requests go to this instance, which needs no identifying referrer (the OSMF
+# policy is satisfied by Core's own User-Agent), so nothing is sent at all.
+# Core already serves the page with ``Referrer-Policy: no-referrer``
+# (``homeassistant.components.http.headers``); the explicit policy keeps the
+# property independent of that header. Without it, a browser default of
 # ``strict-origin-when-cross-origin`` would send the full page URL, share token
 # included, once per tile into any access log.
 # Leaflet substitutes ``{token}`` from the layer options on every request,
@@ -142,7 +143,7 @@ _MAP_TILE_LAYER_OSM_JS = """L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/
 _MAP_TILE_LAYER_PROXY_JS = """var gfmyTileLayer = L.tileLayer('__GFMY_TILE_URL__', {
             attribution: '__GFMY_ATTRIBUTION__',
             maxNativeZoom: __GFMY_MAX_NATIVE_ZOOM__,
-            referrerPolicy: 'origin',
+            referrerPolicy: 'no-referrer',
             token: __GFMY_TILE_TOKEN__
         }).addTo(map);
         var GFMY_TILE_TOKEN_REFRESH_THROTTLE_MS = 30000;
@@ -161,9 +162,10 @@ _MAP_TILE_LAYER_PROXY_JS = """var gfmyTileLayer = L.tileLayer('__GFMY_TILE_URL__
                 return;
             }
             // The share token travels in a header, not in the URL, so it does
-            // not end up in the request line of an access log; the referrer
-            // policy mirrors the tile layer (Core's page header already sends
-            // no referrer, this keeps it so without depending on it).
+            // not end up in the request line of an access log. The referrer
+            // policy sends at most the origin (never the page URL with its
+            // token), whatever Core's page header says; the origin of a
+            // same-origin JSON call to this instance reveals nothing.
             fetch('__GFMY_REFRESH_PATH__', {
                 cache: 'no-store',
                 referrerPolicy: 'origin',
