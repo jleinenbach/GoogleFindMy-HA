@@ -389,6 +389,7 @@ def _heal_lazy_runtime_imports() -> None:
         "DiscoveryManager",
         "GoogleFindMyMapView",
         "GoogleFindMyMapRedirectView",
+        "GoogleFindMyMapTilesTokenView",
     )
     any_placeholder = any(
         "Placeholder" in getattr(getattr(integration, name, None), "__name__", "")

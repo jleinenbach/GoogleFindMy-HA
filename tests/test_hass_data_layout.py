@@ -617,6 +617,37 @@ async def test_async_setup_entry_leaves_modern_entries_intact(
 
 
 @pytest.mark.asyncio
+async def test_async_setup_entry_registers_the_map_tiles_token_view(
+    monkeypatch: pytest.MonkeyPatch,
+    stub_coordinator_factory: Callable[..., type[Any]],
+) -> None:
+    """Setup registers the token view next to the two map views.
+
+    The harness stubs the two map views; the token view is the real class, so
+    the registered route is the one the map page fetches.
+    """
+
+    loop = asyncio.get_running_loop()
+    harness = _prepare_async_setup_entry_harness(
+        monkeypatch, stub_coordinator_factory, loop
+    )
+    integration = harness.integration
+    hass = harness.hass
+
+    assert await integration.async_setup(hass, {}) is True
+    assert await integration.async_setup_entry(hass, harness.entry) is True
+
+    assert len(hass.http.registered) == 3
+    token_views = [
+        view
+        for view in hass.http.registered
+        if getattr(view, "url", None) == "/api/googlefindmy/map_tiles_token"
+    ]
+    assert len(token_views) == 1
+    assert type(token_views[0]).__name__ == "GoogleFindMyMapTilesTokenView"
+
+
+@pytest.mark.asyncio
 async def test_changed_credentials_reload_the_entry_exactly_once(
     monkeypatch: pytest.MonkeyPatch,
     stub_coordinator_factory: Callable[..., type[Any]],

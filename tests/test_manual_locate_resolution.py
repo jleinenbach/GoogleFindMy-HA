@@ -27,6 +27,7 @@ if "custom_components.googlefindmy.map_view" not in sys.modules:
 
     map_module.GoogleFindMyMapRedirectView = _DummyView
     map_module.GoogleFindMyMapView = _DummyView
+    map_module.GoogleFindMyMapTilesTokenView = _DummyView
     sys.modules["custom_components.googlefindmy.map_view"] = map_module
 
 gfm = importlib.import_module("custom_components.googlefindmy")
