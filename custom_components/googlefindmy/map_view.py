@@ -1326,3 +1326,47 @@ class GoogleFindMyMapRedirectView(HomeAssistantView):
         _LOGGER.debug("Relative redirect prepared for device_id=%s", device_id)
 
         raise web.HTTPFound(location=redirect_url, headers=NO_STORE_HEADERS)
+
+
+# ------------------------- Map Tiles Token View ------------------------------
+
+
+class GoogleFindMyMapTilesTokenView(HomeAssistantView):
+    """Hand the current Core ``map_tiles`` token to a page that outlived its own.
+
+    Core rotates the token every 30 minutes and keeps two, so a page that has
+    been open for longer (a shared family link left open in a phone browser)
+    starts getting 403 for its tiles. The page then asks here, once per 30 s at
+    most, and swaps the token into its tile layer without a reload, keeping
+    zoom, position and popups.
+
+    Trust boundary: the caller proves possession of a valid map share token
+    (the same check as the map page itself); in return it gets a Core token
+    that grants nothing but tile fetches through this instance's proxy, which
+    the map page already exposes in its HTML. Auth is checked before the proxy
+    is looked for, so an unauthenticated caller cannot probe whether the proxy
+    exists. 401 is returned, not raised, exactly like the map view, so the
+    HTTP ban middleware does not count it. Nothing is logged.
+    """
+
+    url = "/api/googlefindmy/map_tiles_token"
+    name = "api:googlefindmy:map_tiles_token"
+    requires_auth = False
+
+    def __init__(self, hass: HomeAssistant) -> None:
+        """Bind the Home Assistant instance to the token view."""
+        super().__init__()
+        self.hass = hass
+
+    async def get(self, request: web.Request) -> web.Response:
+        """Return ``{"token": ...}`` for a valid share token, 401 or 404 otherwise."""
+        auth_token = request.query.get("token")
+        if not auth_token:
+            return web.Response(status=401, headers=NO_STORE_HEADERS)
+        entry, _accepted = _resolve_entry_by_token(self.hass, auth_token)
+        if entry is None:
+            return web.Response(status=401, headers=NO_STORE_HEADERS)
+        token = _map_tiles_access_token(self.hass)
+        if token is None:
+            return web.Response(status=404, headers=NO_STORE_HEADERS)
+        return web.json_response({"token": token}, headers=NO_STORE_HEADERS)
