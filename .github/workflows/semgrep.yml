@@ -104,6 +104,11 @@ jobs:
 
           if [ "$semgrep_exit" -eq 2 ]; then
             echo "::notice::Semgrep returned exit code 2 for the SARIF scan; uploading an empty fallback artifact."
+            # Exit code 2 is a failed scan, not an empty one. This artifact keeps the
+            # distinct driver name "Semgrep" on purpose: GitHub closes an alert when a
+            # later analysis of the same tool and category on the same ref no longer
+            # reports it, and a failed scan must not carry the identity that closes
+            # alerts ("Semgrep OSS", see the empty-result branch below).
             printf '%s\n' \
               '{' \
               '  "version": "2.1.0",' \
@@ -129,6 +134,10 @@ jobs:
           fi
 
           if ! jq -e '(.runs // []) | map(select((.results // []) | length > 0)) | length > 0' semgrep.sarif >/dev/null 2>&1; then
+            # A successful scan with no findings: the driver name must be the one Semgrep
+            # itself emits ("Semgrep OSS"), otherwise GitHub treats this upload as a second
+            # tool and alerts raised by the real run stay open forever (seen on #1274,
+            # where five empty uploads named "Semgrep" closed nothing).
             printf '%s\n' \
               '{' \
               '  "version": "2.1.0",' \
@@ -137,7 +146,7 @@ jobs:
               '    {' \
               '      "tool": {' \
               '        "driver": {' \
-              '          "name": "Semgrep",' \
+              '          "name": "Semgrep OSS",' \
               '          "informationUri": "https://semgrep.dev/",' \
               '          "rules": []' \
               '        }' \
