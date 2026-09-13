@@ -67,6 +67,7 @@ import pty
 import re
 import selectors
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -787,6 +788,50 @@ def _extract_backgrounding_line(entrypoint: str) -> str:
     )
 
 
+def _skip_unless_sigint_is_measurable() -> None:
+    """Skip when this pytest process itself ignores ``SIGINT``.
+
+    A process started as a background job of a shell without job control
+    (``bash -c '... &'``, ``( nohup ... & )``) inherits ``SIG_IGN`` for ``SIGINT``,
+    and POSIX lets neither ``trap`` nor ``trap - INT`` in a non-interactive child
+    shell undo a disposition that was already ignored on entry. The test below
+    would then report ``SIGINT_OK=False`` whatever ``entrypoint.sh`` does: a fact
+    about how the runner was started, not about the launcher. Reporting it as a
+    skip with the cause keeps that measurement failure from reading like a
+    product defect (it did, once, in a preflight run started as a detached job).
+    CI runners start pytest with the default disposition, so this never skips
+    there.
+    """
+
+    if signal.getsignal(signal.SIGINT) is signal.SIG_IGN:
+        pytest.skip(
+            "this pytest process ignores SIGINT (started as a background job "
+            "without job control?); the launcher's SIGINT handling cannot be "
+            "measured from a runner that cannot receive the signal itself"
+        )
+
+
+def test_sigint_precondition_skips_when_the_runner_ignores_sigint() -> None:
+    """The guard skips (does not fail) when the runner inherited ``SIG_IGN``."""
+
+    previous = signal.signal(signal.SIGINT, signal.SIG_IGN)
+    try:
+        with pytest.raises(pytest.skip.Exception, match="ignores SIGINT"):
+            _skip_unless_sigint_is_measurable()
+    finally:
+        signal.signal(signal.SIGINT, previous)
+
+
+def test_sigint_precondition_is_silent_with_the_default_handler() -> None:
+    """With the default handler installed the guard returns without skipping."""
+
+    previous = signal.signal(signal.SIGINT, signal.default_int_handler)
+    try:
+        _skip_unless_sigint_is_measurable()
+    finally:
+        signal.signal(signal.SIGINT, previous)
+
+
 def test_backgrounded_login_child_behaviourally_keeps_stdin_and_default_sigint(
     tmp_path: Path,
 ) -> None:
@@ -864,9 +909,6 @@ def test_backgrounded_login_child_behaviourally_keeps_stdin_and_default_sigint(
     assert "STDIN_OK=True" in out, (
         f"backgrounded child did not receive terminal stdin via `<&0`; got: {out!r}"
     )
-    assert "SIGINT_OK=True" in out, (
-        f"backgrounded child kept the inherited SIG_IGN for SIGINT; got: {out!r}"
-    )
 
     # Negative control: without the `<&0` async-boundary redirect the child's stdin
     # is /dev/null, so the read fails -- proving the assertion discriminates.
@@ -875,6 +917,14 @@ def test_backgrounded_login_child_behaviourally_keeps_stdin_and_default_sigint(
     assert "STDIN_OK=False" in control_out, (
         "control without `<&0` unexpectedly read stdin; the behavioural stdin "
         f"assertion is not discriminating. got: {control_out!r}"
+    )
+
+    # The stdin proofs above do not depend on signal dispositions, so they stay
+    # measurable on every runner; only the SIGINT half needs a runner that can
+    # receive SIGINT itself, which is why the guard sits here and not at the top.
+    _skip_unless_sigint_is_measurable()
+    assert "SIGINT_OK=True" in out, (
+        f"backgrounded child kept the inherited SIG_IGN for SIGINT; got: {out!r}"
     )
 
 
