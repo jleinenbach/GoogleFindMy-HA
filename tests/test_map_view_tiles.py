@@ -9,8 +9,12 @@ tile layer in one of two ways:
 
 * **Proxy branch:** when ``hass.data["map_tiles"]`` holds a token deque, the
   page loads ``/api/map_tiles/raster/{z}/{x}/{y}.png?token=...`` (root-relative,
-  same origin, no ``referrerPolicy``) and refreshes the token through a
-  share-token guarded endpoint when tiles start failing.
+  same origin, ``referrerPolicy: 'origin'`` as on the direct layer, so the
+  page URL with its share token is never sent as ``Referer`` even if Core's
+  page-wide ``Referrer-Policy: no-referrer`` header were to change) and
+  refreshes the token through a
+  share-token guarded endpoint when tiles start failing; the share token
+  travels in the ``X-GoogleFindMy-Map-Token`` header, not in the URL.
 * **Fallback branch:** on any other Core the page keeps loading tiles directly
   from ``tile.openstreetmap.org`` exactly as before, so a Core that renames or
   drops the component degrades to today's behaviour, never to an empty map.
@@ -191,14 +195,20 @@ def test_proxy_branch_uses_core_tiles(monkeypatch: pytest.MonkeyPatch) -> None:
     assert f'token: "{_NEW_TOKEN}"' in html
     assert _OLD_TOKEN not in html
     assert "tile.openstreetmap.org" not in html
-    assert "referrerPolicy" not in html
+    # Core serves the page with ``Referrer-Policy: no-referrer``; the tile layer
+    # and the refresh fetch pin ``origin`` on top, so the page URL (with the
+    # share token) is never sent as Referer regardless of that header
+    assert html.count("referrerPolicy: 'origin'") == 2
     # Leaflet substitutes ``{token}`` from the options; the Core route rejects
     # zoom levels above 19.
     assert "maxNativeZoom: 19" in html
     # token refresh for pages that outlive the 30 min rotation
     assert "gfmyTileLayer.on('tileerror'" in html
     assert "GFMY_TILE_TOKEN_REFRESH_THROTTLE_MS = 30000" in html
-    assert "fetch('/api/googlefindmy/map_tiles_token?token='" in html
+    # share token in a header, never in the URL (access logs record the request line)
+    assert "fetch('/api/googlefindmy/map_tiles_token', {" in html
+    assert "headers: { 'X-GoogleFindMy-Map-Token': shareToken }" in html
+    assert "map_tiles_token?token=" not in html
     assert "gfmyTileLayer.redraw()" in html
     # attribution: Core wording with the copyright link
     assert 'href="https://www.openstreetmap.org/copyright"' in html
@@ -289,9 +299,22 @@ def _share_token(hass: SimpleNamespace, entry: Any) -> str:
     )
 
 
-async def _call_endpoint(hass: SimpleNamespace, query: dict[str, str]) -> Any:
+_HEADER = "X-GoogleFindMy-Map-Token"
+
+
+async def _call_endpoint(
+    hass: SimpleNamespace,
+    headers: dict[str, str],
+    query: dict[str, str] | None = None,
+) -> Any:
     view = map_view.GoogleFindMyMapTilesTokenView(hass)
-    return await view.get(SimpleNamespace(query=query))
+    return await view.get(SimpleNamespace(headers=headers, query=query or {}))
+
+
+def test_share_token_header_name_is_pinned() -> None:
+    """The header name is part of the page contract; the rendered JS uses the same one."""
+
+    assert map_view._MAP_TILES_TOKEN_HEADER == _HEADER
 
 
 @pytest.mark.asyncio
@@ -301,13 +324,33 @@ async def test_token_endpoint_returns_newest_core_token() -> None:
     entry = make_config_entry(entry_id="entry-id")
     hass = _endpoint_hass(entries=[entry], map_tiles_tokens=[_OLD_TOKEN, _NEW_TOKEN])
 
-    response = await _call_endpoint(hass, {"token": _share_token(hass, entry)})
+    response = await _call_endpoint(hass, {_HEADER: _share_token(hass, entry)})
 
     assert response.status == 200
     assert response.content_type == "application/json"
     assert json.loads(response.body) == {"token": _NEW_TOKEN}
     assert response.headers["Cache-Control"] == "no-store"
     assert response.headers["X-Robots-Tag"] == "noindex, nofollow"
+
+
+@pytest.mark.asyncio
+async def test_token_endpoint_ignores_share_token_in_query() -> None:
+    """A share token in the URL no longer authenticates: URLs end up in access logs.
+
+    The endpoint reads the header only, so a valid token passed the old way
+    (``?token=``) is treated as absent and gets the same 401.
+    """
+
+    entry = make_config_entry(entry_id="entry-id")
+    hass = _endpoint_hass(entries=[entry], map_tiles_tokens=[_NEW_TOKEN])
+
+    response = await _call_endpoint(
+        hass, {}, query={"token": _share_token(hass, entry)}
+    )
+
+    assert response.status == 401
+    assert response.body is None
+    assert response.headers["Cache-Control"] == "no-store"
 
 
 @pytest.mark.asyncio
@@ -331,7 +374,7 @@ async def test_token_endpoint_rejects_unknown_share_token() -> None:
     entry = make_config_entry(entry_id="entry-id")
     hass = _endpoint_hass(entries=[entry], map_tiles_tokens=[_NEW_TOKEN])
 
-    response = await _call_endpoint(hass, {"token": "f" * 64})
+    response = await _call_endpoint(hass, {_HEADER: "f" * 64})
 
     assert response.status == 401
     assert response.body is None
@@ -344,7 +387,7 @@ async def test_token_endpoint_is_404_without_core_proxy() -> None:
     entry = make_config_entry(entry_id="entry-id")
     hass = _endpoint_hass(entries=[entry], map_tiles_tokens=None)
 
-    response = await _call_endpoint(hass, {"token": _share_token(hass, entry)})
+    response = await _call_endpoint(hass, {_HEADER: _share_token(hass, entry)})
 
     assert response.status == 404
     assert response.body is None
@@ -358,7 +401,7 @@ async def test_token_endpoint_checks_auth_before_availability() -> None:
     entry = make_config_entry(entry_id="entry-id")
     hass = _endpoint_hass(entries=[entry], map_tiles_tokens=None)
 
-    response = await _call_endpoint(hass, {"token": "f" * 64})
+    response = await _call_endpoint(hass, {_HEADER: "f" * 64})
 
     assert response.status == 401
 
@@ -374,7 +417,7 @@ async def test_token_endpoint_does_not_log_token(
     hass = _endpoint_hass(entries=[entry], map_tiles_tokens=[_NEW_TOKEN])
     share = _share_token(hass, entry)
 
-    response = await _call_endpoint(hass, {"token": share})
+    response = await _call_endpoint(hass, {_HEADER: share})
 
     assert response.status == 200
     assert _NEW_TOKEN not in caplog.text
