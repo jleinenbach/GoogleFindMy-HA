@@ -1036,6 +1036,7 @@ _PGREP_VISIBILITY_TIMEOUT = 30.0
 _PROBE_CHAIN_TIMEOUT = 60
 _RELAY_TIMEOUT = _PROBE_CHAIN_TIMEOUT - 10
 _CLEANUP_TIMEOUT = _PROBE_CHAIN_TIMEOUT - 20
+_KILL_PROBE_DIR = pathlib.Path(__file__).resolve().parent / "fixtures" / "kill_probe"
 # The stranger has to stay alive until the cleanup asks pgrep, which is at worst
 # the visibility wait plus the outer chain budget. The two ``wait(timeout=10)``
 # calls afterwards only wait for its *death* and add nothing here. ``ceil``
@@ -1123,9 +1124,7 @@ def _decode_probe_report(result: subprocess.CompletedProcess[str]) -> dict[str, 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX process semantics")
 @pytest.mark.skipif(shutil.which("pgrep") is None, reason="pgrep not available")
-def test_terminate_matching_processes_spares_its_own_grandparent(
-    tmp_path: Any,
-) -> None:
+def test_terminate_matching_processes_spares_its_own_grandparent() -> None:
     """End-to-end without mocks: the grandparent survives, a stranger dies.
 
     Reproduction of the measured case, at its real depth: pytest -> CLI
@@ -1147,72 +1146,16 @@ def test_terminate_matching_processes_spares_its_own_grandparent(
     """
 
     marker = f"gfmy-kill-probe-{uuid.uuid4().hex}"
-    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-    # Level 3: runs the cleanup, for a marker its own argv carries too. It wraps
-    # the two helpers rather than calling them a second time, so the report
-    # describes the very calls that decided the kill: a repeat call can answer
-    # differently under load, and a report of a different call is not evidence.
-    # The sentinels keep "never called" distinguishable from "called and empty":
-    # -1 for the two counts, and pgrep_calls for stranger_seen, which has no
-    # unused value of its own. pgrep_calls also pins the "very calls" claim: the
-    # wrappers record last-wins, so a second lookup after the kill would silently
-    # rewrite stranger_seen to False.
-    child = tmp_path / "child.py"
-    child.write_text(
-        "import json, sys\n"
-        f"sys.path.insert(0, {repo_root!r})\n"
-        "from custom_components.googlefindmy import chrome_driver\n"
-        "marker, stranger_pid = sys.argv[1], int(sys.argv[2])\n"
-        "real_protected = chrome_driver._protected_pids\n"
-        "real_pgrep = chrome_driver._pgrep_pids\n"
-        "obs = {'protected': -1, 'seen': -1, 'stranger_seen': False,\n"
-        "       'pgrep_calls': 0}\n"
-        "def _protected():\n"
-        "    found = real_protected()\n"
-        "    obs['protected'] = None if found is None else len(found)\n"
-        "    return found\n"
-        "def _pgrep(pattern):\n"
-        "    found = real_pgrep(pattern)\n"
-        "    obs['pgrep_calls'] += 1\n"
-        "    obs['seen'] = len(found)\n"
-        "    obs['stranger_seen'] = stranger_pid in found\n"
-        "    return found\n"
-        "chrome_driver._protected_pids = _protected\n"
-        "chrome_driver._pgrep_pids = _pgrep\n"
-        "obs['signalled'] = chrome_driver._terminate_matching_processes(marker)\n"
-        "print(json.dumps(obs))\n",
-        encoding="utf-8",
-    )
-    # Level 2: pure relay. It hands the marker down, so its own argv carries it
-    # too; what this level buys is the distance to the cleanup, not marker-freedom.
-    parent = tmp_path / "parent.py"
-    parent.write_text(
-        "import subprocess, sys\n"
-        "proc = subprocess.run([sys.executable, *sys.argv[1:]],\n"
-        "                      capture_output=True, text=True, timeout="
-        f"{_CLEANUP_TIMEOUT})\n"
-        "sys.stdout.write(proc.stdout)\n"
-        "sys.stderr.write(proc.stderr)\n"
-        "sys.exit(proc.returncode)\n",
-        encoding="utf-8",
-    )
-    # Level 1: the outermost link. Every link of the chain must survive the
-    # cleanup, and this one is the farthest from it, so it is the link only a
-    # complete ancestry walk can reach. The marker travels down from here,
-    # which is why every link carries it.
-    grandparent = tmp_path / "grandparent.py"
-    grandparent.write_text(
-        "import subprocess, sys\n"
-        "proc = subprocess.run(\n"
-        "    [sys.executable, *sys.argv[1:]],\n"
-        "    capture_output=True, text=True, timeout="
-        f"{_RELAY_TIMEOUT})\n"
-        "sys.stdout.write(proc.stdout)\n"
-        "sys.stderr.write(proc.stderr)\n"
-        "sys.exit(proc.returncode)\n",
-        encoding="utf-8",
-    )
+    # The three links live in tests/fixtures/kill_probe/ so ruff reads them like
+    # any other test module. Level 3 (cleanup.py) runs the cleanup for a marker
+    # its own argv carries too and reports the very calls that decided the
+    # kill. Levels 1 and 2 are the same relay script with staggered budgets:
+    # the outermost link is the one only a complete ancestry walk can reach,
+    # the middle one buys the distance to the cleanup. The marker travels down
+    # from the outermost link, which is why every link carries it.
+    relay = str(_KILL_PROBE_DIR / "relay.py")
+    cleanup = str(_KILL_PROBE_DIR / "cleanup.py")
 
     sleeper = f"import sys, time; time.sleep({_STRANGER_LIFETIME})"
     stranger = subprocess.Popen(  # noqa: S603 - fixed interpreter, generated marker
@@ -1227,9 +1170,11 @@ def test_terminate_matching_processes_spares_its_own_grandparent(
         result = subprocess.run(  # noqa: S603 - fixed interpreter, generated files
             [
                 sys.executable,
-                str(grandparent),
-                str(parent),
-                str(child),
+                relay,
+                str(_RELAY_TIMEOUT),
+                relay,
+                str(_CLEANUP_TIMEOUT),
+                cleanup,
                 marker,
                 str(stranger.pid),
             ],

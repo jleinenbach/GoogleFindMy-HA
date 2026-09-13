@@ -232,9 +232,10 @@ _C_ESCAPES = {
 def _unquote_git_path(quoted: str) -> str:
     """Decode a path git printed in its C-style quoted form.
 
-    With the default ``core.quotePath``, a path holding a space, a quote, a
-    control character or a non-ASCII byte arrives as ``"t\\303\\274r.py"``:
-    surrounded by double quotes, with backslash escapes and octal byte values.
+    With the default ``core.quotePath``, a path holding a double quote, a
+    backslash, a control character or a non-ASCII byte arrives as
+    ``"t\\303\\274r.py"``: surrounded by double quotes, with backslash
+    escapes and octal byte values. A space alone does not trigger quoting.
     Stripping the quotes alone leaves the escapes in place, and such a name
     never matches the UTF-8 filename the coverage report carries, so the file
     would be listed as uninstrumented and its changed lines silently dropped.
@@ -268,13 +269,58 @@ def _unquote_git_path(quoted: str) -> str:
     return raw.decode("utf-8")
 
 
+# The same table read the other way: byte value to escape letter.
+_C_ESCAPE_LETTERS = {value[0]: letter for letter, value in _C_ESCAPES.items()}
+# Below the first printable byte, from DEL upwards, plus the two that would
+# be read as part of the quoting itself.
+_FIRST_PRINTABLE, _DELETE = 0x20, 0x7F
+_QUOTING_BYTES = frozenset(b'"\\')
+
+
+def _needs_git_quoting(byte: int) -> bool:
+    """Return whether git escapes this byte under the default ``core.quotePath``."""
+
+    return byte < _FIRST_PRINTABLE or byte >= _DELETE or byte in _QUOTING_BYTES
+
+
+def _quote_git_path(path: str) -> str:
+    """Encode a path the way git prints it, the inverse of ``_unquote_git_path``.
+
+    Codex finding on PR #1274: the synthetic diff for untracked files wrote
+    the name raw into its ``+++`` header, while the parser expects git's form.
+    A name holding a newline was therefore cut in two by ``splitlines`` and its
+    hunk counted against a path that does not exist. git leaves a name alone
+    unless it holds a double quote, a backslash, a control byte or a non-ASCII
+    byte; then it wraps the name in double quotes, prints the C escapes
+    ``\\a \\b \\t \\n \\v \\f \\r \\\\ \\"`` for their bytes and every
+    other awkward byte as a backslash and three octal digits. A space does not
+    trigger quoting; git marks such a header with a trailing tab instead, which
+    the parser strips, so none is produced here.
+    """
+
+    raw = path.encode("utf-8")
+    if not any(_needs_git_quoting(byte) for byte in raw):
+        return path
+    parts = ['"']
+    for byte in raw:
+        letter = _C_ESCAPE_LETTERS.get(byte)
+        if letter is not None:
+            parts.append(f"\\{letter}")
+        elif _needs_git_quoting(byte):
+            parts.append(f"\\{byte:03o}")
+        else:
+            parts.append(chr(byte))
+    parts.append('"')
+    return "".join(parts)
+
+
 def _diff_path(target: str) -> str | None:
     """Return the repository-relative path a diff header names, if it names one."""
 
     if target == "/dev/null":
         return None
-    # git quotes paths that contain spaces, quotes or non-ASCII bytes; neither
-    # the quotes nor the escapes are part of the name.
+    # git quotes paths that contain quotes, backslashes, control or non-ASCII
+    # bytes; neither the quotes nor the escapes are part of the name.
     if target.startswith('"') and target.endswith('"'):
         target = _unquote_git_path(target)
     return target[2:] if target.startswith(("a/", "b/")) else target
@@ -377,21 +423,32 @@ def format_report(result: DiffCoverage, threshold: float) -> str:
 
 
 def _run_git(args: Sequence[str], repo_root: Path) -> str:
-    """Run a git command inside the repository and return its stdout."""
+    """Run a git command inside the repository and return its stdout.
 
+    The output is read as bytes and decoded here, not through ``text=True``:
+    the text layer translates every carriage return into a newline, and the
+    ``-z`` listing of untracked files carries names verbatim, so a file whose
+    name holds ``\\r`` would be looked up under a name that does not exist.
+    """
+
+    # The parser decodes git's C-style quoting, so that quoting is pinned here
+    # rather than left to the host's ``core.quotePath``. Git quotes control
+    # bytes, quotes and backslashes under either setting; ``false`` only
+    # prints bytes above ASCII raw. The pin keeps the real header in the same
+    # form as the synthetic one from ``_quote_git_path``, so that both take
+    # the same path through ``_diff_path``.
     result = subprocess.run(
-        ["git", *args],
+        ["git", "-c", "core.quotePath=true", *args],
         check=False,
         capture_output=True,
-        text=True,
         cwd=repo_root,
     )
     if result.returncode != 0:
         raise MeasurementError(
             f"git {' '.join(args)} failed with status {result.returncode}: "
-            f"{result.stderr.strip()}"
+            f"{result.stderr.decode('utf-8', errors='replace').strip()}"
         )
-    return result.stdout
+    return result.stdout.decode("utf-8")
 
 
 def collect_diff(base_ref: str, repo_root: Path) -> tuple[str, str]:
@@ -405,7 +462,27 @@ def collect_diff(base_ref: str, repo_root: Path) -> tuple[str, str]:
     # would describe a different revision: uncommitted lines would be missing
     # from the diff while their line numbers had already shifted the report.
     # Two sides of one intersection have to mean the same revision.
-    diff = _run_git(["diff", "--unified=0", base], repo_root)
+    # The header prefixes are pinned as well: ``_diff_path`` strips ``a/`` and
+    # ``b/``, and a host with ``diff.mnemonicPrefix`` or ``diff.noprefix`` set
+    # would print ``w/`` or nothing, leaving every file "uninstrumented".
+    # ``--no-ext-diff`` keeps a configured ``diff.external`` out of the same way.
+    # ``--no-color`` keeps ``color.diff=always`` from putting escape bytes in
+    # front of every header, and ``--inter-hunk-context=0`` keeps a host's
+    # ``diff.interHunkContext`` from merging separate hunks into one, which
+    # would count every untouched line between them as changed.
+    diff = _run_git(
+        [
+            "diff",
+            "--unified=0",
+            "--no-color",
+            "--no-ext-diff",
+            "--inter-hunk-context=0",
+            "--src-prefix=a/",
+            "--dst-prefix=b/",
+            base,
+        ],
+        repo_root,
+    )
     return base, diff + _untracked_diff(repo_root)
 
 
@@ -431,11 +508,12 @@ def _untracked_diff(repo_root: Path) -> str:
             raise MeasurementError(
                 f"untracked file {relative!r} could not be read: {error}"
             ) from error
+        # Quoted exactly as git would print the name, so the parser's decoding
+        # step sees the same shape here as in a real ``git diff``.
+        old = _quote_git_path(f"a/{relative}")
+        new = _quote_git_path(f"b/{relative}")
         sections.append(
-            f"diff --git a/{relative} b/{relative}\n"
-            f"--- /dev/null\n"
-            f"+++ b/{relative}\n"
-            f"@@ -0,0 +1,{count} @@\n"
+            f"diff --git {old} {new}\n--- /dev/null\n+++ {new}\n@@ -0,0 +1,{count} @@\n"
         )
     return "".join(sections)
 

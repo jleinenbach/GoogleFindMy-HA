@@ -988,6 +988,50 @@ def test_wait_helper_clears_the_slot_and_ignores_an_empty_one() -> None:
     )
 
 
+READY_TIMEOUT_SECONDS = 10.0
+
+
+def _wait_until_ready(ready: Path) -> None:
+    """Block until the stub child reports that its signal handler is installed.
+
+    The two behavioural shutdown tests below relay SIGTERM to a Python child
+    that must already own a handler when the signal lands; otherwise the
+    default action kills it and the test measures interpreter start-up time,
+    not the helper under test. A fixed ``sleep(0.5)`` was that measurement:
+    it passed on an idle machine and failed under load during the preflight
+    runs of PR #1274. The child writes ``ready`` right after
+    ``signal.signal``, so the wait ends the moment the handler exists and
+    never earlier; the ceiling only turns a hung child into a failure.
+    """
+
+    deadline = time.monotonic() + READY_TIMEOUT_SECONDS
+    while not ready.exists():
+        assert time.monotonic() < deadline, (
+            f"the stub child never reported readiness via {ready} within "
+            f"{READY_TIMEOUT_SECONDS:g}s"
+        )
+        time.sleep(0.02)
+
+
+def _end(proc: subprocess.Popen[bytes]) -> None:
+    """Bring the outer bash down, relaying TERM first so its child can follow.
+
+    On the normal path the process has already exited and only the kill is a
+    no-op. On the failure path of ``_wait_until_ready`` a bare ``kill`` would
+    take the bash with SIGKILL, which runs no trap, and the stub child would
+    sleep on as an orphan for its full 30 s; a TERM first lets the trap relay.
+    """
+
+    if proc.poll() is None:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            pass
+    proc.kill()
+    proc.wait(timeout=15)
+
+
 def test_wait_helper_behaviourally_survives_a_child_that_outlives_one_signal(
     tmp_path: Path,
 ) -> None:
@@ -1008,14 +1052,16 @@ def test_wait_helper_behaviourally_survives_a_child_that_outlives_one_signal(
     on_signal = _extract_shell_function(entrypoint, "on_signal")
     wait_helper = _extract_shell_function(entrypoint, "wait_for_tracked_child")
     rc_file = tmp_path / "rc"
+    ready = tmp_path / "ready"
 
     stub = tmp_path / "slow_shutdown_child.py"
     stub.write_text(
-        "import signal, sys, time\n"
+        "import pathlib, signal, sys, time\n"
         "def _handler(signum, frame):\n"
         "    time.sleep(1)  # graceful shutdown still in progress\n"
         "    sys.exit(5)\n"
         "signal.signal(signal.SIGTERM, _handler)\n"
+        f"pathlib.Path({str(ready)!r}).touch()\n"
         "time.sleep(30)\n",
         encoding="utf-8",
     )
@@ -1038,12 +1084,11 @@ def test_wait_helper_behaviourally_survives_a_child_that_outlives_one_signal(
         ["bash", "-c", script], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
     )
     try:
-        time.sleep(0.5)
+        _wait_until_ready(ready)
         proc.terminate()
         proc.wait(timeout=15)
     finally:
-        proc.kill()
-        proc.wait(timeout=15)
+        _end(proc)
 
     assert rc_file.exists(), "the helper never returned after the forwarded signal"
     assert rc_file.read_text().strip() == "5", (
@@ -1074,11 +1119,13 @@ def test_terminating_marker_catches_a_child_that_exits_cleanly_on_the_signal(
         'exit_if_terminating "${_srv_rc}"'
     )
     fallthrough = tmp_path / "fallthrough"
+    ready = tmp_path / "ready"
 
     stub = tmp_path / "clean_exit_child.py"
     stub.write_text(
-        "import signal, sys, time\n"
+        "import pathlib, signal, sys, time\n"
         "signal.signal(signal.SIGTERM, lambda s, f: sys.exit(0))\n"
+        f"pathlib.Path({str(ready)!r}).touch()\n"
         "time.sleep(30)\n",
         encoding="utf-8",
     )
@@ -1102,12 +1149,11 @@ def test_terminating_marker_catches_a_child_that_exits_cleanly_on_the_signal(
         ["bash", "-c", script], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
     )
     try:
-        time.sleep(0.5)
+        _wait_until_ready(ready)
         proc.terminate()
         proc.wait(timeout=15)
     finally:
-        proc.kill()
-        proc.wait(timeout=15)
+        _end(proc)
 
     assert not fallthrough.exists(), (
         "a child that exited 0 on the relayed signal was treated as a normal "

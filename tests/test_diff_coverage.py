@@ -9,6 +9,8 @@ reported full coverage there, it would not be measuring the thing it names.
 
 from __future__ import annotations
 
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -183,7 +185,16 @@ def test_main_resolves_the_base_through_merge_base(
     # The working tree, not cafe1234..HEAD: the coverage report is taken over
     # the working tree, and both sides of the intersection must mean the same
     # revision.
-    assert recorded[1] == ["diff", "--unified=0", "cafe1234"]
+    assert recorded[1] == [
+        "diff",
+        "--unified=0",
+        "--no-color",
+        "--no-ext-diff",
+        "--inter-hunk-context=0",
+        "--src-prefix=a/",
+        "--dst-prefix=b/",
+        "cafe1234",
+    ]
     # Untracked files are part of that same working tree and are asked for
     # after the tracked diff, never instead of it.
     assert recorded[2] == ["ls-files", "--others", "--exclude-standard", "-z"]
@@ -241,6 +252,53 @@ def test_an_untracked_file_enters_the_measurement(
     out = capsys.readouterr().out
     assert status == diff_coverage.EXIT_OK
     assert "RESULT: 1/2 (50.00%)" in out
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX file names")
+def test_an_untracked_file_with_a_newline_in_its_name_enters_the_measurement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A control character in an untracked name does not split the diff header.
+
+    Codex finding on PR #1274: the synthetic header wrote the name raw, so a
+    newline in it cut the ``+++`` line in two and the hunk was booked against
+    the first half. The XML writer coverage.py uses escapes such a name as
+    ``&#10;`` (measured with coverage 7.15.2 on Python 3.13 and 3.14), and
+    only the git-quoted header decodes to the same string; the result has to
+    be 1/2 for this file, not "uninstrumented".
+    """
+
+    awkward = "fresh\nline.py"
+    repo = _untracked_repo(tmp_path, "a = 1\nb = 2\n")
+    (repo / "custom_components" / "googlefindmy" / "fresh.py").rename(
+        repo / "custom_components" / "googlefindmy" / awkward
+    )
+    xml = repo / "coverage.xml"
+    xml.write_text(
+        xml.read_text(encoding="utf-8").replace(
+            'name="fresh.py" filename="fresh.py"',
+            'name="fresh&#10;line.py" filename="fresh&#10;line.py"',
+        ),
+        encoding="utf-8",
+    )
+
+    def _fake(args, repo_root):  # type: ignore[no-untyped-def]
+        if args[0] == "merge-base":
+            return "cafe1234\n"
+        if args[0] == "ls-files":
+            return f"custom_components/googlefindmy/{awkward}\0"
+        return ""
+
+    monkeypatch.setattr(diff_coverage, "_run_git", _fake)
+
+    status = diff_coverage.main(
+        ["--coverage-xml", "coverage.xml", "--repo-root", str(repo), "--threshold", "0"]
+    )
+
+    out = capsys.readouterr().out
+    assert status == diff_coverage.EXIT_OK
+    assert "RESULT: 1/2 (50.00%)" in out
+    assert "uninstrumented" not in out
 
 
 def test_an_untracked_file_that_vanished_is_a_measurement_error(
@@ -439,7 +497,7 @@ def test_a_content_line_is_not_mistaken_for_a_file_header() -> None:
 
 
 def test_a_quoted_path_is_unquoted() -> None:
-    """git quotes paths with spaces; the quotes never match a coverage entry."""
+    """A quoted header is stripped of its quotes; they never match a coverage entry."""
 
     diff = (
         'diff --git a/x "b/custom_components/googlefindmy/a b.py"\n'
@@ -479,3 +537,153 @@ def test_a_malformed_quoted_path_is_a_measurement_error() -> None:
         diff_coverage._unquote_git_path('"a/x\\"')
     with pytest.raises(diff_coverage.MeasurementError):
         diff_coverage._unquote_git_path('"a/x\\q"')
+
+
+_AWKWARD_NAMES = (
+    "new\nline.py",
+    "carriage\rreturn.py",
+    "tab\there.py",
+    'double"quote.py',
+    "back\\slash.py",
+    "tür.py",
+    "bell\aring.py",
+    "escape\x1bkey.py",
+    "delete\x7fkey.py",
+)
+
+
+@pytest.mark.parametrize("name", _AWKWARD_NAMES, ids=repr)
+def test_quoting_a_path_round_trips_through_unquoting(name: str) -> None:
+    """Every byte class git escapes comes back as the original name."""
+
+    quoted = diff_coverage._quote_git_path(f"b/{name}")
+
+    assert quoted.startswith('"') and quoted.endswith('"')
+    # Nothing but printable ASCII may remain: a raw control byte would still
+    # decode correctly and still split or corrupt the header line.
+    assert all(" " <= char <= "~" for char in quoted), repr(quoted)
+    assert diff_coverage._unquote_git_path(quoted) == f"b/{name}"
+
+
+def test_a_plain_or_spaced_path_is_not_quoted() -> None:
+    """git leaves a name without awkward bytes alone, a space included.
+
+    Measured against git 2.x with ``core.quotePath`` at its default: ``a b.py``
+    arrives as ``+++ b/a b.py`` followed by a tab, never inside quotes. Quoting
+    it here would be harmless to the parser but would not be git's form.
+    """
+
+    assert diff_coverage._quote_git_path("b/plain.py") == "b/plain.py"
+    assert diff_coverage._quote_git_path("b/a b.py") == "b/a b.py"
+
+
+def _git(repo: Path, *arguments: str) -> str:
+    """Run one git command inside ``repo`` and return its stdout."""
+
+    completed = subprocess.run(
+        ["git", *arguments],
+        check=True,
+        capture_output=True,
+        text=True,
+        cwd=str(repo),
+    )
+    return completed.stdout
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX file names")
+def test_the_synthetic_diff_names_files_as_git_does(tmp_path: Path) -> None:
+    """The untracked-file diff and a real ``git diff`` parse to the same map.
+
+    The quoting is git's, not ours, so a fake would only pin what we believe
+    git does. Here the same awkward names go through both paths: once as
+    untracked files through ``_untracked_diff``, once staged and printed by
+    git itself. The oracle is called with the pins ``collect_diff`` uses, over
+    a repository configured the opposite way (quoting off, mnemonic prefixes
+    on), so what is compared is git's form under the settings the tool
+    enforces, not under whatever the host happens to carry.
+    """
+
+    _git(tmp_path, "init", "-q")
+    _git(tmp_path, "config", "core.quotePath", "false")
+    _git(tmp_path, "config", "diff.mnemonicPrefix", "true")
+    names = [*_AWKWARD_NAMES, "a b.py", "plain.py"]
+    for name in names:
+        (tmp_path / name).write_text("y = 1\ny = 2\n", encoding="utf-8")
+
+    synthetic = diff_coverage._untracked_diff(tmp_path)
+
+    _git(tmp_path, "add", "-A")
+    real = _git(
+        tmp_path,
+        "-c",
+        "core.quotePath=true",
+        "diff",
+        "--cached",
+        "--unified=0",
+        "--no-color",
+        "--no-ext-diff",
+        "--src-prefix=a/",
+        "--dst-prefix=b/",
+    )
+
+    # Positive control: git really did quote here, so the comparison is doing work.
+    assert '+++ "b/' in real
+    assert diff_coverage.parse_diff(synthetic) == diff_coverage.parse_diff(real)
+    assert set(diff_coverage.parse_diff(synthetic)) == set(names)
+    # The headers themselves, not only what they decode to: a raw non-ASCII
+    # byte inside the quotes decodes to the same name and would pass above.
+    # git ends an unquoted header holding a space with a tab, which the parser
+    # strips and the synthetic diff does not write.
+    headers = [
+        line.rstrip("\t") for line in real.splitlines() if line.startswith("+++ ")
+    ]
+    assert sorted(headers) == sorted(
+        line for line in synthetic.splitlines() if line.startswith("+++ ")
+    )
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX file names")
+def test_collect_diff_is_immune_to_the_host_prefix_and_quoting_settings(
+    tmp_path: Path,
+) -> None:
+    """A developer's diff-shaping git configuration changes nothing.
+
+    ``_diff_path`` strips ``a/`` and ``b/`` and decodes C-quoting. With the
+    prefixes renamed by configuration (``w/`` for the working tree) every
+    changed file was reported as uninstrumented; measured red before the pin.
+    ``diff.noprefix`` is harmless by comparison, an unprefixed name is taken
+    as it is, and ``core.quotePath=false`` only stops the quoting of
+    non-ASCII bytes, never of control bytes. ``color.diff=always`` puts
+    escape bytes in front of every header, so no line parsed as one; and
+    ``diff.interHunkContext`` merges hunks that lie close together, so the
+    untouched lines between them counted as changed (measured: one hunk of
+    485 lines where eight hunks were meant). All four settings are pinned on
+    the command line, and this repository carries the opposite of each.
+    """
+
+    _git(tmp_path, "init", "-q")
+    _git(tmp_path, "config", "user.email", "t@example.invalid")
+    _git(tmp_path, "config", "user.name", "t")
+    _git(tmp_path, "config", "diff.mnemonicPrefix", "true")
+    _git(tmp_path, "config", "core.quotePath", "false")
+    _git(tmp_path, "config", "color.diff", "always")
+    _git(tmp_path, "config", "diff.interHunkContext", "1000")
+    awkward = "tür.py"
+    # Two edits with untouched lines between them: only the hunk-context pin
+    # keeps them apart, without it lines 2 to 4 are reported as changed too.
+    (tmp_path / awkward).write_text(
+        "y = 1\na = 0\nb = 0\nc = 0\nz = 1\n", encoding="utf-8"
+    )
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-q", "-m", "base")
+    (tmp_path / awkward).write_text(
+        "y = 2\na = 0\nb = 0\nc = 0\nz = 2\n", encoding="utf-8"
+    )
+    (tmp_path / "new\nline.py").write_text("z = 3\n", encoding="utf-8")
+
+    _base, diff = diff_coverage.collect_diff("HEAD", tmp_path)
+
+    assert diff_coverage.parse_diff(diff) == {
+        awkward: {1, 5},
+        "new\nline.py": {1},
+    }
