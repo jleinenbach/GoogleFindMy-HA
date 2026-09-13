@@ -90,8 +90,8 @@ violation for a guard) live under `tests/fixtures/<name>/` with an
 `__init__.py` that says what they are for, each file carrying the
 repository-relative path header like every other test file. Keep the
 `test_*.py` and `*_test.py` naming away from them: pytest collects nothing
-there, `ruff` reads all of it. The two instances are `tests/fixtures/registry_guard_probe/`
-and `tests/fixtures/kill_probe/`; source held in a string literal inside a
+there, `ruff` reads all of it. The three instances are `tests/fixtures/registry_guard_probe/`,
+`tests/fixtures/kill_probe/` and `tests/fixtures/map_tiles_probe/`; source held in a string literal inside a
 test is read by no linter, and a typo there surfaces only as a broken child at
 run time.
 

@@ -8,6 +8,7 @@ import json
 import logging
 import math
 import time
+from collections.abc import Mapping, Sequence
 from datetime import datetime, timedelta
 from html import escape
 from pathlib import Path
@@ -398,6 +399,27 @@ def _leaflet_asset(name: str) -> str:
         ) from None
 
 
+# Home Assistant Core >= 2026.9 ships the system component ``map_tiles``, which
+# proxies OpenStreetMap tiles with an application User-Agent and a server-side
+# cache. It publishes no Python API; the only runtime coupling is the key under
+# which it stores its short-lived query tokens in ``hass.data``. That key
+# mirrors ``homeassistant.components.map_tiles.const.DATA_ACCESS_TOKENS``
+# (a ``HassKey``, which is a ``str`` at runtime) and is pinned by the contract
+# test in ``tests/test_map_view_tiles.py``.
+_MAP_TILES_DATA_KEY = "map_tiles"
+_MAP_TILES_RASTER_URL = "/api/map_tiles/raster/{z}/{x}/{y}.png?token={token}"
+# The Core raster proxy answers 404 above this zoom level.
+_MAP_TILES_RASTER_MAX_NATIVE_ZOOM = 19
+# Same wording as the Core map (attribution with the copyright link the OSMF
+# attribution guidelines ask for); shared by the proxy and the fallback layer.
+_OSM_ATTRIBUTION = (
+    '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
+    " contributors"
+)
+# Share-token guarded endpoint that hands the current Core token to a page that
+# outlived the token rotation (see GoogleFindMyMapTilesTokenView).
+_MAP_TILES_TOKEN_REFRESH_PATH = "/api/googlefindmy/map_tiles_token"
+
 # The map URL carries its access token in the query string, so every response of
 # this view is as sensitive as the link itself. `no-store` keeps it out of shared
 # browser and proxy caches, `noindex, nofollow` keeps it out of search engines on
@@ -503,6 +525,37 @@ def _resolve_entry_by_token(
         if auth_token in accepted:
             return entry, accepted
     return None, None
+
+
+def _map_tiles_access_token(hass: Any) -> str | None:
+    """Return the newest Core ``map_tiles`` access token, or ``None`` to fall back.
+
+    Core (>= 2026.9) keeps a short deque of hex tokens under
+    ``hass.data[_MAP_TILES_DATA_KEY]`` (mirrors
+    ``homeassistant.components.map_tiles.const.DATA_ACCESS_TOKENS``) and rotates
+    them every 30 minutes; the last element is the current one.
+
+    Fail-open rule: anything that is not a non-empty sequence of ASCII
+    alphanumeric strings (no ``data``, missing key, empty deque, a bare string,
+    a non-string element, a token with unexpected characters) yields ``None``
+    and the map keeps loading tiles directly from OpenStreetMap as before. The
+    alphanumeric check is also what keeps the token safe to embed in the page.
+    The token is never logged.
+    """
+    data = getattr(hass, "data", None)
+    if not isinstance(data, Mapping):
+        return None
+    tokens = data.get(_MAP_TILES_DATA_KEY)
+    if isinstance(tokens, (str, bytes)) or not isinstance(tokens, Sequence):
+        return None
+    if not tokens:
+        return None
+    token = tokens[-1]
+    if not isinstance(token, str) or not token:
+        return None
+    if not token.isascii() or not token.isalnum():
+        return None
+    return token
 
 
 # ------------------------------- Map View -----------------------------------
