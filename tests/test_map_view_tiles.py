@@ -23,12 +23,14 @@ the two rendered branches and the token endpoint.
 from __future__ import annotations
 
 import json
+import logging
 import pathlib
 import re
 import secrets
 import subprocess
 import sys
 from collections import deque
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any
 
@@ -141,3 +143,112 @@ def test_map_tiles_contract_matches_core() -> None:
         data={"map_tiles": deque([secrets.token_hex(core["token_size"])])}
     )
     assert map_view._map_tiles_access_token(hass) is not None
+
+
+# ------------------------------ rendered page ------------------------------
+
+_OSM_FALLBACK_LINES = (
+    "        L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {\n",
+    "            referrerPolicy: 'origin'\n        }).addTo(map);\n",
+)
+
+
+def _render_html(monkeypatch: pytest.MonkeyPatch, hass: Any) -> str:
+    """Render real map HTML for the given ``hass`` with an empty Leaflet cache.
+
+    The session fixture primes the real Leaflet assets; a fresh dict keeps the
+    output short and never mutates the shared cache (see ``tests/conftest.py``).
+    """
+
+    monkeypatch.setattr(
+        map_view, "_LEAFLET_CACHE", {"leaflet.css": "", "leaflet.js": ""}
+    )
+    view = map_view.GoogleFindMyMapView(hass)
+    now = datetime(2024, 1, 1, tzinfo=UTC)
+    return view._generate_map_html("MyPhone", [], "device-1", now, now, 0)
+
+
+def _hass_with_proxy(*tokens: str) -> SimpleNamespace:
+    return SimpleNamespace(
+        config=SimpleNamespace(language="en"),
+        data={"map_tiles": deque(tokens, maxlen=2)},
+    )
+
+
+def test_proxy_branch_uses_core_tiles(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With a Core token the page loads tiles from this instance, newest token only."""
+
+    html = _render_html(monkeypatch, _hass_with_proxy(_OLD_TOKEN, _NEW_TOKEN))
+
+    assert "L.tileLayer('/api/map_tiles/raster/{z}/{x}/{y}.png?token={token}'" in html
+    assert f'token: "{_NEW_TOKEN}"' in html
+    assert _OLD_TOKEN not in html
+    assert "tile.openstreetmap.org" not in html
+    assert "referrerPolicy" not in html
+    # Leaflet substitutes ``{token}`` from the options; the Core route rejects
+    # zoom levels above 19.
+    assert "maxNativeZoom: 19" in html
+    # token refresh for pages that outlive the 30 min rotation
+    assert "gfmyTileLayer.on('tileerror'" in html
+    assert "GFMY_TILE_TOKEN_REFRESH_THROTTLE_MS = 30000" in html
+    assert "fetch('/api/googlefindmy/map_tiles_token?token='" in html
+    assert "gfmyTileLayer.redraw()" in html
+    # attribution: Core wording with the copyright link
+    assert 'href="https://www.openstreetmap.org/copyright"' in html
+    assert "OpenStreetMap</a> contributors" in html
+
+
+_FALLBACK_HASS = (
+    pytest.param(SimpleNamespace(config=SimpleNamespace(language="en")), id="no-data"),
+    pytest.param(
+        SimpleNamespace(config=SimpleNamespace(language="en"), data={}), id="no-key"
+    ),
+    *(
+        pytest.param(
+            SimpleNamespace(
+                config=SimpleNamespace(language="en"), data={"map_tiles": value}
+            ),
+            id=f"value-{param.id}",
+        )
+        for param in _FAIL_OPEN_VALUES
+        for value in param.values
+    ),
+)
+
+
+@pytest.mark.parametrize("hass", _FALLBACK_HASS)
+def test_fallback_branch_is_direct_osm(
+    monkeypatch: pytest.MonkeyPatch, hass: Any
+) -> None:
+    """Without a usable Core token the page loads tiles directly from OSM.
+
+    The ``referrerPolicy`` and ``addTo`` lines are pinned byte for byte. Two
+    changes against the previous page are intended and pinned as well: the
+    tile host is ``tile.openstreetmap.org`` without the ``{s}`` subdomain (the
+    one hostname the OSMF tile usage policy names) and the attribution carries
+    the copyright link in the Core wording.
+    """
+
+    html = _render_html(monkeypatch, hass)
+
+    for line in _OSM_FALLBACK_LINES:
+        assert line in html
+    assert "api/map_tiles" not in html
+    assert "tileerror" not in html
+    assert "map_tiles_token" not in html
+    assert 'href="https://www.openstreetmap.org/copyright"' in html
+    assert "OpenStreetMap</a> contributors" in html
+
+
+def test_core_token_is_not_logged(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Rendering with a Core token leaves the token out of every log line."""
+
+    caplog.set_level(logging.DEBUG)
+
+    html = _render_html(monkeypatch, _hass_with_proxy(_OLD_TOKEN, _NEW_TOKEN))
+
+    assert _NEW_TOKEN in html
+    assert _NEW_TOKEN not in caplog.text
+    assert _OLD_TOKEN not in caplog.text
