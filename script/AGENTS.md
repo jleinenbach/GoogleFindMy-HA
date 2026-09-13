@@ -173,13 +173,14 @@ module out of the diff while the report already lists it), then intersects the t
 is not a dependency of this repository, and a new runtime dependency for one
 measurement would be out of proportion.
 
-Path listings from git (`ls-files -z`, `diff --name-only -z`) are read as
-bytes and decoded by the script, never through `text=True`: the text layer
-turns a lone carriage return into a newline, and in a `-z` listing that byte is
-the name. The diff itself is asked for with `--src-prefix=a/ --dst-prefix=b/
---no-ext-diff` and every git call runs under `-c core.quotePath=true`, so a
-developer's `diff.mnemonicPrefix` or `core.quotePath=false` cannot change
-what the parser sees.
+Path listings from git (`ls-files -z` here, `diff --name-only -z` in
+`local_verify.py`) are read as bytes and decoded by the script, never through
+`text=True`: the text layer turns a lone carriage return into a newline, and
+in a `-z` listing that byte is the name. The diff itself is asked for with
+`--src-prefix=a/ --dst-prefix=b/ --no-color --no-ext-diff
+--inter-hunk-context=0` and every git call runs under `-c core.quotePath=true`,
+so a developer's `diff.mnemonicPrefix`, `color.diff`, `diff.interHunkContext`
+or `core.quotePath=false` cannot change what the parser sees.
 
 Three decisions keep the number comparable rather than merely plausible:
 

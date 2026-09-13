@@ -188,7 +188,9 @@ def test_main_resolves_the_base_through_merge_base(
     assert recorded[1] == [
         "diff",
         "--unified=0",
+        "--no-color",
         "--no-ext-diff",
+        "--inter-hunk-context=0",
         "--src-prefix=a/",
         "--dst-prefix=b/",
         "cafe1234",
@@ -644,15 +646,19 @@ def test_the_synthetic_diff_names_files_as_git_does(tmp_path: Path) -> None:
 def test_collect_diff_is_immune_to_the_host_prefix_and_quoting_settings(
     tmp_path: Path,
 ) -> None:
-    """A developer's ``diff.mnemonicPrefix`` or ``core.quotePath`` changes nothing.
+    """A developer's diff-shaping git configuration changes nothing.
 
     ``_diff_path`` strips ``a/`` and ``b/`` and decodes C-quoting. With the
     prefixes renamed by configuration (``w/`` for the working tree) every
     changed file was reported as uninstrumented; measured red before the pin.
     ``diff.noprefix`` is harmless by comparison, an unprefixed name is taken
     as it is, and ``core.quotePath=false`` only stops the quoting of
-    non-ASCII bytes, never of control bytes. Both settings are pinned on the
-    command line, and this repository carries the opposite of each.
+    non-ASCII bytes, never of control bytes. ``color.diff=always`` puts
+    escape bytes in front of every header, so no line parsed as one; and
+    ``diff.interHunkContext`` merges hunks that lie close together, so the
+    untouched lines between them counted as changed (measured: one hunk of
+    485 lines where eight hunks were meant). All four settings are pinned on
+    the command line, and this repository carries the opposite of each.
     """
 
     _git(tmp_path, "init", "-q")
@@ -660,13 +666,24 @@ def test_collect_diff_is_immune_to_the_host_prefix_and_quoting_settings(
     _git(tmp_path, "config", "user.name", "t")
     _git(tmp_path, "config", "diff.mnemonicPrefix", "true")
     _git(tmp_path, "config", "core.quotePath", "false")
+    _git(tmp_path, "config", "color.diff", "always")
+    _git(tmp_path, "config", "diff.interHunkContext", "1000")
     awkward = "tür.py"
-    (tmp_path / awkward).write_text("y = 1\n", encoding="utf-8")
+    # Two edits with untouched lines between them: only the hunk-context pin
+    # keeps them apart, without it lines 2 to 4 are reported as changed too.
+    (tmp_path / awkward).write_text(
+        "y = 1\na = 0\nb = 0\nc = 0\nz = 1\n", encoding="utf-8"
+    )
     _git(tmp_path, "add", "-A")
     _git(tmp_path, "commit", "-q", "-m", "base")
-    (tmp_path / awkward).write_text("y = 1\ny = 2\n", encoding="utf-8")
+    (tmp_path / awkward).write_text(
+        "y = 2\na = 0\nb = 0\nc = 0\nz = 2\n", encoding="utf-8"
+    )
     (tmp_path / "new\nline.py").write_text("z = 3\n", encoding="utf-8")
 
     _base, diff = diff_coverage.collect_diff("HEAD", tmp_path)
 
-    assert diff_coverage.parse_diff(diff) == {awkward: {2}, "new\nline.py": {1}}
+    assert diff_coverage.parse_diff(diff) == {
+        awkward: {1, 5},
+        "new\nline.py": {1},
+    }

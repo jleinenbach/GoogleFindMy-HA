@@ -432,8 +432,11 @@ def _run_git(args: Sequence[str], repo_root: Path) -> str:
     """
 
     # The parser decodes git's C-style quoting, so that quoting is pinned here
-    # rather than left to the host's ``core.quotePath``; a developer's global
-    # ``false`` would otherwise hand the parser a raw control byte in a header.
+    # rather than left to the host's ``core.quotePath``. Git quotes control
+    # bytes, quotes and backslashes under either setting; ``false`` only
+    # prints bytes above ASCII raw. The pin keeps the real header in the same
+    # form as the synthetic one from ``_quote_git_path``, so that both take
+    # the same path through ``_diff_path``.
     result = subprocess.run(
         ["git", "-c", "core.quotePath=true", *args],
         check=False,
@@ -463,11 +466,17 @@ def collect_diff(base_ref: str, repo_root: Path) -> tuple[str, str]:
     # ``b/``, and a host with ``diff.mnemonicPrefix`` or ``diff.noprefix`` set
     # would print ``w/`` or nothing, leaving every file "uninstrumented".
     # ``--no-ext-diff`` keeps a configured ``diff.external`` out of the same way.
+    # ``--no-color`` keeps ``color.diff=always`` from putting escape bytes in
+    # front of every header, and ``--inter-hunk-context=0`` keeps a host's
+    # ``diff.interHunkContext`` from merging separate hunks into one, which
+    # would count every untouched line between them as changed.
     diff = _run_git(
         [
             "diff",
             "--unified=0",
+            "--no-color",
             "--no-ext-diff",
+            "--inter-hunk-context=0",
             "--src-prefix=a/",
             "--dst-prefix=b/",
             base,
