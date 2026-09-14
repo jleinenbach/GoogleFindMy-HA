@@ -283,6 +283,14 @@ class BLEBatteryState:
             the advertisement time, not the processing time: on a history
             replay (integration reload, Home Assistant restart) it is the
             original sighting.
+        observed_at_monotonic: The same observation on the
+            :func:`time.monotonic` clock. This is the ordering key: the
+            writer keeps the newest sighting by this value, not by the wall
+            clock, because the wall clock can be stepped backwards (NTP or a
+            manual correction) while the process runs, and a later sighting
+            with a smaller wall stamp must not be mistaken for an older one.
+            Defaults to ``-inf`` ("no ordering knowledge") for states built
+            elsewhere, so that any real sighting supersedes them.
     """
 
     battery_level: int
@@ -290,6 +298,7 @@ class BLEBatteryState:
     uwt_mode: bool
     decoded_flags: int
     observed_at_wall: float
+    observed_at_monotonic: float = -math.inf
 
 
 @dataclass(slots=True)
@@ -1046,6 +1055,11 @@ class GoogleFindMyEIDResolver:
         init=False, default_factory=dict
     )
     _known_offsets: dict[tuple[str, str], int] = field(init=False, default_factory=dict)
+    # Newest sighting per device on the monotonic clock, in memory only:
+    # orders the lock writes within this process (see _update_match_state).
+    _lock_last_seen_monotonic: dict[str, float] = field(
+        init=False, default_factory=dict
+    )
     _known_advertisement_reversed: dict[str, bool] = field(
         init=False, default_factory=dict
     )
@@ -1136,6 +1150,8 @@ class GoogleFindMyEIDResolver:
             self._decryption_status = {}
         if not hasattr(self, "_last_lock_confirmation"):
             self._last_lock_confirmation = {}
+        if not hasattr(self, "_lock_last_seen_monotonic"):
+            self._lock_last_seen_monotonic = {}
         if not hasattr(self, "_provisioning_warn_at"):
             self._provisioning_warn_at = {}
         if not hasattr(self, "_locks"):
@@ -1187,6 +1203,7 @@ class GoogleFindMyEIDResolver:
             "_known_advertisement_reversed",
             "_known_timebases",
             "_last_lock_confirmation",
+            "_lock_last_seen_monotonic",
         ):
             mapping = getattr(self, attr, None)
             if isinstance(mapping, dict) and device_id in mapping:
@@ -2848,6 +2865,38 @@ class GoogleFindMyEIDResolver:
         if previous is None or now > previous:
             self._last_lock_confirmation[device_id] = now
 
+    def _sighting_is_older_than_the_lock(
+        self,
+        device_id: str,
+        existing_lock: EIDGenerationLock | None,
+        *,
+        now: int,
+        now_monotonic: float | None,
+    ) -> bool:
+        """Whether the lock already reflects a newer sighting than this one.
+
+        An older sighting can be delivered after a newer one (HA before
+        2026.8 replays the advertisement history in dict order, and a tracker
+        rotates its address, so the history can hold several of its
+        sightings); drift and ``last_seen_at`` must not roll back to it.
+        Within this process the sightings are ordered on the monotonic
+        clock: the wall clock can be stepped backwards while HA runs, and a
+        guard on it would then hold every live sighting as older until wall
+        time caught up. Only when no sighting of the device is on record in
+        this process (first sighting after a restart) is the persisted wall
+        stamp the reference; it is whole seconds, so that comparison resolves
+        to the second: two sightings within one wall second are applied in
+        delivery order, the next live packet settles the drift.
+        """
+        last_seen_monotonic = self._lock_last_seen_monotonic.get(device_id)
+        if now_monotonic is not None and last_seen_monotonic is not None:
+            return now_monotonic < last_seen_monotonic
+        return (
+            existing_lock is not None
+            and existing_lock.last_seen_at is not None
+            and now < existing_lock.last_seen_at
+        )
+
     def _update_match_state(  # noqa: PLR0913
         self,
         match: EIDMatch,
@@ -2858,8 +2907,14 @@ class GoogleFindMyEIDResolver:
         candidate_prefix: str,
         raw_prefix: str,
         now: int,
+        now_monotonic: float | None = None,
     ) -> None:
-        """Update internal state (locks, offsets, etc.) for a single match."""
+        """Update internal state (locks, offsets, etc.) for a single match.
+
+        ``now`` is the observation on the wall clock (whole seconds, the
+        persisted lock schema); ``now_monotonic`` is the same observation on
+        the monotonic clock and orders the writes within this process.
+        """
         self._confirm_lock(match.device_id, now)
         previous_basis = _normalize_anchor_basis(
             self._known_timebases.get(match.device_id)
@@ -2876,18 +2931,8 @@ class GoogleFindMyEIDResolver:
             self._known_timebases.pop(match.device_id, None)
 
         existing_lock = self._locks.get(match.device_id)
-        # An older sighting delivered after a newer one (HA before 2026.8
-        # replays the advertisement history in dict order, and a tracker
-        # rotates its address, so the history can hold several of its
-        # sightings). The lock already reflects the newer sighting; drift
-        # and last_seen_at must not roll back to the older one. Lock stamps
-        # are whole seconds (persisted schema), so this guard resolves to
-        # the second: two sightings within one wall second are applied in
-        # delivery order, the next live packet settles the drift.
-        stale = (
-            existing_lock is not None
-            and existing_lock.last_seen_at is not None
-            and now < existing_lock.last_seen_at
+        stale = self._sighting_is_older_than_the_lock(
+            match.device_id, existing_lock, now=now, now_monotonic=now_monotonic
         )
         if existing_lock is None:
             variant_value = self._normalize_variant_value(
@@ -2929,6 +2974,9 @@ class GoogleFindMyEIDResolver:
                     "+1/+2" if match.time_offset > 0 else "-1/-2",
                 )
             self._schedule_lock_save()
+
+        if not stale and now_monotonic is not None:
+            self._lock_last_seen_monotonic[match.device_id] = now_monotonic
 
         self._known_advertisement_reversed[match.device_id] = match.is_reversed
 
@@ -3046,6 +3094,7 @@ class GoogleFindMyEIDResolver:
                     candidate_prefix=candidate_prefix,
                     raw_prefix=raw_prefix,
                     now=now,
+                    now_monotonic=clock.monotonic,
                 )
 
             # ---------------------------------------------------------
@@ -3213,7 +3262,8 @@ class GoogleFindMyEIDResolver:
             battery_pct = FMDN_BATTERY_PCT.get(battery_raw)
             # Observation time, not processing time (see ObservationClock);
             # direct callers without a clock get the old "now" behaviour.
-            now_wall = (clock if clock is not None else _observation_clock(None)).wall
+            observation = clock if clock is not None else _observation_clock(None)
+            now_wall = observation.wall
 
             # Observe -- do not arbitrate -- the two redundant channels.
             #
@@ -3253,6 +3303,7 @@ class GoogleFindMyEIDResolver:
                 uwt_mode=uwt_mode,
                 decoded_flags=decoded,
                 observed_at_wall=now_wall,
+                observed_at_monotonic=observation.monotonic,
             )
 
             battery_labels = {
@@ -3271,10 +3322,16 @@ class GoogleFindMyEIDResolver:
             for match in matches:
                 storage_key = match.canonical_id or match.device_id
                 prev = self._ble_battery_state.get(storage_key)
-                if prev is not None and prev.observed_at_wall > now_wall:
+                if (
+                    prev is not None
+                    and prev.observed_at_monotonic > observation.monotonic
+                ):
                     # Older sighting delivered after a newer one (history
                     # replay in dict order on HA before 2026.8): the state on
-                    # record is the more recent observation, keep it.
+                    # record is the more recent observation, keep it. Ordered
+                    # on the monotonic clock: the wall clock can be stepped
+                    # backwards while HA runs, and a guard on it would then
+                    # reject every live sighting until wall time caught up.
                     continue
                 self._ble_battery_state[storage_key] = state
 

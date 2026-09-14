@@ -452,13 +452,13 @@ def test_older_sighting_after_newer_keeps_known_offset() -> None:
 
 
 @pytest.mark.usefixtures("frozen_clocks")
-def test_lock_guard_resolves_to_the_second() -> None:
-    """R8: declared limit. Lock stamps are whole seconds (persisted schema).
+def test_lock_keeps_the_newer_sighting_within_one_second() -> None:
+    """R8: the lock is ordered on the monotonic clock, not on its second stamp.
 
-    Two sightings within one wall second are applied to the lock in delivery
-    order; battery state and scan info, which compare floats, still keep the
-    newer one. Pinned so that the limit is a decision on record, not a
-    surprise.
+    Lock stamps are whole seconds (persisted schema). Within this process
+    the writer still orders sightings on the monotonic clock, so two
+    sightings in the same wall second keep the newer one on the lock as well,
+    like battery state and scan info. The remaining limit is pinned by R12.
     """
     resolver, raw_newer, raw_older = _primed_pair("dev-r8")
     # Both sightings fall into the same wall second (x.8 and x.3).
@@ -477,7 +477,7 @@ def test_lock_guard_resolves_to_the_second() -> None:
     assert info is not None and state is not None
     assert info.ble_address == "AA:AA"
     assert state.battery_level == 1
-    assert resolver._locks["dev-r8"].drift_offset == -1  # the limit
+    assert resolver._locks["dev-r8"].drift_offset == 0  # the newer sighting
 
 
 @pytest.mark.usefixtures("frozen_clocks")
@@ -505,3 +505,91 @@ def test_future_sighting_does_not_freeze_the_out_of_order_guard() -> None:
     assert info.observed_at == MONO_NOW
     assert info.observed_at_wall == WALL_NOW
     assert state.battery_level == 2  # the wall-clock writer took it as well
+
+
+def test_wall_clock_step_back_does_not_freeze_the_battery_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R10: a backward wall-clock correction does not make live sightings "older".
+
+    Found by Codex on the PR: the battery writer ordered sightings by the
+    wall clock. When the wall clock is stepped backwards while HA runs (NTP
+    or a manual correction), a later advertisement gets a smaller wall
+    stamp although it is newer on the monotonic clock, and a wall-clock
+    guard would reject every battery/UWT update until wall time caught up.
+    The guard orders by the monotonic stamp, so the later sighting wins and
+    its wall stamp is the corrected one.
+    """
+    resolver, raw_first, raw_second = _primed_pair("dev-r10")
+    monkeypatch.setattr(time, "monotonic", lambda: MONO_NOW)
+
+    monkeypatch.setattr(time, "time", lambda: WALL_NOW)
+    assert resolver.resolve_eid(raw_first, observed_at=MONO_NOW - 100.0)
+    first = resolver.get_ble_battery_state("dev-r10")
+    assert first is not None and first.battery_level == 1  # positive control
+
+    step = 3600.0  # the wall clock is corrected back by one hour
+    monkeypatch.setattr(time, "time", lambda: WALL_NOW - step)
+    assert resolver.resolve_eid(raw_second, observed_at=MONO_NOW - 50.0)
+
+    state = resolver.get_ble_battery_state("dev-r10")
+    assert state is not None
+    assert state.battery_level == 2  # LOW, from the later sighting
+    assert state.observed_at_monotonic == MONO_NOW - 50.0
+    assert state.observed_at_wall == WALL_NOW - step - 50.0
+
+
+def test_wall_clock_step_back_does_not_freeze_the_lock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R11: the lock writer is ordered on the monotonic clock as well.
+
+    Same class as R10 on the lock guard: with the wall stamp as the
+    reference, a backward wall-clock correction would hold every live
+    sighting as older than the lock for the size of the step, freezing drift
+    learning and the ``_known_offsets`` mirror. Ordered on the monotonic
+    clock, the later sighting updates drift and ``last_seen_at`` (which then
+    carries the corrected wall second).
+    """
+    resolver, raw_first, raw_second = _primed_pair("dev-r11")
+    monkeypatch.setattr(time, "monotonic", lambda: MONO_NOW)
+
+    monkeypatch.setattr(time, "time", lambda: WALL_NOW)
+    assert resolver.resolve_eid(raw_first, observed_at=MONO_NOW - 100.0)
+    assert resolver._locks["dev-r11"].drift_offset == 0
+
+    step = 3600.0
+    monkeypatch.setattr(time, "time", lambda: WALL_NOW - step)
+    assert resolver.resolve_eid(raw_second, observed_at=MONO_NOW - 50.0)
+
+    lock = resolver._locks["dev-r11"]
+    assert lock.drift_offset == -1  # learned from the later sighting
+    assert lock.last_seen_at == int(WALL_NOW - step - 50.0)
+    assert resolver._last_lock_confirmation["dev-r11"] == int(WALL_NOW - 100.0)
+
+
+@pytest.mark.usefixtures("frozen_clocks")
+def test_first_sighting_after_restart_is_ordered_by_the_persisted_second() -> None:
+    """R12: declared limit. Across a restart only the wall second is on record.
+
+    A restored lock carries ``last_seen_at`` in whole seconds and no
+    monotonic stamp (the monotonic clock does not survive a restart), so the
+    first sighting after a restart is compared on the second: a sighting in
+    the same second as the persisted one is applied in delivery order, one
+    in an earlier second is held as older. Pinned so that the limit is a
+    decision on record, not a surprise.
+    """
+    resolver, raw_first, raw_second = _primed_pair("dev-r12")
+    assert resolver.resolve_eid(raw_first, observed_at=NEWER + 0.8)  # x.8
+    persisted = resolver._locks["dev-r12"]
+    assert persisted.last_seen_at == int(WALL_NOW - 100.0)  # second x
+    # "Restart": the in-process order is gone, the persisted second remains.
+    resolver._lock_last_seen_monotonic.clear()
+
+    # An earlier second: held as older, drift stays.
+    assert resolver.resolve_eid(raw_second, observed_at=NEWER - 1.0)
+    assert resolver._locks["dev-r12"].drift_offset == 0
+
+    # The same second, but older (x.3): applied in delivery order, the limit.
+    assert resolver.resolve_eid(raw_second, observed_at=NEWER + 0.3)
+    assert resolver._locks["dev-r12"].drift_offset == -1
