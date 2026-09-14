@@ -118,7 +118,8 @@ def test_observation_in_the_future_is_clamped_to_now() -> None:
     ``time.monotonic``, it lags by up to one tick. A value ahead of the
     resolver's reading comes from a caller with a different clock or from a
     skewed test clock; whatever its origin, the sighting must never be dated
-    into the future.
+    into the future, on either clock (R9 shows what a future monotonic
+    stamp would do to the out-of-order guard).
     """
     resolver, raw = _primed_resolver("dev-t4")
 
@@ -134,7 +135,7 @@ def test_observation_in_the_future_is_clamped_to_now() -> None:
     assert info is not None and state is not None
     assert info.observed_at_wall == WALL_NOW
     assert state.observed_at_wall == WALL_NOW
-    assert info.observed_at == MONO_NOW + 0.005
+    assert info.observed_at == MONO_NOW
 
 
 @pytest.mark.usefixtures("frozen_clocks")
@@ -477,3 +478,30 @@ def test_lock_guard_resolves_to_the_second() -> None:
     assert info.ble_address == "AA:AA"
     assert state.battery_level == 1
     assert resolver._locks["dev-r8"].drift_offset == -1  # the limit
+
+
+@pytest.mark.usefixtures("frozen_clocks")
+def test_future_sighting_does_not_freeze_the_out_of_order_guard() -> None:
+    """R9: a sighting from ahead of the local clock does not block later ones.
+
+    Found by Codex on the PR: with the wall clock clamped but the monotonic
+    stamp kept, the scan-info guard would compare every later, correctly
+    dated sighting against a future value and reject it as older, freezing
+    the stored address until the local clock caught up (indefinitely for a
+    caller with a different clock origin). Both clocks are clamped, so a
+    sighting dated *now* still replaces it.
+    """
+    resolver, raw_first, raw_second = _primed_pair("dev-r9")
+
+    assert resolver.resolve_eid(
+        raw_first, ble_address="AA:AA", observed_at=MONO_NOW + 3600.0
+    )
+    assert resolver.resolve_eid(raw_second, ble_address="BB:BB", observed_at=MONO_NOW)
+
+    info = resolver.get_ble_scan_info("dev-r9")
+    state = resolver.get_ble_battery_state("dev-r9")
+    assert info is not None and state is not None
+    assert info.ble_address == "BB:BB"
+    assert info.observed_at == MONO_NOW
+    assert info.observed_at_wall == WALL_NOW
+    assert state.battery_level == 2  # the wall-clock writer took it as well

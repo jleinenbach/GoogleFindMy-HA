@@ -334,17 +334,25 @@ def _observation_clock(observed_at: float | None) -> ObservationClock:
     for callers that do not know the advertisement time, and it is exactly
     the behaviour every caller had before the parameter existed.
 
-    The age is clamped at zero. On the Home Assistant path it is never
-    negative: advertisements are stamped with ``CLOCK_MONOTONIC_COARSE``,
-    which lags ``time.monotonic()`` by up to one tick and never runs ahead.
-    The clamp guards callers that hand in a different clock (and test
-    clocks), so that no sighting is ever dated into the future.
+    A value ahead of ``time.monotonic()`` is clamped to *now* on both
+    clocks. On the Home Assistant path it never occurs: advertisements are
+    stamped with ``CLOCK_MONOTONIC_COARSE``, which lags ``time.monotonic()``
+    by up to one tick and never runs ahead, and habluetooth drops any
+    restored history entry dated in the future when it loads the store. The
+    clamp guards callers that hand in a different clock (and test clocks),
+    so that no sighting is ever dated into the future. Clamping the wall clock alone would not do:
+    the monotonic component is what the scan-info writer compares sightings
+    by, and a future value there would make every later, correctly dated
+    sighting look older and freeze the stored address until the local clock
+    caught up.
     """
     now_mono = time.monotonic()
     if observed_at is None:
         return ObservationClock(monotonic=now_mono, wall=time.time())
-    age = max(0.0, now_mono - observed_at)
-    return ObservationClock(monotonic=observed_at, wall=time.time() - age)
+    monotonic = min(observed_at, now_mono)
+    return ObservationClock(
+        monotonic=monotonic, wall=time.time() - (now_mono - monotonic)
+    )
 
 
 EidLayout = Literal["framed", "bare", "window"]
