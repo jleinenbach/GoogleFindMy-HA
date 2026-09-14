@@ -424,8 +424,17 @@ class TestUpdateBLEBattery:
         resolver._update_ble_battery(raw, None, {"flags_xor_mask": 0x00}, [match])
         assert resolver._ble_battery_state.get("dev-short") is None
 
-    def test_observed_at_wall_recorded(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """observed_at_wall should use time.time()."""
+    def test_direct_call_without_clock_dates_the_observation_now(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A direct call without ``clock`` falls back to ``time.time()``.
+
+        This used to pin ``observed_at_wall == time.time()`` as *the*
+        contract, which pinned the defect: the processing time posing as the
+        observation time. The production path now hands the writer the
+        advertisement time (``tests/test_eid_resolver_scan_time.py``); the
+        fallback measured here is the contract for direct callers only.
+        """
         monkeypatch.setattr(time, "time", lambda: 9999.5)
         resolver = _make_resolver()
         eid = b"\xaa" * LEGACY_EID_LENGTH
