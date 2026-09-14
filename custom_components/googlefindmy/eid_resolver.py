@@ -279,7 +279,10 @@ class BLEBatteryState:
         battery_pct: Mapped percentage (100, 25, 5) or None for UNSUPPORTED (0).
         uwt_mode: True if Unwanted Tracking mode is active.
         decoded_flags: Fully decoded flags byte (after XOR).
-        observed_at_wall: Wall-clock timestamp of the BLE observation (time.time()).
+        observed_at_wall: Wall-clock timestamp of the BLE observation. This is
+            the advertisement time, not the processing time: on a history
+            replay (integration reload, Home Assistant restart) it is the
+            original sighting.
     """
 
     battery_level: int
@@ -300,13 +303,48 @@ class BLEScanInfo:
 
     Attributes:
         ble_address: Current BLE MAC address (rotates every ~15 min on FMDN).
-        observed_at: Monotonic timestamp (:func:`time.monotonic`) of the scan.
-        observed_at_wall: Wall-clock timestamp (:func:`time.time`) of the scan.
+        observed_at: Monotonic timestamp (:func:`time.monotonic` clock) of
+            the scan, i.e. of the advertisement, not of its processing.
+        observed_at_wall: Wall-clock timestamp of the same scan.
     """
 
     ble_address: str
     observed_at: float
     observed_at_wall: float
+
+
+class ObservationClock(NamedTuple):
+    """The observation time of one advertisement on both clocks.
+
+    Derived exactly once per ``resolve_eid``/``resolve_eid_all`` call by
+    :func:`_observation_clock` and handed to every state writer, so that no
+    writer reads a clock of its own.
+    """
+
+    monotonic: float
+    wall: float
+
+
+def _observation_clock(observed_at: float | None) -> ObservationClock:
+    """Derive the observation time from an optional monotonic timestamp.
+
+    ``observed_at`` is the advertisement time on the :func:`time.monotonic`
+    clock (Home Assistant hands it over as ``BluetoothServiceInfoBleak.time``).
+    Without it, the observation is taken to be *now*: that is the contract
+    for callers that do not know the advertisement time, and it is exactly
+    the behaviour every caller had before the parameter existed.
+
+    The age is clamped at zero. On the Home Assistant path it is never
+    negative: advertisements are stamped with ``CLOCK_MONOTONIC_COARSE``,
+    which lags ``time.monotonic()`` by up to one tick and never runs ahead.
+    The clamp guards callers that hand in a different clock (and test
+    clocks), so that no sighting is ever dated into the future.
+    """
+    now_mono = time.monotonic()
+    if observed_at is None:
+        return ObservationClock(monotonic=now_mono, wall=time.time())
+    age = max(0.0, now_mono - observed_at)
+    return ObservationClock(monotonic=observed_at, wall=time.time() - age)
 
 
 EidLayout = Literal["framed", "bare", "window"]
@@ -525,7 +563,11 @@ class GoogleFindMyEIDResolverProtocol(Protocol):  # pylint: disable=unnecessary-
         ...
 
     def resolve_eid(
-        self, eid_bytes: bytes, *, ble_address: str | None = None
+        self,
+        eid_bytes: bytes,
+        *,
+        ble_address: str | None = None,
+        observed_at: float | None = None,
     ) -> EIDMatch | None:
         """Resolve EID bytes to a matching device identity.
 
@@ -533,6 +575,13 @@ class GoogleFindMyEIDResolverProtocol(Protocol):  # pylint: disable=unnecessary-
             eid_bytes: Raw EID bytes from a BLE advertisement.
             ble_address: Optional BLE MAC address of the advertising device.
                 When provided, stored for future direct GATT connections.
+            observed_at: Optional advertisement time on the
+                :func:`time.monotonic` clock (``BluetoothServiceInfoBleak.time``).
+                When provided, every observation timestamp the resolver
+                records (battery state, scan info, lock confirmation) is the
+                advertisement time rather than the processing time, which
+                matters when Home Assistant replays its advertisement
+                history on reload or restart. When omitted, *now* is used.
 
         Returns:
             EIDMatch with device identity info, or None if no match found.
@@ -543,7 +592,11 @@ class GoogleFindMyEIDResolverProtocol(Protocol):  # pylint: disable=unnecessary-
         ...
 
     def resolve_eid_all(
-        self, eid_bytes: bytes, *, ble_address: str | None = None
+        self,
+        eid_bytes: bytes,
+        *,
+        ble_address: str | None = None,
+        observed_at: float | None = None,
     ) -> list[EIDMatch]:
         """Resolve EID bytes to all matching device identities.
 
@@ -554,6 +607,8 @@ class GoogleFindMyEIDResolverProtocol(Protocol):  # pylint: disable=unnecessary-
             eid_bytes: Raw EID bytes from a BLE advertisement.
             ble_address: Optional BLE MAC address of the advertising device.
                 When provided, stored for future direct GATT connections.
+            observed_at: Optional advertisement time on the
+                :func:`time.monotonic` clock; see :meth:`resolve_eid`.
 
         Returns:
             List of EIDMatch entries for all accounts that share this device.
@@ -2859,15 +2914,23 @@ class GoogleFindMyEIDResolver:
         )
 
     def _resolve_eid_internal(  # noqa: PLR0911, PLR0912
-        self, eid_bytes: bytes
+        self, eid_bytes: bytes, *, clock: ObservationClock | None = None
     ) -> tuple[list[EIDMatch], bytes | None, int | None]:
         """Internal EID resolution returning all matches.
+
+        Args:
+            eid_bytes: Raw EID bytes from a BLE advertisement.
+            clock: Observation time of the advertisement, derived once by
+                the public entry point. Direct callers may omit it, in which
+                case the observation is dated *now*.
 
         Returns:
             Tuple of (matches, matched_candidate, observed_frame).
             matches is empty if no match found.
         """
         self._ensure_cache_defaults()
+        if clock is None:
+            clock = _observation_clock(None)
         if not isinstance(eid_bytes, (bytes, bytearray)):
             return [], None, None
 
@@ -2922,7 +2985,12 @@ class GoogleFindMyEIDResolver:
                 continue
 
             metadata: dict[str, Any] = self._lookup_metadata.get(candidate.eid) or {}
-            now = int(time.time())
+            # The lock confirmation is dated with the observation, not with
+            # the processing: a replayed advertisement confirms the lock as
+            # of its sighting. The same value becomes ``created_at`` and
+            # ``last_seen_at`` of the EIDGenerationLock the match creates or
+            # refreshes (persisted), which is where the sighting belongs.
+            now = int(clock.wall)
 
             # Update state for ALL matches (shared devices)
             for match in matches:
@@ -2957,6 +3025,7 @@ class GoogleFindMyEIDResolver:
                 metadata,
                 matches,
                 geometry=candidate,
+                clock=clock,
             )
 
             return matches, candidate.eid, candidate.frame_type
@@ -2972,8 +3041,11 @@ class GoogleFindMyEIDResolver:
             [candidate.eid for candidate in candidates], now_unix=now_unix
         )
         if heuristic_match is not None:
-            # Update standard tracking state for the heuristic match
-            self._last_lock_confirmation[heuristic_match.device_id] = now_unix
+            # Update standard tracking state for the heuristic match. The
+            # search above runs against "now" (which EID would be current);
+            # the confirmation stamp is the observation, like on the cache
+            # hit path.
+            self._last_lock_confirmation[heuristic_match.device_id] = int(clock.wall)
             self._known_advertisement_reversed[heuristic_match.device_id] = (
                 heuristic_match.is_reversed
             )
@@ -2999,7 +3071,7 @@ class GoogleFindMyEIDResolver:
     # ------------------------------------------------------------------
     # FMDN BLE battery decode + store
     # ------------------------------------------------------------------
-    def _update_ble_battery(  # noqa: PLR0912
+    def _update_ble_battery(  # noqa: PLR0912, PLR0913
         self,
         raw: bytes,
         observed_frame: int | None,
@@ -3007,6 +3079,7 @@ class GoogleFindMyEIDResolver:
         matches: list[EIDMatch],
         *,
         geometry: EidCandidate | None = None,
+        clock: ObservationClock | None = None,
     ) -> None:
         """Decode the FMDN hashed-flags byte and store battery state.
 
@@ -3100,7 +3173,9 @@ class GoogleFindMyEIDResolver:
             ) & FMDN_HASHED_FLAGS_BATTERY_MASK
             uwt_mode = bool(decoded & FMDN_HASHED_FLAGS_UWT_MODE_MASK)
             battery_pct = FMDN_BATTERY_PCT.get(battery_raw)
-            now_wall = time.time()
+            # Observation time, not processing time (see ObservationClock);
+            # direct callers without a clock get the old "now" behaviour.
+            now_wall = (clock if clock is not None else _observation_clock(None)).wall
 
             # Observe -- do not arbitrate -- the two redundant channels.
             #
@@ -3248,21 +3323,29 @@ class GoogleFindMyEIDResolver:
         """
         return self._ble_scan_info.get(device_id)
 
-    def _record_ble_scan_info(self, matches: list[EIDMatch], ble_address: str) -> None:
+    def _record_ble_scan_info(
+        self,
+        matches: list[EIDMatch],
+        ble_address: str,
+        *,
+        clock: ObservationClock | None = None,
+    ) -> None:
         """Store the BLE address for all matched devices.
 
         Called from :meth:`resolve_eid` when the caller provides a
         ``ble_address``.  Uses the same canonical_id keying pattern
-        as :attr:`_ble_battery_state`.
+        as :attr:`_ble_battery_state`. The timestamps are the observation
+        time handed in by the caller; without a clock the scan is dated
+        *now*.
         """
-        now_mono = time.monotonic()
-        now_wall = time.time()
+        if clock is None:
+            clock = _observation_clock(None)
         for match in matches:
             storage_key = match.canonical_id or match.device_id
             self._ble_scan_info[storage_key] = BLEScanInfo(
                 ble_address=ble_address,
-                observed_at=now_mono,
-                observed_at_wall=now_wall,
+                observed_at=clock.monotonic,
+                observed_at_wall=clock.wall,
             )
 
     def resolve_eid(  # noqa: PLR0911, PLR0912, PLR0915
@@ -3270,6 +3353,7 @@ class GoogleFindMyEIDResolver:
         eid_bytes: bytes,
         *,
         ble_address: str | None = None,
+        observed_at: float | None = None,
     ) -> EIDMatch | None:
         """Resolve a scanned payload to a Home Assistant device registry ID.
 
@@ -3284,12 +3368,22 @@ class GoogleFindMyEIDResolver:
                 connections (e.g. BLE ring fallback).  This parameter is
                 backward-compatible: existing callers that omit it are
                 unaffected.
+            observed_at: Optional advertisement time on the
+                :func:`time.monotonic` clock (``BluetoothServiceInfoBleak.time``).
+                Every observation timestamp recorded for the match (battery
+                state, scan info, lock confirmation) is then the advertisement
+                time. Home Assistant replays its advertisement history when
+                the callback is registered (reload) and restores that history
+                across restarts, so without this parameter a replayed
+                advertisement of up to 15 minutes age would count as seen
+                *now*. Omitting it keeps the old behaviour.
         """
-        matches, _, _ = self._resolve_eid_internal(eid_bytes)
+        clock = _observation_clock(observed_at)
+        matches, _, _ = self._resolve_eid_internal(eid_bytes, clock=clock)
         if not matches:
             return None
         if ble_address is not None:
-            self._record_ble_scan_info(matches, ble_address)
+            self._record_ble_scan_info(matches, ble_address, clock=clock)
         # Return the match with the smallest absolute time_offset (best match)
         return min(matches, key=lambda m: abs(m.time_offset))
 
@@ -3298,6 +3392,7 @@ class GoogleFindMyEIDResolver:
         eid_bytes: bytes,
         *,
         ble_address: str | None = None,
+        observed_at: float | None = None,
     ) -> list[EIDMatch]:
         """Resolve a scanned payload to all matching Home Assistant device registry IDs.
 
@@ -3311,10 +3406,13 @@ class GoogleFindMyEIDResolver:
             ble_address: Optional BLE MAC address of the advertising device.
                 When provided, the address is stored for future direct GATT
                 connections (e.g. BLE ring fallback).
+            observed_at: Optional advertisement time on the
+                :func:`time.monotonic` clock; see :meth:`resolve_eid`.
         """
-        matches, _, _ = self._resolve_eid_internal(eid_bytes)
+        clock = _observation_clock(observed_at)
+        matches, _, _ = self._resolve_eid_internal(eid_bytes, clock=clock)
         if matches and ble_address is not None:
-            self._record_ble_scan_info(matches, ble_address)
+            self._record_ble_scan_info(matches, ble_address, clock=clock)
         return matches
 
     def _extract_candidates(self, payload: bytes) -> tuple[list[bytes], int | None]:
