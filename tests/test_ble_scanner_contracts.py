@@ -191,8 +191,17 @@ async def test_setup_registers_callback_and_stores_unsub(
     fake_bluetooth.register.assert_called_once()
     # PASSIVE mode requested (no active scan / no extra power draw).
     assert fake_bluetooth.captured["mode"] == "passive"
-    # No matcher — the module filters inside the callback.
-    assert fake_bluetooth.captured["matcher"] is None
+    # The matcher must explicitly carry connectable=False. HA's
+    # BluetoothManager turns *any* falsy matcher (None *and* {}) into
+    # {"connectable": True}, which drops every advertisement relayed by a
+    # non-connectable proxy. Pin the key's value, not just "a matcher was
+    # passed": an ``is not None`` check would be blind to the ``{}`` mutant.
+    # ``isinstance`` narrows ``object`` for mypy; ``is False`` rejects an
+    # int-valued key (``{"connectable": 0}``) that ``==`` would accept.
+    matcher = fake_bluetooth.captured["matcher"]
+    assert matcher == {"connectable": False}
+    assert isinstance(matcher, dict)
+    assert matcher.get("connectable") is False
     assert callable(bucket[DATA_BLE_SCANNER_UNSUB])
 
 
