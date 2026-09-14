@@ -115,7 +115,15 @@ async def async_setup_ble_scanner(hass: HomeAssistant) -> bool:
         ble_address = service_info.address
         rssi = service_info.rssi
 
-        match = resolver.resolve_eid(payload, ble_address=ble_address)
+        # ``service_info.time`` is the advertisement time (monotonic clock).
+        # It matters because HA does not only deliver live advertisements:
+        # on registration it replays the last advertisement of every known
+        # address (up to 15 minutes old for non-connectable sources), and it
+        # restores that history across restarts. Without the timestamp the
+        # resolver would date every replayed sighting "now".
+        match = resolver.resolve_eid(
+            payload, ble_address=ble_address, observed_at=service_info.time
+        )
 
         if match is not None:
             _LOGGER.debug(

@@ -150,8 +150,15 @@ def _service_info(
     service_data: dict[str, bytes],
     address: str = "AA:BB:CC:DD:EE:FF",
     rssi: int = -50,
+    time: float = 1234.5,
 ) -> SimpleNamespace:
-    return SimpleNamespace(service_data=service_data, address=address, rssi=rssi)
+    # ``time`` mirrors ``BluetoothServiceInfoBleak.time`` (advertisement time
+    # on the monotonic clock). The production model always carries it, so
+    # the fixture always carries it too: the callback must read it directly,
+    # a ``getattr`` fallback there would hide a drift of this fixture.
+    return SimpleNamespace(
+        service_data=service_data, address=address, rssi=rssi, time=time
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -247,21 +254,29 @@ async def test_callback_returns_when_resolver_absent(
 async def test_callback_resolves_match_with_ble_address(
     fake_bluetooth: SimpleNamespace,
 ) -> None:
-    """A resolvable advertisement calls resolve_eid with the BLE address."""
+    """A resolvable advertisement calls resolve_eid with address and time.
+
+    ``observed_at`` must be the advertisement's own timestamp
+    (``service_info.time``): HA replays its advertisement history on
+    registration and restores it across restarts, and only this value lets
+    the resolver date a replayed sighting correctly.
+    """
     match = SimpleNamespace(device_id="device12345678", canonical_id="canon12345678")
     resolver = Mock()
     resolver.resolve_eid.return_value = match
     _bucket, callback = await _setup_and_capture(fake_bluetooth, resolver)
 
     payload = _payload(frame=MODERN_FRAME_TYPE, length=21)
-    callback(
-        _service_info({FEAA_SERVICE_UUID: payload}, address="11:22:33:44:55:66"), None
+    info = _service_info(
+        {FEAA_SERVICE_UUID: payload}, address="11:22:33:44:55:66", time=98765.25
     )
+    callback(info, None)
 
     resolver.resolve_eid.assert_called_once()
     args, kwargs = resolver.resolve_eid.call_args
     assert args[0] == payload
     assert kwargs["ble_address"] == "11:22:33:44:55:66"
+    assert kwargs["observed_at"] == info.time
 
 
 @pytest.mark.asyncio
