@@ -216,8 +216,11 @@ def test_state_writers_read_no_clock_of_their_own() -> None:
     # this body is the heuristic *search* parameter, which is not a stamp.
     assert "now = int(clock.wall)" in internal
     assert not re.search(r"\bnow = int\(time\.time\(\)\)", internal)
-    assert internal.count("_last_lock_confirmation[") == 1
-    assert "= int(clock.wall)" in internal.split("_last_lock_confirmation[")[1]
+    # The heuristic path confirms through the shared helper (which enforces
+    # the newest-sighting rule) and hands it the observation.
+    assert internal.count("_confirm_lock(") == 1
+    assert "_confirm_lock(heuristic_match.device_id, int(clock.wall))" in internal
+    assert "_last_lock_confirmation[" not in internal
 
     assert clock_read.search(inspect.getsource(resolver_module._observation_clock))
 
@@ -285,3 +288,192 @@ def test_direct_scan_info_call_without_clock_is_dated_now() -> None:
     assert info is not None
     assert info.observed_at == MONO_NOW
     assert info.observed_at_wall == WALL_NOW
+
+
+# --- Out-of-order delivery ---------------------------------------------------
+#
+# HA before 2026.8 replays the advertisement history in dict order (Core
+# `manager.py`, `history.values()`; 2026.8 sorts by `time`). A tracker rotates
+# its address, so the history can hold several of its sightings and an older
+# one can be delivered after a newer one. The state on record must then stay
+# with the newer sighting: `last_ble_observation` must not move backwards and
+# the stored address must not fall back to a rotated-out one.
+
+NEWER = MONO_NOW - 100.0  # the sighting that arrives first
+OLDER = MONO_NOW - AGE  # the sighting that arrives second, but is older
+
+
+def _primed_pair(device_id: str) -> tuple[GoogleFindMyEIDResolver, bytes, bytes]:
+    """Resolver with two payloads for one device: battery NORMAL and LOW.
+
+    The second payload resolves with ``time_offset=-1`` so that a rolled-back
+    drift is observable on the lock.
+    """
+    resolver, raw_normal = _primed_resolver(device_id)
+    eid_low = bytes([0x6B]) * LEGACY_EID_LENGTH
+    raw_low = _service_data_payload(eid_low, 0b00000_10_0)  # battery=2 (LOW)
+    resolver._lookup[eid_low] = [
+        EIDMatch(
+            device_id=device_id,
+            config_entry_id="entry-1",
+            canonical_id=device_id,
+            time_offset=-1,
+            is_reversed=False,
+        )
+    ]
+    resolver._lookup_metadata[eid_low] = {"flags_xor_mask": 0x00}
+    return resolver, raw_normal, raw_low
+
+
+@pytest.mark.usefixtures("frozen_clocks")
+def test_older_sighting_after_newer_keeps_scan_info() -> None:
+    """R1: the stored address and scan time stay with the newer sighting."""
+    resolver, raw_newer, raw_older = _primed_pair("dev-r1")
+
+    assert resolver.resolve_eid(raw_newer, ble_address="AA:AA", observed_at=NEWER)
+    assert resolver.resolve_eid(raw_older, ble_address="BB:BB", observed_at=OLDER)
+
+    info = resolver.get_ble_scan_info("dev-r1")
+    assert info is not None
+    assert info.ble_address == "AA:AA"
+    assert info.observed_at == NEWER
+    assert info.observed_at_wall == WALL_NOW - 100.0
+
+
+@pytest.mark.usefixtures("frozen_clocks")
+def test_older_sighting_after_newer_keeps_battery_state() -> None:
+    """R2: ``last_ble_observation`` and the battery level do not move back."""
+    resolver, raw_newer, raw_older = _primed_pair("dev-r2")
+
+    assert resolver.resolve_eid(raw_newer, observed_at=NEWER)
+    assert resolver.resolve_eid(raw_older, observed_at=OLDER)
+
+    state = resolver.get_ble_battery_state("dev-r2")
+    assert state is not None
+    assert state.battery_level == 1  # NORMAL from the newer sighting, not LOW
+    assert state.observed_at_wall == WALL_NOW - 100.0
+
+
+@pytest.mark.usefixtures("frozen_clocks")
+def test_older_sighting_after_newer_keeps_lock_stamps() -> None:
+    """R3: confirmation, ``last_seen_at`` and drift stay with the newer sighting."""
+    resolver, raw_newer, raw_older = _primed_pair("dev-r3")
+
+    assert resolver.resolve_eid(raw_newer, observed_at=NEWER)
+    assert resolver.resolve_eid(raw_older, observed_at=OLDER)
+
+    assert resolver._last_lock_confirmation["dev-r3"] == int(WALL_NOW - 100.0)
+    lock = resolver._locks["dev-r3"]
+    assert lock.last_seen_at == int(WALL_NOW - 100.0)
+    assert lock.drift_offset == 0  # not the -1 of the older sighting
+
+
+@pytest.mark.usefixtures("frozen_clocks")
+def test_newer_sighting_after_older_updates_everything() -> None:
+    """R4: the guard is one-directional; in-order delivery still updates.
+
+    Positive control for R1 to R3: the same two sightings in the natural
+    order end on the newer one, on all three writers, including the drift.
+    """
+    resolver, raw_newer, raw_older = _primed_pair("dev-r4")
+
+    assert resolver.resolve_eid(raw_older, ble_address="BB:BB", observed_at=OLDER)
+    assert resolver.resolve_eid(raw_newer, ble_address="AA:AA", observed_at=NEWER)
+
+    info = resolver.get_ble_scan_info("dev-r4")
+    state = resolver.get_ble_battery_state("dev-r4")
+    assert info is not None and state is not None
+    assert (info.ble_address, info.observed_at) == ("AA:AA", NEWER)
+    assert (state.battery_level, state.observed_at_wall) == (1, WALL_NOW - 100.0)
+    lock = resolver._locks["dev-r4"]
+    assert lock.last_seen_at == int(WALL_NOW - 100.0)
+    assert lock.drift_offset == 0  # the newer sighting's offset replaced -1
+
+
+@pytest.mark.usefixtures("frozen_clocks")
+def test_same_time_sighting_is_applied() -> None:
+    """R5: only a strictly older sighting is ignored.
+
+    Two proxies can hand over the same advertisement with the same stamp;
+    the second one is not older and is applied (the boundary of the guard).
+    """
+    resolver, raw_newer, raw_older = _primed_pair("dev-r5")
+
+    assert resolver.resolve_eid(raw_newer, ble_address="AA:AA", observed_at=NEWER)
+    assert resolver.resolve_eid(raw_older, ble_address="BB:BB", observed_at=NEWER)
+
+    info = resolver.get_ble_scan_info("dev-r5")
+    state = resolver.get_ble_battery_state("dev-r5")
+    assert info is not None and state is not None
+    assert info.ble_address == "BB:BB"
+    assert state.battery_level == 2
+    assert resolver._locks["dev-r5"].drift_offset == -1  # lock boundary, too
+
+
+@pytest.mark.usefixtures("frozen_clocks")
+def test_heuristic_confirmation_does_not_move_backwards(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R6: the heuristic path shares the newest-sighting rule for the stamp."""
+    resolver, _raw = _primed_resolver("dev-cached")
+    unrelated = _service_data_payload(bytes([0x3C]) * LEGACY_EID_LENGTH, 0)
+
+    def fake_heuristic(
+        _self: GoogleFindMyEIDResolver, candidates: list[bytes], *, now_unix: int
+    ) -> EIDMatch:
+        return _match("dev-heur")
+
+    monkeypatch.setattr(GoogleFindMyEIDResolver, "_heuristic_resolve", fake_heuristic)
+
+    assert resolver.resolve_eid(unrelated, observed_at=NEWER)
+    assert resolver.resolve_eid(unrelated, observed_at=OLDER)
+
+    assert resolver._last_lock_confirmation["dev-heur"] == int(WALL_NOW - 100.0)
+
+
+@pytest.mark.usefixtures("frozen_clocks")
+def test_older_sighting_after_newer_keeps_known_offset() -> None:
+    """R7: ``_known_offsets`` mirrors the lock drift and follows the same rule.
+
+    It is restored from ``lock.drift_offset`` on load, so the two must carry
+    the same sighting. Needs a ``timestamp_basis`` in the metadata, otherwise
+    the offset is never recorded and the guard would be measured in a vacuum.
+    """
+    resolver, raw_newer, raw_older = _primed_pair("dev-r7")
+    for metadata in resolver._lookup_metadata.values():
+        metadata["timestamp_basis"] = "unix"
+
+    assert resolver.resolve_eid(raw_newer, observed_at=NEWER)
+    assert resolver._known_offsets[("dev-r7", "unix")] == 0  # positive control
+    assert resolver.resolve_eid(raw_older, observed_at=OLDER)
+
+    assert resolver._known_offsets[("dev-r7", "unix")] == 0  # not the older -1
+
+
+@pytest.mark.usefixtures("frozen_clocks")
+def test_lock_guard_resolves_to_the_second() -> None:
+    """R8: declared limit. Lock stamps are whole seconds (persisted schema).
+
+    Two sightings within one wall second are applied to the lock in delivery
+    order; battery state and scan info, which compare floats, still keep the
+    newer one. Pinned so that the limit is a decision on record, not a
+    surprise.
+    """
+    resolver, raw_newer, raw_older = _primed_pair("dev-r8")
+    # Both sightings fall into the same wall second (x.8 and x.3).
+    same_second_newer = NEWER - 0.2
+    same_second_older = NEWER - 0.7
+
+    assert resolver.resolve_eid(
+        raw_newer, ble_address="AA:AA", observed_at=same_second_newer
+    )
+    assert resolver.resolve_eid(
+        raw_older, ble_address="BB:BB", observed_at=same_second_older
+    )
+
+    info = resolver.get_ble_scan_info("dev-r8")
+    state = resolver.get_ble_battery_state("dev-r8")
+    assert info is not None and state is not None
+    assert info.ble_address == "AA:AA"
+    assert state.battery_level == 1
+    assert resolver._locks["dev-r8"].drift_offset == -1  # the limit

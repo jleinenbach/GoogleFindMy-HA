@@ -2827,6 +2827,19 @@ class GoogleFindMyEIDResolver:
         self._heuristic_miss_log_at[raw_prefix] = now
         return True
 
+    def _confirm_lock(self, device_id: str, now: int) -> None:
+        """Record ``now`` as the lock confirmation unless a newer one is on record.
+
+        ``now`` is the observation, not the processing time, and observations
+        do not arrive in order: HA before 2026.8 replays its advertisement
+        history in dict order, so an older sighting of a rotating tracker can
+        follow a newer one. The confirmation feeds the lock TTL and must never
+        move backwards.
+        """
+        previous = self._last_lock_confirmation.get(device_id)
+        if previous is None or now > previous:
+            self._last_lock_confirmation[device_id] = now
+
     def _update_match_state(  # noqa: PLR0913
         self,
         match: EIDMatch,
@@ -2839,7 +2852,7 @@ class GoogleFindMyEIDResolver:
         now: int,
     ) -> None:
         """Update internal state (locks, offsets, etc.) for a single match."""
-        self._last_lock_confirmation[match.device_id] = now
+        self._confirm_lock(match.device_id, now)
         previous_basis = _normalize_anchor_basis(
             self._known_timebases.get(match.device_id)
         )
@@ -2855,6 +2868,19 @@ class GoogleFindMyEIDResolver:
             self._known_timebases.pop(match.device_id, None)
 
         existing_lock = self._locks.get(match.device_id)
+        # An older sighting delivered after a newer one (HA before 2026.8
+        # replays the advertisement history in dict order, and a tracker
+        # rotates its address, so the history can hold several of its
+        # sightings). The lock already reflects the newer sighting; drift
+        # and last_seen_at must not roll back to the older one. Lock stamps
+        # are whole seconds (persisted schema), so this guard resolves to
+        # the second: two sightings within one wall second are applied in
+        # delivery order, the next live packet settles the drift.
+        stale = (
+            existing_lock is not None
+            and existing_lock.last_seen_at is not None
+            and now < existing_lock.last_seen_at
+        )
         if existing_lock is None:
             variant_value = self._normalize_variant_value(
                 metadata.get("variant"),
@@ -2880,6 +2906,8 @@ class GoogleFindMyEIDResolver:
             self._locks[match.device_id] = lock
             self._persisted_locks[match.device_id] = lock
             self._schedule_lock_save()
+        elif stale:
+            pass
         else:
             # Update drift tracking on existing lock
             drift_changed = existing_lock.drift_offset != match.time_offset
@@ -2896,7 +2924,9 @@ class GoogleFindMyEIDResolver:
 
         self._known_advertisement_reversed[match.device_id] = match.is_reversed
 
-        if anchor_basis is not None and not basis_explicitly_invalid:
+        if anchor_basis is not None and not basis_explicitly_invalid and not stale:
+            # Mirrors lock.drift_offset (restored from the lock on load), so
+            # it follows the same newest-sighting rule.
             self._known_offsets[(match.device_id, anchor_basis)] = match.time_offset
             self._known_timebases[match.device_id] = anchor_basis
 
@@ -3045,7 +3075,7 @@ class GoogleFindMyEIDResolver:
             # search above runs against "now" (which EID would be current);
             # the confirmation stamp is the observation, like on the cache
             # hit path.
-            self._last_lock_confirmation[heuristic_match.device_id] = int(clock.wall)
+            self._confirm_lock(heuristic_match.device_id, int(clock.wall))
             self._known_advertisement_reversed[heuristic_match.device_id] = (
                 heuristic_match.is_reversed
             )
@@ -3233,6 +3263,11 @@ class GoogleFindMyEIDResolver:
             for match in matches:
                 storage_key = match.canonical_id or match.device_id
                 prev = self._ble_battery_state.get(storage_key)
+                if prev is not None and prev.observed_at_wall > now_wall:
+                    # Older sighting delivered after a newer one (history
+                    # replay in dict order on HA before 2026.8): the state on
+                    # record is the more recent observation, keep it.
+                    continue
                 self._ble_battery_state[storage_key] = state
 
                 # First decode per device → INFO probe log (once per device)
@@ -3342,6 +3377,13 @@ class GoogleFindMyEIDResolver:
             clock = _observation_clock(None)
         for match in matches:
             storage_key = match.canonical_id or match.device_id
+            existing = self._ble_scan_info.get(storage_key)
+            if existing is not None and existing.observed_at > clock.monotonic:
+                # Older sighting delivered after a newer one (history replay
+                # in dict order on HA before 2026.8). The address on record
+                # is the newer one; an older address would be stale for a
+                # rotating tracker.
+                continue
             self._ble_scan_info[storage_key] = BLEScanInfo(
                 ble_address=ble_address,
                 observed_at=clock.monotonic,
