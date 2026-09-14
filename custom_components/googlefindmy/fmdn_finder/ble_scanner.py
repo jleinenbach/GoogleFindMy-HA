@@ -1,3 +1,4 @@
+# custom_components/googlefindmy/fmdn_finder/ble_scanner.py
 """Optional HA-Bluetooth FMDN advertisement listener.
 
 Registers a callback on Home Assistant's built-in Bluetooth scanner to capture
@@ -150,18 +151,26 @@ async def async_setup_ble_scanner(hass: HomeAssistant) -> bool:
     # checking service_data for FEAA/FE2C.  Using BluetoothScanningMode.PASSIVE
     # avoids requesting active scans (no extra power draw).
     #
-    # Note: HA's async_register_callback does not support service_data UUID
-    # filtering natively, so we filter ourselves inside the callback.
+    # Note: HA's matcher accepts a single ``service_data_uuid`` per
+    # registration. FMDN advertises under FEAA or FE2C, so instead of two
+    # registrations we accept every advertisement and filter in the callback.
     #
     # A falsy matcher (e.g. None) is NOT "match everything" — HA's
     # BluetoothManager treats it as {"connectable": True}
     # (homeassistant/components/bluetooth/manager.py), which silently drops
-    # every advertisement relayed through a non-connectable source. ESPHome
-    # and Shelly Bluetooth proxies register as non-connectable, so this
-    # callback never fired for any proxy-heard tracker — only advertisements
-    # picked up by a connectable local adapter got through. Explicitly
-    # passing connectable=False disables that filter, so both local-radio
-    # and proxy-relayed advertisements reach us.
+    # every advertisement relayed through a non-connectable source. Shelly
+    # proxies always register as non-connectable (aioshelly creates the
+    # scanner with connectable=False). ESPHome proxies are connectable when
+    # built with ``active: true`` (the ESP32/RP2 default) and non-connectable
+    # with ``active: false`` or on advertisement-only hubs (bleak_esphome
+    # derives the flag from BluetoothProxyFeature.ACTIVE_CONNECTIONS).
+    # habluetooth only surfaces a non-connectable advertisement as connectable
+    # (``_as_connectable``) while a still-registered connectable scanner holds
+    # an unexpired history entry for the same address, so trackers heard
+    # solely by non-connectable proxies never reached this callback.
+    # Explicitly passing connectable=False disables that filter, so
+    # local-radio and every proxy-relayed advertisement reach us; the history
+    # replay HA performs on registration now covers all sources as well.
     unsub: CALLBACK_TYPE = async_register_callback(
         hass,
         _fmdn_advertisement_callback,
