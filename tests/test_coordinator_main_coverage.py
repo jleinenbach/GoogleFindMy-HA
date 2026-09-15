@@ -14,12 +14,14 @@ method under test needs are set explicitly. Async paths use ``async def`` with
 
 from __future__ import annotations
 
+import asyncio
 import time
 from datetime import UTC
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from homeassistant.const import EVENT_HOMEASSISTANT_STOP
 
 from custom_components.googlefindmy.const import (
     OPT_IGNORED_DEVICES,
@@ -411,10 +413,13 @@ async def test_async_setup_sets_cache_namespace_and_subscribes() -> None:
     c._ensure_service_device_exists = lambda: ensure.append(True)
     c._reindex_poll_targets_from_device_registry = lambda: reindex.append(True)
     c._dr_unsub = None
+    c._hass_stop_unsub = None
     listens: list[str] = []
+    listens_once: list[str] = []
     c.hass = SimpleNamespace(
         bus=SimpleNamespace(
-            async_listen=lambda ev, cb: (listens.append(ev), "unsub")[1]
+            async_listen=lambda ev, cb: (listens.append(ev), "unsub")[1],
+            async_listen_once=lambda ev, cb: (listens_once.append(ev), "stop")[1],
         )
     )
 
@@ -424,6 +429,8 @@ async def test_async_setup_sets_cache_namespace_and_subscribes() -> None:
     assert ensure and reindex
     assert c._dr_unsub == "unsub"
     assert listens  # subscribed to device-registry updates
+    assert listens_once == [EVENT_HOMEASSISTANT_STOP]
+    assert c._hass_stop_unsub == "stop"
 
 
 @pytest.mark.asyncio
@@ -442,10 +449,16 @@ async def test_async_setup_namespace_failure_swallowed() -> None:
     c._ensure_service_device_exists = lambda: None
     c._reindex_poll_targets_from_device_registry = lambda: None
     c._dr_unsub = "already"  # skip re-subscribe branch
-    c.hass = SimpleNamespace(bus=SimpleNamespace(async_listen=lambda *a: "x"))
+    c._hass_stop_unsub = "already"
+    c.hass = SimpleNamespace(
+        bus=SimpleNamespace(
+            async_listen=lambda *a: "x", async_listen_once=lambda *a: "y"
+        )
+    )
 
     await c.async_setup()  # must not raise
     assert c._dr_unsub == "already"
+    assert c._hass_stop_unsub == "already"
 
 
 # ---------------------------------------------------------------------------
@@ -525,6 +538,259 @@ async def test_async_shutdown_cancels_handles_and_unloads() -> None:
     assert c._dr_unsub is None
     assert c._short_retry_cancel is None
     assert unloaded
+
+
+@pytest.mark.asyncio
+async def test_async_shutdown_cancels_an_in_flight_poll_cycle() -> None:
+    """A poll cycle still running at entry unload is cancelled by the coordinator.
+
+    ``async_shutdown`` is the *unload* path (``config_entry.async_on_unload``);
+    without the cancel the old cycle kept running into the closed entry-scoped
+    cache. The Home Assistant *stop* path is covered separately below, because
+    the core does not unload entries on stop.
+    """
+
+    c = _bare()
+    c._cancel_pending_subentry_repair = lambda: None
+    c._stats_save_task = None
+    c._hass_stop_unsub = None
+
+    async def _save() -> None:
+        return None
+
+    c._async_save_stats = _save  # type: ignore[method-assign]
+
+    async def _unload() -> None:
+        return None
+
+    c._async_unload = _unload  # type: ignore[assignment]
+
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    async def _poll_forever() -> None:
+        started.set()
+        try:
+            await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+
+    c._poll_cycle_task = asyncio.create_task(_poll_forever())
+    await started.wait()
+
+    await c.async_shutdown()
+
+    assert cancelled.is_set(), "the in-flight poll cycle was not cancelled"
+    assert c._poll_cycle_task is None
+
+
+@pytest.mark.asyncio
+async def test_async_shutdown_leaves_a_finished_poll_cycle_alone() -> None:
+    """A poll cycle that already ended is neither cancelled nor awaited again."""
+
+    c = _bare()
+    c._cancel_pending_subentry_repair = lambda: None
+    c._stats_save_task = None
+    c._hass_stop_unsub = None
+
+    async def _save() -> None:
+        return None
+
+    c._async_save_stats = _save  # type: ignore[method-assign]
+
+    async def _unload() -> None:
+        return None
+
+    c._async_unload = _unload  # type: ignore[assignment]
+
+    touched: list[str] = []
+
+    class _DoneTask:
+        def done(self) -> bool:
+            return True
+
+        def cancel(self) -> None:
+            touched.append("cancel")
+
+        def __await__(self):  # type: ignore[no-untyped-def]
+            touched.append("await")
+            return iter(())
+
+    c._poll_cycle_task = _DoneTask()
+
+    await c.async_shutdown()
+
+    assert touched == []
+    assert c._poll_cycle_task is None
+
+
+class _OneShotBus:
+    """Bus stub with Home Assistant's one-time listener contract.
+
+    Firing consumes the listener before the handler runs (``core.py``,
+    ``_OneTimeListener.__call__``); a remover called after that is a double
+    removal, which the real bus reports as an ERROR log line rather than an
+    exception. Every call of a handed-out remover is counted (``removals``)
+    and, within those, the calls that found the listener already consumed
+    (``double_removals``); firing itself is not counted, as in the core it is
+    the bus that consumes.
+    """
+
+    def __init__(self) -> None:
+        self.once: dict[str, list[list[Any]]] = {}
+        self.removals = 0
+        self.double_removals = 0
+
+    def async_listen(self, event: str, callback: Any) -> Any:
+        return lambda: None
+
+    def async_listen_once(self, event: str, callback: Any) -> Any:
+        token = [callback]
+        self.once.setdefault(event, []).append(token)
+
+        def _remove() -> None:
+            self.removals += 1
+            try:
+                self.once[event].remove(token)
+            except (KeyError, ValueError):
+                self.double_removals += 1
+
+        return _remove
+
+    async def async_fire(self, event: str) -> None:
+        for token in list(self.once.get(event, [])):
+            self.once[event].remove(token)
+            await token[0](SimpleNamespace(event_type=event))
+
+
+def _coordinator_with_stop_listener(bus: _OneShotBus) -> Any:
+    """Return a bare coordinator that ran ``async_setup`` against ``bus``."""
+
+    c = _bare()
+    c._cache = SimpleNamespace(entry_id="e")
+    c.config_entry = make_config_entry(entry_id="e", data={}, options={})
+    c._ensure_service_device_exists = lambda: None
+    c._reindex_poll_targets_from_device_registry = lambda: None
+    c._dr_unsub = None
+    c._hass_stop_unsub = None
+    c.hass = SimpleNamespace(bus=bus)
+    return c
+
+
+@pytest.mark.asyncio
+async def test_hass_stop_cancels_an_in_flight_poll_cycle() -> None:
+    """EVENT_HOMEASSISTANT_STOP cancels the running poll cycle.
+
+    Regression for ``Task <... googlefindmy.poll_cycle ...> was still running
+    after final writes shutdown stage``: the core does not unload entries on
+    stop, so ``async_shutdown`` never ran and the tracked task outlived the
+    stop event until the core cancelled it itself and logged the warning.
+    """
+
+    bus = _OneShotBus()
+    c = _coordinator_with_stop_listener(bus)
+    await c.async_setup()
+    assert bus.once[EVENT_HOMEASSISTANT_STOP], "stop listener not armed"
+
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    async def _poll_forever() -> None:
+        started.set()
+        try:
+            await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+
+    c._poll_cycle_task = asyncio.create_task(_poll_forever())
+    await started.wait()
+    disarmed: list[str] = []
+    c._short_retry_cancel = lambda: disarmed.append("retry")
+    c._eid_refresh_debounce_handle = SimpleNamespace(
+        cancel=lambda: disarmed.append("eid")
+    )
+    c._eid_inline_refresh_debounce_handle = SimpleNamespace(
+        cancel=lambda: disarmed.append("eid-inline")
+    )
+
+    await bus.async_fire(EVENT_HOMEASSISTANT_STOP)
+
+    assert cancelled.is_set(), "the in-flight poll cycle was not cancelled on stop"
+    assert c._poll_cycle_task is None
+    # What the cycle's ``finally`` may have armed is disarmed on the stop path too.
+    assert disarmed == ["retry", "eid", "eid-inline"]
+    assert c._short_retry_cancel is None
+    assert c._eid_refresh_debounce_handle is None
+    assert c._eid_inline_refresh_debounce_handle is None
+    # The bus consumed the listener; the coordinator did not call the spent remover.
+    assert c._hass_stop_unsub is None
+    assert bus.removals == 0
+    assert bus.double_removals == 0
+
+
+@pytest.mark.asyncio
+async def test_async_shutdown_after_hass_stop_does_not_remove_the_spent_listener() -> (
+    None
+):
+    """An unload that follows a stop must not call the consumed remover again."""
+
+    bus = _OneShotBus()
+    c = _coordinator_with_stop_listener(bus)
+    await c.async_setup()
+    c._cancel_pending_subentry_repair = lambda: None
+    c._stats_save_task = None
+
+    async def _save() -> None:
+        return None
+
+    c._async_save_stats = _save  # type: ignore[method-assign]
+
+    async def _unload() -> None:
+        return None
+
+    c._async_unload = _unload  # type: ignore[assignment]
+
+    await bus.async_fire(EVENT_HOMEASSISTANT_STOP)
+    await c.async_shutdown()
+
+    assert bus.removals == 0
+    assert bus.double_removals == 0
+
+
+@pytest.mark.asyncio
+async def test_async_shutdown_before_hass_stop_disarms_the_stop_listener() -> None:
+    """An unload before any stop removes the listener exactly once."""
+
+    bus = _OneShotBus()
+    c = _coordinator_with_stop_listener(bus)
+    await c.async_setup()
+    c._cancel_pending_subentry_repair = lambda: None
+    c._stats_save_task = None
+
+    async def _save() -> None:
+        return None
+
+    c._async_save_stats = _save  # type: ignore[method-assign]
+
+    async def _unload() -> None:
+        return None
+
+    c._async_unload = _unload  # type: ignore[assignment]
+
+    await c.async_shutdown()
+
+    assert c._hass_stop_unsub is None
+    assert bus.removals == 1
+    assert bus.double_removals == 0
+    assert bus.once[EVENT_HOMEASSISTANT_STOP] == []
+
+    # The real unload calls ``async_shutdown`` twice (explicitly and via the
+    # base class ``async_on_unload``); the second call must not remove again.
+    await c.async_shutdown()
+    assert bus.removals == 1
+    assert bus.double_removals == 0
 
 
 @pytest.mark.asyncio
