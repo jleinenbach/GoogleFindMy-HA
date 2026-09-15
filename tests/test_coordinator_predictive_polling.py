@@ -269,3 +269,62 @@ async def test_predictive_overdue_polls_at_cadence_floor(
 
     assert not short_retries
     assert poll_cycle.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_no_poll_cycle_is_scheduled_once_teardown_started(
+    coordinator: GoogleFindMyCoordinator, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A refresh that resumes after the cancel helper ran schedules no cycle.
+
+    The cancel helper can only cancel a task that exists. A refresh suspended
+    before its scheduling step when unload or stop begins would otherwise create
+    a fresh cycle afterwards, against a cache about to close or a core about to
+    stop; the latch set by ``_async_cancel_poll_cycle`` closes that window.
+    """
+
+    wall_now = time.time()
+    coordinator._device_update_history["dev-id"] = deque(
+        [wall_now - 900, wall_now - 600, wall_now - 350],
+        maxlen=4,
+    )
+    _prime_cached_devices(coordinator, wall_now)
+    effective_interval = max(
+        coordinator.location_poll_interval, coordinator.min_poll_interval
+    )
+    # Same cadence as the at-floor case above: without the latch a poll is due.
+    coordinator._last_poll_mono = time.monotonic() - effective_interval
+    baseline_polls = sum(
+        1 for _, name in coordinator.hass.created if name == f"{DOMAIN}.poll_cycle"
+    )
+
+    monkeypatch.setattr(coordinator, "_ensure_service_device_exists", lambda: None)
+    monkeypatch.setattr(
+        coordinator, "_ensure_registry_for_devices", lambda *_args, **_kwargs: 0
+    )
+    monkeypatch.setattr(
+        coordinator, "_refresh_subentry_index", lambda *_args, **_kwargs: None
+    )
+    monkeypatch.setattr(
+        coordinator,
+        "_async_build_device_snapshot_with_fallbacks",
+        AsyncMock(return_value=[]),
+    )
+    monkeypatch.setattr(coordinator, "_store_subentry_snapshots", lambda _snap: None)
+
+    poll_cycle = AsyncMock(return_value=None)
+    coordinator._async_start_poll_cycle = poll_cycle
+
+    # Teardown began while this refresh was still ahead of its scheduling step.
+    await coordinator._async_cancel_poll_cycle()
+    assert coordinator._poll_cycle_teardown is True
+
+    await coordinator._async_update_data()
+    poll_tasks = [
+        task
+        for task, name in coordinator.hass.created
+        if name == f"{DOMAIN}.poll_cycle"
+    ]
+    assert len(poll_tasks) == baseline_polls
+    assert poll_cycle.await_count == 0
+    assert coordinator._poll_cycle_task is None

@@ -131,7 +131,8 @@ else:  # pragma: no cover - typing fallback for runtime imports
 from homeassistant.config_entries import (
     ConfigEntry,
 )
-from homeassistant.core import HomeAssistant
+from homeassistant.const import EVENT_HOMEASSISTANT_STOP
+from homeassistant.core import Event, HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.device_registry import EVENT_DEVICE_REGISTRY_UPDATED
 
@@ -800,6 +801,14 @@ class GoogleFindMyCoordinator(
         # Polling state
         self._poll_lock = asyncio.Lock()
         self._is_polling = False
+        # The in-flight poll cycle, held so it can be cancelled on entry unload
+        # and on Home Assistant stop (see ``_async_cancel_poll_cycle``).
+        self._poll_cycle_task: asyncio.Task[None] | None = None
+        # Latched by ``_async_cancel_poll_cycle``; the refresh schedules no new
+        # cycle once it is set (a refresh may be mid-flight when teardown starts).
+        self._poll_cycle_teardown = False
+        # Remover of the EVENT_HOMEASSISTANT_STOP listener armed in ``async_setup``.
+        self._hass_stop_unsub: Callable[[], None] | None = None
         self._startup_complete = False
         self._last_poll_mono: float = 0.0  # monotonic timestamp for scheduling
         self._last_list_poll_mono: float = (
@@ -1107,6 +1116,13 @@ class GoogleFindMyCoordinator(
         - Ensures the per-entry "service device" exists in the Device Registry.
         - Enforces entry-scoped namespace by attaching `entry_id` to the cache object.
         """
+        # Armed first: it depends on nothing below, and the steps below can
+        # raise (the caller logs and moves on without calling this again).
+        if self._hass_stop_unsub is None:
+            self._hass_stop_unsub = self.hass.bus.async_listen_once(
+                EVENT_HOMEASSISTANT_STOP, self._async_on_hass_stop
+            )
+
         # Ensure the cache carries our entry_id namespace for downstream Nova/API helpers.
         try:
             entry = self.config_entry or getattr(self, "entry", None)
@@ -1124,6 +1140,69 @@ class GoogleFindMyCoordinator(
             self._dr_unsub = self.hass.bus.async_listen(
                 EVENT_DEVICE_REGISTRY_UPDATED, self._handle_dr_event
             )
+
+    async def _async_on_hass_stop(self, _event: Event) -> None:
+        """Cancel the in-flight poll cycle when Home Assistant stops.
+
+        This cannot be left to ``async_shutdown``: for an entry-bound coordinator
+        the core runs that only on entry unload (``config_entry.async_on_unload``
+        in ``DataUpdateCoordinator.__init__``), and a stopping Home Assistant does
+        not unload entries (``ConfigEntries._async_shutdown`` merely cancels retry
+        setups). Without this listener the tracked poll task outlives the stop
+        event and the core logs ``Task ... was still running after final writes
+        shutdown stage`` against this integration before cancelling it itself.
+
+        The one-time listener has already removed itself from the bus before it
+        invokes this handler, so the remover it handed out is spent; drop it
+        first so a later ``async_shutdown`` does not call it again.
+        """
+        self._hass_stop_unsub = None
+        await self._async_cancel_poll_cycle()
+
+    async def _async_cancel_poll_cycle(self) -> None:
+        """Cancel and settle the in-flight poll cycle, if any.
+
+        The cycle runs as a *tracked* task (``hass.async_create_task`` in
+        ``polling.py``) so ``hass.async_block_till_done`` still waits for it; the
+        price is that nobody but this coordinator cancels it. Shared by the
+        unload path (``async_shutdown``) and the stop path (``_async_on_hass_stop``).
+        Awaiting the cancelled task lets the cycle's ``finally`` settle first;
+        what that ``finally`` arms (a short retry, the EID refresh debounce) is
+        then disarmed here, so neither path leaves a raw ``call_later`` behind
+        that would fire on a stopping core. ``async_shutdown`` repeats the EID
+        cancels after its own awaits; both are idempotent.
+
+        The latch comes first: a refresh that is suspended before its scheduling
+        step when this runs would otherwise find nothing to cancel here and then
+        create a fresh cycle that nobody cancels any more.
+        """
+        self._poll_cycle_teardown = True
+        poll_task = getattr(self, "_poll_cycle_task", None)
+        self._poll_cycle_task = None
+        if poll_task is not None and not poll_task.done():
+            poll_task.cancel()
+            try:
+                await poll_task
+            except (asyncio.CancelledError, Exception):
+                pass
+        for attr in (
+            "_short_retry_cancel",
+            "_eid_refresh_debounce_handle",
+            "_eid_inline_refresh_debounce_handle",
+        ):
+            handle = getattr(self, attr, None)
+            if handle is None:
+                continue
+            try:
+                # ``_short_retry_cancel`` is a remover, the others are timer handles.
+                if attr == "_short_retry_cancel":
+                    handle()
+                else:
+                    handle.cancel()
+            except Exception:
+                pass
+            finally:
+                setattr(self, attr, None)
 
     def _get_google_home_filter(self) -> GoogleHomeFilterProtocol | None:
         """Return the Google Home filter associated with this coordinator."""
@@ -1180,6 +1259,19 @@ class GoogleFindMyCoordinator(
 
     async def async_shutdown(self) -> None:
         """Clean up listeners and timers on entry unload to avoid leaks."""
+        # Cancel an in-flight poll cycle first, so its ``finally`` (which may arm
+        # a short retry) runs before the short-retry cancel below. This is the
+        # unload path; the Home Assistant stop path is ``_async_on_hass_stop``.
+        await self._async_cancel_poll_cycle()
+        # Disarm the stop listener when the entry unloads before a stop. On the
+        # stop path the handler has already cleared this (spent remover).
+        hass_stop_unsub = getattr(self, "_hass_stop_unsub", None)
+        if hass_stop_unsub is not None:
+            try:
+                hass_stop_unsub()
+            except Exception:
+                pass
+            self._hass_stop_unsub = None
         self._cancel_pending_subentry_repair()
         # Unsubscribe DR listener
         dr_unsub = getattr(self, "_dr_unsub", None)
@@ -1189,15 +1281,9 @@ class GoogleFindMyCoordinator(
             except Exception:
                 pass
             self._dr_unsub = None
-        # Cancel short-retry callback if scheduled
-        short_retry_cancel = getattr(self, "_short_retry_cancel", None)
-        if short_retry_cancel is not None:
-            try:
-                short_retry_cancel()
-            except Exception:
-                pass
-            finally:
-                self._short_retry_cancel = None
+        # The short-retry callback was cancelled by ``_async_cancel_poll_cycle``
+        # above; nothing between there and here suspends, so nothing can arm it
+        # again before this point.
         # End the pending debounced stats write by WRITING it, not by dropping it.
         # Cancelling alone loses whatever the window was still coalescing, which is every
         # increment of the last few seconds together with the claims recorded for them.

@@ -191,6 +191,8 @@ class PollingOperations(_MixinBase):
     _crypto_status_changed_at: float | None
     _force_device_list_reason: str | None
     _short_retry_cancel: Callable[[], None] | None
+    _poll_cycle_task: asyncio.Task[None] | None
+    _poll_cycle_teardown: bool
     _fcm_error_count: int
     _fcm_last_error: str | None
     _last_transient_auth_error: str | None
@@ -1560,7 +1562,13 @@ class PollingOperations(_MixinBase):
                 hard_limit_passed=hard_limit_passed,
                 is_cold_start=is_cold_start,
             )
-            if due and not self._is_polling and devices_to_poll:
+            if self._poll_cycle_teardown:
+                # Unload or stop is under way. The cancel helper can only cancel a
+                # task that exists; a refresh that was already past the cancel
+                # when it ran would otherwise create a fresh cycle here, against
+                # a cache about to close or a core about to stop.
+                _LOGGER.debug("Teardown in progress; not scheduling a poll cycle")
+            elif due and not self._is_polling and devices_to_poll:
                 force_poll = False
                 fcm_ready = self._is_fcm_ready_soft()
                 if not fcm_ready:
@@ -1598,7 +1606,10 @@ class PollingOperations(_MixinBase):
                         len(devices_to_poll),
                         effective_interval,
                     )
-                    self.hass.async_create_task(
+                    # Held so ``_async_cancel_poll_cycle`` can cancel a cycle that
+                    # is still running when the entry unloads or Home Assistant
+                    # stops.
+                    self._poll_cycle_task = self.hass.async_create_task(
                         self._async_start_poll_cycle(devices_to_poll, force=force_poll),
                         name=f"{DOMAIN}.poll_cycle",
                     )
@@ -1675,8 +1686,10 @@ class PollingOperations(_MixinBase):
     def _request_poll_reauth(self, reauth_exc: ConfigEntryAuthFailed) -> None:
         """Start the config-entry reauth flow from the background poll cycle.
 
-        ``_async_start_poll_cycle`` runs via ``hass.async_create_task`` (fire and
-        forget), so a raised ``ConfigEntryAuthFailed`` never reaches the awaited
+        ``_async_start_poll_cycle`` runs via ``hass.async_create_task`` (not
+        awaited by the refresh; the task is held in ``_poll_cycle_task`` only so
+        it can be cancelled on unload and on Home Assistant stop), so a raised
+        ``ConfigEntryAuthFailed`` never reaches the awaited
         coordinator refresh and Home Assistant's automatic reauth
         (``_async_refresh`` -> ``ConfigEntry.async_start_reauth``) is never
         triggered. Start the entry-scoped reauth flow directly instead, mirroring

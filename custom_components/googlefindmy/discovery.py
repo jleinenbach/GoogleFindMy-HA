@@ -1658,6 +1658,12 @@ class DiscoveryManager:
         self._started = False
 
     async def _handle_hass_stop(self, _event: Any) -> None:
+        # Home Assistant's one-time listener removes itself from the bus
+        # *before* it invokes this handler, so the remover we hold is already
+        # spent. Calling it again from ``async_stop`` makes the bus log
+        # "Unable to remove unknown job listener" as an ERROR on every
+        # shutdown (it does not raise, so the try/except there never saw it).
+        self._stop_unsub = None
         await self.async_stop()
 
     async def async_force_secrets_scan(self) -> None:
