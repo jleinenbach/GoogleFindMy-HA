@@ -804,6 +804,9 @@ class GoogleFindMyCoordinator(
         # The in-flight poll cycle, held so it can be cancelled on entry unload
         # and on Home Assistant stop (see ``_async_cancel_poll_cycle``).
         self._poll_cycle_task: asyncio.Task[None] | None = None
+        # Latched by ``_async_cancel_poll_cycle``; the refresh schedules no new
+        # cycle once it is set (a refresh may be mid-flight when teardown starts).
+        self._poll_cycle_teardown = False
         # Remover of the EVENT_HOMEASSISTANT_STOP listener armed in ``async_setup``.
         self._hass_stop_unsub: Callable[[], None] | None = None
         self._startup_complete = False
@@ -1166,9 +1169,14 @@ class GoogleFindMyCoordinator(
         Awaiting the cancelled task lets the cycle's ``finally`` settle first;
         what that ``finally`` arms (a short retry, the EID refresh debounce) is
         then disarmed here, so neither path leaves a raw ``call_later`` behind
-        that would fire on a stopping core. ``async_shutdown`` repeats those
-        cancels for its other arming sites; both are idempotent.
+        that would fire on a stopping core. ``async_shutdown`` repeats the EID
+        cancels after its own awaits; both are idempotent.
+
+        The latch comes first: a refresh that is suspended before its scheduling
+        step when this runs would otherwise find nothing to cancel here and then
+        create a fresh cycle that nobody cancels any more.
         """
+        self._poll_cycle_teardown = True
         poll_task = getattr(self, "_poll_cycle_task", None)
         self._poll_cycle_task = None
         if poll_task is not None and not poll_task.done():
@@ -1273,15 +1281,9 @@ class GoogleFindMyCoordinator(
             except Exception:
                 pass
             self._dr_unsub = None
-        # Cancel short-retry callback if scheduled
-        short_retry_cancel = getattr(self, "_short_retry_cancel", None)
-        if short_retry_cancel is not None:
-            try:
-                short_retry_cancel()
-            except Exception:
-                pass
-            finally:
-                self._short_retry_cancel = None
+        # The short-retry callback was cancelled by ``_async_cancel_poll_cycle``
+        # above; nothing between there and here suspends, so nothing can arm it
+        # again before this point.
         # End the pending debounced stats write by WRITING it, not by dropping it.
         # Cancelling alone loses whatever the window was still coalescing, which is every
         # increment of the last few seconds together with the claims recorded for them.

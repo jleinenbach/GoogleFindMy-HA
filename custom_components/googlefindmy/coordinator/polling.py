@@ -192,6 +192,7 @@ class PollingOperations(_MixinBase):
     _force_device_list_reason: str | None
     _short_retry_cancel: Callable[[], None] | None
     _poll_cycle_task: asyncio.Task[None] | None
+    _poll_cycle_teardown: bool
     _fcm_error_count: int
     _fcm_last_error: str | None
     _last_transient_auth_error: str | None
@@ -1561,7 +1562,13 @@ class PollingOperations(_MixinBase):
                 hard_limit_passed=hard_limit_passed,
                 is_cold_start=is_cold_start,
             )
-            if due and not self._is_polling and devices_to_poll:
+            if self._poll_cycle_teardown:
+                # Unload or stop is under way. The cancel helper can only cancel a
+                # task that exists; a refresh that was already past the cancel
+                # when it ran would otherwise create a fresh cycle here, against
+                # a cache about to close or a core about to stop.
+                _LOGGER.debug("Teardown in progress; not scheduling a poll cycle")
+            elif due and not self._is_polling and devices_to_poll:
                 force_poll = False
                 fcm_ready = self._is_fcm_ready_soft()
                 if not fcm_ready:

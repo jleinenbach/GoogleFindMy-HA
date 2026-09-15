@@ -583,6 +583,7 @@ async def test_async_shutdown_cancels_an_in_flight_poll_cycle() -> None:
 
     assert cancelled.is_set(), "the in-flight poll cycle was not cancelled"
     assert c._poll_cycle_task is None
+    assert c._poll_cycle_teardown is True
 
 
 @pytest.mark.asyncio
@@ -803,6 +804,7 @@ async def test_async_shutdown_swallows_unsub_errors() -> None:
 
     c._dr_unsub = _boom
     c._short_retry_cancel = _boom
+    c._hass_stop_unsub = _boom
     c._stats_save_task = None
     c._eid_refresh_debounce_handle = SimpleNamespace(cancel=_boom)
     c._eid_inline_refresh_debounce_handle = None
@@ -814,6 +816,7 @@ async def test_async_shutdown_swallows_unsub_errors() -> None:
 
     await c.async_shutdown()  # must not raise
     assert c._dr_unsub is None
+    assert c._hass_stop_unsub is None
 
 
 @pytest.mark.asyncio
