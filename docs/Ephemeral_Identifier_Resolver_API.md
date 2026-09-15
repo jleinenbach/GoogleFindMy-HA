@@ -88,7 +88,14 @@ if resolver:
 
 ### Return value
 
-`resolve_eid(eid_bytes: bytes) -> EIDMatch | None`
+`resolve_eid(eid_bytes: bytes, *, ble_address: str | None = None, observed_at: float | None = None) -> EIDMatch | None`
+
+Both keyword arguments are optional and backward-compatible:
+
+* `ble_address` — BLE MAC address of the advertising device; when given, it is stored for a future direct GATT connection (`get_ble_scan_info`).
+* `observed_at` — advertisement time on the `time.monotonic()` clock (what Home Assistant hands over as `BluetoothServiceInfoBleak.time`). When given, every observation timestamp the resolver records for the match (battery state, scan info, lock confirmation) is the advertisement time; when omitted, the observation is dated at the moment of the call; a value ahead of `time.monotonic()` is clamped to the moment of the call on both clocks. This matters because Home Assistant replays the last advertisement of every known address when a callback is registered (up to 15 minutes old for non-connectable sources) and restores that history across restarts: without `observed_at`, a replayed sighting would count as seen *now*. Observations need not arrive in order (Home Assistant before 2026.8 replays the history in dict order, and a rotating tracker can have several addresses in it): a sighting older than the one already on record for the device is ignored by all three writers, so the recorded state does not move backwards. Battery state, scan info and the lock's drift/`last_seen_at` guard order sightings on the monotonic clock, so a wall-clock correction backwards while Home Assistant runs does not make live sightings look older (the lock confirmation that feeds the lock TTL stays on wall seconds, as does the TTL). One limit remains on the lock: its persisted stamps are whole seconds on the wall clock and the monotonic clock does not survive a restart, so after a restart every sighting up to the first accepted one is compared on the persisted second, and a sighting in the same second as the persisted one is applied in delivery order.
+
+The returned `EIDMatch` carries:
 
 * `device_id` — Home Assistant device registry identifier.
 * `config_entry_id` — Config entry owning the device.
@@ -164,7 +171,8 @@ if resolver:
 | `battery_pct` | `int \| None` | Mapped percentage: 100, 25, 5, or None (unsupported) |
 | `uwt_mode` | `bool` | `True` if Unwanted Tracking protection is active |
 | `decoded_flags` | `int` | Fully decoded flags byte (after XOR) |
-| `observed_at_wall` | `float` | Wall-clock `time.time()` of the BLE observation |
+| `observed_at_wall` | `float` | Wall-clock time of the BLE observation, i.e. of the advertisement (`observed_at` passed to `resolve_eid`), not of its processing; on a history replay this is the original sighting |
+| `observed_at_monotonic` | `float` | The same observation on the `time.monotonic()` clock; the ordering key by which the writer keeps the newest sighting (default `-inf` for states built elsewhere) |
 
 ### Identity model — which ID to use
 
