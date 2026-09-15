@@ -282,6 +282,119 @@ async def test_refresh_watch_paths_picks_up_new_option(
     await _exercise()
 
 
+class _OneShotBus:
+    """Bus stub that reproduces Home Assistant's one-time listener contract.
+
+    The core's ``_OneTimeListener`` removes itself from the bus *before* it
+    runs the callback, so by the time the handler executes, the remover that
+    ``async_listen_once`` handed out is already spent. Calling it again is a
+    double removal, which the real bus reports as an ERROR log line
+    ("Unable to remove unknown job listener") rather than an exception, so a
+    ``try/except`` around the remover cannot observe it. The stub counts every
+    call of a handed-out remover (``removals``) and, within those, the calls
+    that found the listener already consumed (``double_removals``); firing
+    itself is not counted, as in the core it is the bus that consumes.
+    """
+
+    def __init__(self) -> None:
+        self._listeners: dict[str, list[list[Callable[..., Any]]]] = {}
+        self.removals = 0
+        self.double_removals = 0
+
+    def async_listen_once(
+        self, event: str, callback: Callable[..., Any]
+    ) -> Callable[[], None]:
+        token = [callback]
+        self._listeners.setdefault(event, []).append(token)
+
+        def _remove() -> None:
+            self.removals += 1
+            try:
+                self._listeners[event].remove(token)
+            except (KeyError, ValueError):
+                self.double_removals += 1
+
+        return _remove
+
+    async def async_fire(self, event: str) -> None:
+        for token in list(self._listeners.get(event, [])):
+            self._listeners[event].remove(token)
+            await token[0](SimpleNamespace(event_type=event))
+
+
+def _patch_manager_dependencies(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(discovery, "async_track_time_interval", lambda *_: lambda: None)
+    monkeypatch.setattr(discovery.cf, "_find_entry_by_email", lambda *_: None)
+
+    async def _fake_translations(*_args: Any, **_kwargs: Any) -> dict[str, str]:
+        return {}
+
+    monkeypatch.setattr(
+        discovery.translation, "async_get_translations", _fake_translations
+    )
+
+
+@pytest.mark.asyncio
+async def test_hass_stop_does_not_remove_the_spent_stop_listener_again(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Shutdown via EVENT_HOMEASSISTANT_STOP must not call the spent remover.
+
+    Regression for the ERROR ``Unable to remove unknown job listener`` that
+    Home Assistant logged on every shutdown: the one-time listener had already
+    consumed itself, then ``async_stop`` called its remover a second time.
+    """
+
+    _patch_manager_dependencies(monkeypatch)
+    hass = _OptionsHass()
+    bus = _OneShotBus()
+    hass.bus = bus
+
+    manager = discovery.DiscoveryManager(hass)
+    await manager.async_start()
+
+    await bus.async_fire(discovery.EVENT_HOMEASSISTANT_STOP)
+
+    # The manager did stop (watchers are gone) ...
+    assert manager.watch_paths == ()
+    # ... without touching the remover: the bus consumed the listener itself.
+    assert bus.removals == 0
+    assert bus.double_removals == 0
+
+    # A later explicit stop is idempotent and still does not reach the remover.
+    await manager.async_stop()
+    assert bus.removals == 0
+    assert bus.double_removals == 0
+
+
+@pytest.mark.asyncio
+async def test_manual_stop_before_shutdown_removes_the_stop_listener_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An explicit stop before shutdown unsubscribes exactly once.
+
+    Counterpart to the shutdown case: here the listener has *not* fired, so
+    the remover is live and must be called (once), and the later stop event
+    finds nothing to run.
+    """
+
+    _patch_manager_dependencies(monkeypatch)
+    hass = _OptionsHass()
+    bus = _OneShotBus()
+    hass.bus = bus
+
+    manager = discovery.DiscoveryManager(hass)
+    await manager.async_start()
+
+    await manager.async_stop()
+    assert bus.removals == 1
+    assert bus.double_removals == 0
+
+    await bus.async_fire(discovery.EVENT_HOMEASSISTANT_STOP)
+    assert bus.removals == 1
+    assert bus.double_removals == 0
+
+
 @pytest.mark.asyncio
 async def test_cloud_discovery_results_suppress_task_exceptions(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
