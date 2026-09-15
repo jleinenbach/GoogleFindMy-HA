@@ -1259,7 +1259,18 @@ class GoogleFindMyCoordinator(
 
     async def async_shutdown(self) -> None:
         """Clean up listeners and timers on entry unload to avoid leaks."""
-        # Cancel an in-flight poll cycle first, so its ``finally`` (which may arm
+        # The core's shutdown goes first. ``DataUpdateCoordinator.async_shutdown``
+        # raises ``_shutdown_requested`` (a refresh that arrives after unload, say
+        # a push callback calling ``async_request_refresh``, returns before it
+        # touches the closed API), cancels the interval refresh that
+        # ``_schedule_refresh`` may still have armed, and shuts the request
+        # debouncer, which also drops the debouncer's hard reference to this
+        # coordinator. None of it suspends, so those doors are closed before the
+        # awaits below open a window; and it is idempotent, which matters because
+        # unload runs this method twice (``async_unload_entry`` calls it, then the
+        # ``async_on_unload`` hook the core registered in its ``__init__`` does).
+        await super().async_shutdown()
+        # Then cancel an in-flight poll cycle, so its ``finally`` (which may arm
         # a short retry) runs before the short-retry cancel below. This is the
         # unload path; the Home Assistant stop path is ``_async_on_hass_stop``.
         await self._async_cancel_poll_cycle()

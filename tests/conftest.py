@@ -268,6 +268,7 @@ from tests.helpers import (
 from tests.helpers import single_owner_device_registry as _single_owner_registry
 from tests.helpers.config_entries_stub import install_config_entries_stubs
 from tests.helpers.constants import load_googlefindmy_const_module
+from tests.helpers.core_shutdown_state import seed_core_shutdown_state
 
 ConfigEntryAuthFailed: type[Exception] = Exception
 
@@ -1711,7 +1712,17 @@ def _stub_homeassistant() -> None:
     _T = TypeVar("_T")
 
     class DataUpdateCoordinator(Generic[_T]):
-        """Minimal stub for DataUpdateCoordinator supporting subclassing."""
+        """Minimal stub for DataUpdateCoordinator supporting subclassing.
+
+        ``async_shutdown`` and the two removers it calls mirror the core
+        (``homeassistant/helpers/update_coordinator.py``, 2026.8.2, lines 210
+        to 239) line for line, because ``GoogleFindMyCoordinator.async_shutdown``
+        chains to them and the suite runs every shutdown path against this
+        stub. ``tests/test_core_shutdown_stub_parity.py`` holds the mirror to
+        the real class. The four attributes are the ones the core's
+        ``__init__`` gives them; ``_debounced_refresh`` is a two-method
+        stand-in for the ``Debouncer`` surface the core's shutdown uses.
+        """
 
         def __init__(
             self, hass=None, logger=None, name: str | None = None, update_interval=None
@@ -1720,6 +1731,31 @@ def _stub_homeassistant() -> None:
             self.logger = logger
             self.name = name or "coordinator"
             self.update_interval = update_interval
+            self._shutdown_requested = False
+            self._unsub_refresh: Callable[[], None] | None = None
+            self._unsub_shutdown: Callable[[], None] | None = None
+            self._debounced_refresh: Any = SimpleNamespace(
+                async_shutdown=lambda: None, async_cancel=lambda: None
+            )
+
+        async def async_shutdown(self) -> None:
+            """Cancel any scheduled call, and ignore new runs."""
+            self._shutdown_requested = True
+            self._async_unsub_refresh()
+            self._async_unsub_shutdown()
+            self._debounced_refresh.async_shutdown()
+
+        def _async_unsub_refresh(self) -> None:
+            """Cancel any scheduled call."""
+            if self._unsub_refresh:
+                self._unsub_refresh()
+                self._unsub_refresh = None
+
+        def _async_unsub_shutdown(self) -> None:
+            """Cancel any scheduled call."""
+            if self._unsub_shutdown:
+                self._unsub_shutdown()
+                self._unsub_shutdown = None
 
         async def async_request_refresh(
             self,
@@ -2130,6 +2166,7 @@ def fixture_coordinator_teardown_defaults() -> Callable[[Any], None]:
     def _apply(
         coordinator: Any, *, loop: asyncio.AbstractEventLoop | None = None
     ) -> None:
+        seed_core_shutdown_state(coordinator)
         if getattr(coordinator, "_dr_unsub", None) is None:
             coordinator._dr_unsub = lambda: None
         if getattr(coordinator, "_short_retry_cancel", None) is None:

@@ -60,6 +60,7 @@ from custom_components.googlefindmy.coordinator.helpers.geo import (
 )
 from tests.helpers import drain_loop
 from tests.helpers.config_entries_stub import make_config_entry
+from tests.helpers.core_shutdown_state import seed_core_shutdown_state
 
 # ~5.5 km apart: far beyond any accuracy sum used here, so the clear-jump branch
 # (dist > radius_sum) executes, and slow enough over the timespans below that the
@@ -2533,7 +2534,9 @@ async def test_shutdown_writes_the_pending_stats_instead_of_dropping_them() -> N
     """
     from custom_components.googlefindmy.coordinator import GoogleFindMyCoordinator
 
-    coord = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
+    coord = seed_core_shutdown_state(
+        GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
+    )
     written: list[int] = []
 
     async def _record() -> None:
@@ -2575,7 +2578,9 @@ async def test_shutdown_writes_even_when_no_debounced_task_is_pending() -> None:
     """
     from custom_components.googlefindmy.coordinator import GoogleFindMyCoordinator
 
-    coord = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
+    coord = seed_core_shutdown_state(
+        GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
+    )
     written: list[int] = []
 
     async def _record() -> None:
@@ -3516,6 +3521,7 @@ async def test_a_coordinator_without_the_load_marker_writes_as_before() -> None:
 @pytest.mark.asyncio
 def _shutdownable(coord: Any) -> Any:
     """Everything ``async_shutdown`` touches on the way to the stats flush."""
+    seed_core_shutdown_state(coord)
     coord._cancel_pending_subentry_repair = lambda: None  # type: ignore[method-assign]
     coord._dr_unsub = None
     coord._short_retry_cancel = None
