@@ -6,10 +6,24 @@ on:
     branches:
       - main
 
+# Least-privilege default for every job (CodeQL actions/missing-workflow-permissions).
+# Jobs that need more declare it themselves.
+permissions:
+  contents: read
+
 jobs:
   hassfest:
     name: Hassfest validation
     runs-on: ubuntu-latest
+    # checks: read is the documented permission for /commits/{sha}/check-runs
+    # (GitHub REST, "List check runs for a Git reference"), which the auto-fix
+    # detection below reads twice: the inline query and
+    # lewagon/wait-on-check-action. The inline query tolerates an API error by
+    # assuming no auto-fix run exists (found=false), so the guard must not rely
+    # on public-repo tolerance for an unprivileged token.
+    permissions:
+      contents: read
+      checks: read
     steps:
       - name: Check out repository
         uses: actions/checkout@v5

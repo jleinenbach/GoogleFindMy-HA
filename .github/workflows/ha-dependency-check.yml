@@ -19,6 +19,11 @@ on:
 env:
   PYTHON_VERSION: "3.14"
 
+# Least-privilege default for every job (CodeQL actions/missing-workflow-permissions).
+# No job in this workflow writes to the repository.
+permissions:
+  contents: read
+
 jobs:
   check-latest-ha:
     name: Check Latest HA Compatibility
