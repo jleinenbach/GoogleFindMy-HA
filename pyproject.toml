@@ -416,7 +416,10 @@ skip_covered = true
 # subentry-deletion type-axis series (owner-key ranking, the type guard and the
 # frozen-observation regression tests); measured CI total is 78.36 % on
 # 04a66fc2, so ~0.36 Pp headroom here.
-fail_under = 78
+# Raised to 80 per maintainer request after `if TYPE_CHECKING:` blocks left the
+# coverage denominator (#1283); measured CI total is 80.33 % on c972fd34, so
+# ~0.33 Pp headroom here.
+fail_under = 80
 exclude_lines = [
     "if __name__ == \"__main__\":",
     "pragma: no cover",
