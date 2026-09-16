@@ -132,10 +132,12 @@ async def async_process_fmdn_beacon_detection(  # noqa: PLR0913
         )
         return False
 
+    # Coordinates are never logged (AGENTS.md "Logging & privacy"): DEBUG logs
+    # end up in issue reports and the scanner position is usually a home. The
+    # message records that a position was resolved plus its non-location
+    # attributes, which is what the diagnosis needs.
     _LOGGER.debug(
-        "Resolved location: lat=%.6f, lon=%.6f, accuracy=%dm, zone=%s",
-        location.latitude,
-        location.longitude,
+        "Resolved location (coordinates omitted): accuracy=%dm, zone=%s",
         location.accuracy,
         location.zone_name,
     )
@@ -553,9 +555,10 @@ async def _encrypt_and_upload_location(
     # Note: This is the inner encrypted payload, not the outer protobuf
     gps_data = f"{location.latitude:.7f},{location.longitude:.7f}".encode()
 
+    # The payload itself is never logged: DEBUG logs end up in issue reports.
+    # Only the non-location attributes are recorded.
     _LOGGER.debug(
-        "GPS data for encryption: %s (accuracy=%dm, zone=%s)",
-        gps_data.decode(),
+        "GPS data prepared for encryption (coordinates omitted): accuracy=%dm, zone=%s",
         location.accuracy,
         location.zone_name,
     )

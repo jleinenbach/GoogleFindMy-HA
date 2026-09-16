@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import logging
 import time
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -584,3 +585,65 @@ def test_calculate_accuracy_from_rssi_band_boundaries(rssi, expected_distance):
     returned value is the pure band distance and the boundary is observable.
     """
     assert _calculate_accuracy_from_rssi(rssi, zone_accuracy=1) == expected_distance
+
+
+@pytest.mark.asyncio
+async def test_debug_logs_omit_coordinates(hass_mock, caplog):
+    """AGENTS.md "Logging & privacy": coordinates never reach the log.
+
+    The scanner position is usually the user's home and DEBUG logs end up in
+    issue reports. Runs the full path from beacon detection through
+    ``_encrypt_and_upload_location`` with only the crypto and network
+    boundaries mocked, so both DEBUG sites that used to carry coordinates
+    are actually executed. Logging the (rounded or raw) coordinates at either
+    site turns the test red, while the encrypted payload keeps the full
+    precision.
+    """
+    caplog.set_level(
+        logging.DEBUG,
+        logger="custom_components.googlefindmy.fmdn_finder.location_uploader",
+    )
+    encrypt_mock = MagicMock(return_value=(b"\x00" * 32, b"\x11" * 20))
+    upload_mock = AsyncMock(return_value=True)
+
+    with (
+        patch(
+            "custom_components.googlefindmy.fmdn_finder.location_uploader._resolve_scanner_location",
+            return_value=_resolved_location(5),
+        ),
+        patch(
+            "custom_components.googlefindmy.FMDNCrypto.foreign_tracker_cryptor.encrypt",
+            encrypt_mock,
+        ),
+        patch(
+            "custom_components.googlefindmy.fmdn_finder.google_uploader.async_upload_to_google_fmdn",
+            upload_mock,
+        ),
+    ):
+        result = await async_process_fmdn_beacon_detection(
+            hass=hass_mock,
+            eid=b"\xab" * 20,
+            area=None,
+            rssi=None,
+            scanner_address="AA:BB:CC:DD:EE:FF",
+            scanner_device_id="scanner_123",
+            fmdn_device_id="device_456",
+            entity_id="sensor.bermuda_fmdn_test",
+        )
+
+    assert result is True
+    upload_mock.assert_awaited_once()
+    # Both changed DEBUG sites were executed and carry only accuracy and zone.
+    assert (
+        "Resolved location (coordinates omitted): accuracy=5m, zone=home" in caplog.text
+    )
+    assert (
+        "GPS data prepared for encryption (coordinates omitted): accuracy=5m, zone=home"
+        in caplog.text
+    )
+    # Neither the raw (52.52 / 13.405) nor any rounded form may appear.
+    assert "52.5" not in caplog.text
+    assert "13.4" not in caplog.text
+    # The encrypted payload is unchanged: full precision stays in the upload.
+    encrypt_mock.assert_called_once()
+    assert encrypt_mock.call_args.kwargs["message"] == b"52.5200000,13.4050000"
