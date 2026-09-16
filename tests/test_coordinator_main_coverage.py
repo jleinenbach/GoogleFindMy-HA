@@ -29,11 +29,19 @@ from custom_components.googlefindmy.const import (
 )
 from custom_components.googlefindmy.coordinator import GoogleFindMyCoordinator
 from tests.helpers.config_entries_stub import make_config_entry
+from tests.helpers.core_shutdown_state import seed_core_shutdown_state
 
 
 def _bare() -> Any:
-    """Return a coordinator instance without running ``__init__``."""
-    return GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
+    """Return a coordinator instance without running ``__init__``.
+
+    The attributes the core's ``async_shutdown`` reads are seeded, because
+    ``GoogleFindMyCoordinator.async_shutdown`` chains to it (see
+    ``tests.helpers.core_shutdown_state``).
+    """
+    return seed_core_shutdown_state(
+        GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
+    )
 
 
 class _Cache:
@@ -538,6 +546,108 @@ async def test_async_shutdown_cancels_handles_and_unloads() -> None:
     assert c._dr_unsub is None
     assert c._short_retry_cancel is None
     assert unloaded
+
+
+@pytest.mark.asyncio
+async def test_async_shutdown_chains_to_the_core_before_it_suspends() -> None:
+    """The override hands the core its shutdown, and does so before any await.
+
+    ``DataUpdateCoordinator.async_shutdown`` raises ``_shutdown_requested`` (a
+    refresh arriving after unload returns at once), cancels the scheduled
+    interval refresh and shuts the request debouncer. The override never
+    chained to it, so a late ``async_request_refresh`` from a push callback ran
+    a full refresh against the closed API. The core step is synchronous and
+    the poll-cycle cancel suspends, so the core goes first: the flag must
+    already be up when the cycle sees its cancellation.
+    """
+
+    c = _bare()
+    c._cancel_pending_subentry_repair = lambda: None
+    c._stats_save_task = None
+    c._hass_stop_unsub = None
+    order: list[str] = []
+    c._unsub_refresh = lambda: order.append("interval")
+    c._debounced_refresh = SimpleNamespace(
+        async_shutdown=lambda: order.append("debouncer"),
+        async_cancel=lambda: order.append("debouncer-cancel"),
+    )
+
+    async def _save() -> None:
+        order.append("stats")
+
+    c._async_save_stats = _save  # type: ignore[method-assign]
+
+    async def _unload() -> None:
+        order.append("unload")
+
+    c._async_unload = _unload  # type: ignore[assignment]
+
+    flag_when_cancelled: list[bool] = []
+    started = asyncio.Event()
+
+    async def _poll_forever() -> None:
+        started.set()
+        try:
+            await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            flag_when_cancelled.append(c._shutdown_requested)
+            order.append("poll-cancelled")
+            raise
+
+    c._poll_cycle_task = asyncio.create_task(_poll_forever())
+    await started.wait()
+
+    await c.async_shutdown()
+
+    assert c._shutdown_requested is True
+    # The core's two calls come before the cycle is cancelled: raising the flag
+    # by hand and chaining to the core after the awaits would keep the flag
+    # assertion below green, and fails here.
+    assert order[:3] == ["interval", "debouncer", "poll-cancelled"], order
+    assert c._unsub_refresh is None, "the core clears the remover it called"
+    assert flag_when_cancelled == [True], (
+        "the core's flag must be up before the poll cycle is cancelled"
+    )
+
+
+@pytest.mark.asyncio
+async def test_async_shutdown_twice_hands_the_core_its_turn_each_time() -> None:
+    """Unload runs ``async_shutdown`` twice; the second pass raises nothing.
+
+    ``async_unload_entry`` calls the method explicitly and the core's
+    ``async_on_unload`` hook (registered by ``DataUpdateCoordinator.__init__``)
+    calls it again after the entry-scoped cache is closed. The core's shutdown
+    is idempotent by construction: it clears the interval remover it called,
+    and the debouncer's own shutdown is repeatable. This pins that the override
+    keeps it that way.
+    """
+
+    c = _bare()
+    c._cancel_pending_subentry_repair = lambda: None
+    c._stats_save_task = None
+    c._hass_stop_unsub = None
+    calls: list[str] = []
+    c._unsub_refresh = lambda: calls.append("interval")
+    c._debounced_refresh = SimpleNamespace(
+        async_shutdown=lambda: calls.append("debouncer"),
+        async_cancel=lambda: None,
+    )
+
+    async def _save() -> None:
+        return None
+
+    c._async_save_stats = _save  # type: ignore[method-assign]
+
+    async def _unload() -> None:
+        return None
+
+    c._async_unload = _unload  # type: ignore[assignment]
+
+    await c.async_shutdown()
+    await c.async_shutdown()
+
+    assert calls == ["interval", "debouncer", "debouncer"]
+    assert c._shutdown_requested is True
 
 
 @pytest.mark.asyncio
