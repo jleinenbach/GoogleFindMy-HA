@@ -1,27 +1,21 @@
 name: Semgrep (SAST)
 
 on:
-  push:
-    branches:
-      - main
+  # Pull requests only. This workflow is a baseline scan: every run compares the
+  # PR head against its base commit, so it needs a base. The former `push`,
+  # `schedule` and `workflow_dispatch` triggers were declared, but the job was
+  # guarded by `if: github.event_name == 'pull_request'` (cc671e25), so none of
+  # them ever ran. A full-tree scan of `main` is a different job with a
+  # different finding budget and must not be implied by a trigger that skips.
   # No branch filter: development happens on the version branches (1.7), not on
   # main, and a pull request there must be scanned like any other. Matches the
-  # `on:` blocks of ci.yml and pip-audit.yml.
+  # unfiltered `pull_request:` entry of ci.yml and pip-audit.yml.
   pull_request:
-  schedule:
-    # Runs daily at 02:12 UTC-only
-    - cron: '12 2 * * *'
-    # Runs daily at 14:12 UTC-only
-    - cron: '12 14 * * *'
-  workflow_dispatch: {}
 
 jobs:
   semgrep:
     name: Run Semgrep CE scan
     runs-on: ubuntu-latest
-    if: ${{ github.event_name == 'pull_request' }}
-    env:
-      SEMGREP_HIGH_FAIL_THRESHOLD: 25
     permissions:
       contents: read
       security-events: write
@@ -33,7 +27,6 @@ jobs:
           fetch-depth: 0
 
       - name: Fetch pull request base branch
-        if: ${{ github.event_name == 'pull_request' }}
         run: |
           git fetch origin "${{ github.event.pull_request.base.ref }}":refs/remotes/origin/"${{ github.event.pull_request.base.ref }}"
 
@@ -64,11 +57,7 @@ jobs:
 
       - name: Run Semgrep scan (JSON)
         run: |
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            baseline_commit="--baseline-commit ${{ github.event.pull_request.base.sha }}"
-          else
-            baseline_commit=""
-          fi
+          baseline_commit="--baseline-commit ${{ github.event.pull_request.base.sha }}"
 
           set +e
           semgrep scan --config auto --json $baseline_commit --output=semgrep.json
@@ -91,11 +80,7 @@ jobs:
 
       - name: Run Semgrep scan (SARIF)
         run: |
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            baseline_commit="--baseline-commit ${{ github.event.pull_request.base.sha }}"
-          else
-            baseline_commit=""
-          fi
+          baseline_commit="--baseline-commit ${{ github.event.pull_request.base.sha }}"
 
           set +e
           semgrep scan --config auto --sarif $baseline_commit --output=semgrep.sarif
@@ -157,23 +142,40 @@ jobs:
               '}' > semgrep.sarif
           fi
 
-      - name: Fail on high or critical findings
+      - name: Fail on error, high or critical findings
         run: |
-          high_count=$(jq '[.results[] | select(((.extra.metadata.severity // .extra.metadata.semgrep.severity // .extra.severity // "") | ascii_upcase) as $sev | ($sev == "HIGH" or $sev == "CRITICAL"))] | length' semgrep.json)
-          threshold=${SEMGREP_HIGH_FAIL_THRESHOLD:-0}
-          # Keep large findings batches non-blocking: fail only when the high/critical count is manageable (<= threshold) and otherwise raise a visible warning.
-          if [ "$high_count" -eq 0 ]; then
+          # Semgrep rules carry one of two severity scales (semgrep_output_v1
+          # `match_severity`): the classic ERROR/WARNING/INFO and the newer
+          # CRITICAL/HIGH/MEDIUM/LOW. The registry ruleset behind `--config auto`
+          # still emits the classic scale for almost every rule: a full-tree scan
+          # of c1ea29c yielded 17 ERROR, 129 WARNING, 3 MEDIUM and no HIGH or
+          # CRITICAL at all, so a gate that only counted HIGH/CRITICAL never
+          # fired. Count the top of both scales.
+          #
+          # Any such finding new relative to the base commit fails the job. The
+          # former threshold ("keep large batches non-blocking") existed for
+          # full-tree runs; a baseline diff is small, and a finding belongs on
+          # the line that introduced it (`# nosemgrep: <rule-id>` with a reason
+          # if it is a deliberate fixture).
+          blocking='.results[] | select(((.extra.metadata.severity // .extra.metadata.semgrep.severity // .extra.severity // "") | ascii_upcase) as $sev | ($sev == "ERROR" or $sev == "HIGH" or $sev == "CRITICAL"))'
+          blocking_count=$(jq "[$blocking] | length" semgrep.json)
+          if [ "$blocking_count" -eq 0 ]; then
             exit 0
           fi
 
-          if [ "$high_count" -le "$threshold" ]; then
-            echo "::error::Semgrep reported $high_count HIGH/CRITICAL findings (threshold: $threshold)."
-            exit 1
-          fi
-
-          echo "::warning::Semgrep reported $high_count HIGH/CRITICAL findings which exceeds the fail threshold ($threshold); continuing without failure."
+          # List the findings here: the SARIF upload below is the only other
+          # place they surface, and a job log that says "3 findings" without
+          # naming them sends the reader to the Security tab first.
+          jq -r "$blocking | \"::error file=\\(.path),line=\\(.start.line)::\\(.check_id) [\\(.extra.severity)]\"" semgrep.json
+          echo "::error::Semgrep reported $blocking_count ERROR/HIGH/CRITICAL findings relative to the base commit."
+          exit 1
 
       - name: Upload Semgrep SARIF results
+        # Runs after a red gate as well: the SARIF is complete before the gate
+        # step, and a blocked PR is exactly the one whose findings must reach
+        # the Security tab. Skipped only when no SARIF was written (scan step
+        # itself failed with an exit code above 2).
+        if: ${{ !cancelled() && hashFiles('semgrep.sarif') != '' }}
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: semgrep.sarif

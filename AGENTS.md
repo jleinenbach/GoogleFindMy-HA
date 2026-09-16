@@ -932,10 +932,15 @@ artifacts remain exempt when explicitly flagged by repo configuration).
     guarded by `if: github.event_name != 'pull_request'`) opens automated
     security-update PRs via `peter-evans/create-pull-request` for fixable
     advisories.
-  * **Semgrep SAST runs on PRs only.** `.github/workflows/semgrep.yml` declares
-    `push`, `pull_request`, two daily `schedule` crons and `workflow_dispatch`,
-    but its sole job is guarded by `if: github.event_name == 'pull_request'`, so
-    scheduled, push and manual runs skip the scan.
+  * **Semgrep SAST runs on PRs only.** `.github/workflows/semgrep.yml` triggers
+    on `pull_request` alone and scans the PR head against its base commit
+    (`--baseline-commit`); there is no full-tree scan of `main`, neither scheduled
+    nor on push. Its gate step fails the job on any new finding of severity
+    `ERROR`, `HIGH` or `CRITICAL` (both Semgrep severity scales); `WARNING`,
+    `MEDIUM` and below are uploaded to the Security tab but do not fail the job.
+    The gate only counts what the scan produced: a scan that itself fails
+    (Semgrep exit code 2, e.g. registry unreachable) uploads an empty artifact
+    with a `::notice` and leaves the job green.
   * **Not every change is human-reviewed.** `.github/workflows/release-stamp.yml`
     can push a version stamp directly to the owning branch (or auto-merge a
     fallback PR after status checks, without a required review), and
@@ -1038,7 +1043,7 @@ artifacts remain exempt when explicitly flagged by repo configuration).
 * [ ] Archive extraction is traversal-safe; paths validated with `pathlib`.
 * [ ] `secrets` used for tokens; cryptography aligns with BSI TR-02102-1 guidance.
 * [ ] Logs/diagnostics redact tokens, PII, coordinates, device IDs, and derived identifiers.
-* [ ] The **whole runtime stack** uses `>=` floors (the Chrome/ChromeDriver-currency rationale is what is scoped to the browser packages, not hard pins across the stack); **most test/tooling** deps also use `>=` floors, only a constrained subset is exact-pinned (`pytest-asyncio==1.3.0`, `constraints-test-stubs.txt`); the required `test` job enforces a **narrow** manifest CVE gate (`test_no_fixable_integration_owned_vulnerability`), the separate `pip-audit` workflow runs report-only on PRs + weekly auto-update PRs; Semgrep SAST runs on PRs only (job guarded to `pull_request`); not every change is human-reviewed (release-stamp/hassfest-auto-fix auto-commit); a broad full-tree CVE scan and an SBOM scan remain hardening targets.
+* [ ] The **whole runtime stack** uses `>=` floors (the Chrome/ChromeDriver-currency rationale is what is scoped to the browser packages, not hard pins across the stack); **most test/tooling** deps also use `>=` floors, only a constrained subset is exact-pinned (`pytest-asyncio==1.3.0`, `constraints-test-stubs.txt`); the required `test` job enforces a **narrow** manifest CVE gate (`test_no_fixable_integration_owned_vulnerability`), the separate `pip-audit` workflow runs report-only on PRs + weekly auto-update PRs; Semgrep SAST runs on PRs only (workflow triggers on `pull_request` alone, baseline scan against the PR base, gate fails on new `ERROR`/`HIGH`/`CRITICAL` findings); not every change is human-reviewed (release-stamp/hassfest-auto-fix auto-commit); a broad full-tree CVE scan and an SBOM scan remain hardening targets.
 * [ ] Async: no loop blockers; `to_thread`/`TaskGroup`; proper cancel handling.
 * [ ] I/O optimized (batch/atomic); caches with clear TTL/invalidations.
 * [ ] HA-specific: Coordinator, injected session, `get_url`, config-flow test, Repairs/Diagnostics, HA Store.
