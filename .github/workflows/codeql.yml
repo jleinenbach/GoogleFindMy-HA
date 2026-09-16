@@ -1,0 +1,72 @@
+name: CodeQL
+
+on:
+  # Full-tree scan. This complements the Semgrep workflow, which is a baseline
+  # diff and reports only what a pull request adds relative to its base (see
+  # the `on:` comment in semgrep.yml). CodeQL analyzes the whole tree: the
+  # merge ref of every pull request, `main` after every push, and once a week
+  # so that queries added by a new CodeQL release reach an unchanged `main`.
+  # No branch or path filter on `pull_request`: a check that may later become
+  # required must be able to report on every pull request, and development
+  # happens on version branches as well as on `main`.
+  #
+  # The pass/fail verdict of the resulting check is not decided in this file.
+  # It comes from the repository's code scanning setting "check failure"
+  # (Settings > Code security and analysis), which fails the check on newly
+  # introduced alerts of error level or of high or critical security severity.
+  # Whether the check blocks a merge is decided by branch protection or a
+  # repository ruleset, not here.
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    - cron: '17 4 * * 3'
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      security-events: write
+      actions: read
+      packages: read
+      contents: read
+
+    strategy:
+      # A failing `actions` analysis must not cancel the `python` one; each
+      # language reports as its own check.
+      fail-fast: false
+      matrix:
+        include:
+          - language: actions
+            build-mode: none
+          - language: python
+            build-mode: none
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v4
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: ${{ matrix.build-mode }}
+          # Inline configuration (it takes precedence over `config-file`), so
+          # that triggers and exclusions live in one file, like the
+          # `.semgrepignore` generated inside semgrep.yml. Generated protobuf
+          # modules and vendored third-party code are not a finding surface of
+          # this integration.
+          config: |
+            paths-ignore:
+              - custom_components/googlefindmy/**/*_pb2*.py
+              - custom_components/googlefindmy/vendor/**
+
+      - name: Perform CodeQL analysis
+        uses: github/codeql-action/analyze@v4
+        with:
+          category: "/language:${{ matrix.language }}"

@@ -57,6 +57,12 @@ jobs:
 
       - name: Run Semgrep scan (JSON)
         run: |
+          # Semgrep does not diff against this commit literally: it resolves
+          # the baseline to `git merge-base <base> HEAD` (Semgrep CE, `git.py`,
+          # verified on release 1.177.0) and scans the merge base. On the
+          # `pull_request` merge ref checked out here, that merge base is
+          # `base.sha` itself, so commits that reached the base branch after
+          # this PR branched are not attributed to the PR.
           baseline_commit="--baseline-commit ${{ github.event.pull_request.base.sha }}"
 
           set +e
@@ -80,6 +86,7 @@ jobs:
 
       - name: Run Semgrep scan (SARIF)
         run: |
+          # Baseline semantics: see the JSON step above.
           baseline_commit="--baseline-commit ${{ github.event.pull_request.base.sha }}"
 
           set +e
@@ -176,7 +183,7 @@ jobs:
         # the Security tab. Skipped only when no SARIF was written (scan step
         # itself failed with an exit code above 2).
         if: ${{ !cancelled() && hashFiles('semgrep.sarif') != '' }}
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: semgrep.sarif
           category: semgrep-ce
