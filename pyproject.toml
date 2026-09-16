@@ -420,6 +420,7 @@ fail_under = 78
 exclude_lines = [
     "if __name__ == \"__main__\":",
     "pragma: no cover",
+    "if TYPE_CHECKING:",
 ]
 
 [tool.coverage.paths]
