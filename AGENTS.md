@@ -934,13 +934,27 @@ artifacts remain exempt when explicitly flagged by repo configuration).
     advisories.
   * **Semgrep SAST runs on PRs only.** `.github/workflows/semgrep.yml` triggers
     on `pull_request` alone and scans the PR head against its base commit
-    (`--baseline-commit`); there is no full-tree scan of `main`, neither scheduled
-    nor on push. Its gate step fails the job on any new finding of severity
+    (`--baseline-commit`). Semgrep resolves the baseline to
+    `git merge-base <base> HEAD`, which on the `pull_request` merge ref equals
+    `base.sha`, so commits that reached the base branch after the PR branched
+    are not attributed to the PR. The full-tree scan of `main` is CodeQL's job
+    (next bullet). Its gate step fails the job on any new finding of severity
     `ERROR`, `HIGH` or `CRITICAL` (both Semgrep severity scales); `WARNING`,
     `MEDIUM` and below are uploaded to the Security tab but do not fail the job.
     The gate only counts what the scan produced: a scan that itself fails
     (Semgrep exit code 2, e.g. registry unreachable) uploads an empty artifact
     with a `::notice` and leaves the job green.
+  * **CodeQL scans the full tree.** `.github/workflows/codeql.yml` (advanced
+    setup) analyzes `python` and `actions` on the merge ref of every
+    `pull_request`, on every `push` to `main`, and on a weekly `schedule`;
+    an inline `paths-ignore` excludes generated `*_pb2*.py` modules and
+    `custom_components/googlefindmy/vendor/`. Results upload under the SARIF
+    categories `/language:python` and `/language:actions`. The pass/fail
+    verdict of the PR check is not decided by the workflow file: it comes from
+    the repository's code scanning setting "check failure" (newly introduced
+    alerts of error level or high/critical security severity). The check is
+    not a required status check (`gh api repos/<owner>/<repo>/rulesets`
+    returns no ruleset for `main`); merging is not blocked by it.
   * **Not every change is human-reviewed.** `.github/workflows/release-stamp.yml`
     can push a version stamp directly to the owning branch (or auto-merge a
     fallback PR after status checks, without a required review), and
@@ -1043,7 +1057,7 @@ artifacts remain exempt when explicitly flagged by repo configuration).
 * [ ] Archive extraction is traversal-safe; paths validated with `pathlib`.
 * [ ] `secrets` used for tokens; cryptography aligns with BSI TR-02102-1 guidance.
 * [ ] Logs/diagnostics redact tokens, PII, coordinates, device IDs, and derived identifiers.
-* [ ] The **whole runtime stack** uses `>=` floors (the Chrome/ChromeDriver-currency rationale is what is scoped to the browser packages, not hard pins across the stack); **most test/tooling** deps also use `>=` floors, only a constrained subset is exact-pinned (`pytest-asyncio==1.3.0`, `constraints-test-stubs.txt`); the required `test` job enforces a **narrow** manifest CVE gate (`test_no_fixable_integration_owned_vulnerability`), the separate `pip-audit` workflow runs report-only on PRs + weekly auto-update PRs; Semgrep SAST runs on PRs only (workflow triggers on `pull_request` alone, baseline scan against the PR base, gate fails on new `ERROR`/`HIGH`/`CRITICAL` findings); not every change is human-reviewed (release-stamp/hassfest-auto-fix auto-commit); a broad full-tree CVE scan and an SBOM scan remain hardening targets.
+* [ ] The **whole runtime stack** uses `>=` floors (the Chrome/ChromeDriver-currency rationale is what is scoped to the browser packages, not hard pins across the stack); **most test/tooling** deps also use `>=` floors, only a constrained subset is exact-pinned (`pytest-asyncio==1.3.0`, `constraints-test-stubs.txt`); the required `test` job enforces a **narrow** manifest CVE gate (`test_no_fixable_integration_owned_vulnerability`), the separate `pip-audit` workflow runs report-only on PRs + weekly auto-update PRs; Semgrep SAST runs on PRs only (workflow triggers on `pull_request` alone, baseline scan against the PR base, gate fails on new `ERROR`/`HIGH`/`CRITICAL` findings); CodeQL scans the full tree (PR merge ref, push to `main`, weekly); not every change is human-reviewed (release-stamp/hassfest-auto-fix auto-commit); a broad full-tree CVE scan and an SBOM scan remain hardening targets.
 * [ ] Async: no loop blockers; `to_thread`/`TaskGroup`; proper cancel handling.
 * [ ] I/O optimized (batch/atomic); caches with clear TTL/invalidations.
 * [ ] HA-specific: Coordinator, injected session, `get_url`, config-flow test, Repairs/Diagnostics, HA Store.
