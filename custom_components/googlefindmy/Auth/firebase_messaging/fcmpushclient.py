@@ -788,8 +788,13 @@ class FcmPushClient[NotificationContextT]:  # pylint:disable=too-many-instance-a
                 else {"_raw_bytes": decrypted.hex()}
             )
 
+        # Keys and size only: the decrypted push is the raw API payload and
+        # never reaches the log, verbose or not (AGENTS.md section 5).
         self._log_verbose(
-            "Decrypted data for message %s is: %s", msg.persistent_id, ret_val
+            "Decrypted data for message %s: keys=%s, bytes=%d",
+            msg.persistent_id,
+            sorted(ret_val),
+            len(decrypted),
         )
         try:
             self.callback(ret_val, msg.persistent_id, self.callback_context)
@@ -900,7 +905,14 @@ class FcmPushClient[NotificationContextT]:  # pylint:disable=too-many-instance-a
 
         if isinstance(msg, LoginResponse):
             if str(msg.error):
-                self.logger.error("Received login error response: %s", msg)
+                # The error code and message only, not the whole response in
+                # text format (AGENTS.md section 5).
+                self.logger.error(
+                    "Received login error response: code=%s type=%s message=%s",
+                    msg.error.code,
+                    msg.error.type,
+                    msg.error.message,
+                )
                 if self._try_increment_error_count(ErrorType.LOGIN):
                     self.do_listen = False
             else:

@@ -33,8 +33,12 @@ neutrally named (`page.read()[:16]`), a wrapping call whose arguments hide
 the name (`str(response)[:16]`, `bytes(payload)[:16]`: the chain follows the
 callee, not the arguments), `binascii.hexlify()`, `base64.b64encode()` or
 `repr(bytes)` are not reported; nor is a message passed whole to `%s`
-(`str(message)` is its text format) or a dump built inside a helper that is
-not itself a log call (`self._log_verbose(...)`). Section 5 and the
+(`str(message)` is its text format). Arguments of a logging wrapper that is
+not itself a log call are unchecked, whatever they carry; the one wrapper
+the package has, `_log_verbose`, is treated as a log call by name. Shape
+(C) also reports `len(x.SerializeToString())`, which would log only a
+length; the tree binds serialised bytes to a variable first, so that
+false positive has no instance today. Section 5 and the
 diff review remain the backstop for those; the remaining gap is not
 countable. The scan is package-wide and covers all levels, written as an AST
 walk rather than a pin on the sites that were found, because the leak
@@ -144,9 +148,18 @@ def _payload_leaves(argument: ast.AST) -> list[tuple[str, str]]:
     return found
 
 
+# Logging wrappers of the package: a call to one of these is a log call even
+# though the receiver is `self`.
+_LOG_WRAPPERS = frozenset({"_log_verbose"})
+
+
 def _is_log_call(node: ast.Call) -> bool:
     func = node.func
-    if not isinstance(func, ast.Attribute) or func.attr not in _LOG_LEVELS:
+    if not isinstance(func, ast.Attribute):
+        return False
+    if func.attr in _LOG_WRAPPERS:
+        return True
+    if func.attr not in _LOG_LEVELS:
         return False
     receiver = ast.unparse(func.value)
     return "LOG" in receiver.upper()
