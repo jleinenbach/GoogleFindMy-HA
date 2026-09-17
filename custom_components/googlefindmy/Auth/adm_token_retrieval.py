@@ -57,6 +57,7 @@ from ..const import CONF_OAUTH_TOKEN, DATA_AAS_TOKEN, DATA_AUTH_METHOD
 from .aas_token_retrieval import async_get_aas_token  # entry-scoped AAS provider
 from .gpsoauth_loader import (
     GpsoauthModule,
+    classify_gpsoauth_error,
     load_gpsoauth_exceptions,
     require_gpsoauth,
 )
@@ -693,13 +694,13 @@ async def _perform_oauth_with_provided_aas(
             return token_value
 
         # Typical error shape: {"Error": "BadAuthentication"} (do not print full dict).
-        # Mirror the aas helper: clip + lowercase the closed-set ``Error`` value so
-        # it carries the same privacy guarantees and feeds ``_is_non_retryable_auth``
-        # through the structured attribute path.
+        # Mirror the aas helper: only a documented gpsoauth ``Error`` code is
+        # carried as ``error_kind`` (lower-cased, it feeds
+        # ``_is_non_retryable_auth`` through the structured attribute path);
+        # any other value is server text and is sized, never copied.
         err = resp.get("Error", "unknown")
-        error_kind = (
-            str(err)[:32].lower() if err and err != "unknown" else "exchange_error"
-        )
+        kind = classify_gpsoauth_error(err) if err and err != "unknown" else ""
+        error_kind = kind.lower() if kind else "exchange_error"
         missing_err = RuntimeError(
             f"Missing 'Token'/'Auth' in gpsoauth response (kind={error_kind})"
         )

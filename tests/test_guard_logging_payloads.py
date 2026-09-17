@@ -26,7 +26,10 @@ Seven shapes are recognised inside a log call's arguments:
       a log-safe wrapper (`len`, `_describe_body`, `_describe_error_response`),
       through tuple unpacking and `for` targets as well (`for line in
       text.splitlines(): key, _, value = line.partition("=")` taints
-      `line`, `key` and `value`);
+      `line`, `key` and `value`). Two more seeds: a call that names a
+      library producer of a server mapping (`gpsoauth.exchange_token`,
+      `perform_oauth`, also through a nested `_run` that calls one), and
+      the text of a message of shape (G) (`device_str = str(device)`);
   (E) an unsliced argument whose own name is a whole body (`hex_response`,
       `response_hex`, `result_hex`, `hex_string`, `response_bytes`,
       `raw_data`, `raw_bytes`, `raw_response`, `payload`, `body`, `blob`,
@@ -40,13 +43,17 @@ Seven shapes are recognised inside a log call's arguments:
       every key the mapping carries reaches the record, and redacting one
       of them by name leaves the others (the AidLogin pair `android_id`,
       `security_token` next to the token) in full;
-  (G) a function parameter annotated with a protobuf message type (a name
-      imported from a `_pb2` module in the same file, or the `MessageProto`
-      alias), passed whole to the record: bare, under `str()`/`repr()` or
-      inside an f-string. `%s` renders the text format with every
-      server-supplied field value (`HeartbeatAck` carried three stream
-      counters, a `DataMessageStanza` carries the push); `_msg_str` names
-      the type and the fields instead.
+  (G) a protobuf message passed whole to the record: bare, under
+      `str()`/`repr()` or inside an f-string. A message is a parameter
+      annotated with a message type (a name imported from a `_pb2` module,
+      the module itself as in `DeviceUpdate_pb2.DevicesList`, or the
+      `MessageProto` alias), a name bound from a constructor (`Msg()`,
+      `Msg.FromString(raw)`), a bare alias or subscript of a message, or
+      the target of a `for` over a message field (`for device in
+      getattr(device_list, "deviceMetadata", [])`). `%s` renders the text
+      format with every server-supplied field value (`HeartbeatAck` carried
+      three stream counters, a `DataMessageStanza` carries the push);
+      `_msg_str` names the type and the fields instead.
 
 The EID is allowed at any level, in full or truncated (`AGENTS.md`, class
 (a)); the leaves that carry it are listed in `_ROTATING_LEAVES` and excused
@@ -63,10 +70,14 @@ function, not across calls: a helper that returns the body it was given
 under a new name is trusted unless the name it is bound to is used in a log
 call of the same function. Shape (F) sees the dict display in the call
 itself: a copy bound first (`shown = {**gcm_data, ...}`) or built by
-`dict(gcm_data, token=...)` and then logged is not followed. Shape (G) trusts
-the annotation: a message bound locally (`msg = Stanza.FromString(raw)`), a
-parameter without annotation, or a message reached through an attribute
-(`self._last_msg`) is not reported. Shape (D) reads plain and annotated assignments, tuple unpacking (starred
+`dict(gcm_data, token=...)` and then logged is not followed. Shape (G) does
+not follow a parameter without annotation, a message reached through an
+attribute (`self._last_msg`), or a field bound by assignment
+(`code = msg.error.code`, `pid = getattr(msg, "persistent_id")`): a field
+is a value, not the message, and whether it is a sub-message is not
+knowable from the name. A leak that travels through an exception message
+(`raise RuntimeError(f"... {kind}")`, logged by a caller) is not a log call
+and is not seen. Shape (D) reads plain and annotated assignments, tuple unpacking (starred
 included) and `for` targets, not a walrus, `with ... as` or an augmented
 assignment, and follows them to a fixpoint within the function. It trusts names: any `.read()`
 counts as a body (a file too), and the helpers in `_SAFE_WRAPPERS` are
@@ -162,13 +173,28 @@ _SAFE_WRAPPERS = frozenset(
     {
         "len",
         "type",
+        "bool",
+        "isinstance",
         "_describe_body",
         "_classify_body",
         "_classify_error_body",
         "_classify_error_code",
         "_describe_error_response",
+        "classify_gpsoauth_error",
+        "_msg_str",
+        "_unknown_field_numbers",
+        # Protobuf descriptor access: field names, not values.
+        "ListFields",
+        "HasField",
+        "DESCRIPTOR",
     }
 )
+
+# Library calls that return a server response as a mapping (shape (D) seed
+# next to the HTTP body readers): the gpsoauth exchange functions. A nested
+# function that calls one of them is a producer too, so
+# `resp = await loop.run_in_executor(None, _run)` is a body binding.
+_BODY_PRODUCERS = frozenset({"exchange_token", "perform_oauth", "perform_master_login"})
 
 # Aliases under which a protobuf message travels as a parameter type
 # (shape (G)); the concrete message classes come from the `_pb2` imports of
@@ -276,31 +302,62 @@ def _assignments(function: ast.AST) -> list[tuple[list[str], ast.AST]]:
     return found
 
 
-def _is_body_read(value: ast.AST) -> bool:
+def _is_body_read(value: ast.AST, producers: frozenset[str] = frozenset()) -> bool:
+    """A body read (`resp.text()`) or a call that names a body producer."""
     if isinstance(value, ast.Await):
         value = value.value
-    return (
-        isinstance(value, ast.Call)
-        and isinstance(value.func, ast.Attribute)
-        and value.func.attr in _BODY_READERS
-    )
+    if not isinstance(value, ast.Call):
+        return False
+    if isinstance(value.func, ast.Attribute) and value.func.attr in _BODY_READERS:
+        return True
+    names = {
+        node.attr if isinstance(node, ast.Attribute) else node.id
+        for node in ast.walk(value)
+        if isinstance(node, (ast.Name, ast.Attribute))
+    }
+    return bool(names & (_BODY_PRODUCERS | producers))
 
 
-def _body_names(function: ast.AST) -> frozenset[str]:
+def _producer_names(function: ast.AST) -> frozenset[str]:
+    """Nested functions of `function` that call a body producer."""
+    names: set[str] = set()
+    for node in ast.walk(function):
+        if node is function or not isinstance(
+            node, (ast.FunctionDef, ast.AsyncFunctionDef)
+        ):
+            continue
+        if any(
+            isinstance(inner, ast.Call) and _is_body_read(inner)
+            for inner in ast.walk(node)
+        ):
+            names.add(node.name)
+    return frozenset(names)
+
+
+def _body_names(
+    function: ast.AST, messages: frozenset[str] = frozenset()
+) -> frozenset[str]:
     """Names bound in `function` from a response-body read (shape (D)).
 
     Fixpoint over the function's assignments: a name bound from a body read,
-    or from any expression that references a body name outside a log-safe
-    wrapper, is a body name. The order of assignments in the source does not
-    matter; the loop runs until no name is added.
+    from a body producer, from the text of a message (`str(msg)`, `repr`, an
+    f-string; shape (G) turned into text), or from any expression that
+    references a body name outside a log-safe wrapper, is a body name. The
+    order of assignments in the source does not matter; the loop runs until
+    no name is added.
     """
     names: set[str] = set()
+    producers = _producer_names(function)
     assignments = _assignments(function)
     changed = True
     while changed:
         changed = False
         for bound, value in assignments:
-            if not (_is_body_read(value) or _body_leaves(value, frozenset(names))):
+            if not (
+                _is_body_read(value, producers)
+                or _body_leaves(value, frozenset(names))
+                or _message_text_leaves(value, messages)
+            ):
                 continue
             for name in bound:
                 if name not in names:
@@ -374,15 +431,29 @@ def _expansion_leaves(argument: ast.AST) -> list[tuple[str, str]]:
 
 
 def _message_type_names(tree: ast.AST) -> frozenset[str]:
-    """Protobuf message types a module imports (`from ..._pb2 import A, B`)."""
+    """Protobuf message types a module can name.
+
+    `from ..._pb2 import A, B` contributes `A` and `B`; `import x_pb2` and
+    `from pkg import x_pb2` contribute the module name, so a qualified
+    annotation `x_pb2.Msg` is a message type by its first segment.
+    """
     names = set(_MESSAGE_ALIASES)
     for node in ast.walk(tree):
-        if (
-            isinstance(node, ast.ImportFrom)
-            and node.module is not None
-            and node.module.endswith("_pb2")
-        ):
-            names.update(alias.asname or alias.name for alias in node.names)
+        if isinstance(node, ast.ImportFrom):
+            if node.module is not None and node.module.endswith("_pb2"):
+                names.update(alias.asname or alias.name for alias in node.names)
+            else:
+                names.update(
+                    alias.asname or alias.name
+                    for alias in node.names
+                    if alias.name.endswith("_pb2")
+                )
+        elif isinstance(node, ast.Import):
+            names.update(
+                (alias.asname or alias.name).split(".")[-1]
+                for alias in node.names
+                if alias.name.endswith("_pb2")
+            )
     return frozenset(names)
 
 
@@ -404,9 +475,98 @@ def _message_params(function: ast.AST, types: frozenset[str]) -> frozenset[str]:
         if arg.annotation is None:
             continue
         parts = re.split(r"[^\w.]+", ast.unparse(arg.annotation))
-        if any(part.split(".")[-1] in types for part in parts if part):
+        if any(
+            part.split(".")[-1] in types or part.split(".")[0] in types
+            for part in parts
+            if part
+        ):
             names.add(arg.arg)
     return frozenset(names)
+
+
+def _message_names(function: ast.AST, types: frozenset[str]) -> frozenset[str]:
+    """Message-typed names in `function`: parameters (shape (G)) and bindings.
+
+    Fixpoint over the function's bindings: a name bound from a message
+    constructor (`Msg()`, `Msg.FromString(raw)`), as a bare alias or subscript
+    of a message name (`m = msg`, `first = items[0]`), or as the target of a
+    `for` over a message-rooted chain or `getattr(message, ...)` (a repeated
+    field yields sub-messages) is a message name too. An attribute or
+    `getattr` bound by assignment is a field value, not a message
+    (`code = msg.error.code`), and is not followed.
+    """
+    names: set[str] = set(_message_params(function, types))
+    loop_bound = {
+        name
+        for node in ast.walk(function)
+        if isinstance(node, (ast.For, ast.AsyncFor))
+        for name in _names_in_target(node.target)
+    }
+    changed = True
+    while changed:
+        changed = False
+        for bound, value in _assignments(function):
+            is_loop = bool(set(bound) & loop_bound)
+            if not (
+                _is_message_constructor(value, types)
+                or _is_message_derivation(value, frozenset(names), is_loop)
+            ):
+                continue
+            for name in bound:
+                if name not in names:
+                    names.add(name)
+                    changed = True
+    return frozenset(names)
+
+
+def _is_message_derivation(
+    value: ast.AST, messages: frozenset[str], is_loop: bool
+) -> bool:
+    """`msg`, `items[0]`, or (as a loop iterable) `msg.field`/`getattr(msg, …)`."""
+    if isinstance(value, ast.Await):
+        value = value.value
+    if isinstance(value, ast.Call):
+        func = value.func
+        if not (isinstance(func, ast.Name) and func.id == "getattr" and value.args):
+            return False
+        return is_loop and _root(value.args[0]) in messages
+    if isinstance(value, ast.Name):
+        return value.id in messages
+    if isinstance(value, ast.Subscript) and not isinstance(value.slice, ast.Slice):
+        return _root(value.value) in messages
+    if isinstance(value, ast.Attribute):
+        return is_loop and _root(value) in messages
+    return False
+
+
+def _root(node: ast.AST) -> str | None:
+    """The name a chain hangs on (`device_list` for `device_list.meta[0]`)."""
+    chain = _chain(node)
+    return chain[-1] if chain else None
+
+
+def _is_message_constructor(value: ast.AST, types: frozenset[str]) -> bool:
+    """`Msg()` or `Msg.FromString(...)` for a message type of the module."""
+    if isinstance(value, ast.Await):
+        value = value.value
+    if not isinstance(value, ast.Call):
+        return False
+    return any(name in types for name in _chain(value.func))
+
+
+def _message_text_leaves(
+    value: ast.AST, messages: frozenset[str]
+) -> list[tuple[str, str]]:
+    """Text conversions of a message anywhere inside `value`.
+
+    `str(msg)`, `repr(msg)` or an f-string interpolating it; a bare reference
+    (`helper(msg)`, `msg.field`) is not text and is not reported here.
+    """
+    found: list[tuple[str, str]] = []
+    for node in ast.walk(value):
+        if isinstance(node, (ast.Call, ast.JoinedStr)):
+            found.extend(_message_leaves(node, messages))
+    return found
 
 
 def _message_leaves(
@@ -507,8 +667,8 @@ def _scan_tree(
     message_types = _message_type_names(tree)
     for function in ast.walk(tree):
         if isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            bodies = _body_names(function)
-            messages = _message_params(function, message_types)
+            messages = _message_names(function, message_types)
+            bodies = _body_names(function, messages)
             aliases = _log_aliases(function)
             if bodies or messages or aliases:
                 # Union, not overwrite: a nested function keeps the bodies
@@ -637,6 +797,66 @@ async def fetch(self, resp, first):
         (10, "content"),
         (14, "key"),
         (14, "code"),
+    ]
+
+
+def test_message_taint_reaches_text_and_producers_seed_bodies() -> None:
+    """Local message bindings, their text, and library producers are followed.
+
+    (G) taints through a constructor, an alias, a subscript and a `for` over
+    a message field; `str(device)` turns that into a body (D); a nested
+    function that calls a gpsoauth producer makes `resp` a body, and the
+    error value derived from it stays a body through `.get()` and `[:32]`.
+    """
+    source = """
+from custom_components.googlefindmy.ProtoDecoders import DeviceUpdate_pb2
+
+async def decode(self, device_list: DeviceUpdate_pb2.DevicesList, raw):
+    update = DeviceUpdate_pb2.DeviceUpdate.FromString(raw)
+    alias = update
+    for device in getattr(device_list, "deviceMetadata", []):
+        names = [f.name for f, _ in device.ListFields()]
+        device_str = str(device)
+        unknown = [line for line in device_str.splitlines() if line[:1].isdigit()]
+        _LOGGER.debug("a: %s %s", names, unknown)
+        _LOGGER.debug("b: %s", _unknown_field_numbers(device))
+    first = device_list.deviceMetadata[0]
+    _LOGGER.debug("c: %s", first)
+    code = alias.error.code
+    _LOGGER.debug("d: %s", code)
+
+async def exchange(self, username):
+    def _run():
+        return _gpsoauth().exchange_token(username)
+    resp = await loop.run_in_executor(None, _run)
+    error_value = resp.get("Error", "")
+    kind = str(error_value)[:32]
+    _LOGGER.warning("e: %s", kind, extra={"kind": kind, "n": len(resp)})
+    _LOGGER.warning("f: %s", classify_gpsoauth_error(error_value))
+"""
+    tree = ast.parse(source)
+    types = _message_type_names(tree)
+    assert "DeviceUpdate_pb2" in types
+    assert "pb" in _message_type_names(ast.parse("import pkg.sub.update_pb2 as pb"))
+    assert "update_pb2" in _message_type_names(ast.parse("import pkg.update_pb2"))
+    decode, exchange = tree.body[1], tree.body[2]
+    assert _message_names(decode, types) == frozenset(
+        {"device_list", "update", "alias", "device", "first"}
+    )
+    # `line` is a comprehension variable, not a binding the guard follows.
+    assert _body_names(decode, _message_names(decode, types)) == frozenset(
+        {"device_str", "unknown"}
+    )
+    assert _producer_names(exchange) == frozenset({"_run"})
+    assert _body_names(exchange) == frozenset({"resp", "error_value", "kind"})
+    offenders, scanned = _scan_tree(tree, "fixture.py")
+    assert scanned == 6
+    # Line numbers count from the leading newline of the fixture; the walk is
+    # breadth-first, so the list is sorted before comparing.
+    assert sorted((line, leaf) for _p, line, leaf, _f in offenders) == [
+        (11, "unknown"),
+        (14, "first"),
+        (24, "kind"),
     ]
 
 

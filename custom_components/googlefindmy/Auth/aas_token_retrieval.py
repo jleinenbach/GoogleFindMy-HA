@@ -49,6 +49,7 @@ from typing import Any
 from ..const import CONF_OAUTH_TOKEN, DATA_AAS_TOKEN
 from .gpsoauth_loader import (
     GpsoauthModule,
+    classify_gpsoauth_error,
     load_gpsoauth_exceptions,
     require_gpsoauth,
 )
@@ -317,10 +318,11 @@ async def _exchange_oauth_for_aas(
         new_err.error_kind = wrapped_kind  # type: ignore[attr-defined]
         raise new_err from err
 
+    # Key count, not key names: the mapping is the server response.
     _LOGGER.debug(
-        "gpsoauth exchange response received: type=%s, keys=%s",
+        "gpsoauth exchange response received: type=%s, key_count=%s",
         type(resp).__name__,
-        list(resp.keys()) if isinstance(resp, dict) else "N/A",
+        len(resp) if isinstance(resp, dict) else "N/A",
     )
 
     if not isinstance(resp, dict) or not resp:
@@ -330,25 +332,27 @@ async def _exchange_oauth_for_aas(
     if "Token" not in resp:
         error_value = resp.get("Error", "") if isinstance(resp, dict) else ""
         error_details = resp.get("ErrorDetails", "") if isinstance(resp, dict) else ""
-        resp_keys = list(resp.keys()) if isinstance(resp, dict) else "N/A"
+        key_count = len(resp) if isinstance(resp, dict) else 0
         # Per Auth/AGENTS.md (lines 99-102, 133-135): keep raw gpsoauth
         # response bodies (esp. ``ErrorDetails``) out of the log message;
         # surface only sanitized flags/keys via ``extra``. The gpsoauth
-        # ``Error`` field is a small closed set (e.g. ``NeedsBrowser``,
-        # ``BadAuthentication``) and is exposed as ``error_kind``.
+        # ``Error`` field is a documented closed set (``BadAuthentication``,
+        # ``NeedsBrowser``, ...); only a documented code is exposed as
+        # ``error_kind``, any other value is server text and is sized.
+        classified = classify_gpsoauth_error(error_value)
+        error_kind = classified or "(none)"
         _LOGGER.warning(
             "gpsoauth response missing token (user=%s, keys=%d)",
             _mask_email_for_logs(username),
-            len(resp_keys) if isinstance(resp_keys, list) else 0,
+            key_count,
             extra={
                 "error_field_present": bool(error_value),
-                "error_kind": (str(error_value)[:32] if error_value else None),
+                "error_kind": classified or None,
                 "details_present": bool(error_details),
-                "response_keys": resp_keys,
+                "response_key_count": key_count,
                 "user": _mask_email_for_logs(username),
             },
         )
-        error_kind = str(error_value)[:32] if error_value else "(none)"
         new_err = RuntimeError(
             f"Missing 'Token' in gpsoauth response (kind={error_kind})"
         )

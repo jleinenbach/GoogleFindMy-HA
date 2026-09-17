@@ -130,6 +130,26 @@ def _get_text_format() -> Any:
     return _text_format_module
 
 
+def _unknown_field_numbers(message: Message) -> list[int]:
+    """Field numbers of the unknown fields a decoded message carries.
+
+    Read from the text format with unknown fields printed (``str(message)``
+    omits them on current protobuf runtimes, so the old probe never fired);
+    the numbers are schema drift diagnostics, the values behind them are wire
+    content and are not returned.
+    """
+    if not isinstance(message, Message):
+        # Test doubles stand in for the message in the debug branch.
+        return []
+    text = _get_text_format().MessageToString(message, print_unknown_fields=True)
+    numbers: set[int] = set()
+    for line in text.splitlines():
+        head = line.strip().split(":", 1)[0].split(" ", 1)[0]
+        if head.isdigit():
+            numbers.add(int(head))
+    return sorted(numbers)
+
+
 class _DecryptLocationsCallable(Protocol):
     """Runtime signature for the decrypt helper imported lazily."""
 
@@ -281,9 +301,7 @@ def parse_device_update_protobuf(
             "Failed to decode Google Protobuf response (DeviceUpdate): %s",
             exc,
         )
-        raise NovaProtobufDecodeError(
-            f"DeviceUpdate decode failed: {exc}"
-        ) from exc
+        raise NovaProtobufDecodeError(f"DeviceUpdate decode failed: {exc}") from exc
     return device_update
 
 
@@ -303,9 +321,7 @@ def parse_device_list_protobuf(
             "Failed to decode Google Protobuf response (DevicesList): %s",
             exc,
         )
-        raise NovaProtobufDecodeError(
-            f"DevicesList decode failed: {exc}"
-        ) from exc
+        raise NovaProtobufDecodeError(f"DevicesList decode failed: {exc}") from exc
     return device_list
 
 
@@ -1016,17 +1032,16 @@ def get_devices_with_location(
                     ]
                     _LOGGER.debug("    -> locationInformation fields: %s", loc_fields)
 
-            device_str = str(device)
-            unknown_lines = [
-                line
-                for line in device_str.splitlines()
-                if line.strip() and line.strip()[0].isdigit()
-            ]
-            if unknown_lines:
+            unknown_numbers = _unknown_field_numbers(device)
+            if unknown_numbers:
+                # Field numbers only: the text-format lines carry the
+                # server-supplied values of those fields, which are raw API
+                # payload and never reach the log (AGENTS.md section 5).
                 _LOGGER.debug(
-                    "Device '%s' has UNKNOWN FIELDS: \n%s",
+                    "Device '%s' has UNKNOWN FIELDS: numbers=%s, count=%d",
                     device_name,
-                    "\n".join(unknown_lines),
+                    unknown_numbers,
+                    len(unknown_numbers),
                 )
 
         # Try decryption ONCE per device; share across all its canonic IDs

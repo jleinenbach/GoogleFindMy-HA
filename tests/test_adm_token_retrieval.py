@@ -1448,6 +1448,59 @@ def test_perform_oauth_with_provided_aas_error_response(
     asyncio.run(_exercise())
 
 
+def test_perform_oauth_with_provided_aas_undocumented_error_is_sized(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A non-standard `Error` value is sized, never copied into error_kind."""
+    echoed = "Rejected token 4/0AfB_byDq9x3EtH2kY7Vz for user@example.com"
+
+    async def _exercise() -> None:
+        def fake_perform_oauth(
+            username: str,
+            aas_token: str,
+            android_id: int,
+            **kwargs: Any,
+        ) -> dict[str, str]:
+            return {"Error": echoed}
+
+        monkeypatch.setattr(
+            adm_token_retrieval.gpsoauth, "perform_oauth", fake_perform_oauth
+        )
+
+        with pytest.raises(RuntimeError) as exc_info:
+            await adm_token_retrieval._perform_oauth_with_provided_aas(
+                "user@example.com", "aas-token", android_id=0x1234
+            )
+        kind = getattr(exc_info.value, "error_kind", "")
+        assert kind == f"unrecognized ({len(echoed)} chars)"
+        assert "4/0AfB_" not in str(exc_info.value)
+        assert "4/0AfB_" not in kind
+
+    asyncio.run(_exercise())
+
+
+def test_perform_oauth_with_provided_aas_documented_error_kind_is_lowercased(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A documented code stays the structured, lower-cased error_kind."""
+
+    async def _exercise() -> None:
+        def fake_perform_oauth(*_: Any, **__: Any) -> dict[str, str]:
+            return {"Error": "BadAuthentication"}
+
+        monkeypatch.setattr(
+            adm_token_retrieval.gpsoauth, "perform_oauth", fake_perform_oauth
+        )
+        with pytest.raises(RuntimeError) as exc_info:
+            await adm_token_retrieval._perform_oauth_with_provided_aas(
+                "user@example.com", "aas-token", android_id=0x1234
+            )
+        assert getattr(exc_info.value, "error_kind", "") == "badauthentication"
+        assert adm_token_retrieval._is_non_retryable_auth(exc_info.value)
+
+    asyncio.run(_exercise())
+
+
 def test_perform_oauth_with_provided_aas_exception(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

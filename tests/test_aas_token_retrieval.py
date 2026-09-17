@@ -115,8 +115,44 @@ async def test_exchange_oauth_for_aas_missing_token_logs_warning(
     assert warnings, "Expected warning about missing Token key"
     warning = warnings[0]
     assert getattr(warning, "error_field_present") is True
-    assert getattr(warning, "response_keys") == ["Error"]
+    assert getattr(warning, "response_key_count") == 1
     assert getattr(warning, "user") == "u***@example.com"
+    assert getattr(warning, "error_kind") == "BadAuthentication"
+
+
+async def test_exchange_oauth_for_aas_undocumented_error_is_sized_not_copied(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A non-standard `Error` value never reaches the record or the exception.
+
+    gpsoauth hands the `Error` field through as the server sent it; only a
+    documented ClientLogin code is a kind, anything else is server text
+    (Auth `AGENTS.md`, "Logging") and is reported by size.
+    """
+    echoed = "Rejected token 4/0AfB_byDq9x3EtH2kY7Vz for user@example.com"
+
+    def fake_exchange(*_: Any, **__: Any) -> dict[str, Any]:
+        return {"Error": echoed, "ErrorDetails": "irrelevant"}
+
+    monkeypatch.setattr(aas_token_retrieval.gpsoauth, "exchange_token", fake_exchange)
+    caplog.set_level(logging.DEBUG, logger=aas_token_retrieval.__name__)
+
+    with pytest.raises(RuntimeError) as exc_info:
+        await aas_token_retrieval._exchange_oauth_for_aas(
+            "user@example.com", "oauth-secret-value", 0xDEADBEEF
+        )
+
+    assert f"kind=UNRECOGNIZED ({len(echoed)} chars)" in str(exc_info.value)
+    assert "4/0AfB_" not in str(exc_info.value)
+    warning = next(
+        r for r in caplog.records if "gpsoauth response missing token" in r.message
+    )
+    assert getattr(warning, "error_kind") == f"UNRECOGNIZED ({len(echoed)} chars)"
+    everything = "\n".join(
+        f"{r.getMessage()} {getattr(r, 'error_kind', '')}" for r in caplog.records
+    )
+    assert "4/0AfB_" not in everything
+    assert "Rejected token" not in everything
 
 
 async def test_async_get_aas_token_short_circuits_for_cached_master(

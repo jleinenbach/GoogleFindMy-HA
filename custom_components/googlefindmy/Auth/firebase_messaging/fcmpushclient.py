@@ -789,12 +789,11 @@ class FcmPushClient[NotificationContextT]:  # pylint:disable=too-many-instance-a
             )
 
         # Key count and size only: the decrypted push is the raw API payload,
-        # and its keys are wire content too (a JSON object may carry a value
-        # in a key), so neither reaches the log, verbose or not (AGENTS.md
-        # section 5).
+        # its keys are wire content too (a JSON object may carry a value in a
+        # key), and the persistent id is a server-assigned MCS identifier, so
+        # none of them reaches the log, verbose or not (AGENTS.md section 5).
         self._log_verbose(
-            "Decrypted data for message %s: keys=%d, bytes=%d",
-            msg.persistent_id,
+            "Decrypted data message: keys=%d, bytes=%d",
             len(ret_val),
             len(decrypted),
         )

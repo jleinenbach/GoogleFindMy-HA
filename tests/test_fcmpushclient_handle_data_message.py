@@ -243,6 +243,7 @@ class TestHandleDataMessage:
         assert len(records) == 1
         assert "keys=2, bytes=" in records[0]
         assert "location" not in records[0]
+        assert msg.persistent_id not in records[0]  # server-assigned MCS id
         assert secret not in caplog.text
         assert all(
             secret[i : i + 8] not in caplog.text for i in range(0, len(secret) - 7)
