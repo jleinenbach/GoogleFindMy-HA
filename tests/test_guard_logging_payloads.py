@@ -20,7 +20,10 @@ Seven shapes are recognised inside a log call's arguments:
   (D) a name bound in the same function from an HTTP response body
       (`x = await resp.text()`, `resp.read()`, `resp.json()`), whatever the
       name is called and whether or not it is sliced: `text[:400]` is the
-      raw body under a neutral name;
+      raw body under a neutral name. The taint follows assignments: a name
+      bound from an expression that references a body name is a body too
+      (`snippet = _decode(content)[:512]`), unless the reference sits under
+      a log-safe wrapper (`len`, `_describe_body`, `_describe_error_response`);
   (E) an unsliced argument whose own name is a whole body (`hex_response`,
       `response_hex`, `result_hex`, `hex_string`, `response_bytes`,
       `raw_data`, `raw_bytes`, `raw_response`, `payload`, `body`, `blob`,
@@ -52,16 +55,21 @@ exception covers that one call and not every `payload` line of the module.
 Blind spot, stated on purpose: the guard sees only shapes (A) to (G). Shape
 (E) knows an exact list of names: a whole payload under any other name,
 or wrapped (`str(payload)`, `repr(payload)`, `payload.decode()`, an
-f-string), is not reported. Shape (F) sees the dict display in the call
+f-string), is not reported. Shape (D) follows assignments inside one
+function, not across calls: a helper that returns the body it was given
+under a new name is trusted unless the name it is bound to is used in a log
+call of the same function. Shape (F) sees the dict display in the call
 itself: a copy bound first (`shown = {**gcm_data, ...}`) or built by
 `dict(gcm_data, token=...)` and then logged is not followed. Shape (G) trusts
 the annotation: a message bound locally (`msg = Stanza.FromString(raw)`), a
 parameter without annotation, or a message reached through an attribute
-(`self._last_msg`) is not reported. Shape (D) follows one assignment (plain or annotated, not a walrus), not a chain:
-a body copied a second time (`snippet = text[:200]`, or an f-string built
-from it and logged later) is not followed. It trusts names: any `.read()`
-counts as a body (a file too), and a local helper called `_describe_body`
-is trusted whatever it returns. A raw value under a neutral name that was not read from a
+(`self._last_msg`) is not reported. Shape (D) reads plain and annotated assignments, not a walrus, and follows
+them to a fixpoint within the function. It trusts names: any `.read()`
+counts as a body (a file too), and the helpers in `_SAFE_WRAPPERS` are
+trusted whatever they return. The fixpoint over-approximates in the other
+direction: a scalar derived from a body (`empty = content == b""`) is a
+body name too and would be reported if logged; fail-closed, no instance
+today. A raw value under a neutral name that was not read from a
 response in the same function (`data`, `msg`), a slice whose whole chain is
 neutrally named (`page.read()[:16]`), a wrapping call whose arguments hide
 the name (`str(response)[:16]`, `bytes(payload)[:16]`: the chain follows the
@@ -70,7 +78,8 @@ callee, not the arguments), `binascii.hexlify()`, `base64.b64encode()` or
 (`str(message)` is its text format). Arguments of a logging wrapper that is
 not itself a log call are unchecked, whatever they carry; the two wrappers
 the package has, `_log_verbose` and `_log_warn_with_limit`, are treated as
-log calls by name. Shape
+log calls by name, and so is a name bound in the same function from a log
+method (`log_fn = _LOGGER.info if first else _LOGGER.warning`). Shape
 (C) also reports `len(x.SerializeToString())`, which would log only a
 length; the tree binds serialised bytes to a variable first, so that
 false positive has no instance today. Section 5 and the
@@ -144,8 +153,17 @@ _BODY_READERS = frozenset({"text", "read", "json"})
 
 # Helpers whose return value is log-safe even when a body goes in: the
 # guard does not descend into their arguments (shape (D)). `len` and `type`
-# yield a number or a name; the two describers yield a content class.
-_SAFE_WRAPPERS = frozenset({"len", "type", "_describe_body", "_classify_body"})
+# yield a number or a name; the describers yield a content class.
+_SAFE_WRAPPERS = frozenset(
+    {
+        "len",
+        "type",
+        "_describe_body",
+        "_classify_body",
+        "_classify_error_body",
+        "_describe_error_response",
+    }
+)
 
 # Aliases under which a protobuf message travels as a parameter type
 # (shape (G)); the concrete message classes come from the `_pb2` imports of
@@ -223,27 +241,61 @@ def _payload_leaves(argument: ast.AST) -> list[tuple[str, str]]:
 _LOG_WRAPPERS = frozenset({"_log_verbose", "_log_warn_with_limit"})
 
 
-def _body_names(function: ast.AST) -> frozenset[str]:
-    """Names bound in `function` from a response-body read (shape (D))."""
-    names: set[str] = set()
+def _assignments(function: ast.AST) -> list[tuple[list[ast.AST], ast.AST]]:
+    """(targets, value) of every plain or annotated assignment in `function`."""
+    found: list[tuple[list[ast.AST], ast.AST]] = []
     for node in ast.walk(function):
         if isinstance(node, ast.Assign):
-            targets: list[ast.AST] = list(node.targets)
-            value: ast.AST | None = node.value
-        elif isinstance(node, ast.AnnAssign):
-            targets, value = [node.target], node.value
-        else:
-            continue
-        if isinstance(value, ast.Await):
-            value = value.value
-        if (
-            isinstance(value, ast.Call)
-            and isinstance(value.func, ast.Attribute)
-            and value.func.attr in _BODY_READERS
-        ):
+            found.append((list(node.targets), node.value))
+        elif isinstance(node, ast.AnnAssign) and node.value is not None:
+            found.append(([node.target], node.value))
+    return found
+
+
+def _is_body_read(value: ast.AST) -> bool:
+    if isinstance(value, ast.Await):
+        value = value.value
+    return (
+        isinstance(value, ast.Call)
+        and isinstance(value.func, ast.Attribute)
+        and value.func.attr in _BODY_READERS
+    )
+
+
+def _body_names(function: ast.AST) -> frozenset[str]:
+    """Names bound in `function` from a response-body read (shape (D)).
+
+    Fixpoint over the function's assignments: a name bound from a body read,
+    or from any expression that references a body name outside a log-safe
+    wrapper, is a body name. The order of assignments in the source does not
+    matter; the loop runs until no name is added.
+    """
+    names: set[str] = set()
+    assignments = _assignments(function)
+    changed = True
+    while changed:
+        changed = False
+        for targets, value in assignments:
+            if not (_is_body_read(value) or _body_leaves(value, frozenset(names))):
+                continue
             for target in targets:
-                if isinstance(target, ast.Name):
+                if isinstance(target, ast.Name) and target.id not in names:
                     names.add(target.id)
+                    changed = True
+    return frozenset(names)
+
+
+def _log_aliases(function: ast.AST) -> frozenset[str]:
+    """Names bound in `function` from a log method (`log_fn = _LOGGER.info`)."""
+    names: set[str] = set()
+    for targets, value in _assignments(function):
+        if any(
+            isinstance(node, ast.Attribute)
+            and node.attr in _LOG_LEVELS
+            and "LOG" in ast.unparse(node.value).upper()
+            for node in ast.walk(value)
+        ):
+            names.update(t.id for t in targets if isinstance(t, ast.Name))
     return frozenset(names)
 
 
@@ -363,8 +415,10 @@ def _message_leaves(
     return []
 
 
-def _is_log_call(node: ast.Call) -> bool:
+def _is_log_call(node: ast.Call, aliases: frozenset[str] = frozenset()) -> bool:
     func = node.func
+    if isinstance(func, ast.Name):
+        return func.id in aliases
     if not isinstance(func, ast.Attribute):
         return False
     if func.attr in _LOG_WRAPPERS:
@@ -406,56 +460,78 @@ def scan(
             continue
         relative = path.relative_to(root).as_posix()
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-        # Body names (shape (D)) and message parameters (shape (G)) are
-        # scoped to their function.
-        bodies_by_call: dict[int, frozenset[str]] = {}
-        messages_by_call: dict[int, frozenset[str]] = {}
-        message_types = _message_type_names(tree)
-        for function in ast.walk(tree):
-            if isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                bodies = _body_names(function)
-                messages = _message_params(function, message_types)
-                if bodies or messages:
-                    # Union, not overwrite: a nested function keeps the bodies
-                    # and message parameters of the function that encloses it.
-                    for inner in ast.walk(function):
-                        if isinstance(inner, ast.Call):
-                            bodies_by_call[id(inner)] = (
-                                bodies_by_call.get(id(inner), frozenset()) | bodies
-                            )
-                            messages_by_call[id(inner)] = (
-                                messages_by_call.get(id(inner), frozenset()) | messages
-                            )
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.Call) or not _is_log_call(node):
-                continue
-            scanned += 1
-            bodies = bodies_by_call.get(id(node), frozenset())
-            messages = messages_by_call.get(id(node), frozenset())
-            # `.log(level, msg, ...)` carries the format string at index 1.
-            msg_index = 1 if node.func.attr == "log" else 0
-            first = node.args[msg_index] if len(node.args) > msg_index else None
-            fmt = (
-                first.value
-                if isinstance(first, ast.Constant) and isinstance(first.value, str)
-                else ""
-            )
-            arguments: list[ast.AST] = [*node.args, *(kw.value for kw in node.keywords)]
-            seen: set[str] = set()
-            for argument in arguments:
-                for _shape, leaf in [
-                    *_payload_leaves(argument),
-                    *_body_leaves(argument, bodies),
-                    *_whole_body_leaves(argument),
-                    *_expansion_leaves(argument),
-                    *_message_leaves(argument, messages),
-                ]:
-                    if leaf in seen or leaf in rotating:
-                        continue
-                    if _is_reviewed(reviewed, relative, leaf, fmt):
-                        continue
-                    seen.add(leaf)
-                    offenders.append((relative, node.lineno, leaf, fmt))
+        found, count = _scan_tree(tree, relative, reviewed, rotating)
+        offenders.extend(found)
+        scanned += count
+    return offenders, scanned
+
+
+def _scan_tree(
+    tree: ast.AST,
+    relative: str,
+    reviewed: frozenset[tuple[str, str, str]] = frozenset(),
+    rotating: frozenset[str] = frozenset(),
+) -> tuple[list[tuple[str, int, str, str]], int]:
+    """Offenders and scanned log calls of one parsed module."""
+    offenders: list[tuple[str, int, str, str]] = []
+    scanned = 0
+    # Body names (shape (D)) and message parameters (shape (G)) are
+    # scoped to their function.
+    bodies_by_call: dict[int, frozenset[str]] = {}
+    messages_by_call: dict[int, frozenset[str]] = {}
+    aliases_by_call: dict[int, frozenset[str]] = {}
+    message_types = _message_type_names(tree)
+    for function in ast.walk(tree):
+        if isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            bodies = _body_names(function)
+            messages = _message_params(function, message_types)
+            aliases = _log_aliases(function)
+            if bodies or messages or aliases:
+                # Union, not overwrite: a nested function keeps the bodies
+                # and message parameters of the function that encloses it.
+                for inner in ast.walk(function):
+                    if isinstance(inner, ast.Call):
+                        bodies_by_call[id(inner)] = (
+                            bodies_by_call.get(id(inner), frozenset()) | bodies
+                        )
+                        messages_by_call[id(inner)] = (
+                            messages_by_call.get(id(inner), frozenset()) | messages
+                        )
+                        aliases_by_call[id(inner)] = (
+                            aliases_by_call.get(id(inner), frozenset()) | aliases
+                        )
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or not _is_log_call(
+            node, aliases_by_call.get(id(node), frozenset())
+        ):
+            continue
+        scanned += 1
+        bodies = bodies_by_call.get(id(node), frozenset())
+        messages = messages_by_call.get(id(node), frozenset())
+        # `.log(level, msg, ...)` carries the format string at index 1.
+        msg_index = 1 if getattr(node.func, "attr", "") == "log" else 0
+        first = node.args[msg_index] if len(node.args) > msg_index else None
+        fmt = (
+            first.value
+            if isinstance(first, ast.Constant) and isinstance(first.value, str)
+            else ""
+        )
+        arguments: list[ast.AST] = [*node.args, *(kw.value for kw in node.keywords)]
+        seen: set[str] = set()
+        for argument in arguments:
+            for _shape, leaf in [
+                *_payload_leaves(argument),
+                *_body_leaves(argument, bodies),
+                *_whole_body_leaves(argument),
+                *_expansion_leaves(argument),
+                *_message_leaves(argument, messages),
+            ]:
+                if leaf in seen or leaf in rotating:
+                    continue
+                if _is_reviewed(reviewed, relative, leaf, fmt):
+                    continue
+                seen.add(leaf)
+                offenders.append((relative, node.lineno, leaf, fmt))
     return offenders, scanned
 
 
@@ -499,6 +575,36 @@ def test_shape_f_reports_every_unpacked_mapping() -> None:
             for _shape, leaf in _expansion_leaves(argument)
         ]
         assert leaves == expected, source
+
+
+def test_shape_d_follows_assignments_and_log_aliases() -> None:
+    """Shape (D) taints through assignments; a bound log method is a log call.
+
+    Positive fixture: `snippet` is bound from a helper that received the body,
+    two hops after `content = await resp.read()`, in source order that puts
+    the hop before the read (the fixpoint is order-independent). The log
+    call goes through `log_fn`, bound from `_LOGGER.info`/`.warning`.
+    """
+    source = """
+async def fetch(self, resp, first):
+    snippet = _redact(_decode(content, 503))
+    content = await resp.read()
+    described = _describe_error_response(content, 503)
+    size = len(content)
+    log_fn = _LOGGER.info if first else _LOGGER.warning
+    log_fn("a: %s", snippet)
+    log_fn("b: %s %s", described, size)
+    _LOGGER.error("c: %s", content)
+"""
+    function = ast.parse(source).body[0]
+    assert _body_names(function) == frozenset({"content", "snippet"})
+    assert _log_aliases(function) == frozenset({"log_fn"})
+    offenders, scanned = _scan_tree(ast.parse(source), "fixture.py")
+    assert scanned == 3
+    assert [(line, leaf) for _p, line, leaf, _f in offenders] == [
+        (8, "snippet"),
+        (10, "content"),
+    ]
 
 
 def test_shape_g_reports_message_parameters_passed_whole() -> None:
