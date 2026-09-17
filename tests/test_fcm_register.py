@@ -1318,14 +1318,21 @@ class _JsonFakeSession:
 async def test_fcm_register_verbose_log_keeps_endpoint_host_not_token(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """The verbose registration log names the push host, never the token.
+    """The verbose registration log names the push host, never the token,
+    and logs the p256dh key by length only.
 
     The endpoint is ``FCM_SEND_URL + token``; a 48-character prefix of it used
     to reach the DEBUG log, twelve characters of which were the subscription
     token (`AGENTS.md` section 5: tokens are never logged). The host is the
-    diagnostic (which push service); the path is the secret.
+    diagnostic (which push service); the path is the secret. The p256dh key
+    used to be logged with its redacted tail, a stable fragment of the
+    subscription; only its length remains.
     """
     token = "dq9x3EtH2kY:APA91bF0VzWc8ghUGrOpN1JmQ5aTe4bRxL7sKdZyCvIiHpMuWn"
+    # A real p256dh key is 87 base64url characters (an uncompressed P-256
+    # point); a redacted tail of it is a stable fragment of the subscription,
+    # so only its length may be logged.
+    p256dh = "BNcRdreALRFXTkOOUHK1EtK2wtaz5Ry4YfYCA_0QTpQtUbVlUls0VJXg7A8u-Ts1XbjhazAkj7I99e8QcYP7DkM"
 
     class _R(_FakeResponse):
         async def json(self) -> dict[str, Any]:
@@ -1346,7 +1353,7 @@ async def test_fcm_register_verbose_log_keeps_endpoint_host_not_token(
         await register.fcm_register(
             {"token": token},
             {"token": "inst-token"},
-            {"public": "pub", "private": "priv", "secret": "sec"},
+            {"public": p256dh, "private": "priv", "secret": "sec"},
         )
 
     logged = "\n".join(
@@ -1355,6 +1362,10 @@ async def test_fcm_register_verbose_log_keeps_endpoint_host_not_token(
         if "FCM registration data" in record.getMessage()
     )
     assert logged, "verbose registration record missing"
+    assert f"p256dh_len={len(p256dh)}" in logged
+    assert all(p256dh[i : i + 6] not in logged for i in range(0, len(p256dh) - 5)), (
+        "a window of the p256dh key reached the log"
+    )
     # Exact host, not a substring: the log names the push service and
     # nothing else of the endpoint.
     host_match = re.search(r"endpoint_host=(\S+),", logged)
@@ -1457,7 +1468,8 @@ async def test_register_verbose_log_omits_gcm_credentials(
     )
     assert "GCM subscription: fields=" in logged
     assert "security_token" in logged  # the field name is the diagnostic
-    assert f"token=•••{token[-6:]}" in logged
+    assert f"token_len={len(token)}" in logged
+    assert token[-6:] not in logged  # no tail either: a stable fragment
 
 
 @pytest.mark.asyncio
@@ -1478,15 +1490,17 @@ async def test_gcm_register_error_line_keeps_free_text_out_of_log(
     ]
     session = _FakeSession(responses)
     register = FcmRegister(_checkin_config(), http_client_session=session)
+    register._log_debug_verbose = True  # the request record is verbose-only
 
     async def fast_sleep(_: float) -> None:
         return None
 
     monkeypatch.setattr(asyncio, "sleep", fast_sleep)
 
+    android_id = 5_738_291_047_365_182_930
     with caplog.at_level(logging.DEBUG):
         result = await register.gcm_register(
-            {"androidId": 1, "securityToken": 2}, retries=2
+            {"androidId": android_id, "securityToken": 2}, retries=2
         )
 
     assert result is None
@@ -1494,7 +1508,10 @@ async def test_gcm_register_error_line_keeps_free_text_out_of_log(
     for window in _windows(echoed.upper()):
         assert window not in logged, "a window of the echoed value reached the log"
     assert f"Error=UNRECOGNIZED ({len(echoed)} chars)" in logged
-    assert "Error=INVALID_SENDER" in logged  # a code in identifier shape stays
+    assert "Error=INVALID_SENDER" in logged  # a documented code stays
+    # The request record names the android_id by presence, never by a tail.
+    assert "device_set=True" in logged
+    assert str(android_id)[-6:] not in logged
 
 
 def test_classify_error_code_shapes() -> None:

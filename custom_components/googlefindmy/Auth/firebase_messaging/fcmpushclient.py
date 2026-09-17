@@ -788,12 +788,14 @@ class FcmPushClient[NotificationContextT]:  # pylint:disable=too-many-instance-a
                 else {"_raw_bytes": decrypted.hex()}
             )
 
-        # Keys and size only: the decrypted push is the raw API payload and
-        # never reaches the log, verbose or not (AGENTS.md section 5).
+        # Key count and size only: the decrypted push is the raw API payload,
+        # and its keys are wire content too (a JSON object may carry a value
+        # in a key), so neither reaches the log, verbose or not (AGENTS.md
+        # section 5).
         self._log_verbose(
-            "Decrypted data for message %s: keys=%s, bytes=%d",
+            "Decrypted data for message %s: keys=%d, bytes=%d",
             msg.persistent_id,
-            sorted(ret_val),
+            len(ret_val),
             len(decrypted),
         )
         try:

@@ -555,12 +555,12 @@ class FcmRegister:
         while attempt <= retries:
             if self._log_debug_verbose:
                 _logger.debug(
-                    "GCM Registration request attempt %d/%d via /c2dm/register3: app=%s, X-subtype=%s, device=%s, sender=%s",
+                    "GCM Registration request attempt %d/%d via /c2dm/register3: app=%s, X-subtype=%s, device_set=%s, sender=%s",
                     attempt,
                     retries,
                     body["app"],
                     self._redact(body["X-subtype"]),
-                    self._redact(body["device"]),
+                    bool(body["device"]),
                     body["sender"],
                 )
 
@@ -778,10 +778,10 @@ class FcmRegister:
         if self._log_debug_verbose:
             _logger.debug(
                 "GCM unregister request via /c2dm/register3: "
-                "app=%s, X-subtype=%s, device=%s, delete=true",
+                "app=%s, X-subtype=%s, device_set=%s, delete=true",
                 body["app"],
                 self._redact(body["X-subtype"]),
-                self._redact(body["device"]),
+                bool(body["device"]),
             )
 
         try:
@@ -1047,14 +1047,15 @@ class FcmRegister:
         url = FCM_REGISTRATION + f"projects/{self.config.project_id}/registrations"
         if self._log_debug_verbose:
             # The endpoint is FCM_SEND_URL + token; only the host is logged
-            # (which push service), never a prefix of the token (AGENTS.md
-            # section 5).
+            # (which push service), never a prefix of the token, and the
+            # p256dh key only by its length: a redacted tail is still a
+            # stable fragment of the subscription (AGENTS.md section 5).
             _logger.debug(
-                "FCM registration data (url=%s): endpoint_host=%s, appPubKey=%s, p256dh=%s…",
+                "FCM registration data (url=%s): endpoint_host=%s, appPubKey=%s, p256dh_len=%d",
                 url,
                 urlsplit(payload["web"]["endpoint"]).netloc,
                 bool(payload["web"]["applicationPubKey"]),
-                self._redact(payload["web"]["p256dh"]),
+                len(payload["web"]["p256dh"]),
             )
 
         last_error: str | Exception | None = None
@@ -1258,12 +1259,13 @@ class FcmRegister:
                 "Unable to establish subscription with Google Cloud Messaging."
             )
         # The mapping carries the AidLogin pair (android_id, security_token)
-        # next to the token: name the fields, redact the token, never expand
-        # the mapping into the record (AGENTS.md section 5).
+        # next to the token: name the fields and the token length, never a
+        # tail of the token (a stable fragment of the subscription) and never
+        # the mapping itself (AGENTS.md section 5).
         self._log_verbose(
-            "GCM subscription: fields=%s token=%s",
+            "GCM subscription: fields=%s token_len=%d",
             sorted(gcm_data),
-            self._redact(gcm_data.get("token")),
+            len(gcm_data.get("token") or ""),
         )
 
         fcm_data = await self.fcm_install_and_register(gcm_data, keys)

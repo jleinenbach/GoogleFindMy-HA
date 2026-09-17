@@ -229,7 +229,9 @@ class TestHandleDataMessage:
         """
         client = FcmHandleSlim()
         secret = "9f3c1e7a-4b2d-4c8e-a1f6-7d5b3e9c2a41"
-        _set_decrypt(client, f'{{"location": "{secret}", "ok": true}}'.encode())
+        # The key of a JSON object is wire content as well: a payload may
+        # carry a value in a key, so the record counts keys, never names them.
+        _set_decrypt(client, f'{{"location": "{secret}", "{secret}": true}}'.encode())
         msg = make_data_message(subtype="APPID")
         caplog.set_level(logging.DEBUG, logger=client.logger.name)
 
@@ -239,7 +241,8 @@ class TestHandleDataMessage:
             r.getMessage() for r in caplog.records if "Decrypted data" in r.getMessage()
         ]
         assert len(records) == 1
-        assert "keys=['location', 'ok']" in records[0]
+        assert "keys=2, bytes=" in records[0]
+        assert "location" not in records[0]
         assert secret not in caplog.text
         assert all(
             secret[i : i + 8] not in caplog.text for i in range(0, len(secret) - 7)
