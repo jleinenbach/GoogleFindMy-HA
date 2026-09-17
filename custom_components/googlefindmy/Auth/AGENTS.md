@@ -145,17 +145,18 @@ When reading cookies from external authentication flows (for example, Selenium-m
 
 ### Preferred logger pattern
 
-Use structured extras plus `exc_info` to keep tokens and raw error text out of messages:
+Use structured extras plus `describe_exception` to keep tokens and raw error text out of records:
 
 ```python
 _LOGGER.debug(
-    "Token probe failed; mapped error key.",
+    "Token probe failed; mapped error key (%s at %s).",
+    describe_exception(err),
+    exception_origin(err),
     extra={
         "token_source": source,
         "error_key": key,
         "email": _mask_email_for_logs(email),
     },
-    exc_info=err,
 )
 ```
 
@@ -163,12 +164,13 @@ _LOGGER.debug(
 
 ```python
 _LOGGER.info(
-    "<short summary without secrets>",
+    "<short summary without secrets>: %s at %s",
+    describe_exception(err),  # type plus error_kind, errno or withheld length
+    exception_origin(err),  # innermost frame, no text; omit when the location adds nothing
     extra={
         "user": _mask_email_for_logs(username),
         "context_key": context_value,
     },
-    exc_info=err,  # include only when a traceback is helpful
 )
 ```
 

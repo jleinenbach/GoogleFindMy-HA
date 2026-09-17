@@ -1134,9 +1134,11 @@ class FcmPushClient[NotificationContextT]:  # pylint:disable=too-many-instance-a
                         "messages; stored key material is stale and requires "
                         "re-registration"
                     ) from decrypt_err
+            # The persistent id is a server-assigned MCS identifier (R-1):
+            # length only, as in ``_send_selective_ack``.
             self._log_warn_with_limit(
-                "Skipping FCM message that failed to decrypt (persistent_id=%s): %s",
-                persistent_id,
+                "Skipping FCM message that failed to decrypt (id_len=%d): %s",
+                len(persistent_id or ""),
                 describe_exception(decrypt_err),
             )
             acked = await self._ack_or_disconnect(persistent_id)
