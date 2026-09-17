@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import types
 from dataclasses import dataclass
 from typing import Any
@@ -1330,7 +1331,11 @@ async def test_fcm_register_verbose_log_keeps_endpoint_host_not_token(
         if "FCM registration data" in record.getMessage()
     )
     assert logged, "verbose registration record missing"
-    assert "fcm.googleapis.com" in logged
+    # Exact host, not a substring: the log names the push service and
+    # nothing else of the endpoint.
+    host_match = re.search(r"endpoint_host=(\S+),", logged)
+    assert host_match is not None, logged
+    assert host_match.group(1) == "fcm.googleapis.com"
     assert all(token[i : i + 8] not in logged for i in range(0, len(token) - 7)), (
         "a window of the subscription token reached the log"
     )
