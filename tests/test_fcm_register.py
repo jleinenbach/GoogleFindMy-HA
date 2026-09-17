@@ -1412,6 +1412,7 @@ def _windows(value: str) -> list[str]:
         ("  \n", "empty"),
         ("<html>", "html"),
         ('{"error": 1}', "json"),
+        ("[1]", "json"),
         ("Error=PHONE_REGISTRATION_ERROR", "error-marker"),
         ("token=abc", "text"),
     ],
@@ -1460,6 +1461,28 @@ async def test_gcm_register_unexpected_response_log_omits_body(
     assert "Unexpected register response (status=503" in caplog.text
     assert f"kind=html len={len(_ERROR_PAGE)}" in caplog.text
     assert all(w not in caplog.text for w in _windows(_ERROR_PAGE))
+
+
+@pytest.mark.asyncio
+async def test_gcm_register_plain_text_response_log_omits_body(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The non-HTML twin of the unexpected-response branch (no token=, no Error=)."""
+    body = "service unavailable; request echo=dq9x3EtH2kY:APA91bF0VzWc8ghUGrOpN1Jm"
+    session = _FakeSession(
+        [_FakeResponse(503, body, {"Content-Type": "text/plain"})] * 2
+    )
+    register = FcmRegister(_checkin_config(), http_client_session=session)
+    monkeypatch.setattr(asyncio, "sleep", _fast_sleep)
+
+    with caplog.at_level(logging.DEBUG):
+        result = await register.gcm_register(
+            {"androidId": 1, "securityToken": 2}, retries=2
+        )
+
+    assert result is None
+    assert f"kind=text len={len(body)}" in caplog.text
+    assert all(w not in caplog.text for w in _windows(body))
 
 
 @pytest.mark.asyncio

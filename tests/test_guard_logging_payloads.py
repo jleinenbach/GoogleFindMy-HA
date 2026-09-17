@@ -30,9 +30,11 @@ bytes, rotating) and is excused by (path, leaf, format-string prefix), so the
 exception covers that one call and not every `payload` line of the module.
 
 Blind spot, stated on purpose: the guard sees only shapes (A) to (D). Shape
-(D) follows one assignment, not a chain: a body copied a second time
-(`snippet = text[:200]`, or an f-string built from it and logged later) is
-not followed. A raw value under a neutral name that was not read from a
+(D) follows one assignment (plain or annotated, not a walrus), not a chain:
+a body copied a second time (`snippet = text[:200]`, or an f-string built
+from it and logged later) is not followed. It trusts names: any `.read()`
+counts as a body (a file too), and a local helper called `_describe_body`
+is trusted whatever it returns. A raw value under a neutral name that was not read from a
 response in the same function (`data`, `msg`), a slice whose whole chain is
 neutrally named (`page.read()[:16]`), a wrapping call whose arguments hide
 the name (`str(response)[:16]`, `bytes(payload)[:16]`: the chain follows the
@@ -172,9 +174,13 @@ def _body_names(function: ast.AST) -> frozenset[str]:
     """Names bound in `function` from a response-body read (shape (D))."""
     names: set[str] = set()
     for node in ast.walk(function):
-        if not isinstance(node, ast.Assign):
+        if isinstance(node, ast.Assign):
+            targets: list[ast.AST] = list(node.targets)
+            value: ast.AST | None = node.value
+        elif isinstance(node, ast.AnnAssign):
+            targets, value = [node.target], node.value
+        else:
             continue
-        value = node.value
         if isinstance(value, ast.Await):
             value = value.value
         if (
@@ -182,7 +188,7 @@ def _body_names(function: ast.AST) -> frozenset[str]:
             and isinstance(value.func, ast.Attribute)
             and value.func.attr in _BODY_READERS
         ):
-            for target in node.targets:
+            for target in targets:
                 if isinstance(target, ast.Name):
                     names.add(target.id)
     return frozenset(names)
@@ -264,9 +270,13 @@ def scan(
             if isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 bodies = _body_names(function)
                 if bodies:
+                    # Union, not overwrite: a nested function keeps the bodies
+                    # of the function that encloses it.
                     for inner in ast.walk(function):
                         if isinstance(inner, ast.Call):
-                            bodies_by_call[id(inner)] = bodies
+                            bodies_by_call[id(inner)] = (
+                                bodies_by_call.get(id(inner), frozenset()) | bodies
+                            )
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call) or not _is_log_call(node):
                 continue
