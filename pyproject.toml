@@ -344,6 +344,7 @@ module = [
     "bs4",
     "Cryptodome.*",
     "ecdsa",
+    "google.protobuf.unknown_fields",
     "h2",
     "selenium",
     "selenium.*",

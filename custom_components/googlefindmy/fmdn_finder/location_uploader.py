@@ -25,6 +25,12 @@ import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+# Module-level import (integration setup runs in the executor): the first
+# upload used to import this on the event loop (AGENTS.md 11.3); no cycle,
+# google_uploader does not import this module. The module, not the name, so
+# tests can patch `google_uploader.async_upload_to_google_fmdn`.
+from . import google_uploader
+
 if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant, State
 
@@ -597,11 +603,9 @@ async def _encrypt_and_upload_location(
         _LOGGER.error("Failed to encrypt location: %s", err, exc_info=True)
         raise ValueError(f"Encryption failed: {err}") from err
 
-    _LOGGER.debug(
-        "Encrypted location: %d bytes, ephemeral key Sx=%s...",
-        len(encrypted_and_tag),
-        ecdh_shared_x.hex()[:16],
-    )
+    # Ciphertext length only; the ECDH shared secret is key material and is
+    # never logged (AGENTS.md section 5).
+    _LOGGER.debug("Encrypted location: %d bytes", len(encrypted_and_tag))
 
     # 3. Create LocationReport protobuf with proper structure
     location_report = LocationReport()
@@ -659,9 +663,9 @@ async def _encrypt_and_upload_location(
     )
 
     # 5. Upload to Google FMDN backend
-    from .google_uploader import async_upload_to_google_fmdn  # noqa: PLC0415
-
-    return await async_upload_to_google_fmdn(hass, upload_bytes, eid[:10].hex())
+    return await google_uploader.async_upload_to_google_fmdn(
+        hass, upload_bytes, eid[:10].hex()
+    )
 
 
 def _update_upload_cache(

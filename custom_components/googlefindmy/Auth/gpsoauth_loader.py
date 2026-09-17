@@ -28,6 +28,43 @@ class GpsoauthModule(Protocol):
         """Exchange an OAuth token for an AAS token."""
 
 
+# The `Error` values the ClientLogin protocol documents (Google, "ClientLogin
+# for Installed Applications", archived 2012, "Error codes") plus NeedsBrowser,
+# which gpsoauth surfaces for the same exchange. A value outside this list is
+# server-supplied text and never reaches a record or an exception message
+# (Auth AGENTS.md, "Logging"); it is reported as UNRECOGNIZED instead.
+GPSOAUTH_ERROR_CODES: frozenset[str] = frozenset(
+    {
+        "BadAuthentication",
+        "NotVerified",
+        "TermsNotAgreed",
+        "CaptchaRequired",
+        "Unknown",
+        "AccountDeleted",
+        "AccountDisabled",
+        "ServiceDisabled",
+        "ServiceUnavailable",
+        "NeedsBrowser",
+    }
+)
+
+
+def classify_gpsoauth_error(value: object) -> str:
+    """Return the `Error` value of a gpsoauth response as a loggable kind.
+
+    A documented code is returned in its documented spelling, matched
+    case-insensitively; anything else, a non-string included, is
+    `UNRECOGNIZED (<n> chars)`. An empty value stays empty.
+    """
+    text = str(value).strip() if value is not None else ""
+    if not text:
+        return ""
+    for code in GPSOAUTH_ERROR_CODES:
+        if code.lower() == text.lower():
+            return code
+    return f"UNRECOGNIZED ({len(text)} chars)"
+
+
 @lru_cache(maxsize=1)
 def _gpsoauth_available() -> bool:
     """Return True when the gpsoauth dependency is importable."""

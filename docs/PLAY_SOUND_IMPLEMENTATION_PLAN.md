@@ -79,6 +79,13 @@ _LOGGER.debug(
 **Acceptance:** Both data streams visible in HA debug logs during Play Sound.
 Users with real devices can provide sample payloads for schema analysis.
 
+> **Superseded (2026-09):** the payload bytes (`response_hex[:200]`,
+> `hex_prefix=`) were removed from all three records; `AGENTS.md` section 5 forbids
+> raw API payloads in log records at every level, and
+> `tests/test_guard_logging_payloads.py` enforces it. The records keep the
+> byte count only. Sample payloads for schema analysis have to be captured
+> outside the log.
+
 ### Step 1.2: Attempt generic protobuf decode
 
 **Files:** New `NovaApi/ExecuteAction/PlaySound/response_parser.py`

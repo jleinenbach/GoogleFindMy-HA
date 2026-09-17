@@ -36,7 +36,6 @@ import random
 import ssl
 import struct
 import time
-import traceback
 from base64 import b64decode
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -47,9 +46,9 @@ from aiohttp import ClientSession
 from cryptography.hazmat.primitives.serialization import load_der_private_key
 
 import http_ece
-from google.protobuf.json_format import MessageToJson
 from google.protobuf.message import Message as RuntimeMessage
 
+from ..log_safety import describe_exception, exception_origin
 from ._typing import (
     CredentialsUpdatedCallable,
     JSONDict,
@@ -344,9 +343,15 @@ class FcmPushClient[NotificationContextT]:  # pylint:disable=too-many-instance-a
     # ---- Logging helpers ----
 
     def _msg_str(self, msg: MessageProto) -> str:
+        # Type and field names only, even in verbose mode: MCS messages carry
+        # the push payload, persistent ids and the login token, none of which
+        # may reach the log (AGENTS.md section 5). The structure is what a
+        # protocol trace needs; the values are the payload.
         if self.config.log_debug_verbose:
-            pretty_json = MessageToJson(cast(RuntimeMessage, msg), indent=4)
-            return f"{type(msg).__name__}\n{pretty_json}"
+            fields = [
+                field.name for field, _value in cast(RuntimeMessage, msg).ListFields()
+            ]
+            return f"{type(msg).__name__} fields={fields}"
         return type(msg).__name__
 
     def _log_verbose(self, msg: str, *args: object) -> None:
@@ -562,7 +567,9 @@ class FcmPushClient[NotificationContextT]:  # pylint:disable=too-many-instance-a
             await self._send_msg(req)
             self.logger.debug("Sent login request")
         except Exception as ex:
-            self.logger.error("Received an exception logging in: %s", ex)
+            self.logger.error(
+                "Received an exception logging in: %s", describe_exception(ex)
+            )
             if self._try_increment_error_count(ErrorType.LOGIN):
                 # On worker, treat as fatal: stop listening and let supervisor restart
                 self.do_listen = False
@@ -783,15 +790,23 @@ class FcmPushClient[NotificationContextT]:  # pylint:disable=too-many-instance-a
                 else {"_raw_bytes": decrypted.hex()}
             )
 
+        # Key count and size only: the decrypted push is the raw API payload,
+        # its keys are wire content too (a JSON object may carry a value in a
+        # key), and the persistent id is a server-assigned MCS identifier, so
+        # none of them reaches the log, verbose or not (AGENTS.md section 5).
         self._log_verbose(
-            "Decrypted data for message %s is: %s", msg.persistent_id, ret_val
+            "Decrypted data message: keys=%d, bytes=%d",
+            len(ret_val),
+            len(decrypted),
         )
         try:
             self.callback(ret_val, msg.persistent_id, self.callback_context)
             self._reset_error_count(ErrorType.NOTIFY)
-        except Exception:
-            self.logger.exception(
-                "Unexpected exception calling notification callback\n"
+        except Exception as callback_err:
+            self.logger.error(
+                "Unexpected exception calling notification callback: %s at %s",
+                describe_exception(callback_err),
+                exception_origin(callback_err),
             )
             self._try_increment_error_count(ErrorType.NOTIFY)
 
@@ -821,9 +836,16 @@ class FcmPushClient[NotificationContextT]:  # pylint:disable=too-many-instance-a
         await self._send_msg(req)
 
     async def _handle_iq(self, p: IqStanza) -> None:
-        if not p.extension:
+        # `HasField`, not truthiness: an unset sub-message is still a truthy
+        # default instance, so `not p.extension` never held and a stanza
+        # without extension fell through to the "extension id 0" warning.
+        if not p.HasField("extension"):
+            # `_msg_str` names the type and fields; the whole stanza in text
+            # format is a payload dump (AGENTS.md section 5). The old call
+            # also had no placeholder for its argument.
             self._log_warn_with_limit(
-                "Unexpected IqStanza id received with no extension", str(p)
+                "Unexpected IqStanza id received with no extension: %s",
+                self._msg_str(p),
             )
             return
         if p.extension.id not in (12, 13):
@@ -840,7 +862,8 @@ class FcmPushClient[NotificationContextT]:  # pylint:disable=too-many-instance-a
         sa = SelectiveAck()
         sa.id.extend([persistent_id])
         iqs.extension.data = sa.SerializeToString()
-        self.logger.debug("Sending selective ack for message id %s", persistent_id)
+        # The persistent id is a server-assigned MCS identifier (R-1).
+        self.logger.debug("Sending selective ack (id_len=%d)", len(persistent_id))
         await self._send_msg(iqs)
 
     async def _send_heartbeat(self) -> None:
@@ -895,7 +918,14 @@ class FcmPushClient[NotificationContextT]:  # pylint:disable=too-many-instance-a
 
         if isinstance(msg, LoginResponse):
             if str(msg.error):
-                self.logger.error("Received login error response: %s", msg)
+                # Structured code and type only: `message` is server-supplied
+                # free text and stays out of the record (Auth AGENTS.md,
+                # "Logging": raw error text and response bodies).
+                self.logger.error(
+                    "Received login error response: code=%s type=%s",
+                    msg.error.code,
+                    msg.error.type,
+                )
                 if self._try_increment_error_count(ErrorType.LOGIN):
                     self.do_listen = False
             else:
@@ -939,7 +969,10 @@ class FcmPushClient[NotificationContextT]:  # pylint:disable=too-many-instance-a
         elif isinstance(msg, HeartbeatPing):
             await self._handle_ping(msg)
         elif isinstance(msg, HeartbeatAck):
-            self.logger.debug("Received heartbeat ack: %s", msg)
+            # Type and field names, not the text format: the ack carries only
+            # stream counters, but a message passed whole to %s is a wire dump
+            # (AGENTS.md section 5), and every other MCS record uses _msg_str.
+            self.logger.debug("Received heartbeat ack: %s", self._msg_str(msg))
         elif isinstance(msg, IqStanza):
             pass
         else:
@@ -971,7 +1004,7 @@ class FcmPushClient[NotificationContextT]:  # pylint:disable=too-many-instance-a
                 "Could not connect to MCS endpoint (%s,%s): %s",
                 MCS_HOST,
                 MCS_PORT,
-                oex,
+                describe_exception(oex),
             )
             return False
 
@@ -1101,10 +1134,12 @@ class FcmPushClient[NotificationContextT]:  # pylint:disable=too-many-instance-a
                         "messages; stored key material is stale and requires "
                         "re-registration"
                     ) from decrypt_err
+            # The persistent id is a server-assigned MCS identifier (R-1):
+            # length only, as in ``_send_selective_ack``.
             self._log_warn_with_limit(
-                "Skipping FCM message that failed to decrypt (persistent_id=%s): %s",
-                persistent_id,
-                decrypt_err,
+                "Skipping FCM message that failed to decrypt (id_len=%d): %s",
+                len(persistent_id or ""),
+                describe_exception(decrypt_err),
             )
             acked = await self._ack_or_disconnect(persistent_id)
             if acked and persistent_id:
@@ -1135,7 +1170,7 @@ class FcmPushClient[NotificationContextT]:  # pylint:disable=too-many-instance-a
             try:
                 await self._login()
             except Exception as ex:
-                self.logger.info("Login failed: %s", ex)
+                self.logger.info("Login failed: %s", describe_exception(ex))
                 self.do_listen = False
                 return
 
@@ -1148,13 +1183,19 @@ class FcmPushClient[NotificationContextT]:  # pylint:disable=too-many-instance-a
 
                 except (ConnectionError, ssl.SSLError) as cex:
                     # Treat stream end/TLS quirks as normal stop; supervisor will restart
-                    self.logger.info("FCM stream ended (%s); worker stopping.", cex)
+                    self.logger.info(
+                        "FCM stream ended (%s); worker stopping.",
+                        describe_exception(cex),
+                    )
                     self.do_listen = False
                     break
 
                 except (OSError, EOFError, asyncio.IncompleteReadError) as osex:
                     # Normal network life-cycle: log and stop; supervisor will restart
-                    self.logger.info("FCM read ended (%s); worker stopping.", osex)
+                    self.logger.info(
+                        "FCM read ended (%s); worker stopping.",
+                        describe_exception(osex),
+                    )
                     self.do_listen = False
                     break
 
@@ -1181,10 +1222,13 @@ class FcmPushClient[NotificationContextT]:  # pylint:disable=too-many-instance-a
             )
             self.do_listen = False
         except Exception as ex:
+            # Type, kind or length plus the innermost frame (Auth contract):
+            # a producer's text may echo a token or a body, and so would
+            # ``traceback.format_exc()`` or ``exc_info``.
             self.logger.error(
-                "Unknown error in listener: %s\n%s",
-                ex,
-                traceback.format_exc(),
+                "Unknown error in listener: %s at %s",
+                describe_exception(ex),
+                exception_origin(ex),
             )
         finally:
             self.run_state = FcmPushClientRunState.STOPPING
@@ -1277,7 +1321,9 @@ class FcmPushClient[NotificationContextT]:  # pylint:disable=too-many-instance-a
                     try:
                         await self._send_heartbeat()
                     except Exception as ex:
-                        self.logger.debug("Error while sending heartbeat: %s", ex)
+                        self.logger.debug(
+                            "Error while sending heartbeat: %s", describe_exception(ex)
+                        )
         except asyncio.CancelledError:
             self.logger.debug("Heartbeat task cancelled")
             raise
@@ -1306,7 +1352,9 @@ class FcmPushClient[NotificationContextT]:  # pylint:disable=too-many-instance-a
                 ),
             ]
         except Exception as ex:
-            self.logger.error("Unexpected error running FcmPushClient: %s", ex)
+            self.logger.error(
+                "Unexpected error running FcmPushClient: %s", describe_exception(ex)
+            )
 
     async def stop(self) -> None:
         """Graceful stop: close writer, cancel tasks, mark stopped"""

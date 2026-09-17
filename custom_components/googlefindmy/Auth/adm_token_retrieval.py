@@ -54,15 +54,20 @@ from typing import Any, cast
 
 # Prefer relative imports inside the package for robustness
 from ..const import CONF_OAUTH_TOKEN, DATA_AAS_TOKEN, DATA_AUTH_METHOD
-from .aas_token_retrieval import async_get_aas_token  # entry-scoped AAS provider
+from .aas_token_retrieval import (  # entry-scoped AAS provider
+    _mask_email_for_logs,
+    async_get_aas_token,
+)
 from .gpsoauth_loader import (
     GpsoauthModule,
+    classify_gpsoauth_error,
     load_gpsoauth_exceptions,
     require_gpsoauth,
 )
 from .gpsoauth_loader import (
     gpsoauth as _gpsoauth_proxy,
 )
+from .log_safety import describe_exception, exception_origin
 from .token_cache import TokenCache
 from .token_retrieval import (
     InvalidAasTokenError,
@@ -92,15 +97,10 @@ gpsoauth = _gpsoauth_proxy
 # ---------------------------------------------------------------------------
 
 
-def _mask_email(email: str | None) -> str:
-    """Return a privacy-friendly representation of an email for logs."""
-    if not email or "@" not in email:
-        return "<unknown>"
-    local, domain = email.split("@", 1)
-    if not local:
-        return f"*@{domain}"
-    masked_local = (local[0] + "***") if len(local) > 1 else "*"
-    return f"{masked_local}@{domain}"
+# Single masking helper for the Auth package (Auth/AGENTS.md: mask account
+# identifiers via ``_mask_email_for_logs``); the local name is kept for the
+# call sites and the tests that address it.
+_mask_email = _mask_email_for_logs
 
 
 def _clip(value: object, limit: int = 200) -> str:
@@ -226,8 +226,9 @@ async def _seed_username_in_cache(username: str, *, cache: TokenCache) -> None:
             )
     except Exception as exc:  # Defensive: never fail token flow on seeding.
         _LOGGER.debug(
-            "Username cache seeding skipped; best-effort fallback active.",
-            exc_info=exc,
+            "Username cache seeding skipped; best-effort fallback active. (%s at %s)",
+            describe_exception(exc),
+            exception_origin(exc),
         )
 
 
@@ -254,8 +255,9 @@ async def _resolve_android_id_for_entry(username: str, *, cache: TokenCache) -> 
             await cache.set(cache_key, android_id)
         except Exception as err:  # noqa: BLE001
             _LOGGER.debug(
-                "Failed to persist android_id from FCM credentials; cache write skipped.",
-                exc_info=err,
+                "Failed to persist android_id from FCM credentials; cache write skipped. (%s at %s)",
+                describe_exception(err),
+                exception_origin(err),
             )
         return android_id
 
@@ -271,8 +273,9 @@ async def _resolve_android_id_for_entry(username: str, *, cache: TokenCache) -> 
         await cache.set(cache_key, android_id)
     except Exception as err:  # noqa: BLE001
         _LOGGER.debug(
-            "Failed to persist generated android_id; cache write skipped.",
-            exc_info=err,
+            "Failed to persist generated android_id; cache write skipped. (%s at %s)",
+            describe_exception(err),
+            exception_origin(err),
             extra={"account": _mask_email(username)},
         )
     return android_id
@@ -363,17 +366,19 @@ async def _resolve_android_id_for_isolated_flow(
             cached_android_id = _coerce_android_id(await cache_get(cache_key), "cache")
         except Exception as err:  # noqa: BLE001
             _LOGGER.debug(
-                "Isolated exchange: failed to read cached android_id for account.",
+                "Isolated exchange: failed to read cached android_id for account. (%s at %s)",
+                describe_exception(err),
+                exception_origin(err),
                 extra={"account": _mask_email(username)},
-                exc_info=err,
             )
         if android_id is None:
             try:
                 cached_fcm = await cache_get("fcm_credentials")
             except Exception as err:  # noqa: BLE001
                 _LOGGER.debug(
-                    "Isolated exchange: failed to read cached FCM credentials; continuing without cached bundle.",
-                    exc_info=err,
+                    "Isolated exchange: failed to read cached FCM credentials; continuing without cached bundle. (%s at %s)",
+                    describe_exception(err),
+                    exception_origin(err),
                 )
             else:
                 android_id = _extract_android_id_from_credentials(cached_fcm)
@@ -384,9 +389,10 @@ async def _resolve_android_id_for_isolated_flow(
                 await cache_set(cache_key, android_id)
             except Exception as err:  # noqa: BLE001
                 _LOGGER.debug(
-                    "Isolated exchange: failed to persist android_id from secrets for account.",
+                    "Isolated exchange: failed to persist android_id from secrets for account. (%s at %s)",
+                    describe_exception(err),
+                    exception_origin(err),
                     extra={"account": _mask_email(username)},
-                    exc_info=err,
                 )
         return android_id
 
@@ -403,9 +409,10 @@ async def _resolve_android_id_for_isolated_flow(
             await cache_set(cache_key, android_id)
         except Exception as err:  # noqa: BLE001
             _LOGGER.debug(
-                "Isolated exchange: failed to persist generated android_id for account.",
+                "Isolated exchange: failed to persist generated android_id for account. (%s at %s)",
+                describe_exception(err),
+                exception_origin(err),
                 extra={"account": _mask_email(username)},
-                exc_info=err,
             )
 
     return android_id
@@ -513,18 +520,20 @@ async def async_get_adm_token(  # noqa: PLR0912,PLR0915
                                 )
                             except Exception as err:  # noqa: BLE001
                                 _LOGGER.debug(
-                                    "Failed to read auth_method before OAuth fallback for account.",
+                                    "Failed to read auth_method before OAuth fallback for account. (%s at %s)",
+                                    describe_exception(err),
+                                    exception_origin(err),
                                     extra={"account": _mask_email(user)},
-                                    exc_info=err,
                                 )
                             await cache.set(
                                 DATA_AUTH_METHOD, _AUTH_METHOD_INDIVIDUAL_TOKENS
                             )
                         except Exception as err:  # noqa: BLE001
                             _LOGGER.debug(
-                                "Failed to switch auth_method for OAuth fallback on account.",
+                                "Failed to switch auth_method for OAuth fallback on account. (%s at %s)",
+                                describe_exception(err),
+                                exception_origin(err),
                                 extra={"account": _mask_email(user)},
-                                exc_info=err,
                             )
                         else:
                             fallback_active = True
@@ -559,10 +568,13 @@ async def async_get_adm_token(  # noqa: PLR0912,PLR0915
                             "Error: %s",
                             retry_num,
                             max_retries,
-                            exc,
+                            describe_exception(exc),
                         )
                     else:
-                        _LOGGER.error("ADM token: generation failed. Error: %s", exc)
+                        _LOGGER.error(
+                            "ADM token: generation failed. Error: %s",
+                            describe_exception(exc),
+                        )
                     break
 
                 # Retryable path: clear any stale cache value and back off
@@ -574,7 +586,8 @@ async def async_get_adm_token(  # noqa: PLR0912,PLR0915
                 sleep_s = backoff * (2**attempt)
                 if retry_num == 0:
                     _LOGGER.warning(
-                        "ADM token: generation failed. Error: %s. Retrying...", exc
+                        "ADM token: generation failed. Error: %s. Retrying...",
+                        describe_exception(exc),
                     )
                 else:
                     _LOGGER.warning(
@@ -582,7 +595,7 @@ async def async_get_adm_token(  # noqa: PLR0912,PLR0915
                         "Retrying in %.0fs...",
                         retry_num,
                         max_retries,
-                        exc,
+                        describe_exception(exc),
                         sleep_s,
                     )
                 await asyncio.sleep(sleep_s)
@@ -597,9 +610,10 @@ async def async_get_adm_token(  # noqa: PLR0912,PLR0915
                 current_method = await cache.get(DATA_AUTH_METHOD)
             except Exception as err:  # noqa: BLE001
                 _LOGGER.debug(
-                    "Failed to read auth_method during OAuth fallback reset for account.",
+                    "Failed to read auth_method during OAuth fallback reset for account. (%s at %s)",
+                    describe_exception(err),
+                    exception_origin(err),
                     extra={"account": _mask_email(user)},
-                    exc_info=err,
                 )
             else:
                 if current_method == auth_method_for_reset:
@@ -617,7 +631,7 @@ async def async_get_adm_token(  # noqa: PLR0912,PLR0915
                     _LOGGER.debug(
                         "Failed to restore auth_method after OAuth fallback for %s: %s",
                         _mask_email(user),
-                        _clip(err),
+                        describe_exception(err),
                     )
 
 
@@ -693,13 +707,13 @@ async def _perform_oauth_with_provided_aas(
             return token_value
 
         # Typical error shape: {"Error": "BadAuthentication"} (do not print full dict).
-        # Mirror the aas helper: clip + lowercase the closed-set ``Error`` value so
-        # it carries the same privacy guarantees and feeds ``_is_non_retryable_auth``
-        # through the structured attribute path.
+        # Mirror the aas helper: only a documented gpsoauth ``Error`` code is
+        # carried as ``error_kind`` (lower-cased, it feeds
+        # ``_is_non_retryable_auth`` through the structured attribute path);
+        # any other value is server text and is sized, never copied.
         err = resp.get("Error", "unknown")
-        error_kind = (
-            str(err)[:32].lower() if err and err != "unknown" else "exchange_error"
-        )
+        kind = classify_gpsoauth_error(err) if err and err != "unknown" else ""
+        error_kind = kind.lower() if kind else "exchange_error"
         missing_err = RuntimeError(
             f"Missing 'Token'/'Auth' in gpsoauth response (kind={error_kind})"
         )
@@ -710,11 +724,12 @@ async def _perform_oauth_with_provided_aas(
     try:
         return cast(str, await loop.run_in_executor(None, _run))
     except Exception as exc:  # noqa: BLE001
-        # Summarize without leaking sensitive data
+        # Type plus kind, errno or length: the producer's text may carry the
+        # server response (R-1); the caller classifies the kind.
         _LOGGER.debug(
             "perform_oauth failed for %s: %s",
             _mask_email(username),
-            _clip(str(exc)),
+            describe_exception(exc),
         )
         raise
 
@@ -804,7 +819,8 @@ async def async_get_adm_token_isolated(  # noqa: PLR0913,PLR0912
                     Exception
                 ) as meta_exc:  # never fail the exchange on metadata issues
                     _LOGGER.debug(
-                        "Isolated TTL metadata write skipped: %s", _clip(meta_exc)
+                        "Isolated TTL metadata write skipped: %s",
+                        describe_exception(meta_exc),
                     )
 
             return tok
@@ -816,7 +832,7 @@ async def async_get_adm_token_isolated(  # noqa: PLR0913,PLR0912
                     "Isolated ADM exchange failed%s for %s: %s",
                     "" if attempt >= attempts - 1 else " (non-retryable)",
                     _mask_email(user),
-                    _clip(exc),
+                    describe_exception(exc),
                 )
                 break
             sleep_s = backoff * (2**attempt)
@@ -825,7 +841,7 @@ async def async_get_adm_token_isolated(  # noqa: PLR0913,PLR0912
                 attempt + 1,
                 attempts,
                 _mask_email(user),
-                _clip(exc),
+                describe_exception(exc),
                 sleep_s,
             )
             await asyncio.sleep(sleep_s)

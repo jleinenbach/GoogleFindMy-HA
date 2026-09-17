@@ -1243,21 +1243,26 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
                 raw_encrypted_identity_key, cache=cache, device_id=canonic_id
             )
 
-        _LOGGER.debug(
-            "[DIAG-SECRETS] Structure Analysis:\n"
-            "  - DeviceReg String: %s\n"
-            "  - Secrets Container Type: %s\n"
-            "  - Secrets Serialized Length: %s bytes\n"
-            "  - EncryptedIdentityKey Length: %s bytes\n"
-            "  - EncryptedIdentityKey Type: %s\n"
-            "  - EncryptedIdentityKey Hex: %s",
-            device_registration,
-            type(encrypted_user_secrets),
-            serialized_length if serialized_length is not None else "Unknown",
-            len(raw_encrypted_identity_key) if raw_encrypted_identity_key else "None",
-            type(raw_encrypted_identity_key),
-            raw_encrypted_identity_key.hex() if raw_encrypted_identity_key else "None",
-        )
+        # Structure only: field names, types and lengths. Neither the
+        # registration message (its text format prints the key escaped) nor
+        # the key bytes themselves are logged (AGENTS.md section 5). Guarded:
+        # the field walk runs per device on the event loop.
+        if _LOGGER.isEnabledFor(logging.DEBUG):
+            _LOGGER.debug(
+                "[DIAG-SECRETS] Structure Analysis:\n"
+                "  - DeviceReg Fields: %s\n"
+                "  - Secrets Container Type: %s\n"
+                "  - Secrets Serialized Length: %s bytes\n"
+                "  - EncryptedIdentityKey Length: %s bytes\n"
+                "  - EncryptedIdentityKey Type: %s",
+                [field.name for field, _value in device_registration.ListFields()],
+                type(encrypted_user_secrets),
+                serialized_length if serialized_length is not None else "Unknown",
+                len(raw_encrypted_identity_key)
+                if raw_encrypted_identity_key
+                else "None",
+                type(raw_encrypted_identity_key),
+            )
 
         if (
             serialized_length is not None
@@ -1301,14 +1306,14 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
                 prefix_bytes = secrets_blob[prefix_start:offset]
                 suffix_start = offset + len(raw_encrypted_identity_key)
                 suffix_bytes = secrets_blob[suffix_start : suffix_start + 10]
+                # Offset and lengths only; the surrounding bytes are part of
+                # the secrets blob and are never logged (AGENTS.md section 5).
                 _LOGGER.debug(
                     "[DIAG-SECRETS-BYTE-SCAN] Cloud key located inside encryptedUserSecrets at offset %d."
-                    " Prefix (%d bytes): %s | Suffix (%d bytes): %s",
+                    " Prefix (%d bytes) | Suffix (%d bytes)",
                     offset,
                     len(prefix_bytes),
-                    prefix_bytes.hex(),
                     len(suffix_bytes),
-                    suffix_bytes.hex(),
                 )
             else:
                 _LOGGER.debug(

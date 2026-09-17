@@ -34,6 +34,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.storage import Store
 
 from ..const import STORAGE_KEY, STORAGE_VERSION
+from .log_safety import describe_exception, exception_origin
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -180,8 +181,13 @@ class TokenCache:
                         raw
                     ).hexdigest()
                 return None
-            except Exception:
-                _LOGGER.exception("Failed to read legacy cache file at %s", legacy_path)
+            except Exception as read_err:
+                _LOGGER.error(
+                    "Failed to read legacy cache file at %s (%s at %s)",
+                    legacy_path,
+                    describe_exception(read_err),
+                    exception_origin(read_err),
+                )
                 return None
 
         legacy_read = await self._hass.async_add_executor_job(_read_legacy)
@@ -275,10 +281,12 @@ class TokenCache:
             return
         try:
             await self._store.async_save(self._snapshot())
-        except Exception:
-            _LOGGER.exception(
-                "googlefindmy: Failed to persist the migrated cache for entry '%s'",
+        except Exception as save_err:
+            _LOGGER.error(
+                "googlefindmy: Failed to persist the migrated cache for entry '%s' (%s at %s)",
                 self.entry_id,
+                describe_exception(save_err),
+                exception_origin(save_err),
             )
 
     async def _async_store_contains_keys(self, expected: frozenset[str]) -> bool:
@@ -348,11 +356,12 @@ class TokenCache:
 
         try:
             proven = await self._hass.async_add_executor_job(_envelope_holds_values)
-        except (OSError, ValueError, TypeError, KeyError):
+        except (OSError, ValueError, TypeError, KeyError) as probe_err:
             _LOGGER.debug(
-                "googlefindmy: Could not read back the Store file at %s",
+                "googlefindmy: Could not read back the Store file at %s (%s at %s)",
                 store_path,
-                exc_info=True,
+                describe_exception(probe_err),
+                exception_origin(probe_err),
             )
             return False
 
@@ -594,24 +603,27 @@ def _register_instance(entry_id: str, instance: TokenCache) -> None:
                 setattr(instance, "entry_id", entry_id)
             except Exception as err:  # noqa: BLE001 - defensive logging only
                 _LOGGER.debug(
-                    "Failed to correct TokenCache entry_id to registry key",
-                    exc_info=err,
+                    "Failed to correct TokenCache entry_id to registry key (%s at %s)",
+                    describe_exception(err),
+                    exception_origin(err),
                 )
         elif not normalized:
             try:
                 setattr(instance, "entry_id", entry_id)
             except Exception as err:  # noqa: BLE001 - defensive logging only
                 _LOGGER.debug(
-                    "Failed to assign registry entry_id to TokenCache instance",
-                    exc_info=err,
+                    "Failed to assign registry entry_id to TokenCache instance (%s at %s)",
+                    describe_exception(err),
+                    exception_origin(err),
                 )
     else:
         try:
             setattr(instance, "entry_id", entry_id)
         except Exception as err:  # noqa: BLE001 - defensive logging only
             _LOGGER.debug(
-                "Failed to assign registry entry_id to TokenCache instance",
-                exc_info=err,
+                "Failed to assign registry entry_id to TokenCache instance (%s at %s)",
+                describe_exception(err),
+                exception_origin(err),
             )
     _INSTANCES[entry_id] = instance
 

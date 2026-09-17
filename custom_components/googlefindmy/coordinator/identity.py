@@ -216,9 +216,10 @@ class IdentityOperations(_MixinBase):
         if device_id not in device_set:
             device_set.add(device_id)
             if len(device_set) > 1:
+                # The device ids identify the shared tracker; no prefix of
+                # the key is logged (AGENTS.md section 5: key material).
                 _LOGGER.info(
-                    "Shared tracker detected: identity_key=%s... shared by %d devices: %s",
-                    identity_key[:8].hex(),
+                    "Shared tracker detected: one identity key shared by %d devices: %s",
                     len(device_set),
                     sorted(device_set),
                 )
@@ -765,11 +766,15 @@ class IdentityOperations(_MixinBase):
                     if isinstance(payload, Mapping):
                         _update_preserve_metadata(merged_device_data, payload)
 
-            _LOGGER.debug(
-                "Building Identity for %s: cached_data=%s",
-                canonical_id,
-                merged_device_data,
-            )
+            # Key names only: the merged cache record is the device payload
+            # (AGENTS.md section 5). The sort is guarded: it runs per device
+            # on the event loop and would otherwise be evaluated with DEBUG off.
+            if _LOGGER.isEnabledFor(logging.DEBUG):
+                _LOGGER.debug(
+                    "Building Identity for %s: cached_keys=%s",
+                    canonical_id,
+                    sorted(merged_device_data, key=str),
+                )
 
             direct_pair_date = _extract_pair_date(merged_device_data)
             direct_secrets_date = _extract_secrets_creation_date(merged_device_data)

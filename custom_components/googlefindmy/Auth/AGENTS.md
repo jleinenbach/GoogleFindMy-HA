@@ -140,22 +140,23 @@ When reading cookies from external authentication flows (for example, Selenium-m
 
 ## Logging guardrails
 
-* Prefer `exc_info=<err>` over interpolating exception text into log messages so token- or credential-related details remain out of the log stream while still preserving traceback context for debugging.
+* Do not attach a traceback in this package: no `exc_info=` value other than `False` or `None` (a name, `True`, an alias bound outside the handler, a tuple, `sys.exc_info()`) and no `logger.exception(...)`. The last rendered line of a traceback is `str(err)`, which for `gpsoauth`, `requests` or `aiohttp` may echo a token or a response body, and an exception this package raises `from` a foreign one renders the chained cause as well. Log `describe_exception(err)` and, for the location, `exception_origin(err)` instead.
 * When referencing account identifiers in logs, always mask them via `_mask_email_for_logs` (available from `aas_token_retrieval`) instead of embedding raw usernames or email addresses.
 
 ### Preferred logger pattern
 
-Use structured extras plus `exc_info` to keep tokens and raw error text out of messages:
+Use structured extras plus `describe_exception` to keep tokens and raw error text out of records:
 
 ```python
 _LOGGER.debug(
-    "Token probe failed; mapped error key.",
+    "Token probe failed; mapped error key (%s at %s).",
+    describe_exception(err),
+    exception_origin(err),
     extra={
         "token_source": source,
         "error_key": key,
         "email": _mask_email_for_logs(email),
     },
-    exc_info=err,
 )
 ```
 
@@ -163,15 +164,29 @@ _LOGGER.debug(
 
 ```python
 _LOGGER.info(
-    "<short summary without secrets>",
+    "<short summary without secrets>: %s at %s",
+    describe_exception(err),  # type plus error_kind, errno or withheld length
+    exception_origin(err),  # innermost frame, no text; omit when the location adds nothing
     extra={
         "user": _mask_email_for_logs(username),
         "context_key": context_value,
     },
-    exc_info=err,  # include only when a traceback is helpful
 )
 ```
 
 Keep sensitive strings (tokens, response bodies, raw exception text) out of the
 message itself and prefer short context keys in `extra` so log processing stays
 consistent and Semgrep does not flag credential leaks.
+
+Inside an `except` handler whose types are not all defined in this package
+(`except Exception as exc`, `except (OSError, ssl.SSLError) as err`, ...), pass
+the exception through `Auth.log_safety.describe_exception(exc)` instead of
+`exc`, `str(exc)` or `_clip(exc)`: it prints the type plus `error_kind` or
+`errno` when present, the message of exceptions raised by this package, the bare
+type name for an empty message, `(unprintable)` when `str()` itself fails, and
+otherwise the withheld character count. `exception_origin(exc)` names the innermost frame when a location
+is needed. `tests/test_guard_logging_payloads.py` (shape (I)) fails the suite
+on a bare exception in such a record under `Auth/`, and on any `exc_info=`
+value other than `False`/`None` or any `logger.exception(...)` under `Auth/`,
+whatever the handler; `fcm_receiver_ha.py` is
+deferred there with its site count pinned.

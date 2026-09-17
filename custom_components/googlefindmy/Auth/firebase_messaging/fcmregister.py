@@ -40,13 +40,15 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from http import HTTPStatus
 from typing import Any, cast
+from urllib.parse import urlsplit
 
 from aiohttp import ClientSession, ClientTimeout
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 
-from google.protobuf.json_format import MessageToDict, MessageToJson
+from google.protobuf.json_format import MessageToDict
 
+from ..log_safety import describe_exception, exception_origin
 from ._typing import (
     CredentialsUpdatedCallable,
     JSONDict,
@@ -73,6 +75,65 @@ from .proto.checkin_pb2 import (
 )
 
 _logger = logging.getLogger(__name__)
+
+
+# The `Error=` codes the registration endpoint documents: the C2DM list
+# (Google, "Android Cloud to Device Messaging Framework", archived 2012,
+# section "Registration") plus INVALID_PARAMETERS from the GCM client
+# library (`com.google.android.gcm.GCMConstants.ERROR_*`), which registers
+# through the same /c2dm/register3. A value outside this list is
+# server-supplied text.
+_GCM_REGISTER_ERROR_CODES = frozenset(
+    {
+        "SERVICE_NOT_AVAILABLE",
+        "ACCOUNT_MISSING",
+        "AUTHENTICATION_FAILED",
+        "TOO_MANY_REGISTRATIONS",
+        "INVALID_PARAMETERS",
+        "INVALID_SENDER",
+        "PHONE_REGISTRATION_ERROR",
+    }
+)
+
+
+def _classify_error_code(value: str) -> str:
+    """Return the `Error=` value of a register response as a loggable code.
+
+    Only a documented C2DM/GCM code is logged as itself; any other value on
+    that line, even one that looks like a code, is server-supplied text that
+    may echo a token or an account identifier and stays out of the log
+    (AGENTS.md section 5): the record names its size instead. An empty
+    value stays empty so the caller keeps its no-marker branch.
+    """
+    code = value.strip().upper()
+    if not code:
+        return ""
+    if code in _GCM_REGISTER_ERROR_CODES:
+        return code
+    return f"UNRECOGNIZED ({len(value.strip())} chars)"
+
+
+def _describe_body(text: str) -> str:
+    """Describe an HTTP error body for the log without quoting it.
+
+    Response bodies stay out of log messages (AGENTS.md section 5; Auth
+    AGENTS.md "Logging"): a Google error page can echo request parameters,
+    and the registration endpoints answer with credentials on success. The
+    content class (HTML page, JSON, `Error=` marker line, other text) and
+    the length carry the diagnostic; the bytes do not.
+    """
+    stripped = text.lstrip()
+    if not stripped:
+        kind = "empty"
+    elif stripped[:1] == "<":
+        kind = "html"
+    elif stripped[:1] in ("{", "["):
+        kind = "json"
+    elif stripped.startswith("Error="):
+        kind = "error-marker"
+    else:
+        kind = "text"
+    return f"kind={kind} len={len(text)}"
 
 
 class FcmRegisterHTTPError(RuntimeError):
@@ -359,7 +420,7 @@ class FcmRegister:
                         max_attempts,
                         GCM_CHECKIN_URL,
                         status,
-                        text[:200],
+                        _describe_body(text),
                     )
                     if status in _FATAL_HTTP_STATUSES:
                         # 401/404 indicate invalid credentials or a moved
@@ -383,7 +444,7 @@ class FcmRegister:
                     attempt,
                     max_attempts,
                     GCM_CHECKIN_URL,
-                    e,
+                    describe_exception(e),
                 )
 
             # Exponential backoff with light jitter
@@ -419,8 +480,13 @@ class FcmRegister:
         acir.ParseFromString(content)
 
         if self._log_debug_verbose:
-            msg = MessageToJson(acir, indent=4)
-            _logger.debug("GCM check-in response (raw):\n%s", msg)
+            # Field names only: the check-in response carries android_id and
+            # security_token, which are credentials and never reach the log
+            # (AGENTS.md section 5).
+            _logger.debug(
+                "GCM check-in response: fields=%s",
+                [field.name for field, _value in acir.ListFields()],
+            )
 
         parsed_response: JSONDict = MessageToDict(acir)
         return parsed_response
@@ -490,12 +556,12 @@ class FcmRegister:
         while attempt <= retries:
             if self._log_debug_verbose:
                 _logger.debug(
-                    "GCM Registration request attempt %d/%d via /c2dm/register3: app=%s, X-subtype=%s, device=%s, sender=%s",
+                    "GCM Registration request attempt %d/%d via /c2dm/register3: app=%s, X-subtype=%s, device_set=%s, sender=%s",
                     attempt,
                     retries,
                     body["app"],
                     self._redact(body["X-subtype"]),
-                    self._redact(body["device"]),
+                    bool(body["device"]),
                     body["sender"],
                 )
 
@@ -519,7 +585,7 @@ class FcmRegister:
                     "GCM register request failed via /c2dm/register3 (attempt %d/%d): %s",
                     attempt,
                     retries,
-                    exc,
+                    describe_exception(exc),
                 )
                 if attempt < retries:
                     await asyncio.sleep(1)
@@ -531,8 +597,7 @@ class FcmRegister:
             )
 
             if status == HTTPStatus.NOT_FOUND or html_like:
-                snippet = response_text[:200]
-                last_error = f"Unexpected register response (status={status}, ctype={content_type}): {snippet}"
+                last_error = f"Unexpected register response (status={status}, ctype={content_type}): {_describe_body(response_text)}"
                 # Last-wins: cache reflects THIS response, not a stale
                 # earlier fatal. Non-fatal HTML responses clear the latch.
                 last_fatal_status = (
@@ -558,7 +623,7 @@ class FcmRegister:
                     token = value.strip()
                     break
                 if lower_key == "error":
-                    error_code = value.strip().upper()
+                    error_code = _classify_error_code(value)
 
             if token:
                 _logger.info(
@@ -606,10 +671,7 @@ class FcmRegister:
                         last_error,
                     )
             else:
-                snippet = response_text[:200]
-                if html_like:
-                    snippet += " [html]"
-                last_error = f"Unexpected register response (status={status}, ctype={content_type}): {snippet}"
+                last_error = f"Unexpected register response (status={status}, ctype={content_type}): {_describe_body(response_text)}"
                 # Last-wins: cache reflects THIS response, not a stale
                 # earlier fatal. Non-fatal statuses (e.g. 5xx) clear the
                 # latch so a final transient response is not escalated
@@ -630,7 +692,12 @@ class FcmRegister:
 
         msg = f"Unable to complete GCM register after {retries} attempts"
         if isinstance(last_error, Exception):
-            _logger.error(msg, exc_info=last_error)
+            _logger.error(
+                "%s: %s at %s",
+                msg,
+                describe_exception(last_error),
+                exception_origin(last_error),
+            )
         else:
             _logger.error("%s, last error was: %s", msg, last_error)
         # If the retry budget was exhausted on persistent 401/404 responses
@@ -717,10 +784,10 @@ class FcmRegister:
         if self._log_debug_verbose:
             _logger.debug(
                 "GCM unregister request via /c2dm/register3: "
-                "app=%s, X-subtype=%s, device=%s, delete=true",
+                "app=%s, X-subtype=%s, device_set=%s, delete=true",
                 body["app"],
                 self._redact(body["X-subtype"]),
-                self._redact(body["device"]),
+                bool(body["device"]),
             )
 
         try:
@@ -735,7 +802,7 @@ class FcmRegister:
             _logger.debug(
                 "GCM unregister for X-subtype=%s failed (ignored, best-effort): %s",
                 self._redact(app_id),
-                exc,
+                describe_exception(exc),
             )
             return
 
@@ -752,7 +819,7 @@ class FcmRegister:
                 deleted = True
                 break
             if lower_key == "error":
-                error_code = value.strip().upper()
+                error_code = _classify_error_code(value)
 
         if deleted:
             _logger.debug(
@@ -846,7 +913,7 @@ class FcmRegister:
                     "Error during fcm_install at %s (status=%s): %s",
                     url,
                     resp.status,
-                    text[:300],
+                    _describe_body(text),
                 )
                 if resp.status in _FATAL_HTTP_STATUSES:
                     raise FcmRegisterHTTPError(
@@ -985,12 +1052,16 @@ class FcmRegister:
         }
         url = FCM_REGISTRATION + f"projects/{self.config.project_id}/registrations"
         if self._log_debug_verbose:
+            # The endpoint is FCM_SEND_URL + token; only the host is logged
+            # (which push service), never a prefix of the token, and the
+            # p256dh key only by its length: a redacted tail is still a
+            # stable fragment of the subscription (AGENTS.md section 5).
             _logger.debug(
-                "FCM registration data (url=%s): endpoint=%s…, appPubKey=%s, p256dh=%s…",
+                "FCM registration data (url=%s): endpoint_host=%s, appPubKey=%s, p256dh_len=%d",
                 url,
-                (payload["web"]["endpoint"][:48] + "…"),
+                urlsplit(payload["web"]["endpoint"]).netloc,
                 bool(payload["web"]["applicationPubKey"]),
-                self._redact(payload["web"]["p256dh"]),
+                len(payload["web"]["p256dh"]),
             )
 
         last_error: str | Exception | None = None
@@ -1014,7 +1085,7 @@ class FcmRegister:
                             attempt,
                             retries,
                             status,
-                            text[:400],
+                            _describe_body(text),
                         )
                         if status in _FATAL_HTTP_STATUSES:
                             # Retrying 401/404 with the same payload only
@@ -1028,17 +1099,21 @@ class FcmRegister:
             except Exception as e:
                 last_error = e
                 _logger.error(
-                    "Error during FCM register at %s (attempt %d/%d)",
+                    "Error during FCM register at %s (attempt %d/%d) (%s at %s)",
                     url,
                     attempt,
                     retries,
-                    exc_info=e,
+                    describe_exception(e),
+                    exception_origin(e),
                 )
                 await asyncio.sleep(1)
 
         if isinstance(last_error, Exception):
             _logger.error(
-                "FCM register ultimately failed at %s", url, exc_info=last_error
+                "FCM register ultimately failed at %s: %s at %s",
+                url,
+                describe_exception(last_error),
+                exception_origin(last_error),
             )
         return None
 
@@ -1066,8 +1141,9 @@ class FcmRegister:
                 raise
             except Exception as e:
                 _logger.warning(
-                    "Existing credentials check-in failed; re-registering",
-                    exc_info=e,
+                    "Existing credentials check-in failed; re-registering (%s at %s)",
+                    describe_exception(e),
+                    exception_origin(e),
                 )
 
         self.credentials = await self.register()
@@ -1076,7 +1152,11 @@ class FcmRegister:
             try:
                 self.credentials_updated_callback(credentials)
             except Exception as e:  # avoid caller breaking the flow
-                _logger.debug("credentials_updated_callback raised", exc_info=e)
+                _logger.debug(
+                    "credentials_updated_callback raised (%s at %s)",
+                    describe_exception(e),
+                    exception_origin(e),
+                )
 
         if credentials is None:
             raise RuntimeError("Registration did not yield credentials")
@@ -1090,7 +1170,11 @@ class FcmRegister:
             try:
                 self.credentials_updated_callback(self.credentials)
             except Exception as e:
-                _logger.debug("credentials_updated_callback raised", exc_info=e)
+                _logger.debug(
+                    "credentials_updated_callback raised (%s at %s)",
+                    describe_exception(e),
+                    exception_origin(e),
+                )
         if self.credentials is None:
             raise RuntimeError("Fallback registration did not yield credentials")
         return self.credentials
@@ -1128,7 +1212,11 @@ class FcmRegister:
             # than rotating a working android_id/keys via a full register().
             raise
         except Exception as e:
-            _logger.debug("Check-in exception detail", exc_info=e)
+            _logger.debug(
+                "Check-in exception detail (%s at %s)",
+                describe_exception(e),
+                exception_origin(e),
+            )
             return await self._fallback_full_register(
                 "Check-in with existing identity failed"
             )
@@ -1165,7 +1253,11 @@ class FcmRegister:
             try:
                 self.credentials_updated_callback(res)
             except Exception as e:
-                _logger.debug("credentials_updated_callback raised", exc_info=e)
+                _logger.debug(
+                    "credentials_updated_callback raised (%s at %s)",
+                    describe_exception(e),
+                    exception_origin(e),
+                )
 
         # Step 4: Best-effort unregister of the now-orphaned OLD subscription.
         # Runs only AFTER the new registration is fully secured and persisted,
@@ -1193,9 +1285,14 @@ class FcmRegister:
             raise RuntimeError(
                 "Unable to establish subscription with Google Cloud Messaging."
             )
+        # The mapping carries the AidLogin pair (android_id, security_token)
+        # next to the token: name the fields and the token length, never a
+        # tail of the token (a stable fragment of the subscription) and never
+        # the mapping itself (AGENTS.md section 5).
         self._log_verbose(
-            "GCM subscription: %s",
-            {**gcm_data, "token": self._redact(gcm_data.get("token"))},
+            "GCM subscription: fields=%s token_len=%d",
+            sorted(gcm_data),
+            len(gcm_data.get("token") or ""),
         )
 
         fcm_data = await self.fcm_install_and_register(gcm_data, keys)

@@ -1936,12 +1936,14 @@ class GoogleFindMyAPI:
 
             response_hex, _response_uuid = result
             _LOGGER.info("Play Sound (async) submitted successfully for %s", device_id)
+            # Byte count only: the body is never parsed
+            # (docs/PLAY_SOUND_ARCHITECTURE.md) and raw API payloads are never
+            # logged (AGENTS.md section 5).
             _LOGGER.debug(
-                "Play Sound Nova response for %s (uuid=%s): %d bytes: %s",
+                "Play Sound Nova response for %s (uuid=%s): %d bytes",
                 device_id,
                 request_uuid[:8] if request_uuid else "none",
                 len(response_hex) // 2 if response_hex else 0,
-                response_hex[:200] if response_hex else "(empty)",
             )
             return PlaySoundResult(
                 SoundDispatchOutcome.ACCEPTED, cancel_key=request_uuid
@@ -2184,11 +2186,12 @@ class GoogleFindMyAPI:
                     device_id,
                 )
             if submitted:
+                # Byte count only: the body is never parsed (see NOTE above)
+                # and raw API payloads are never logged (AGENTS.md section 5).
                 _LOGGER.debug(
-                    "Stop Sound Nova response for %s: %d bytes: %s",
+                    "Stop Sound Nova response for %s: %d bytes",
                     device_id,
                     len(result_hex) // 2 if result_hex else 0,
-                    result_hex[:200] if result_hex else "(empty)",
                 )
             else:
                 _LOGGER.error(

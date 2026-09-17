@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import types
 from dataclasses import dataclass
 from typing import Any
@@ -20,6 +21,7 @@ from custom_components.googlefindmy.Auth.firebase_messaging.fcmregister import (
     FcmRegister,
     FcmRegisterConfig,
     FcmRegisterHTTPError,
+    _classify_error_code,
 )
 
 # Coroutine regression tests below carry an explicit ``@pytest.mark.asyncio``
@@ -1234,6 +1236,29 @@ async def test_reregister_unregister_error_is_visible_at_debug(
 
 
 @pytest.mark.asyncio
+async def test_reregister_unregister_error_free_text_stays_out_of_log(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The unregister `Error=` parser classifies the value like `gcm_register`.
+
+    Same class as the register path: a server that echoes an identifier
+    after `Error=` must not reach the DEBUG record verbatim.
+    """
+    echoed = "account 5738291047365182930 rejected"
+    session = _FakeSession(
+        [_FakeResponse(200, f"Error={echoed}", {"Content-Type": "text/plain"})]
+    )
+    register = _build_reregister(session, old_app_id=_OLD_APP_ID)
+
+    with caplog.at_level(logging.DEBUG):
+        await register.reregister_keeping_identity()
+
+    logged = "\n".join(record.getMessage() for record in caplog.records)
+    assert "5738291047365182930" not in logged
+    assert f"ineffective (Error=UNRECOGNIZED ({len(echoed)} chars), ignored)" in logged
+
+
+@pytest.mark.asyncio
 async def test_reregister_unregister_no_marker_is_visible_at_debug(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -1273,3 +1298,389 @@ async def test_reregister_unregister_network_failure_is_visible_at_debug(
     logged = "\n".join(record.getMessage() for record in caplog.records)
     assert "failed (ignored, best-effort)" in logged
     assert _OLD_APP_ID not in logged  # still redacted
+
+
+class _JsonFakeSession:
+    """Session stub for ``fcm_register``, which posts ``json=`` not ``data=``."""
+
+    def __init__(self, responses: list[_FakeResponse]) -> None:
+        self._responses = responses
+        self.calls: list[dict[str, Any]] = []
+
+    def post(
+        self, *, url: str, headers: dict[str, str], json: dict[str, Any], timeout: Any
+    ) -> _FakeResponse:
+        self.calls.append({"url": url, "json": json, "headers": dict(headers)})
+        return self._responses.pop(0)
+
+
+@pytest.mark.asyncio
+async def test_fcm_register_verbose_log_keeps_endpoint_host_not_token(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The verbose registration log names the push host, never the token,
+    and logs the p256dh key by length only.
+
+    The endpoint is ``FCM_SEND_URL + token``; a 48-character prefix of it used
+    to reach the DEBUG log, twelve characters of which were the subscription
+    token (`AGENTS.md` section 5: tokens are never logged). The host is the
+    diagnostic (which push service); the path is the secret. The p256dh key
+    used to be logged with its redacted tail, a stable fragment of the
+    subscription; only its length remains.
+    """
+    token = "dq9x3EtH2kY:APA91bF0VzWc8ghUGrOpN1JmQ5aTe4bRxL7sKdZyCvIiHpMuWn"
+    # A real p256dh key is 87 base64url characters (an uncompressed P-256
+    # point); a redacted tail of it is a stable fragment of the subscription,
+    # so only its length may be logged.
+    p256dh = "BNcRdreALRFXTkOOUHK1EtK2wtaz5Ry4YfYCA_0QTpQtUbVlUls0VJXg7A8u-Ts1XbjhazAkj7I99e8QcYP7DkM"
+
+    class _R(_FakeResponse):
+        async def json(self) -> dict[str, Any]:
+            return {"token": "fcm-token"}
+
+    session = _JsonFakeSession([_R(200, "{}", {})])
+    config = FcmRegisterConfig(
+        project_id="proj",
+        app_id="app",
+        api_key="key",
+        messaging_sender_id="1234567890123",
+        bundle_id="bundle",
+    )
+    register = FcmRegister(config, http_client_session=session)
+    register._log_debug_verbose = True
+
+    with caplog.at_level(logging.DEBUG):
+        await register.fcm_register(
+            {"token": token},
+            {"token": "inst-token"},
+            {"public": p256dh, "private": "priv", "secret": "sec"},
+        )
+
+    logged = "\n".join(
+        record.getMessage()
+        for record in caplog.records
+        if "FCM registration data" in record.getMessage()
+    )
+    assert logged, "verbose registration record missing"
+    assert f"p256dh_len={len(p256dh)}" in logged
+    assert all(p256dh[i : i + 6] not in logged for i in range(0, len(p256dh) - 5)), (
+        "a window of the p256dh key reached the log"
+    )
+    # Exact host, not a substring: the log names the push service and
+    # nothing else of the endpoint.
+    host_match = re.search(r"endpoint_host=(\S+),", logged)
+    assert host_match is not None, logged
+    assert host_match.group(1) == "fcm.googleapis.com"
+    assert all(token[i : i + 8] not in logged for i in range(0, len(token) - 7)), (
+        "a window of the subscription token reached the log"
+    )
+
+
+class _CheckinOkResponse(_FakeResponse):
+    """A 200 check-in reply whose body is a serialised ``AndroidCheckinResponse``."""
+
+    def __init__(self, body: bytes) -> None:
+        super().__init__(200, "", {})
+        self._body = body
+
+    async def read(self) -> bytes:
+        return self._body
+
+
+@pytest.mark.asyncio
+async def test_gcm_check_in_verbose_log_omits_credentials(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The verbose check-in record names fields, never the credential values.
+
+    The response carries ``android_id`` and ``security_token``; both used to
+    reach the DEBUG log as a full JSON dump of the message (`AGENTS.md`
+    section 5: tokens and credentials are never logged).
+    """
+    from custom_components.googlefindmy.Auth.firebase_messaging.proto.checkin_pb2 import (
+        AndroidCheckinResponse,
+    )
+
+    android_id = 5_738_291_047_365_182_930
+    security_token = 8_361_940_275_183_064_927
+    reply = AndroidCheckinResponse()
+    reply.stats_ok = True
+    reply.android_id = android_id
+    reply.security_token = security_token
+    session = _SequencedCheckinSession([_CheckinOkResponse(reply.SerializeToString())])
+    register = FcmRegister(_checkin_config(), http_client_session=session)
+    register._log_debug_verbose = True
+
+    with caplog.at_level(logging.DEBUG):
+        result = await register.gcm_check_in(1, 2)
+
+    assert result is not None
+    assert result["androidId"] == str(android_id)
+    logged = "\n".join(record.getMessage() for record in caplog.records)
+    assert str(android_id) not in logged
+    assert str(security_token) not in logged
+    assert "GCM check-in response: fields=" in logged
+    assert "security_token" in logged  # the field name is the diagnostic
+
+
+@pytest.mark.asyncio
+async def test_register_verbose_log_omits_gcm_credentials(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The verbose `GCM subscription` record names fields, never the values.
+
+    `gcm_check_in_and_register()` returns the token together with
+    ``android_id`` and ``security_token`` (the AidLogin pair). The record used
+    to expand the whole mapping and redact only ``token``; the two credentials
+    reached the DEBUG log in full (`AGENTS.md` section 5).
+    """
+    android_id = 5_738_291_047_365_182_930
+    security_token = 8_361_940_275_183_064_927
+    token = "dq9x3EtH2kY:APA91bF0VzWc8ghUGrOpN1JmQ5aTe4bRxL7sKdZyCvIiHpMuWn"
+    gcm_data = {
+        "token": token,
+        "app_id": "app",
+        "android_id": android_id,
+        "security_token": security_token,
+    }
+
+    async def fake_gcm(*_: object) -> dict[str, object]:
+        return dict(gcm_data)
+
+    async def fake_fcm(*_: object) -> dict[str, object]:
+        return {"installation": {"token": "inst"}, "registration": {"token": "reg"}}
+
+    register = FcmRegister(_checkin_config())
+    register._log_debug_verbose = True
+    register.generate_keys = lambda: {"public": "p", "private": "s", "secret": "a"}  # type: ignore[method-assign]
+    register.gcm_check_in_and_register = fake_gcm  # type: ignore[method-assign]
+    register.fcm_install_and_register = fake_fcm  # type: ignore[method-assign]
+
+    with caplog.at_level(logging.DEBUG):
+        result = await register.register()
+
+    assert result["gcm"] == gcm_data
+    logged = "\n".join(record.getMessage() for record in caplog.records)
+    assert str(android_id) not in logged
+    assert str(security_token) not in logged
+    assert all(token[i : i + 8] not in logged for i in range(0, len(token) - 7)), (
+        "a window of the subscription token reached the log"
+    )
+    assert "GCM subscription: fields=" in logged
+    assert "security_token" in logged  # the field name is the diagnostic
+    assert f"token_len={len(token)}" in logged
+    assert token[-6:] not in logged  # no tail either: a stable fragment
+
+
+@pytest.mark.asyncio
+async def test_gcm_register_error_line_keeps_free_text_out_of_log(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A structured `Error=` line is logged as a code, never as its text.
+
+    The `/c2dm/register3` body `Error=<value>` used to reach the WARNING
+    and the final ERROR record verbatim (upper-cased), so a server that
+    echoes a token or an account identifier after `Error=` leaked it past
+    `_describe_body`, which only covers the unstructured branch.
+    """
+    echoed = "ya29.a0AfB_byDq9x3EtH2kY7VzWc8ghUGrOpN1JmQ5aTe4bRxL7sKdZyCvIiHpMuWn"  # nosemgrep: generic.secrets.security.detected-google-oauth-access-token.detected-google-oauth-access-token
+    responses = [
+        _FakeResponse(200, f"Error={echoed}", {"Content-Type": "text/plain"}),
+        _FakeResponse(200, "Error=INVALID_SENDER", {"Content-Type": "text/plain"}),
+    ]
+    session = _FakeSession(responses)
+    register = FcmRegister(_checkin_config(), http_client_session=session)
+    register._log_debug_verbose = True  # the request record is verbose-only
+
+    async def fast_sleep(_: float) -> None:
+        return None
+
+    monkeypatch.setattr(asyncio, "sleep", fast_sleep)
+
+    android_id = 5_738_291_047_365_182_930
+    with caplog.at_level(logging.DEBUG):
+        result = await register.gcm_register(
+            {"androidId": android_id, "securityToken": 2}, retries=2
+        )
+
+    assert result is None
+    logged = "\n".join(record.getMessage() for record in caplog.records)
+    for window in _windows(echoed.upper()):
+        assert window not in logged, "a window of the echoed value reached the log"
+    assert f"Error=UNRECOGNIZED ({len(echoed)} chars)" in logged
+    assert "Error=INVALID_SENDER" in logged  # a documented code stays
+    # The request record names the android_id by presence, never by a tail.
+    assert "device_set=True" in logged
+    assert str(android_id)[-6:] not in logged
+
+
+def test_classify_error_code_shapes() -> None:
+    """Documented codes pass, anything else is sized; an empty value stays falsy."""
+    assert (
+        _classify_error_code(" phone_registration_error ") == "PHONE_REGISTRATION_ERROR"
+    )
+    assert _classify_error_code("INVALID_SENDER") == "INVALID_SENDER"
+    assert _classify_error_code("INVALID_PARAMETERS") == "INVALID_PARAMETERS"
+    assert _classify_error_code("ACCOUNT_12345") == "UNRECOGNIZED (13 chars)"
+    assert _classify_error_code("tok.a0AfB_x") == "UNRECOGNIZED (11 chars)"
+    # Identifier shape is not enough: only the documented codes pass.
+    assert _classify_error_code("SECRETAUTHTOKEN") == "UNRECOGNIZED (15 chars)"
+    assert _classify_error_code("NOT_A_DOCUMENTED_CODE") == "UNRECOGNIZED (21 chars)"
+    assert _classify_error_code("   ") == ""  # falsy: caller keeps the no-marker branch
+
+
+# ---------------------------------------------------------------------
+# Error bodies never reach the log (AGENTS.md section 5; Auth AGENTS.md
+# "Logging": response bodies stay out of the message). Each non-OK path used
+# to quote a slice of the body; the records now carry `_describe_body`.
+# ---------------------------------------------------------------------
+
+_ERROR_PAGE = (
+    "<!DOCTYPE html><html><body>Error 400: the request parameter "
+    "echo=dq9x3EtH2kY:APA91bF0VzWc8ghUGrOpN1JmQ5aTe4bRxL7sKdZyCvIiHpMuWn "
+    "was rejected</body></html>"
+)
+
+
+def _windows(value: str) -> list[str]:
+    return [value[i : i + 8] for i in range(0, len(value) - 7)]
+
+
+@pytest.mark.parametrize(
+    ("text", "kind"),
+    [
+        ("", "empty"),
+        ("  \n", "empty"),
+        ("<html>", "html"),
+        ('{"error": 1}', "json"),
+        ("[1]", "json"),
+        ("Error=PHONE_REGISTRATION_ERROR", "error-marker"),
+        ("token=abc", "text"),
+    ],
+)
+def test_describe_body_names_the_class_and_length(text: str, kind: str) -> None:
+    from custom_components.googlefindmy.Auth.firebase_messaging.fcmregister import (
+        _describe_body,
+    )
+
+    assert _describe_body(text) == f"kind={kind} len={len(text)}"
+
+
+@pytest.mark.asyncio
+async def test_gcm_check_in_non_ok_log_omits_body(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    session = _SequencedCheckinSession(
+        [_FakeResponse(500, _ERROR_PAGE, {"Content-Type": "text/html"})] * 8
+    )
+    register = FcmRegister(_checkin_config(), http_client_session=session)
+    monkeypatch.setattr(asyncio, "sleep", _fast_sleep)
+
+    with caplog.at_level(logging.DEBUG):
+        assert await register.gcm_check_in(1, 2) is None
+
+    assert f"body=kind=html len={len(_ERROR_PAGE)}" in caplog.text
+    assert all(w not in caplog.text for w in _windows(_ERROR_PAGE))
+
+
+@pytest.mark.asyncio
+async def test_gcm_register_unexpected_response_log_omits_body(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    session = _FakeSession(
+        [_FakeResponse(503, _ERROR_PAGE, {"Content-Type": "text/html"})] * 2
+    )
+    register = FcmRegister(_checkin_config(), http_client_session=session)
+    monkeypatch.setattr(asyncio, "sleep", _fast_sleep)
+
+    with caplog.at_level(logging.DEBUG):
+        result = await register.gcm_register(
+            {"androidId": 1, "securityToken": 2}, retries=2
+        )
+
+    assert result is None
+    assert "Unexpected register response (status=503" in caplog.text
+    assert f"kind=html len={len(_ERROR_PAGE)}" in caplog.text
+    assert all(w not in caplog.text for w in _windows(_ERROR_PAGE))
+
+
+@pytest.mark.asyncio
+async def test_gcm_register_plain_text_response_log_omits_body(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The non-HTML twin of the unexpected-response branch (no token=, no Error=)."""
+    body = "service unavailable; request echo=dq9x3EtH2kY:APA91bF0VzWc8ghUGrOpN1Jm"
+    session = _FakeSession(
+        [_FakeResponse(503, body, {"Content-Type": "text/plain"})] * 2
+    )
+    register = FcmRegister(_checkin_config(), http_client_session=session)
+    monkeypatch.setattr(asyncio, "sleep", _fast_sleep)
+
+    with caplog.at_level(logging.DEBUG):
+        result = await register.gcm_register(
+            {"androidId": 1, "securityToken": 2}, retries=2
+        )
+
+    assert result is None
+    assert f"kind=text len={len(body)}" in caplog.text
+    assert all(w not in caplog.text for w in _windows(body))
+
+
+@pytest.mark.asyncio
+async def test_fcm_install_non_ok_log_omits_body(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    session = _JsonFakeSession(
+        [_FakeResponse(503, _ERROR_PAGE, {"Content-Type": "text/html"})]
+    )
+    register = FcmRegister(_checkin_config(), http_client_session=session)
+
+    with caplog.at_level(logging.DEBUG):
+        assert await register.fcm_install() is None
+
+    assert f"kind=html len={len(_ERROR_PAGE)}" in caplog.text
+    assert all(w not in caplog.text for w in _windows(_ERROR_PAGE))
+
+
+@pytest.mark.asyncio
+async def test_fcm_register_non_ok_log_omits_body(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    session = _JsonFakeSession(
+        [_FakeResponse(503, _ERROR_PAGE, {"Content-Type": "text/html"})] * 2
+    )
+    register = FcmRegister(_checkin_config(), http_client_session=session)
+    monkeypatch.setattr(asyncio, "sleep", _fast_sleep)
+
+    with caplog.at_level(logging.DEBUG):
+        result = await register.fcm_register(
+            {"token": "t"},
+            {"token": "inst"},
+            {"public": "p", "private": "k", "secret": "s"},
+        )
+
+    assert result is None
+    assert f"kind=html len={len(_ERROR_PAGE)}" in caplog.text
+    assert all(w not in caplog.text for w in _windows(_ERROR_PAGE))
+
+
+@pytest.mark.asyncio
+async def test_checkin_transient_warning_withholds_producer_text(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The check-in retry warning prints a transport error by type and size."""
+    echoed = "connection refused for token ECHOED-TOKEN-4f8xLEAK"
+    session = _SequencedCheckinSession([RuntimeError(echoed)] * 8)
+    creds = {"gcm": {"android_id": 1, "security_token": 2}}
+    register = FcmRegister(_checkin_config(), creds, http_client_session=session)
+    monkeypatch.setattr(asyncio, "sleep", _fast_sleep)
+    caplog.set_level(logging.WARNING, logger="custom_components.googlefindmy")
+
+    with pytest.raises(Exception):  # noqa: B017 - the loop re-raises the last transient error
+        await register.checkin_or_register()
+
+    warnings = [r for r in caplog.records if "GCM check-in error" in r.message]
+    assert warnings
+    for record in warnings:
+        assert "4f8xLEAK" not in record.getMessage()
+        assert f"RuntimeError ({len(echoed)} chars withheld)" in record.getMessage()

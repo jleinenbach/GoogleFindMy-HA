@@ -30,7 +30,6 @@ import binascii
 import contextvars
 import logging
 import random
-import re
 import time
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
@@ -83,32 +82,11 @@ from ..const import (
 )
 
 if TYPE_CHECKING:
-    from bs4 import BeautifulSoup as _BeautifulSoupType
     from homeassistant.core import HomeAssistant
 else:
-    _BeautifulSoupType = Any
     HomeAssistant = Any
 
-_beautiful_soup_factory: Callable[[str, str], _BeautifulSoupType] | None
-try:
-    from bs4 import BeautifulSoup as _bs_factory
-except (
-    ImportError
-):  # pragma: no cover - optional dependency, covered via fallback branch
-    _beautiful_soup_factory = None
-    _BS4_AVAILABLE = False
-else:
-    _beautiful_soup_factory = cast(
-        "Callable[[str, str], _BeautifulSoupType]", _bs_factory
-    )
-    _BS4_AVAILABLE = True
-
 _LOGGER = logging.getLogger(__name__)
-
-if not _BS4_AVAILABLE:
-    _LOGGER.debug(
-        "BeautifulSoup4 not installed, error response beautification disabled."
-    )
 
 # --- Retry constants ---
 NOVA_MAX_RETRIES = 6
@@ -249,106 +227,99 @@ def _compute_delay(attempt: int, retry_after: str | None) -> float:
     return min(delay, NOVA_MAX_RETRY_AFTER_S)
 
 
-# --- PII Redaction ---
+# --- Error response description ---
 
-_RE_BEARER = re.compile(r"Bearer\s+[A-Za-z0-9\-\._~\+\/]+=*", re.I)
-_RE_EMAIL = re.compile(r"([A-Za-z0-9._%+-])([A-Za-z0-9._%+-]*)(@[^,\s]+)")
-_RE_HEX16 = re.compile(r"\b[0-9a-fA-F]{16,}\b")
-
-
-def _redact(s: str) -> str:
-    """Redact sensitive information from a string for safe logging."""
-    s = _RE_BEARER.sub("Bearer <redacted>", s)
-    s = _RE_EMAIL.sub(r"\1***\3", s)
-    s = _RE_HEX16.sub("<hex-redacted>", s)
-    return s
-
-
-_ERROR_SNIPPET_MAX = 512
-
-
-def _beautify_text(resp_text: str) -> str:
-    """Return a human-readable snippet of a response body for logging purposes."""
-
-    if not resp_text:
-        return ""
-
-    if _BS4_AVAILABLE and _beautiful_soup_factory is not None:
-        try:
-            soup = _beautiful_soup_factory(resp_text, "html.parser")
-            # Extract from <body> only to avoid duplicating <title> content
-            node = soup.body if soup.body else soup
-            text_raw = node.get_text(separator=" ", strip=True)
-            text = str(text_raw)
-        except Exception as err:  # pragma: no cover - defensive logging path
-            _LOGGER.debug(
-                "Failed to parse error response body via BeautifulSoup: %s", err
-            )
-        else:
-            if text:
-                return text[:_ERROR_SNIPPET_MAX]
-
-    return resp_text[:_ERROR_SNIPPET_MAX]
+# google.rpc.Code, the closed enum behind `Status.code`; the name is the
+# diagnostic, the server-supplied `message` is free text and stays out of
+# the record (AGENTS.md section 5: raw API payloads are never logged).
+_RPC_CODE_NAMES: dict[int, str] = {
+    0: "OK",
+    1: "CANCELLED",
+    2: "UNKNOWN",
+    3: "INVALID_ARGUMENT",
+    4: "DEADLINE_EXCEEDED",
+    5: "NOT_FOUND",
+    6: "ALREADY_EXISTS",
+    7: "PERMISSION_DENIED",
+    8: "RESOURCE_EXHAUSTED",
+    9: "FAILED_PRECONDITION",
+    10: "ABORTED",
+    11: "OUT_OF_RANGE",
+    12: "UNIMPLEMENTED",
+    13: "INTERNAL",
+    14: "UNAVAILABLE",
+    15: "DATA_LOSS",
+    16: "UNAUTHENTICATED",
+}
 
 
-def _decode_error_response(content: bytes, http_status: int) -> str:
-    """Decode a Google API error response using smart fallback.
+def _classify_error_body(content: bytes) -> str:
+    """Content class of a non-protobuf error body: html, json, text or binary.
 
-    Google's Nova API returns errors in google.rpc.Status Protobuf format,
-    not as HTML/text. This function attempts to decode the Protobuf first,
-    falling back to text/HTML parsing for load balancer errors.
+    The class is what a load-balancer or maintenance page carries as a
+    diagnostic; its text echoes request parameters and is never logged.
+    Decided on the first non-blank byte, so a stray non-UTF-8 byte deep in
+    an HTML page or a run of leading whitespace does not change the class.
+    No `error-marker` class as in `fcmregister._describe_body`: the
+    `Error=CODE` line is the format of the Android auth endpoints, Nova
+    answers with google.rpc.Status, HTML or plain text.
+    """
+    head = content.lstrip()[:1]
+    if not head:
+        return "empty"
+    if head == b"<":
+        return "html"
+    if head in (b"{", b"["):
+        return "json"
+    probe = content.lstrip()[:64]
+    try:
+        probe.decode("utf-8")
+    except UnicodeDecodeError as err:
+        # A multi-byte character cut by the probe's edge is text, not binary:
+        # the undecodable run then reaches the end of the probe.
+        if err.end != len(probe):
+            return "binary"
+    return "text"
 
-    Args:
-        content: Raw response body bytes.
-        http_status: HTTP status code for context.
 
-    Returns:
-        Human-readable error message for logging.
+def _describe_error_response(content: bytes, http_status: int) -> str:
+    """Describe a Google API error response without quoting it.
 
-    Strategy:
-        1. Try to parse as google.rpc.Status Protobuf (primary)
-        2. Fall back to text/HTML parsing (for load balancer errors, etc.)
+    Google's Nova API returns errors as google.rpc.Status protobuf; load
+    balancers answer with HTML or text. The record names the HTTP status and,
+    for a Status, the RPC code by name plus the size of its message and the
+    number of detail messages; for anything else the content class and the
+    byte count. The body itself, the Status message included, is
+    server-supplied text and never reaches the log or an exception message
+    (AGENTS.md section 5; Auth AGENTS.md "Logging").
     """
     if not content:
         return f"HTTP {http_status} (empty response body)"
 
-    # --- Strategy 1: Try google.rpc.Status Protobuf decoding ---
     if _RPC_STATUS_AVAILABLE and RpcStatus is not None:
         try:
             status = RpcStatus()
             status.ParseFromString(content)
-
-            # Check if we got meaningful data (code or message present)
             if status.code or status.message:
-                rpc_code = status.code if status.code else http_status
-                rpc_message = (
-                    status.message if status.message else "No message provided"
+                code_name = _RPC_CODE_NAMES.get(status.code, "UNRECOGNIZED")
+                return (
+                    f"HTTP {http_status} - RPC {status.code} {code_name}, "
+                    f"message {len(status.message)} chars, "
+                    f"{len(status.details)} detail message(s)"
                 )
-
-                # Log details if present (for debugging)
-                if status.details:
-                    _LOGGER.debug(
-                        "RpcStatus contains %d detail message(s)", len(status.details)
-                    )
-
-                return f"HTTP {http_status} - RPC {rpc_code}: {rpc_message}"
         except ProtobufDecodeError:
-            # Not a valid Protobuf - fall through to text/HTML parsing
+            # Not a valid Protobuf - fall through to the content class
             _LOGGER.debug(
                 "Response body is not a valid google.rpc.Status Protobuf, "
-                "falling back to text parsing"
+                "falling back to content classification"
             )
         except Exception as exc:
             # Unexpected error during Protobuf parsing - log and fall through
             _LOGGER.debug("Unexpected error during RpcStatus decoding: %s", exc)
 
-    # --- Strategy 2: Fall back to text/HTML parsing ---
-    # This handles load balancer errors, maintenance pages, etc.
-    try:
-        text = content.decode(errors="ignore")
-        return _beautify_text(text) or f"HTTP {http_status} (non-decodable response)"
-    except Exception:
-        return f"HTTP {http_status} (failed to decode response body)"
+    return (
+        f"HTTP {http_status} body={_classify_error_body(content)}, {len(content)} bytes"
+    )
 
 
 # --- Custom Exceptions ---
@@ -1598,7 +1569,7 @@ async def async_nova_request(  # noqa: PLR0913,PLR0912,PLR0915
                         return cast(bytes, content).hex()
 
                     # Decode error response: try Protobuf first, then text/HTML
-                    text_snippet = _redact(_decode_error_response(content, status))
+                    text_snippet = _describe_error_response(content, status)
 
                     if status == HTTP_UNAUTHORIZED:
                         # 401 Retry Sequence (OAuth → AAS → ADM token chain):

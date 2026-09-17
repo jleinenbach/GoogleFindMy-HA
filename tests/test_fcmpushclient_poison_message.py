@@ -268,6 +268,10 @@ async def test_rate_limit_kicks_in_after_threshold(
         and "Skipping FCM message that failed to decrypt" in r.getMessage()
     ]
     assert len(skip_warnings) == 5
+    # The server-assigned persistent id is logged by length only (R-1).
+    for record in skip_warnings:
+        assert "poison-" not in record.getMessage()
+        assert "id_len=" in record.getMessage()
     # All 20 messages must still be acknowledged (rate limit applies to logs only).
     assert client._send_selective_ack.await_count == 20
 

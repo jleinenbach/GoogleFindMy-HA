@@ -49,6 +49,25 @@ class SpotApiEmptyResponseError(RuntimeError):
     """Raised when a SPOT API call returns an empty body where one was expected."""
 
 
+def _classify_body(body: bytes) -> str:
+    """Name the content class of an undecodable response body for the log.
+
+    Decided on the first non-whitespace byte: an HTML error page (`<`), a JSON
+    error (`{` or `[`), nothing at all, or binary. This is the diagnostic the
+    warning used to smuggle in as a 16-byte hex prefix; the class carries it
+    without the payload. Takes the whole body so that no slice of it appears
+    in the log call (`tests/test_guard_logging_payloads.py`).
+    """
+    stripped = body.lstrip()
+    if not stripped:
+        return "empty"
+    if stripped[:1] == b"<":
+        return "html"
+    if stripped[:1] in (b"{", b"["):
+        return "json"
+    return "binary"
+
+
 def _build_request_bytes() -> bytes:
     """Build and serialize the GetEidInfoForE2eeDevices protobuf request.
 
@@ -151,7 +170,7 @@ async def async_get_eid_info(
     # Defensive checks + diagnostics for trailers-only / empty payloads (sync-path fallback)
     if not response_bytes:
         _LOGGER.warning(
-            "GetEidInfoForE2eeDevices: empty/none response (len=0, pre=). "
+            "GetEidInfoForE2eeDevices: empty/none response (len=0, kind=empty). "
             "This often indicates an authentication issue (trailers-only with grpc-status!=0). "
             "If this persists after a token refresh, please re-authenticate your Google account."
         )
@@ -163,13 +182,14 @@ async def async_get_eid_info(
     try:
         eid_info.ParseFromString(response_bytes)
     except DecodeError:
-        # Provide minimal, high-signal context to help diagnose corrupted/incompatible payloads
+        # Minimal, high-signal context: length and content class, never the
+        # bytes themselves (AGENTS.md section 5: raw API payloads are not logged).
         _LOGGER.warning(
-            "GetEidInfoForE2eeDevices: protobuf DecodeError (len=%s, pre=%s). "
+            "GetEidInfoForE2eeDevices: protobuf DecodeError (len=%s, kind=%s). "
             "This may indicate a truncated/corrupted gRPC response or a server-side format change. "
             "If this persists, try re-authenticating.",
             len(response_bytes),
-            response_bytes[:16].hex(),
+            _classify_body(response_bytes),
         )
         raise
 
@@ -202,7 +222,7 @@ def get_eid_info() -> DeviceUpdate_pb2.GetEidInfoForE2eeDevicesResponse:
 
     if not response_bytes:
         _LOGGER.warning(
-            "GetEidInfoForE2eeDevices: empty/none response (len=0, pre=). "
+            "GetEidInfoForE2eeDevices: empty/none response (len=0, kind=empty). "
             "This often indicates an authentication issue (trailers-only with grpc-status!=0). "
             "If this persists after a token refresh, please re-authenticate your Google account."
         )
@@ -215,11 +235,11 @@ def get_eid_info() -> DeviceUpdate_pb2.GetEidInfoForE2eeDevicesResponse:
         eid_info.ParseFromString(response_bytes)
     except DecodeError:
         _LOGGER.warning(
-            "GetEidInfoForE2eeDevices: protobuf DecodeError (len=%s, pre=%s). "
+            "GetEidInfoForE2eeDevices: protobuf DecodeError (len=%s, kind=%s). "
             "This may indicate a truncated/corrupted gRPC response or a server-side format change. "
             "If this persists, try re-authenticating.",
             len(response_bytes),
-            response_bytes[:16].hex(),
+            _classify_body(response_bytes),
         )
         raise
 

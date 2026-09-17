@@ -115,8 +115,44 @@ async def test_exchange_oauth_for_aas_missing_token_logs_warning(
     assert warnings, "Expected warning about missing Token key"
     warning = warnings[0]
     assert getattr(warning, "error_field_present") is True
-    assert getattr(warning, "response_keys") == ["Error"]
+    assert getattr(warning, "response_key_count") == 1
     assert getattr(warning, "user") == "u***@example.com"
+    assert getattr(warning, "error_kind") == "BadAuthentication"
+
+
+async def test_exchange_oauth_for_aas_undocumented_error_is_sized_not_copied(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A non-standard `Error` value never reaches the record or the exception.
+
+    gpsoauth hands the `Error` field through as the server sent it; only a
+    documented ClientLogin code is a kind, anything else is server text
+    (Auth `AGENTS.md`, "Logging") and is reported by size.
+    """
+    echoed = "Rejected token 4/0AfB_byDq9x3EtH2kY7Vz for user@example.com"
+
+    def fake_exchange(*_: Any, **__: Any) -> dict[str, Any]:
+        return {"Error": echoed, "ErrorDetails": "irrelevant"}
+
+    monkeypatch.setattr(aas_token_retrieval.gpsoauth, "exchange_token", fake_exchange)
+    caplog.set_level(logging.DEBUG, logger=aas_token_retrieval.__name__)
+
+    with pytest.raises(RuntimeError) as exc_info:
+        await aas_token_retrieval._exchange_oauth_for_aas(
+            "user@example.com", "oauth-secret-value", 0xDEADBEEF
+        )
+
+    assert f"kind=UNRECOGNIZED ({len(echoed)} chars)" in str(exc_info.value)
+    assert "4/0AfB_" not in str(exc_info.value)
+    warning = next(
+        r for r in caplog.records if "gpsoauth response missing token" in r.message
+    )
+    assert getattr(warning, "error_kind") == f"UNRECOGNIZED ({len(echoed)} chars)"
+    everything = "\n".join(
+        f"{r.getMessage()} {getattr(r, 'error_kind', '')}" for r in caplog.records
+    )
+    assert "4/0AfB_" not in everything
+    assert "Rejected token" not in everything
 
 
 async def test_async_get_aas_token_short_circuits_for_cached_master(
@@ -250,10 +286,13 @@ def test_clip_preserves_short_strings() -> None:
 
 
 def test_summarize_response_with_mapping() -> None:
-    """Mapping objects should be summarized with sorted keys."""
-    resp = {"B": 1, "A": 2, "C": 3}
+    """Mapping objects are summarized by key count: the names are part of the
+    server response and the summary ends up in a logged exception message."""
+    resp = {"B": 1, "A": 2, "Token": "aas_et/SECRET"}
     result = aas_token_retrieval._summarize_response(resp)
-    assert result == "dict(keys=[A, B, C])"
+    assert result == "dict(key_count=3)"
+    assert "Token" not in result
+    assert "SECRET" not in result
 
 
 def test_summarize_response_with_non_mapping() -> None:
@@ -903,3 +942,87 @@ async def test_exchange_oauth_missing_token_no_error_details(
     assert warnings
     # Check that error_field_present is False
     assert getattr(warnings[0], "error_field_present") is False
+
+
+def test_classify_gpsoauth_error_matches_documented_codes_case_insensitively() -> None:
+    """A documented code in any spelling maps to its documented spelling;
+    anything else is sized, never quoted."""
+    from custom_components.googlefindmy.Auth.gpsoauth_loader import (
+        classify_gpsoauth_error,
+    )
+
+    assert classify_gpsoauth_error("badauthentication") == "BadAuthentication"
+    assert classify_gpsoauth_error("BadAuthentication") == "BadAuthentication"
+    assert (
+        classify_gpsoauth_error("BadAuthentication for x@y")
+        == "UNRECOGNIZED (25 chars)"
+    )
+    assert classify_gpsoauth_error("") == ""
+
+
+@pytest.mark.asyncio
+async def test_async_get_aas_token_retry_records_withhold_producer_text(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The AAS retry loop logs a foreign exception by type and size only."""
+    echoed = "Rejected token aas_et/LEAKED for user@example.com"
+    cache = _DummyCache()
+    await cache.set(username_string, "user@example.com")
+
+    async def fake_generate(*, cache: Any) -> str:
+        raise RuntimeError(echoed)
+
+    monkeypatch.setattr(aas_token_retrieval, "_generate_aas_token", fake_generate)
+
+    async def _no_sleep(_: float) -> None:
+        return None
+
+    monkeypatch.setattr(aas_token_retrieval.asyncio, "sleep", _no_sleep)
+    caplog.set_level(logging.DEBUG, logger=aas_token_retrieval.__name__)
+
+    with pytest.raises(RuntimeError):
+        await aas_token_retrieval.async_get_aas_token(
+            cache=cache, retries=1, backoff=0.0
+        )
+
+    failed = [r for r in caplog.records if "generation failed" in r.message]
+    assert len(failed) >= 2
+    for record in failed:
+        assert "LEAKED" not in record.getMessage()
+        assert "user@example.com" not in record.getMessage()
+        assert f"RuntimeError ({len(echoed)} chars withheld)" in record.getMessage()
+
+
+@pytest.mark.asyncio
+async def test_exchange_oauth_for_aas_foreign_error_record_has_no_traceback(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A foreign exchange error is logged without traceback and without its text.
+
+    The last line of a rendered traceback is ``str(err)``; the record carries
+    ``describe_exception`` and ``exception_origin`` instead of ``exc_info``.
+    """
+    echoed = "server said: token ECHOED-TOKEN-4f8xLEAK is invalid"
+
+    def fake_exchange(*_: Any, **__: Any) -> dict[str, Any]:
+        raise RuntimeError(echoed)
+
+    monkeypatch.setattr(aas_token_retrieval.gpsoauth, "exchange_token", fake_exchange)
+    caplog.set_level(logging.DEBUG, logger=aas_token_retrieval.__name__)
+
+    with pytest.raises(RuntimeError):
+        await aas_token_retrieval._exchange_oauth_for_aas(
+            "user@example.com", "oauth-secret-value", 0xDEADBEEF
+        )
+
+    records = [
+        r
+        for r in caplog.records
+        if "gpsoauth exchange failed unexpectedly" in r.message
+    ]
+    assert len(records) == 1
+    record = records[0]
+    assert record.exc_info is None
+    assert "4f8xLEAK" not in record.getMessage()
+    assert f"RuntimeError ({len(echoed)} chars withheld)" in record.getMessage()
+    assert getattr(record, "error_kind") == "exchange_error"

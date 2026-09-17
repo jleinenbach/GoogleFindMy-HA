@@ -15,6 +15,11 @@ import subprocess
 from importlib import import_module
 from typing import TYPE_CHECKING, Any, Protocol
 
+# Imported at module load (integration setup runs in the executor): the probe
+# runs on the event loop, where a lazy ``import_module`` would be blocking
+# filesystem work (AGENTS.md 11.3).
+from google.protobuf.unknown_fields import UnknownFieldSet
+
 from google.protobuf.message import DecodeError, Message
 
 try:
@@ -128,6 +133,40 @@ def _get_text_format() -> Any:
     if _text_format_module is None:
         _text_format_module = import_module("google.protobuf.text_format")
     return _text_format_module
+
+
+def _unknown_field_numbers(message: Message) -> list[int]:
+    """Field numbers of the unknown fields a decoded message carries.
+
+    Read from the runtime's unknown-field set of the message and of every
+    known sub-message it holds (``str(message)`` omits unknown fields on
+    current protobuf runtimes, so the old probe never fired). The numbers are
+    schema drift diagnostics, the values behind them are wire content and are
+    not returned. No text serialisation: this runs on the event loop inside
+    the DEBUG branch of the device-list walk, twice per poll, and a
+    ``text_format`` pass over every device message would stall the loop for
+    large lists (``AGENTS.md`` 11.3, async-first).
+    """
+    if not isinstance(message, Message):
+        # Test doubles stand in for the message in the debug branch.
+        return []
+    numbers: set[int] = set()
+    pending: list[Message] = [message]
+    while pending:
+        current = pending.pop()
+        numbers.update(field.field_number for field in UnknownFieldSet(current))
+        for descriptor, value in current.ListFields():
+            # `message_type` is set for message-typed fields on every runtime;
+            # the upb descriptor has no `label`, so repeated is read from the
+            # value (map fields yield message values via `.values()`).
+            if descriptor.message_type is None:
+                continue
+            if isinstance(value, Message):
+                pending.append(value)
+            else:
+                items = value.values() if hasattr(value, "values") else value
+                pending.extend(item for item in items if isinstance(item, Message))
+    return sorted(numbers)
 
 
 class _DecryptLocationsCallable(Protocol):
@@ -281,9 +320,7 @@ def parse_device_update_protobuf(
             "Failed to decode Google Protobuf response (DeviceUpdate): %s",
             exc,
         )
-        raise NovaProtobufDecodeError(
-            f"DeviceUpdate decode failed: {exc}"
-        ) from exc
+        raise NovaProtobufDecodeError(f"DeviceUpdate decode failed: {exc}") from exc
     return device_update
 
 
@@ -303,9 +340,7 @@ def parse_device_list_protobuf(
             "Failed to decode Google Protobuf response (DevicesList): %s",
             exc,
         )
-        raise NovaProtobufDecodeError(
-            f"DevicesList decode failed: {exc}"
-        ) from exc
+        raise NovaProtobufDecodeError(f"DevicesList decode failed: {exc}") from exc
     return device_list
 
 
@@ -1016,17 +1051,16 @@ def get_devices_with_location(
                     ]
                     _LOGGER.debug("    -> locationInformation fields: %s", loc_fields)
 
-            device_str = str(device)
-            unknown_lines = [
-                line
-                for line in device_str.splitlines()
-                if line.strip() and line.strip()[0].isdigit()
-            ]
-            if unknown_lines:
+            unknown_numbers = _unknown_field_numbers(device)
+            if unknown_numbers:
+                # Field numbers only: the text-format lines carry the
+                # server-supplied values of those fields, which are raw API
+                # payload and never reach the log (AGENTS.md section 5).
                 _LOGGER.debug(
-                    "Device '%s' has UNKNOWN FIELDS: \n%s",
+                    "Device '%s' has UNKNOWN FIELDS: numbers=%s, count=%d",
                     device_name,
-                    "\n".join(unknown_lines),
+                    unknown_numbers,
+                    len(unknown_numbers),
                 )
 
         # Try decryption ONCE per device; share across all its canonic IDs

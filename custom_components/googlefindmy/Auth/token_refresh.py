@@ -28,6 +28,7 @@ import time
 from typing import TYPE_CHECKING
 
 from ..const import DOMAIN, TOKEN_REFRESH_COOLDOWN_S
+from .log_safety import describe_exception
 
 if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant
@@ -183,7 +184,7 @@ async def async_regenerate_fcm_token(
             _LOGGER.error(
                 "FCM token regeneration failed (entry: %s): %s",
                 entry_id,
-                err,
+                describe_exception(err),
             )
             return False
 
@@ -269,7 +270,7 @@ async def async_regenerate_adm_token(
             _LOGGER.error(
                 "ADM token regeneration failed for %s: %s",
                 masked_user,
-                err,
+                describe_exception(err),
             )
             return False
 

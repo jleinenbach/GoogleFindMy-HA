@@ -1010,3 +1010,57 @@ async def test_any_real_location_record(records: object, expected: bool) -> None
     report-less rows must return False so they cannot clear the reauth budget.
     """
     assert decrypt_locations.any_real_location_record(records) is expected
+
+
+async def test_diag_secrets_records_omit_key_material(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The `[DIAG-SECRETS]` DEBUG records describe structure, never bytes.
+
+    `AGENTS.md` section 5: key material is never logged. The structure record
+    used to carry the full hex of the encrypted identity key and the whole
+    registration message in text format (which prints the key as an escaped
+    string); the byte-scan record carried ten bytes on each side of the key.
+    Lengths, offsets and field names stay.
+    """
+    import hashlib
+
+    base_now = 1_700_100_000.0
+    monkeypatch.setattr(decrypt_locations.time, "time", lambda: base_now)
+
+    async def fake_identity_key(*_args: object, **_kwargs: object) -> list[bytes]:
+        return [b"\x41" * 32]
+
+    monkeypatch.setattr(
+        decrypt_locations, "async_retrieve_identity_key", fake_identity_key
+    )
+    key = hashlib.sha256(b"encrypted-identity-key").digest()
+    key_hex = key.hex()
+
+    update = DeviceUpdate_pb2.DeviceUpdate()
+    registration = update.deviceMetadata.information.deviceRegistration
+    registration.pairDate = int(base_now - 120)
+    registration.encryptedUserSecrets.creationDate.seconds = int(base_now - 60)
+    registration.encryptedUserSecrets.encryptedIdentityKey = key
+    caplog.set_level(logging.DEBUG)
+
+    await decrypt_locations.async_decrypt_location_response_locations(
+        update, cache=object()
+    )
+
+    text = caplog.text
+    assert key_hex not in text
+    assert all(key_hex[i : i + 8] not in text for i in range(0, len(key_hex) - 7)), (
+        "a window of the encrypted identity key reached the log"
+    )
+    # Text-format dump of the registration message (prints the key escaped).
+    assert "encryptedIdentityKey:" not in text
+    messages = [record.getMessage() for record in caplog.records]
+    assert any(
+        "[DIAG-SECRETS] Structure Analysis" in m and f"{len(key)} bytes" in m
+        for m in messages
+    )
+    assert any(
+        "[DIAG-SECRETS-BYTE-SCAN] Cloud key located" in m and "Prefix (" in m
+        for m in messages
+    ), "byte-scan record missing: the fixture no longer reaches that branch"

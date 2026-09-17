@@ -508,3 +508,73 @@ def test_register_coordinator_exposes_cache_and_tracks_push_updates(
         ("device-1", {"latitude": 1.0, "longitude": 2.0, "last_updated": 1234.0})
     ]
     assert coord.push_calls == [["device-1"]]
+
+
+@pytest.mark.asyncio
+async def test_unrouted_push_debug_record_omits_payload_bytes(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A push without a registered callback logs its length, never its bytes.
+
+    `AGENTS.md` section 5: raw API payloads are never logged. The record used
+    to carry `hex_prefix=` with 60 bytes of the push; the byte count is the
+    diagnostic, the content is the payload.
+    """
+    import hashlib
+    import logging
+
+    receiver = FcmReceiverHA()
+    raw = b"".join(hashlib.sha256(f"push-{i}".encode()).digest() for i in range(4))
+    hex_string = raw.hex()
+    payload = {
+        "data": {
+            "com.google.android.apps.adm.FCM_PAYLOAD": base64.b64encode(raw).decode(
+                "ascii"
+            )
+        }
+    }
+
+    async def _canonic(_hex: str) -> str:
+        return "canonic-id-0123456789"
+
+    monkeypatch.setattr(receiver, "_extract_canonic_id_async", _canonic)
+    caplog.set_level(logging.DEBUG)
+
+    await receiver._handle_notification_async("entry-1", payload)
+
+    text = caplog.text
+    assert hex_string not in text
+    assert all(
+        hex_string[i : i + 8] not in text for i in range(0, len(hex_string) - 7)
+    ), "a window of the push payload reached the log"
+    assert any(
+        "has no registered callback" in record.getMessage()
+        and f"payload_len={len(hex_string)}" in record.getMessage()
+        for record in caplog.records
+    )
+
+
+def test_token_routing_debug_record_omits_token(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The routing update names entries and a count, never a token prefix.
+
+    `AGENTS.md` section 5: tokens are never logged. Eight characters of the
+    push token used to reach the DEBUG record.
+    """
+    import logging
+
+    receiver = FcmReceiverHA()
+    token = "dq9x3EtH2kY:APA91bF0VzWc8ghUGrOpN1JmQ5aTe4bRxL7sKdZyCvIiHpMuWn"
+    caplog.set_level(logging.DEBUG)
+
+    receiver._update_token_routing(token, {"entry-a", "entry-b"})
+
+    messages = [
+        r.getMessage() for r in caplog.records if "push routing" in r.getMessage()
+    ]
+    assert messages, "routing record missing"
+    assert "entry-a,entry-b" in messages[0]
+    assert all(token[i : i + 8] not in caplog.text for i in range(0, len(token) - 7)), (
+        "a window of the push token reached the log"
+    )

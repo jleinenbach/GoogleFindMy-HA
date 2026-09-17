@@ -22,12 +22,14 @@ from custom_components.googlefindmy.exceptions import MissingTokenCacheError
 
 from .gpsoauth_loader import (
     GpsoauthModule,
+    classify_gpsoauth_error,
     load_gpsoauth_exceptions,
     require_gpsoauth,
 )
 from .gpsoauth_loader import (
     gpsoauth as _gpsoauth_proxy,
 )
+from .log_safety import describe_exception, exception_origin
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -37,6 +39,15 @@ _LOGGER = logging.getLogger(__name__)
 # independent of its (possibly HTTP-generic) message text. Kept at module scope
 # so tests can monkeypatch it, exactly like the AAS exchange path.
 gpsoauth_exceptions: ModuleType | None = load_gpsoauth_exceptions()
+
+
+class _ResponseShapeError(ValueError):
+    """The gpsoauth response had no usable shape (empty, no token field).
+
+    Raised by this module with a fixed, self-authored message so the
+    fall-through `RuntimeError` may quote it; a producer exception is not
+    quoted (its text may carry the server response, AGENTS.md R-1).
+    """
 
 
 class InvalidAasTokenError(RuntimeError):
@@ -78,6 +89,30 @@ def _is_invalid_aas_error_text(text: str, *, allow_http_generic: bool = False) -
         if "token" in lowered or "auth" in lowered or "credential" in lowered:
             return True
     return False
+
+
+_AAS_ERROR_MARKERS: tuple[str, ...] = (
+    "badauthentication",
+    "needsbrowser",
+    "unauthorized",
+    "forbidden",
+    "invalid",
+    "401",
+    "403",
+)
+
+
+def _describe_aas_error_text(text: str) -> str:
+    """Name the markers of a gpsoauth error text without quoting it.
+
+    The text is server output or a transport error string and may carry a
+    token or an e-mail; the description is what an exception message (logged
+    one hop later, AGENTS.md R-1) may carry: the markers that classified it
+    and its length.
+    """
+    lowered = text.lower()
+    markers = [marker for marker in _AAS_ERROR_MARKERS if marker in lowered]
+    return f"markers={markers} ({len(text)} chars)"
 
 
 _CLIENT_SIG: str = "38918a453d07199354f8b19af05ec6562ced5788"
@@ -138,7 +173,11 @@ async def _resolve_android_id(*, cache: TokenCache, username: str) -> int:
     try:
         fcm_creds = await cache.get("fcm_credentials")
     except Exception as err:  # noqa: BLE001
-        _LOGGER.debug("Failed to read FCM credentials from cache", exc_info=err)
+        _LOGGER.debug(
+            "Failed to read FCM credentials from cache (%s at %s)",
+            describe_exception(err),
+            exception_origin(err),
+        )
         fcm_creds = None
 
     android_id = _extract_android_id_from_credentials(fcm_creds)
@@ -147,14 +186,20 @@ async def _resolve_android_id(*, cache: TokenCache, username: str) -> int:
             await cache.set(cache_key, android_id)
         except Exception as err:  # noqa: BLE001
             _LOGGER.debug(
-                "Failed to persist android_id from FCM credentials", exc_info=err
+                "Failed to persist android_id from FCM credentials (%s at %s)",
+                describe_exception(err),
+                exception_origin(err),
             )
         return android_id
 
     try:
         cached_android_id = await cache.get(cache_key)
     except Exception as err:  # noqa: BLE001
-        _LOGGER.debug("Failed to read cached android_id", exc_info=err)
+        _LOGGER.debug(
+            "Failed to read cached android_id (%s at %s)",
+            describe_exception(err),
+            exception_origin(err),
+        )
         cached_android_id = None
 
     android_id = _coerce_android_id(cached_android_id, "cache")
@@ -169,7 +214,11 @@ async def _resolve_android_id(*, cache: TokenCache, username: str) -> int:
     try:
         await cache.set(cache_key, android_id)
     except Exception as err:  # noqa: BLE001
-        _LOGGER.debug("Failed to persist generated android_id", exc_info=err)
+        _LOGGER.debug(
+            "Failed to persist generated android_id (%s at %s)",
+            describe_exception(err),
+            exception_origin(err),
+        )
     return android_id
 
 
@@ -213,7 +262,7 @@ def _perform_oauth_sync(
             client_sig=_CLIENT_SIG,
         )
         if not auth_response:
-            raise ValueError("No response from gpsoauth.perform_oauth")
+            raise _ResponseShapeError("No response from gpsoauth.perform_oauth")
 
         token_value = auth_response.get("Token")
         if not isinstance(token_value, str) or not token_value:
@@ -229,11 +278,21 @@ def _perform_oauth_sync(
             error_detail, allow_http_generic=True
         ):
             raise InvalidAasTokenError(
-                f"gpsoauth rejected the AAS token while requesting scope '{scope}': {error_detail}"
+                # The Error field is server text and the exception message is
+                # logged one hop later; keep the kind, drop the wording (R-1).
+                f"gpsoauth rejected the AAS token while requesting scope '{scope}': "
+                f"{classify_gpsoauth_error(error_detail)}"
             )
-        raise KeyError("Neither 'Token' nor 'Auth' found in gpsoauth response")
+        raise _ResponseShapeError(
+            "Neither 'Token' nor 'Auth' found in gpsoauth response"
+        )
     except InvalidAasTokenError:
         raise
+    except _ResponseShapeError as err:
+        # Self-authored message, safe to quote.
+        raise RuntimeError(
+            f"Failed to get auth token for scope '{scope}': {err}"
+        ) from err
     except Exception as err:  # noqa: BLE001
         message: str = str(err)
         # A typed gpsoauth ``AuthError`` is a definitive credential rejection,
@@ -249,7 +308,8 @@ def _perform_oauth_sync(
         )
         if is_typed_autherror:
             raise InvalidAasTokenError(
-                f"gpsoauth rejected the AAS token while requesting scope '{scope}': {message}"
+                f"gpsoauth rejected the AAS token while requesting scope '{scope}': "
+                f"{_describe_aas_error_text(message)}"
             ) from err
         # Generic exception string: keep ``allow_http_generic=False`` so a
         # transport/network error whose text merely contains "unauthorized" or
@@ -257,7 +317,8 @@ def _perform_oauth_sync(
         # gpsoauth-specific vocabulary may promote this to InvalidAasTokenError.
         if message and _is_invalid_aas_error_text(message):
             raise InvalidAasTokenError(
-                f"gpsoauth rejected the AAS token while requesting scope '{scope}': {message}"
+                f"gpsoauth rejected the AAS token while requesting scope '{scope}': "
+                f"{_describe_aas_error_text(message)}"
             ) from err
         # AP-2 field probe (typed-vs-untyped denial). The vendor auth endpoint is
         # reverse-engineered: a genuine credential denial arrives as an ``Error``
@@ -288,7 +349,8 @@ def _perform_oauth_sync(
             http_auth_markers,
         )
         raise RuntimeError(
-            f"Failed to get auth token for scope '{scope}': {err}"
+            f"Failed to get auth token for scope '{scope}': "
+            f"{type(err).__name__} ({len(message)} chars)"
         ) from err
 
 
