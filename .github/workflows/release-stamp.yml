@@ -23,14 +23,17 @@ name: Release Stamp
 #
 # Loop safety: the stamp commit carries [skip ci], and this workflow triggers only
 # on `release: published`, never on `push`. A push made with GITHUB_TOKEN does not,
-# by GitHub design, trigger further workflow runs either.
+# by GitHub design, trigger further workflow runs either. The fallback PR below is
+# different: GitHub creates the pull_request runs for a GITHUB_TOKEN-created PR in
+# an approval-required state (docs: actions/concepts/security/github_token), so
+# they wait for a maintainer instead of running on their own.
 
 on:
   release:
     types: [published]
 
-# Least-privilege: contents for the stamp push + ZIP upload; pull-requests only
-# for the dormant protected-branch fallback leg (see "Resolve the owning branch").
+# Least-privilege: contents for the ZIP upload + stamp push; pull-requests only
+# for the branch-rules fallback leg (see "Resolve the owning branch").
 permissions:
   contents: write
   pull-requests: write
@@ -110,6 +113,25 @@ jobs:
             echo "STAMP_COMMITTED=true" >> "$GITHUB_ENV"
           fi
 
+      - name: Rebuild and upload the HACS ZIP from the stamped tree
+        # Runs BEFORE the branch push on purpose: the working tree is already
+        # stamped (script/stamp_version.py above; committing does not change it),
+        # and the asset must not depend on whether the push is accepted by the
+        # branch rules. A rejected push must never cost the release its HACS ZIP.
+        run: |
+          set -euo pipefail
+          # hacs.json sets zip_release=true + filename=googlefindmy.zip, so HACS
+          # installs THIS asset and extracts it directly into
+          # custom_components/googlefindmy/. manifest.json MUST therefore sit at
+          # the ZIP root -- zip the domain *contents* (`.` from inside the domain
+          # dir), never the googlefindmy/ directory from its parent (that would
+          # nest one level too deep and hide the integration -> broken installs).
+          # Locked by tests/test_hacs_validation.py (ZIP-structure guard).
+          cd custom_components/googlefindmy
+          zip -r ../../googlefindmy.zip .
+          cd ../..
+          gh release upload "$TAG_NAME" googlefindmy.zip --clobber
+
       - name: Resolve the owning branch and push the stamp
         if: env.STAMP_COMMITTED == 'true'
         run: |
@@ -143,24 +165,28 @@ jobs:
           fi
           echo "stamping onto branch: ${STAMP_BRANCH}"
           # Push order of the error classification matters: protection rejections
-          # ("remote rejected", GH006) also contain the word "rejected", so the
-          # protected-branch check MUST precede the non-fast-forward check.
+          # ("remote rejected", GH006 for classic branch protection, GH013
+          # "Repository rule violations found" for repository rulesets; the
+          # ruleset text was measured on 2026-09-17 with a dry-run ruleset) also
+          # contain the word "rejected", so the branch-rules check MUST precede
+          # the non-fast-forward check.
           if git push origin "HEAD:${STAMP_BRANCH}" 2> push_err.log; then
             echo "direct push to ${STAMP_BRANCH} succeeded"
-          elif grep -qiE 'protected branch|\b403\b|GH006' push_err.log; then
-            # Dormant fallback for a future branch protection: a short-lived PR +
-            # auto-merge. Needs the repo switch allow_auto_merge=true. If the future
-            # protection requires a REVIEW, GITHUB_TOKEN cannot approve its own PR
-            # -> the stamp PR waits for one maintainer click. If it requires only
-            # status checks, auto-merge lands it after CI.
-            echo "direct push blocked by branch protection; using PR fallback"
+          elif grep -qiE 'protected branch|\b403\b|GH006|GH013|repository rule' push_err.log; then
+            # Branch rules reject the direct push: open a stamp PR that a
+            # maintainer merges by hand (admin bypass). Auto-merge is deliberately
+            # NOT requested, because it can never complete here: (a) the repo has
+            # allow_auto_merge=false; (b) the stamp commit carries [skip ci], so
+            # ci.yml never reports the required "CI Success" check for it; (c) the
+            # pull_request runs of a GITHUB_TOKEN-created PR wait in an
+            # approval-required state anyway (docs: github_token).
+            echo "direct push to ${STAMP_BRANCH} rejected by branch rules; opening the stamp PR"
             FB_BRANCH="release-stamp/${TAG_NAME}"
             git push origin "HEAD:${FB_BRANCH}"
-            gh pr create --base "${STAMP_BRANCH}" --head "${FB_BRANCH}" \
+            PR_URL="$(gh pr create --base "${STAMP_BRANCH}" --head "${FB_BRANCH}" \
               --title "chore(release): ${TAG_NAME}" \
-              --body "Automated version stamp for release ${TAG_NAME}. [skip ci]"
-            gh pr merge --auto --squash "${FB_BRANCH}" \
-              || echo "::warning::auto-merge unavailable (allow_auto_merge=false?); PR left open for manual merge"
+              --body "Automated version stamp for release ${TAG_NAME}. [skip ci]")"
+            echo "::notice::stamp PR opened: ${PR_URL}; a maintainer merges it (admin bypass; the stamp commit carries [skip ci] and workflow runs for a GITHUB_TOKEN-created PR wait in an approval-required state, so CI Success is not reported)"
           elif grep -qiE 'non-fast-forward|fetch first|tip of your current branch is behind' push_err.log; then
             # The tag is behind the branch tip; the stamp would rewrite history.
             # Skip it -- the HACS asset already carries the version, and we never
@@ -171,18 +197,3 @@ jobs:
             cat push_err.log
             exit 1
           fi
-
-      - name: Rebuild and upload the HACS ZIP from the stamped tree
-        run: |
-          set -euo pipefail
-          # hacs.json sets zip_release=true + filename=googlefindmy.zip, so HACS
-          # installs THIS asset and extracts it directly into
-          # custom_components/googlefindmy/. manifest.json MUST therefore sit at
-          # the ZIP root -- zip the domain *contents* (`.` from inside the domain
-          # dir), never the googlefindmy/ directory from its parent (that would
-          # nest one level too deep and hide the integration -> broken installs).
-          # Locked by tests/test_hacs_validation.py (ZIP-structure guard).
-          cd custom_components/googlefindmy
-          zip -r ../../googlefindmy.zip .
-          cd ../..
-          gh release upload "$TAG_NAME" googlefindmy.zip --clobber

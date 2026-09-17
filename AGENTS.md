@@ -803,11 +803,11 @@ Add to the PR description:
   > interactive stub-install prompt; no separate step scans the logs for the flag.
 
 > **Hassfest runs in CI.** The `.github/workflows/hassfest-auto-fix.yml` workflow
-> validates manifests on every PR and on pushes to `main`, auto-committing any key
+> validates manifests on every PR, auto-committing any key
 > ordering fixes (the blocking manifest gate is the `hassfest` job in `ci.yml`).
 > Review the workflow output instead of attempting a local run; when you need a
-> fresh validation, use the **Run workflow** button in the Actions tab or re-run
-> the job from the PR UI.
+> fresh validation, re-run the job from the PR UI (the workflow has no
+> `workflow_dispatch` trigger).
 
 ### 10.1 Type-checking policy — mypy strict on edited Python files
 
@@ -956,8 +956,10 @@ artifacts remain exempt when explicitly flagged by repo configuration).
     not a required status check (`gh api repos/<owner>/<repo>/rulesets`
     returns no ruleset for `main`); merging is not blocked by it.
   * **Not every change is human-reviewed.** `.github/workflows/release-stamp.yml`
-    can push a version stamp directly to the owning branch (or auto-merge a
-    fallback PR after status checks, without a required review), and
+    can push a version stamp directly to the owning branch (or, when branch
+    rules reject the direct push, step "Resolve the owning branch and push the
+    stamp" opens a stamp PR that a maintainer merges by hand; no review
+    requirement), and
     `.github/workflows/hassfest-auto-fix.yml` commits manifest key-sorts via
     `stefanzweifel/git-auto-commit-action`. Human review is the norm for feature
     PRs, not a guarantee on every commit.

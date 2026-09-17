@@ -852,20 +852,22 @@ poetry run mypy --strict
 
 ### Development Scripts
 
-Manifest validation (`hassfest`) now runs exclusively through the
-[`hassfest-auto-fix`](.github/workflows/hassfest-auto-fix.yml) workflow. Every
-push to `main` and every pull request automatically executes the
+Manifest validation (`hassfest`) runs in CI. Every pull request executes the
+[`hassfest-auto-fix`](.github/workflows/hassfest-auto-fix.yml) workflow, which
+runs the
 [`home-assistant/actions/hassfest`](https://github.com/home-assistant/actions/tree/master/hassfest#readme)
-GitHub Action, which rewrites manifests when needed and re-runs the validator to
-confirm the fixes.
+GitHub Action, rewrites manifests when needed and re-runs the validator to
+confirm the fixes. Pushes to `main` are validated (blocking) by the `hassfest`
+job in `ci.yml`.
 
 When you need to inspect or download the results locally:
 
 1. Open the relevant workflow run from the PR or commit.
 2. Expand the **Run hassfest (may rewrite manifest)** step to review the console
    output, or download the generated artifact directly from the workflow UI.
-3. If you need a fresh validation pass, trigger the workflow manually from the
-   **Run workflow** button in the Actions tab or by re-running the job on the PR.
+3. If you need a fresh validation pass, re-run the job from the PR (the
+   workflow has no `workflow_dispatch` trigger, so there is no **Run workflow**
+   button).
 
 ## Legacy CLI helpers & token cache selection
 
