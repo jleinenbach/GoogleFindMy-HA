@@ -36,7 +36,6 @@ import random
 import ssl
 import struct
 import time
-import traceback
 from base64 import b64decode
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -49,6 +48,7 @@ from cryptography.hazmat.primitives.serialization import load_der_private_key
 import http_ece
 from google.protobuf.message import Message as RuntimeMessage
 
+from ..log_safety import describe_exception, exception_origin
 from ._typing import (
     CredentialsUpdatedCallable,
     JSONDict,
@@ -567,7 +567,9 @@ class FcmPushClient[NotificationContextT]:  # pylint:disable=too-many-instance-a
             await self._send_msg(req)
             self.logger.debug("Sent login request")
         except Exception as ex:
-            self.logger.error("Received an exception logging in: %s", ex)
+            self.logger.error(
+                "Received an exception logging in: %s", describe_exception(ex)
+            )
             if self._try_increment_error_count(ErrorType.LOGIN):
                 # On worker, treat as fatal: stop listening and let supervisor restart
                 self.do_listen = False
@@ -1000,7 +1002,7 @@ class FcmPushClient[NotificationContextT]:  # pylint:disable=too-many-instance-a
                 "Could not connect to MCS endpoint (%s,%s): %s",
                 MCS_HOST,
                 MCS_PORT,
-                oex,
+                describe_exception(oex),
             )
             return False
 
@@ -1133,7 +1135,7 @@ class FcmPushClient[NotificationContextT]:  # pylint:disable=too-many-instance-a
             self._log_warn_with_limit(
                 "Skipping FCM message that failed to decrypt (persistent_id=%s): %s",
                 persistent_id,
-                decrypt_err,
+                describe_exception(decrypt_err),
             )
             acked = await self._ack_or_disconnect(persistent_id)
             if acked and persistent_id:
@@ -1164,7 +1166,7 @@ class FcmPushClient[NotificationContextT]:  # pylint:disable=too-many-instance-a
             try:
                 await self._login()
             except Exception as ex:
-                self.logger.info("Login failed: %s", ex)
+                self.logger.info("Login failed: %s", describe_exception(ex))
                 self.do_listen = False
                 return
 
@@ -1177,13 +1179,19 @@ class FcmPushClient[NotificationContextT]:  # pylint:disable=too-many-instance-a
 
                 except (ConnectionError, ssl.SSLError) as cex:
                     # Treat stream end/TLS quirks as normal stop; supervisor will restart
-                    self.logger.info("FCM stream ended (%s); worker stopping.", cex)
+                    self.logger.info(
+                        "FCM stream ended (%s); worker stopping.",
+                        describe_exception(cex),
+                    )
                     self.do_listen = False
                     break
 
                 except (OSError, EOFError, asyncio.IncompleteReadError) as osex:
                     # Normal network life-cycle: log and stop; supervisor will restart
-                    self.logger.info("FCM read ended (%s); worker stopping.", osex)
+                    self.logger.info(
+                        "FCM read ended (%s); worker stopping.",
+                        describe_exception(osex),
+                    )
                     self.do_listen = False
                     break
 
@@ -1210,10 +1218,13 @@ class FcmPushClient[NotificationContextT]:  # pylint:disable=too-many-instance-a
             )
             self.do_listen = False
         except Exception as ex:
+            # Type, kind or length plus the innermost frame (Auth contract):
+            # a producer's text may echo a token or a body, and so would
+            # ``traceback.format_exc()`` or ``exc_info``.
             self.logger.error(
-                "Unknown error in listener: %s\n%s",
-                ex,
-                traceback.format_exc(),
+                "Unknown error in listener: %s at %s",
+                describe_exception(ex),
+                exception_origin(ex),
             )
         finally:
             self.run_state = FcmPushClientRunState.STOPPING
@@ -1306,7 +1317,9 @@ class FcmPushClient[NotificationContextT]:  # pylint:disable=too-many-instance-a
                     try:
                         await self._send_heartbeat()
                     except Exception as ex:
-                        self.logger.debug("Error while sending heartbeat: %s", ex)
+                        self.logger.debug(
+                            "Error while sending heartbeat: %s", describe_exception(ex)
+                        )
         except asyncio.CancelledError:
             self.logger.debug("Heartbeat task cancelled")
             raise
@@ -1335,7 +1348,9 @@ class FcmPushClient[NotificationContextT]:  # pylint:disable=too-many-instance-a
                 ),
             ]
         except Exception as ex:
-            self.logger.error("Unexpected error running FcmPushClient: %s", ex)
+            self.logger.error(
+                "Unexpected error running FcmPushClient: %s", describe_exception(ex)
+            )
 
     async def stop(self) -> None:
         """Graceful stop: close writer, cancel tasks, mark stopped"""

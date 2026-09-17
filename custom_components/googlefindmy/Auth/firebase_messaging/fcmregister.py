@@ -48,6 +48,7 @@ from cryptography.hazmat.primitives.asymmetric import ec
 
 from google.protobuf.json_format import MessageToDict
 
+from ..log_safety import describe_exception
 from ._typing import (
     CredentialsUpdatedCallable,
     JSONDict,
@@ -443,7 +444,7 @@ class FcmRegister:
                     attempt,
                     max_attempts,
                     GCM_CHECKIN_URL,
-                    e,
+                    describe_exception(e),
                 )
 
             # Exponential backoff with light jitter
@@ -584,7 +585,7 @@ class FcmRegister:
                     "GCM register request failed via /c2dm/register3 (attempt %d/%d): %s",
                     attempt,
                     retries,
-                    exc,
+                    describe_exception(exc),
                 )
                 if attempt < retries:
                     await asyncio.sleep(1)
@@ -796,7 +797,7 @@ class FcmRegister:
             _logger.debug(
                 "GCM unregister for X-subtype=%s failed (ignored, best-effort): %s",
                 self._redact(app_id),
-                exc,
+                describe_exception(exc),
             )
             return
 

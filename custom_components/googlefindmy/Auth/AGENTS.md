@@ -140,7 +140,7 @@ When reading cookies from external authentication flows (for example, Selenium-m
 
 ## Logging guardrails
 
-* Prefer `exc_info=<err>` over interpolating exception text into log messages so token- or credential-related details remain out of the log stream while still preserving traceback context for debugging.
+* Prefer `exc_info=<err>` over interpolating exception text into log messages when a traceback is worth its cost; note that its last line repeats `str(err)`, so where the producer is foreign (`gpsoauth`, `requests`, `aiohttp`) use `describe_exception(err)` and, for a location, `exception_origin(err)` instead.
 * When referencing account identifiers in logs, always mask them via `_mask_email_for_logs` (available from `aas_token_retrieval`) instead of embedding raw usernames or email addresses.
 
 ### Preferred logger pattern
@@ -175,3 +175,14 @@ _LOGGER.info(
 Keep sensitive strings (tokens, response bodies, raw exception text) out of the
 message itself and prefer short context keys in `extra` so log processing stays
 consistent and Semgrep does not flag credential leaks.
+
+Inside an `except` handler whose types are not all defined in this package
+(`except Exception as exc`, `except (OSError, ssl.SSLError) as err`, ...), pass
+the exception through `Auth.log_safety.describe_exception(exc)` instead of
+`exc`, `str(exc)` or `_clip(exc)`: it prints the type plus `error_kind` or
+`errno` when present, the message of exceptions raised by this package, the bare
+type name for an empty message, `(unprintable)` when `str()` itself fails, and
+otherwise the withheld character count. `exception_origin(exc)` names the innermost frame when a location
+is needed. `tests/test_guard_logging_payloads.py` (shape (I)) fails the suite
+on a bare exception in such a record under `Auth/`; `fcm_receiver_ha.py` is
+deferred there with its site count pinned.

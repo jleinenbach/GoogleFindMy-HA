@@ -36,6 +36,8 @@ except Exception as err:  # noqa: BLE001 - defensive import for rare packaging l
         "please ensure the integration is installed correctly."
     ) from err
 
+from custom_components.googlefindmy.Auth.log_safety import describe_exception
+
 get_cached_value = _token_cache.get_cached_value
 set_cached_value = _token_cache.set_cached_value
 
@@ -163,7 +165,10 @@ class FcmReceiver:  # pragma: no cover - legacy surface kept for compatibility
             self._creds = creds
             _LOGGER.debug("Legacy FcmReceiver: credentials snapshot updated via shim.")
         except Exception as err:  # noqa: BLE001
-            _LOGGER.debug("Legacy FcmReceiver: failed to persist credentials: %s", err)
+            _LOGGER.debug(
+                "Legacy FcmReceiver: failed to persist credentials: %s",
+                describe_exception(err),
+            )
 
     # ----------------------------
     # Internal helpers

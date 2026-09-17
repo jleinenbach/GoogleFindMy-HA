@@ -1662,3 +1662,25 @@ async def test_fcm_register_non_ok_log_omits_body(
     assert result is None
     assert f"kind=html len={len(_ERROR_PAGE)}" in caplog.text
     assert all(w not in caplog.text for w in _windows(_ERROR_PAGE))
+
+
+@pytest.mark.asyncio
+async def test_checkin_transient_warning_withholds_producer_text(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The check-in retry warning prints a transport error by type and size."""
+    echoed = "connection refused for token ya29.a0AfB_LEAKED"
+    session = _SequencedCheckinSession([RuntimeError(echoed)] * 8)
+    creds = {"gcm": {"android_id": 1, "security_token": 2}}
+    register = FcmRegister(_checkin_config(), creds, http_client_session=session)
+    monkeypatch.setattr(asyncio, "sleep", _fast_sleep)
+    caplog.set_level(logging.WARNING, logger="custom_components.googlefindmy")
+
+    with pytest.raises(Exception):  # noqa: B017 - the loop re-raises the last transient error
+        await register.checkin_or_register()
+
+    warnings = [r for r in caplog.records if "GCM check-in error" in r.message]
+    assert warnings
+    for record in warnings:
+        assert "ya29." not in record.getMessage()
+        assert f"RuntimeError ({len(echoed)} chars withheld)" in record.getMessage()

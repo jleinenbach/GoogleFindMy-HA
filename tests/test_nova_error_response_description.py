@@ -72,7 +72,7 @@ def test_describe_error_response_names_rpc_code_not_message() -> None:
         (b"\xff\xfe\x00binary", "binary"),
         (b"<html><body>Fehler \xe4 hier</body></html>", "html"),
         (b" " * 70 + b"<html>", "html"),
-        (b"x" * 63 + "ä".encode() + b" text", "text"),
+        (b"x" * 63 + "\u00e4".encode() + b" text", "text"),
         (b"   ", "empty"),
     ],
 )

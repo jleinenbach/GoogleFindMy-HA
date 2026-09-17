@@ -62,7 +62,7 @@ frame (`payload[:4].hex()` in the BLE scanner: frame byte plus three EID
 bytes, rotating) and is excused by (path, leaf, format-string prefix), so the
 exception covers that one call and not every `payload` line of the module.
 
-Blind spot, stated on purpose: the guard sees only shapes (A) to (G). Shape
+Blind spot, stated on purpose: the guard sees only shapes (A) to (I). Shape
 (E) knows an exact list of names: a whole payload under any other name,
 or wrapped (`str(payload)`, `repr(payload)`, `payload.decode()`, an
 f-string), is not reported. Shape (D) follows assignments inside one
@@ -79,9 +79,18 @@ knowable from the name. Shape (H) treats an
 exception constructor as a sink, because its message is logged by a
 caller one hop later: `raise X(f"... {body}")` and the two-step form
 `err = X(f"... {body}"); raise err` (any call whose name ends in `Error`,
-`Exception` or `Failed`, or that is raised in the same function). Not seen:
-a library exception whose own text carries the body (`exc_info=err`,
-`str(err)` of a producer). Shape (D) reads plain and annotated assignments, tuple unpacking (starred
+`Exception` or `Failed`, or that is raised in the same function). Shape (I), Auth package only (its AGENTS.md keeps raw exception text
+out of the message): inside a handler whose types are not all defined in
+this package (`except Exception as exc`, bare `except`, `except
+(OSError, ssl.SSLError) as err`), a log call that carries the exception by name, wrapped
+(`_clip(exc)`, `str(exc)`, an f-string) or through an attribute other
+than a code (`errno`, `error_kind`, `status`, `code`); `describe_exception`,
+`type` and `isinstance` clear their own arguments, and `exc_info=` is not scanned (the
+contract allows a traceback; that it repeats the text is a contract
+finding). `fcm_receiver_ha.py` is deferred with its count pinned. Not seen:
+an alias (`detail = exc; log(detail)`), `except builtins.Exception`,
+`traceback.format_exc()`, an own exception built from a foreign one,
+and every module outside `Auth/` (119 such sites counted on 2026-09-17). Shape (D) reads plain and annotated assignments, tuple unpacking (starred
 included) and `for` targets, not a walrus, `with ... as` or an augmented
 assignment, and follows them to a fixpoint within the function. It trusts names: any `.read()`
 counts as a body (a file too), and the helpers in `_SAFE_WRAPPERS` are
@@ -112,6 +121,7 @@ from __future__ import annotations
 
 import ast
 import re
+from collections.abc import Mapping
 from pathlib import Path
 
 from custom_components import googlefindmy
@@ -664,6 +674,99 @@ def scan(
 
 _EXCEPTION_SUFFIXES = ("Error", "Exception", "Failed")
 
+# Shape (I): a producer exception logged by name inside a broad handler.
+# Scope is the Auth package, whose AGENTS.md keeps raw exception text out of
+# the message; `fcm_receiver_ha.py` is deferred with its count pinned below
+# (aiohttp producer, own follow-up), not silently excused.
+_SHAPE_I_ROOT = "Auth/"
+_SHAPE_I_DEFERRED: dict[str, int] = {"Auth/fcm_receiver_ha.py": 34}
+_BROAD_EXCEPTIONS = frozenset({"Exception", "BaseException"})
+# Wrappers that reduce an exception to a type, a kind or a count.
+_SAFE_EXCEPTION_WRAPPERS = frozenset(
+    {"describe_exception", "exception_origin", "type", "isinstance"}
+)
+# Attributes of an exception that are a code, not its text.
+_SAFE_EXCEPTION_ATTRS = frozenset(
+    {"errno", "error_kind", "status", "code", "__class__"}
+)
+
+
+def _own_type_names(tree: ast.AST) -> frozenset[str]:
+    """Exception types this module defines or imports from this package."""
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ClassDef):
+            names.add(node.name)
+        elif isinstance(node, ast.ImportFrom) and (
+            node.level >= 1
+            or (node.module or "").startswith("custom_components.googlefindmy")
+        ):
+            names.update(alias.asname or alias.name for alias in node.names)
+    return frozenset(names)
+
+
+def _is_foreign_handler(handler: ast.ExceptHandler, own: frozenset[str]) -> bool:
+    """`except:`, a broad type, or any type not defined in this package.
+
+    Fail-closed: a builtin (`ValueError`) or a library type (`ssl.SSLError`,
+    `ECEException`) carries text this package did not write.
+    """
+    kind = handler.type
+    if kind is None:
+        return True
+    types = list(kind.elts) if isinstance(kind, ast.Tuple) else [kind]
+    for node in types:
+        chain = _chain(node)
+        name = chain[0] if chain else ""
+        if name in _BROAD_EXCEPTIONS or name not in own:
+            return True
+    return False
+
+
+def _exception_names_by_call(tree: ast.AST) -> dict[int, str]:
+    """Map each call inside a foreign `except ... as NAME` to NAME (innermost wins)."""
+    names: dict[int, str] = {}
+    own = _own_type_names(tree)
+    for handler in ast.walk(tree):
+        if not isinstance(handler, ast.ExceptHandler) or not handler.name:
+            continue
+        if not _is_foreign_handler(handler, own):
+            continue
+        for inner in ast.walk(handler):
+            if isinstance(inner, ast.Call):
+                names[id(inner)] = handler.name
+    return names
+
+
+def _exception_leaves(argument: ast.AST, name: str) -> list[tuple[str, str]]:
+    """Shape (I): NAME, `str(NAME)`, `_clip(NAME)`, `f"{NAME}"`, `NAME.args`.
+
+    Not reported: NAME inside a safe wrapper (`describe_exception(NAME)`,
+    `type(NAME).__name__`, `isinstance(NAME, X)`), a code attribute
+    (`NAME.errno`), and the keyword `exc_info` (the contract allows a
+    traceback; that it carries the same text is a contract finding, not a
+    guard one). The wrapper clears only its own arguments: in
+    `f"{describe_exception(exc)} raw={exc}"` the second `exc` is reported.
+    """
+    cleared: set[int] = set()
+    for node in ast.walk(argument):
+        if isinstance(node, ast.Call):
+            chain = _chain(node.func)
+            if chain and chain[0] in _SAFE_EXCEPTION_WRAPPERS:
+                for inner in node.args:
+                    cleared.update(id(n) for n in ast.walk(inner))
+        elif (
+            isinstance(node, ast.Attribute)
+            and isinstance(node.value, ast.Name)
+            and node.value.id == name
+            and node.attr in _SAFE_EXCEPTION_ATTRS
+        ):
+            cleared.add(id(node.value))
+    for node in ast.walk(argument):
+        if isinstance(node, ast.Name) and node.id == name and id(node) not in cleared:
+            return [("I", name)]
+    return []
+
 
 def _is_exception_constructor(
     value: ast.AST, targets: list[ast.expr], raised_names: set[str]
@@ -686,6 +789,7 @@ def _scan_tree(
     relative: str,
     reviewed: frozenset[tuple[str, str, str]] = frozenset(),
     rotating: frozenset[str] = frozenset(),
+    deferred: Mapping[str, int] = _SHAPE_I_DEFERRED,
 ) -> tuple[list[tuple[str, int, str, str]], int]:
     """Offenders and scanned log calls of one parsed module."""
     offenders: list[tuple[str, int, str, str]] = []
@@ -715,6 +819,8 @@ def _scan_tree(
                         aliases_by_call[id(inner)] = (
                             aliases_by_call.get(id(inner), frozenset()) | aliases
                         )
+    in_scope_for_i = relative.startswith(_SHAPE_I_ROOT) and relative not in deferred
+    exception_names = _exception_names_by_call(tree) if in_scope_for_i else {}
     raised_names = {
         node.exc.id
         for node in ast.walk(tree)
@@ -754,6 +860,9 @@ def _scan_tree(
         bodies = bodies_by_call.get(id(call), frozenset())
         messages = messages_by_call.get(id(call), frozenset())
         arguments: list[ast.AST] = [*call.args, *(kw.value for kw in call.keywords)]
+        # Shape (I) alone skips `exc_info=`; shapes (A) to (H) keep scanning it.
+        traceback_args = {id(kw.value) for kw in call.keywords if kw.arg == "exc_info"}
+        exception_name = exception_names.get(id(call), "") if fmt != "raise" else ""
         seen: set[str] = set()
         for argument in arguments:
             for _shape, leaf in [
@@ -762,6 +871,11 @@ def _scan_tree(
                 *_whole_body_leaves(argument),
                 *_expansion_leaves(argument),
                 *_message_leaves(argument, messages),
+                *(
+                    _exception_leaves(argument, exception_name)
+                    if exception_name and id(argument) not in traceback_args
+                    else []
+                ),
             ]:
                 if leaf in seen or leaf in rotating:
                     continue
@@ -1003,3 +1117,75 @@ def test_each_reviewed_site_matches_exactly_one_log_call() -> None:
         "each reviewed site must match exactly one raw-bytes log call "
         f"(0 = stale entry, >1 = copied site): {wrong}"
     )
+
+
+_SHAPE_I_FIXTURE = """
+def exchange(user):
+    try:
+        return call()
+    except Exception as exc:
+        _LOGGER.error("failed: %s", exc)
+        _LOGGER.error("failed: %s", _clip(exc))
+        _LOGGER.error("failed: %s", str(exc))
+        _LOGGER.error(f"failed: {exc}")
+        _LOGGER.error("failed: %s", exc.args)
+        _LOGGER.error("failed: %s", describe_exception(exc))
+        _LOGGER.error("failed: %s", type(exc).__name__)
+        _LOGGER.error("failed: %s", exc.errno)
+        _LOGGER.error("failed", exc_info=exc)
+        _LOGGER.error(f"{describe_exception(exc)} raw={exc}")
+    except ValueError as builtin_type:
+        _LOGGER.error("failed: %s", builtin_type)
+    except OwnError as own_type:
+        _LOGGER.error("failed: %s", own_type)
+
+
+class OwnError(Exception):
+    pass
+"""
+
+
+def test_shape_i_reports_producer_exceptions_in_broad_auth_handlers() -> None:
+    """Shape (I): six sinks carry a foreign exception, four are safe.
+
+    A wrapper clears only its own argument (line 15), a builtin type is
+    foreign (line 17), a type defined in the module is not (line 19). The
+    same fixture outside `Auth/` and in the deferred file reports nothing,
+    so the scope is measured and not assumed.
+    """
+    tree = ast.parse(_SHAPE_I_FIXTURE)
+    offenders, _ = _scan_tree(tree, "Auth/fixture.py")
+    assert sorted(line for _, line, _, _ in offenders) == [6, 7, 8, 9, 10, 15, 17]
+    assert {leaf for _, _, leaf, _ in offenders} == {"exc", "builtin_type"}
+    outside, _ = _scan_tree(tree, "coordinator/fixture.py")
+    assert outside == []
+    deferred, _ = _scan_tree(tree, "Auth/fcm_receiver_ha.py")
+    assert deferred == []
+
+
+def test_exc_info_is_skipped_by_shape_i_only() -> None:
+    """`exc_info=` is exempt for shape (I) alone; a payload there stays a finding."""
+    source = """
+def read(response):
+    body = response.read()
+    try:
+        return parse(body)
+    except Exception as exc:
+        _LOGGER.error("failed", exc_info=exc)
+        _LOGGER.error("failed", exc_info=body)
+"""
+    offenders, _ = _scan_tree(ast.parse(source), "Auth/fixture.py")
+    assert [(line, leaf) for _, line, leaf, _ in offenders] == [(8, "body")]
+
+
+def test_shape_i_deferred_file_count_is_pinned() -> None:
+    """The deferred file carries exactly the pinned number of shape-(I) sites.
+
+    A drop means sites were fixed and the pin (or the deferral) is stale; a
+    rise means a new producer-text sink slipped in under the deferral.
+    """
+    for relative, expected in _SHAPE_I_DEFERRED.items():
+        path = _PACKAGE_ROOT / relative
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        offenders, _ = _scan_tree(tree, relative, deferred={})
+        assert len(offenders) == expected, (relative, len(offenders), expected)

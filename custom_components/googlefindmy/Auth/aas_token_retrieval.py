@@ -56,6 +56,7 @@ from .gpsoauth_loader import (
 from .gpsoauth_loader import (
     gpsoauth as _gpsoauth_proxy,
 )
+from .log_safety import describe_exception
 from .token_cache import TokenCache
 from .username_provider import username_string
 
@@ -236,7 +237,9 @@ async def _get_or_generate_android_id(
     try:
         await cache.set(cache_key, android_id)
     except Exception as err:  # noqa: BLE001
-        _LOGGER.debug("Failed to persist generated android_id: %s", _clip(err))
+        _LOGGER.debug(
+            "Failed to persist generated android_id: %s", describe_exception(err)
+        )
     return android_id
 
 
@@ -475,7 +478,8 @@ async def _generate_aas_token(*, cache: TokenCache) -> str:  # noqa: PLR0912, PL
             await cache.set(username_string, resp["Email"])
         except Exception as err:  # noqa: BLE001
             _LOGGER.debug(
-                "Failed to persist normalized username from gpsoauth: %s", _clip(err)
+                "Failed to persist normalized username from gpsoauth: %s",
+                describe_exception(err),
             )
 
     return str(resp["Token"])
@@ -545,16 +549,20 @@ async def async_get_aas_token(
                             "Error: %s",
                             retry_num,
                             max_retries,
-                            exc,
+                            describe_exception(exc),
                         )
                     else:
-                        _LOGGER.error("AAS token: generation failed. Error: %s", exc)
+                        _LOGGER.error(
+                            "AAS token: generation failed. Error: %s",
+                            describe_exception(exc),
+                        )
                     break
 
                 sleep_s = backoff * (2**attempt)
                 if retry_num == 0:
                     _LOGGER.warning(
-                        "AAS token: generation failed. Error: %s. Retrying...", exc
+                        "AAS token: generation failed. Error: %s. Retrying...",
+                        describe_exception(exc),
                     )
                 else:
                     _LOGGER.warning(
@@ -562,7 +570,7 @@ async def async_get_aas_token(
                         "Retrying in %.0fs...",
                         retry_num,
                         max_retries,
-                        exc,
+                        describe_exception(exc),
                         sleep_s,
                     )
                 await asyncio.sleep(sleep_s)
@@ -584,7 +592,10 @@ async def async_get_aas_token(
                     extra={"user": _mask_email_for_logs(username_val)},
                 )
             except Exception as err:  # noqa: BLE001 - defensive cache write
-                _LOGGER.debug("Failed to record AAS issuance timestamp: %s", err)
+                _LOGGER.debug(
+                    "Failed to record AAS issuance timestamp: %s",
+                    describe_exception(err),
+                )
 
     return token
 

@@ -958,3 +958,36 @@ def test_classify_gpsoauth_error_matches_documented_codes_case_insensitively() -
         == "UNRECOGNIZED (25 chars)"
     )
     assert classify_gpsoauth_error("") == ""
+
+
+@pytest.mark.asyncio
+async def test_async_get_aas_token_retry_records_withhold_producer_text(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The AAS retry loop logs a foreign exception by type and size only."""
+    echoed = "Rejected token aas_et/LEAKED for user@example.com"
+    cache = _DummyCache()
+    await cache.set(username_string, "user@example.com")
+
+    async def fake_generate(*, cache: Any) -> str:
+        raise RuntimeError(echoed)
+
+    monkeypatch.setattr(aas_token_retrieval, "_generate_aas_token", fake_generate)
+
+    async def _no_sleep(_: float) -> None:
+        return None
+
+    monkeypatch.setattr(aas_token_retrieval.asyncio, "sleep", _no_sleep)
+    caplog.set_level(logging.DEBUG, logger=aas_token_retrieval.__name__)
+
+    with pytest.raises(RuntimeError):
+        await aas_token_retrieval.async_get_aas_token(
+            cache=cache, retries=1, backoff=0.0
+        )
+
+    failed = [r for r in caplog.records if "generation failed" in r.message]
+    assert len(failed) >= 2
+    for record in failed:
+        assert "LEAKED" not in record.getMessage()
+        assert "user@example.com" not in record.getMessage()
+        assert f"RuntimeError ({len(echoed)} chars withheld)" in record.getMessage()

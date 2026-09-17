@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import Awaitable, Callable
 from types import SimpleNamespace
 from typing import Any
@@ -1448,57 +1449,53 @@ def test_perform_oauth_with_provided_aas_error_response(
     asyncio.run(_exercise())
 
 
-def test_perform_oauth_with_provided_aas_undocumented_error_is_sized(
+@pytest.mark.asyncio
+async def test_perform_oauth_with_provided_aas_undocumented_error_is_sized(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A non-standard `Error` value is sized, never copied into error_kind."""
     echoed = "Rejected token 4/0AfB_byDq9x3EtH2kY7Vz for user@example.com"
 
-    async def _exercise() -> None:
-        def fake_perform_oauth(
-            username: str,
-            aas_token: str,
-            android_id: int,
-            **kwargs: Any,
-        ) -> dict[str, str]:
-            return {"Error": echoed}
+    def fake_perform_oauth(
+        username: str,
+        aas_token: str,
+        android_id: int,
+        **kwargs: Any,
+    ) -> dict[str, str]:
+        return {"Error": echoed}
 
-        monkeypatch.setattr(
-            adm_token_retrieval.gpsoauth, "perform_oauth", fake_perform_oauth
+    monkeypatch.setattr(
+        adm_token_retrieval.gpsoauth, "perform_oauth", fake_perform_oauth
+    )
+
+    with pytest.raises(RuntimeError) as exc_info:
+        await adm_token_retrieval._perform_oauth_with_provided_aas(
+            "user@example.com", "aas-token", android_id=0x1234
         )
-
-        with pytest.raises(RuntimeError) as exc_info:
-            await adm_token_retrieval._perform_oauth_with_provided_aas(
-                "user@example.com", "aas-token", android_id=0x1234
-            )
-        kind = getattr(exc_info.value, "error_kind", "")
-        assert kind == f"unrecognized ({len(echoed)} chars)"
-        assert "4/0AfB_" not in str(exc_info.value)
-        assert "4/0AfB_" not in kind
-
-    asyncio.run(_exercise())
+    kind = getattr(exc_info.value, "error_kind", "")
+    assert kind == f"unrecognized ({len(echoed)} chars)"
+    assert "4/0AfB_" not in str(exc_info.value)
+    assert "4/0AfB_" not in kind
 
 
-def test_perform_oauth_with_provided_aas_documented_error_kind_is_lowercased(
+@pytest.mark.asyncio
+async def test_perform_oauth_with_provided_aas_documented_error_kind_is_lowercased(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A documented code stays the structured, lower-cased error_kind."""
 
-    async def _exercise() -> None:
-        def fake_perform_oauth(*_: Any, **__: Any) -> dict[str, str]:
-            return {"Error": "BadAuthentication"}
+    def fake_perform_oauth(*_: Any, **__: Any) -> dict[str, str]:
+        return {"Error": "BadAuthentication"}
 
-        monkeypatch.setattr(
-            adm_token_retrieval.gpsoauth, "perform_oauth", fake_perform_oauth
+    monkeypatch.setattr(
+        adm_token_retrieval.gpsoauth, "perform_oauth", fake_perform_oauth
+    )
+    with pytest.raises(RuntimeError) as exc_info:
+        await adm_token_retrieval._perform_oauth_with_provided_aas(
+            "user@example.com", "aas-token", android_id=0x1234
         )
-        with pytest.raises(RuntimeError) as exc_info:
-            await adm_token_retrieval._perform_oauth_with_provided_aas(
-                "user@example.com", "aas-token", android_id=0x1234
-            )
-        assert getattr(exc_info.value, "error_kind", "") == "badauthentication"
-        assert adm_token_retrieval._is_non_retryable_auth(exc_info.value)
-
-    asyncio.run(_exercise())
+    assert getattr(exc_info.value, "error_kind", "") == "badauthentication"
+    assert adm_token_retrieval._is_non_retryable_auth(exc_info.value)
 
 
 def test_perform_oauth_with_provided_aas_exception(
@@ -2173,3 +2170,47 @@ async def test_isolated_oauth_typed_channel_absent_stays_retryable(
         )
     assert getattr(excinfo.value, "error_kind", "") != "auth_error"
     assert adm_token_retrieval._is_non_retryable_auth(excinfo.value) is False
+
+
+@pytest.mark.asyncio
+async def test_async_get_adm_token_isolated_retry_records_withhold_producer_text(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A foreign exception from the OAuth producer is logged by type and size.
+
+    Regression for the retry path (INFO on retry, ERROR on the last attempt):
+    ``str(exc)`` of a library or transport error may echo the AAS token, the
+    account or the response text, so the records carry ``describe_exception``.
+    """
+    echoed = "Rejected token ya29.a0AfB_LEAKED for user@example.com"
+
+    async def fake_perform(*_: Any, **__: Any) -> str:
+        raise RuntimeError(echoed)
+
+    monkeypatch.setattr(
+        adm_token_retrieval, "_perform_oauth_with_provided_aas", fake_perform
+    )
+
+    async def _noop_sleep(_: float) -> None:
+        return None
+
+    monkeypatch.setattr(adm_token_retrieval.asyncio, "sleep", _noop_sleep)
+    caplog.set_level(logging.DEBUG, logger=adm_token_retrieval.__name__)
+
+    with pytest.raises(RuntimeError):
+        await adm_token_retrieval.async_get_adm_token_isolated(
+            "user@example.com",
+            aas_token="aas-token",
+            secrets_bundle={"aas_token": "aas-token"},
+            retries=1,
+            backoff=0.0,
+        )
+
+    exchange_records = [
+        r for r in caplog.records if "Isolated ADM exchange failed" in r.message
+    ]
+    assert [r.levelno for r in exchange_records] == [logging.INFO, logging.ERROR]
+    for record in exchange_records:
+        assert "ya29." not in record.getMessage()
+        assert "user@example.com" not in record.getMessage()
+        assert f"RuntimeError ({len(echoed)} chars withheld)" in record.getMessage()

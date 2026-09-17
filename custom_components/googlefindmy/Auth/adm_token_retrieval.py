@@ -64,6 +64,7 @@ from .gpsoauth_loader import (
 from .gpsoauth_loader import (
     gpsoauth as _gpsoauth_proxy,
 )
+from .log_safety import describe_exception
 from .token_cache import TokenCache
 from .token_retrieval import (
     InvalidAasTokenError,
@@ -560,10 +561,13 @@ async def async_get_adm_token(  # noqa: PLR0912,PLR0915
                             "Error: %s",
                             retry_num,
                             max_retries,
-                            exc,
+                            describe_exception(exc),
                         )
                     else:
-                        _LOGGER.error("ADM token: generation failed. Error: %s", exc)
+                        _LOGGER.error(
+                            "ADM token: generation failed. Error: %s",
+                            describe_exception(exc),
+                        )
                     break
 
                 # Retryable path: clear any stale cache value and back off
@@ -575,7 +579,8 @@ async def async_get_adm_token(  # noqa: PLR0912,PLR0915
                 sleep_s = backoff * (2**attempt)
                 if retry_num == 0:
                     _LOGGER.warning(
-                        "ADM token: generation failed. Error: %s. Retrying...", exc
+                        "ADM token: generation failed. Error: %s. Retrying...",
+                        describe_exception(exc),
                     )
                 else:
                     _LOGGER.warning(
@@ -583,7 +588,7 @@ async def async_get_adm_token(  # noqa: PLR0912,PLR0915
                         "Retrying in %.0fs...",
                         retry_num,
                         max_retries,
-                        exc,
+                        describe_exception(exc),
                         sleep_s,
                     )
                 await asyncio.sleep(sleep_s)
@@ -618,7 +623,7 @@ async def async_get_adm_token(  # noqa: PLR0912,PLR0915
                     _LOGGER.debug(
                         "Failed to restore auth_method after OAuth fallback for %s: %s",
                         _mask_email(user),
-                        _clip(err),
+                        describe_exception(err),
                     )
 
 
@@ -711,13 +716,12 @@ async def _perform_oauth_with_provided_aas(
     try:
         return cast(str, await loop.run_in_executor(None, _run))
     except Exception as exc:  # noqa: BLE001
-        # Type and length only: the producer's text may carry the server
-        # response (R-1); the caller classifies and logs the kind.
+        # Type plus kind, errno or length: the producer's text may carry the
+        # server response (R-1); the caller classifies the kind.
         _LOGGER.debug(
-            "perform_oauth failed for %s: %s (%d chars)",
+            "perform_oauth failed for %s: %s",
             _mask_email(username),
-            type(exc).__name__,
-            len(str(exc)),
+            describe_exception(exc),
         )
         raise
 
@@ -807,7 +811,8 @@ async def async_get_adm_token_isolated(  # noqa: PLR0913,PLR0912
                     Exception
                 ) as meta_exc:  # never fail the exchange on metadata issues
                     _LOGGER.debug(
-                        "Isolated TTL metadata write skipped: %s", _clip(meta_exc)
+                        "Isolated TTL metadata write skipped: %s",
+                        describe_exception(meta_exc),
                     )
 
             return tok
@@ -819,7 +824,7 @@ async def async_get_adm_token_isolated(  # noqa: PLR0913,PLR0912
                     "Isolated ADM exchange failed%s for %s: %s",
                     "" if attempt >= attempts - 1 else " (non-retryable)",
                     _mask_email(user),
-                    _clip(exc),
+                    describe_exception(exc),
                 )
                 break
             sleep_s = backoff * (2**attempt)
@@ -828,7 +833,7 @@ async def async_get_adm_token_isolated(  # noqa: PLR0913,PLR0912
                 attempt + 1,
                 attempts,
                 _mask_email(user),
-                _clip(exc),
+                describe_exception(exc),
                 sleep_s,
             )
             await asyncio.sleep(sleep_s)
