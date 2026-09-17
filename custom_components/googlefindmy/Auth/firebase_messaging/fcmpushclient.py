@@ -47,7 +47,6 @@ from aiohttp import ClientSession
 from cryptography.hazmat.primitives.serialization import load_der_private_key
 
 import http_ece
-from google.protobuf.json_format import MessageToJson
 from google.protobuf.message import Message as RuntimeMessage
 
 from ._typing import (
@@ -344,9 +343,15 @@ class FcmPushClient[NotificationContextT]:  # pylint:disable=too-many-instance-a
     # ---- Logging helpers ----
 
     def _msg_str(self, msg: MessageProto) -> str:
+        # Type and field names only, even in verbose mode: MCS messages carry
+        # the push payload, persistent ids and the login token, none of which
+        # may reach the log (AGENTS.md section 5). The structure is what a
+        # protocol trace needs; the values are the payload.
         if self.config.log_debug_verbose:
-            pretty_json = MessageToJson(cast(RuntimeMessage, msg), indent=4)
-            return f"{type(msg).__name__}\n{pretty_json}"
+            fields = [
+                field.name for field, _value in cast(RuntimeMessage, msg).ListFields()
+            ]
+            return f"{type(msg).__name__} fields={fields}"
         return type(msg).__name__
 
     def _log_verbose(self, msg: str, *args: object) -> None:

@@ -571,7 +571,7 @@ def test_token_routing_debug_record_omits_token(
     receiver._update_token_routing(token, {"entry-a", "entry-b"})
 
     messages = [
-        r.getMessage() for r in caplog.records if "token routing" in r.getMessage()
+        r.getMessage() for r in caplog.records if "push routing" in r.getMessage()
     ]
     assert messages, "routing record missing"
     assert "entry-a,entry-b" in messages[0]

@@ -46,7 +46,7 @@ from aiohttp import ClientSession, ClientTimeout
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 
-from google.protobuf.json_format import MessageToDict, MessageToJson
+from google.protobuf.json_format import MessageToDict
 
 from ._typing import (
     CredentialsUpdatedCallable,
@@ -420,8 +420,13 @@ class FcmRegister:
         acir.ParseFromString(content)
 
         if self._log_debug_verbose:
-            msg = MessageToJson(acir, indent=4)
-            _logger.debug("GCM check-in response (raw):\n%s", msg)
+            # Field names only: the check-in response carries android_id and
+            # security_token, which are credentials and never reach the log
+            # (AGENTS.md section 5).
+            _logger.debug(
+                "GCM check-in response: fields=%s",
+                [field.name for field, _value in acir.ListFields()],
+            )
 
         parsed_response: JSONDict = MessageToDict(acir)
         return parsed_response

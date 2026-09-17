@@ -2896,10 +2896,10 @@ class FcmReceiverHA:
                 self._entry_to_tokens.setdefault(entry_id, set()).add(token)
 
             if prev != new_entries:
-                # Entry ids only: no prefix of the push token is logged
-                # (AGENTS.md section 5: tokens).
+                # Entry ids and a route count only: no prefix of the push
+                # token is logged (AGENTS.md section 5: tokens).
                 _LOGGER.debug(
-                    "Updated FCM token routing: %d token(s) known, entries %s -> %s",
+                    "Updated FCM push routing: %d route(s) known, entries %s -> %s",
                     len(self._token_to_entries),
                     ",".join(sorted(prev)) or "<none>",
                     ",".join(sorted(new_entries)) or "<none>",

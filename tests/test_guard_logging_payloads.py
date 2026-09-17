@@ -8,12 +8,15 @@ undecodable protobuf, the prefix of a shared secret. This guard watches that
 class; `test_guard_logging_identifiers.py` watches class (c) identifiers and
 the two do not overlap (address-like leaves there, payload-like leaves here).
 
-Two shapes are recognised inside a log call's arguments:
+Three shapes are recognised inside a log call's arguments:
 
   (A) a `.hex()` call, whatever the receiver is called;
-  (B) a slice (`x[:n]`, `x[a:b]`) whose base leaf is named like a payload
-      (`hex`, `response`, `payload`, `raw`, `secret`, `identity_key`,
-      `_bytes`, `body`, `blob`).
+  (B) a slice (`x[:n]`, `x[a:b]`) whose name chain carries a payload-like
+      name (`hex`, `response`, `payload`, `raw`, `secret`, `identity_key`,
+      `_bytes`, `body`, `blob`, `token`);
+  (C) a serialised protobuf message (`MessageToJson(...)`,
+      `MessageToDict(...)`, `MessageToString(...)`, `.SerializeToString()`),
+      which dumps every field of a wire message including credentials.
 
 The EID is allowed at any level, in full or truncated (`AGENTS.md`, class
 (a)); the leaves that carry it are listed in `_ROTATING_LEAVES` and excused
@@ -22,14 +25,16 @@ frame (`payload[:4].hex()` in the BLE scanner: frame byte plus three EID
 bytes, rotating) and is excused by (path, leaf, format-string prefix), so the
 exception covers that one call and not every `payload` line of the module.
 
-Blind spot, stated on purpose: the guard sees only shapes (A) and (B). A raw
+Blind spot, stated on purpose: the guard sees only shapes (A) to (C). A raw
 value copied into a neutrally named variable before the call
 (`preview = resp[:200]; _LOGGER.debug("%s", preview)`), an unsliced raw value
 under a neutral name (`text`, `data`, `msg`), a slice whose whole chain is
 neutrally named (`page.read()[:16]`), a wrapping call whose arguments hide
 the name (`str(response)[:16]`, `bytes(payload)[:16]`: the chain follows the
 callee, not the arguments), `binascii.hexlify()`, `base64.b64encode()` or
-`repr(bytes)` are not reported. Section 5 and the
+`repr(bytes)` are not reported; nor is a message passed whole to `%s`
+(`str(message)` is its text format) or a dump built inside a helper that is
+not itself a log call (`self._log_verbose(...)`). Section 5 and the
 diff review remain the backstop for those; the remaining gap is not
 countable. The scan is package-wide and covers all levels, written as an AST
 walk rather than a pin on the sites that were found, because the leak
@@ -71,6 +76,11 @@ _ROTATING_LEAVES: frozenset[str] = frozenset({"eid", "eid_hex", "truncated_eid_h
 # exactly_one_log_call` fails when the site disappears or is copied.
 _REVIEWED: frozenset[tuple[str, str, str]] = frozenset(
     {("fmdn_finder/ble_scanner.py", "payload", "BLE scan: resolved")}
+)
+
+# Callables that serialise a whole protobuf message (shape (C)).
+_SERIALISERS = frozenset(
+    {"MessageToJson", "MessageToDict", "MessageToString", "SerializeToString"}
 )
 
 _LOG_LEVELS = frozenset(
@@ -115,12 +125,18 @@ def _payload_leaves(argument: ast.AST) -> list[tuple[str, str]]:
     """(shape, base leaf) for every payload-shaped node inside one argument."""
     found: list[tuple[str, str]] = []
     for node in ast.walk(argument):
-        if (
-            isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Attribute)
-            and node.func.attr == "hex"
-        ):
-            found.append(("hex", _base_leaf(node.func.value) or "?"))
+        if isinstance(node, ast.Call):
+            func = node.func
+            name = (
+                func.attr
+                if isinstance(func, ast.Attribute)
+                else getattr(func, "id", "")
+            )
+            if name == "hex" and isinstance(func, ast.Attribute):
+                found.append(("hex", _base_leaf(func.value) or "?"))
+            elif name in _SERIALISERS:
+                target = node.args[0] if node.args else getattr(func, "value", func)
+                found.append(("serialised", _base_leaf(target) or name))
         elif isinstance(node, ast.Subscript) and isinstance(node.slice, ast.Slice):
             chain = _chain(node.value)
             if any(_PAYLOAD_NAME.search(name) for name in chain):

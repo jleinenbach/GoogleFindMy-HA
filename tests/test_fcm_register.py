@@ -1339,3 +1339,50 @@ async def test_fcm_register_verbose_log_keeps_endpoint_host_not_token(
     assert all(token[i : i + 8] not in logged for i in range(0, len(token) - 7)), (
         "a window of the subscription token reached the log"
     )
+
+
+class _CheckinOkResponse(_FakeResponse):
+    """A 200 check-in reply whose body is a serialised ``AndroidCheckinResponse``."""
+
+    def __init__(self, body: bytes) -> None:
+        super().__init__(200, "", {})
+        self._body = body
+
+    async def read(self) -> bytes:
+        return self._body
+
+
+@pytest.mark.asyncio
+async def test_gcm_check_in_verbose_log_omits_credentials(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The verbose check-in record names fields, never the credential values.
+
+    The response carries ``android_id`` and ``security_token``; both used to
+    reach the DEBUG log as a full JSON dump of the message (`AGENTS.md`
+    section 5: tokens and credentials are never logged).
+    """
+    from custom_components.googlefindmy.Auth.firebase_messaging.proto.checkin_pb2 import (
+        AndroidCheckinResponse,
+    )
+
+    android_id = 5_738_291_047_365_182_930
+    security_token = 8_361_940_275_183_064_927
+    reply = AndroidCheckinResponse()
+    reply.stats_ok = True
+    reply.android_id = android_id
+    reply.security_token = security_token
+    session = _SequencedCheckinSession([_CheckinOkResponse(reply.SerializeToString())])
+    register = FcmRegister(_checkin_config(), http_client_session=session)
+    register._log_debug_verbose = True
+
+    with caplog.at_level(logging.DEBUG):
+        result = await register.gcm_check_in(1, 2)
+
+    assert result is not None
+    assert result["androidId"] == str(android_id)
+    logged = "\n".join(record.getMessage() for record in caplog.records)
+    assert str(android_id) not in logged
+    assert str(security_token) not in logged
+    assert "GCM check-in response: fields=" in logged
+    assert "security_token" in logged  # the field name is the diagnostic
