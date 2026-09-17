@@ -286,10 +286,13 @@ def test_clip_preserves_short_strings() -> None:
 
 
 def test_summarize_response_with_mapping() -> None:
-    """Mapping objects should be summarized with sorted keys."""
-    resp = {"B": 1, "A": 2, "C": 3}
+    """Mapping objects are summarized by key count: the names are part of the
+    server response and the summary ends up in a logged exception message."""
+    resp = {"B": 1, "A": 2, "Token": "aas_et/SECRET"}
     result = aas_token_retrieval._summarize_response(resp)
-    assert result == "dict(keys=[A, B, C])"
+    assert result == "dict(key_count=3)"
+    assert "Token" not in result
+    assert "SECRET" not in result
 
 
 def test_summarize_response_with_non_mapping() -> None:
@@ -939,3 +942,19 @@ async def test_exchange_oauth_missing_token_no_error_details(
     assert warnings
     # Check that error_field_present is False
     assert getattr(warnings[0], "error_field_present") is False
+
+
+def test_classify_gpsoauth_error_matches_documented_codes_case_insensitively() -> None:
+    """A documented code in any spelling maps to its documented spelling;
+    anything else is sized, never quoted."""
+    from custom_components.googlefindmy.Auth.gpsoauth_loader import (
+        classify_gpsoauth_error,
+    )
+
+    assert classify_gpsoauth_error("badauthentication") == "BadAuthentication"
+    assert classify_gpsoauth_error("BadAuthentication") == "BadAuthentication"
+    assert (
+        classify_gpsoauth_error("BadAuthentication for x@y")
+        == "UNRECOGNIZED (25 chars)"
+    )
+    assert classify_gpsoauth_error("") == ""

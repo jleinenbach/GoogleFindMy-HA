@@ -711,11 +711,13 @@ async def _perform_oauth_with_provided_aas(
     try:
         return cast(str, await loop.run_in_executor(None, _run))
     except Exception as exc:  # noqa: BLE001
-        # Summarize without leaking sensitive data
+        # Type and length only: the producer's text may carry the server
+        # response (R-1); the caller classifies and logs the kind.
         _LOGGER.debug(
-            "perform_oauth failed for %s: %s",
+            "perform_oauth failed for %s: %s (%d chars)",
             _mask_email(username),
-            _clip(str(exc)),
+            type(exc).__name__,
+            len(str(exc)),
         )
         raise
 

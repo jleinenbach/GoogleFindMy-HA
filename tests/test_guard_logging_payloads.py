@@ -8,7 +8,7 @@ undecodable protobuf, the prefix of a shared secret. This guard watches that
 class; `test_guard_logging_identifiers.py` watches class (c) identifiers and
 the two do not overlap (address-like leaves there, payload-like leaves here).
 
-Seven shapes are recognised inside a log call's arguments:
+Eight shapes are recognised inside a log call's arguments:
 
   (A) a `.hex()` call, whatever the receiver is called;
   (B) a slice (`x[:n]`, `x[a:b]`) whose name chain carries a payload-like
@@ -75,9 +75,13 @@ not follow a parameter without annotation, a message reached through an
 attribute (`self._last_msg`), or a field bound by assignment
 (`code = msg.error.code`, `pid = getattr(msg, "persistent_id")`): a field
 is a value, not the message, and whether it is a sub-message is not
-knowable from the name. A leak that travels through an exception message
-(`raise RuntimeError(f"... {kind}")`, logged by a caller) is not a log call
-and is not seen. Shape (D) reads plain and annotated assignments, tuple unpacking (starred
+knowable from the name. Shape (H) treats an
+exception constructor as a sink, because its message is logged by a
+caller one hop later: `raise X(f"... {body}")` and the two-step form
+`err = X(f"... {body}"); raise err` (any call whose name ends in `Error`,
+`Exception` or `Failed`, or that is raised in the same function). Not seen:
+a library exception whose own text carries the body (`exc_info=err`,
+`str(err)` of a producer). Shape (D) reads plain and annotated assignments, tuple unpacking (starred
 included) and `for` targets, not a walrus, `with ... as` or an augmented
 assignment, and follows them to a fixpoint within the function. It trusts names: any `.read()`
 counts as a body (a file too), and the helpers in `_SAFE_WRAPPERS` are
@@ -181,6 +185,8 @@ _SAFE_WRAPPERS = frozenset(
         "_classify_error_code",
         "_describe_error_response",
         "classify_gpsoauth_error",
+        # Type and key count of a gpsoauth response, never names or values.
+        "_summarize_response",
         "_msg_str",
         "_unknown_field_numbers",
         # Protobuf descriptor access: field names, not values.
@@ -400,6 +406,12 @@ def _body_leaves(argument: ast.AST, bodies: frozenset[str]) -> list[tuple[str, s
                 return
         if isinstance(node, ast.Name) and node.id in bodies:
             found.append(("body", node.id))
+        if isinstance(node, ast.IfExp):
+            # Only the value branches reach the sink; the condition
+            # (`x if body else y`) tests the body without exposing it.
+            walk(node.body)
+            walk(node.orelse)
+            return
         for child in ast.iter_child_nodes(node):
             walk(child)
 
@@ -650,6 +662,25 @@ def scan(
     return offenders, scanned
 
 
+_EXCEPTION_SUFFIXES = ("Error", "Exception", "Failed")
+
+
+def _is_exception_constructor(
+    value: ast.AST, targets: list[ast.expr], raised_names: set[str]
+) -> bool:
+    """`X(...)` bound to a name that is raised later or is named like one."""
+    if not isinstance(value, ast.Call):
+        return False
+    chain = _chain(value.func)
+    if not chain:
+        return False
+    if chain[0].endswith(_EXCEPTION_SUFFIXES):
+        return True
+    return any(
+        isinstance(target, ast.Name) and target.id in raised_names for target in targets
+    )
+
+
 def _scan_tree(
     tree: ast.AST,
     relative: str,
@@ -684,23 +715,45 @@ def _scan_tree(
                         aliases_by_call[id(inner)] = (
                             aliases_by_call.get(id(inner), frozenset()) | aliases
                         )
+    raised_names = {
+        node.exc.id
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Raise) and isinstance(node.exc, ast.Name)
+    }
     for node in ast.walk(tree):
-        if not isinstance(node, ast.Call) or not _is_log_call(
+        if isinstance(node, ast.Raise) and isinstance(node.exc, ast.Call):
+            # Shape (H): an exception message is a log sink one hop later
+            # (`_LOGGER.error("...: %s", err)` is the usual consumer), so the
+            # constructor arguments are scanned like log arguments. The
+            # format string is the marker `raise` so a reviewed pin can
+            # single the site out.
+            call = node.exc
+            fmt = "raise"
+        elif isinstance(node, ast.Assign) and _is_exception_constructor(
+            node.value, node.targets, raised_names
+        ):
+            # Shape (H), two-step form: `err = X(...)` followed by
+            # `raise err` (or a name that says it is an exception).
+            call = node.value
+            fmt = "raise"
+        elif isinstance(node, ast.Call) and _is_log_call(
             node, aliases_by_call.get(id(node), frozenset())
         ):
+            call = node
+            # `.log(level, msg, ...)` carries the format string at index 1.
+            msg_index = 1 if getattr(node.func, "attr", "") == "log" else 0
+            first = node.args[msg_index] if len(node.args) > msg_index else None
+            fmt = (
+                first.value
+                if isinstance(first, ast.Constant) and isinstance(first.value, str)
+                else ""
+            )
+        else:
             continue
         scanned += 1
-        bodies = bodies_by_call.get(id(node), frozenset())
-        messages = messages_by_call.get(id(node), frozenset())
-        # `.log(level, msg, ...)` carries the format string at index 1.
-        msg_index = 1 if getattr(node.func, "attr", "") == "log" else 0
-        first = node.args[msg_index] if len(node.args) > msg_index else None
-        fmt = (
-            first.value
-            if isinstance(first, ast.Constant) and isinstance(first.value, str)
-            else ""
-        )
-        arguments: list[ast.AST] = [*node.args, *(kw.value for kw in node.keywords)]
+        bodies = bodies_by_call.get(id(call), frozenset())
+        messages = messages_by_call.get(id(call), frozenset())
+        arguments: list[ast.AST] = [*call.args, *(kw.value for kw in call.keywords)]
         seen: set[str] = set()
         for argument in arguments:
             for _shape, leaf in [
@@ -891,6 +944,42 @@ async def handle(self, msg: HeartbeatAck, p: MessageProto | None, raw: bytes):
         for _shape, leaf in _message_leaves(argument, messages)
     ]
     assert reported == ["msg", "p", "msg"]
+
+
+def test_shape_h_reports_bodies_in_exception_messages() -> None:
+    """Shape (H) scans exception constructors: direct and two-step raise.
+
+    Fixture in the shape of the two gpsoauth sites this shape was added for
+    (`token_retrieval.py:231`, `aas_token_retrieval.py:360`): the body is a
+    producer result, the message is built with the body's field and raised
+    directly, or bound first and raised two lines later. Described values
+    pass.
+    """
+    source = """
+def exchange(username):
+    resp = gpsoauth.exchange_token(username)
+    detail = str(resp.get("Error", "")).strip()
+    if detail:
+        raise InvalidAasTokenError(f"rejected: {detail}")
+    new_err = RuntimeError(f"invalid: {resp}")
+    raise new_err
+    err = make_error(f"kept: {detail}")
+    raise err
+    LOG.warning("safe: %s", classify_gpsoauth_error(detail))
+    raise RuntimeError(f"safe: {len(resp)} keys")
+"""
+    tree = ast.parse(source)
+    offenders, scanned = _scan_tree(tree, "fixture.py")
+    # Five sinks: the direct raise, `new_err = RuntimeError(...)`,
+    # `err = make_error(...)` (raised later, so a constructor by use), the
+    # warning and the described raise. `raise new_err` is a name, not a
+    # call, and is not a sink of its own.
+    assert scanned == 5
+    assert sorted((line, leaf, fmt) for _p, line, leaf, fmt in offenders) == [
+        (6, "detail", "raise"),
+        (7, "resp", "raise"),
+        (9, "detail", "raise"),
+    ]
 
 
 def test_each_reviewed_site_matches_exactly_one_log_call() -> None:

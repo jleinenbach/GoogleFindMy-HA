@@ -86,10 +86,13 @@ def _clip(value: object, limit: int = 200) -> str:
 
 
 def _summarize_response(obj: Mapping[str, Any] | object) -> str:
-    """Summarize a gpsoauth response without leaking sensitive data."""
+    """Summarize a gpsoauth response without leaking sensitive data.
+
+    Type and key count only: the key names are part of the server response
+    and the message is logged one hop later (AGENTS.md R-1).
+    """
     if isinstance(obj, Mapping):
-        keys = ", ".join(sorted(map(str, obj.keys())))
-        return f"dict(keys=[{keys}])"
+        return f"dict(key_count={len(obj)})"
     return f"{type(obj).__name__}"
 
 

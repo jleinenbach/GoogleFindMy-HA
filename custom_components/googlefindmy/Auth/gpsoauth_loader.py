@@ -52,15 +52,16 @@ GPSOAUTH_ERROR_CODES: frozenset[str] = frozenset(
 def classify_gpsoauth_error(value: object) -> str:
     """Return the `Error` value of a gpsoauth response as a loggable kind.
 
-    A documented code is returned as itself (its case preserved, callers
-    compare case-insensitively); anything else, a non-string included, is
+    A documented code is returned in its documented spelling, matched
+    case-insensitively; anything else, a non-string included, is
     `UNRECOGNIZED (<n> chars)`. An empty value stays empty.
     """
     text = str(value).strip() if value is not None else ""
     if not text:
         return ""
-    if text in GPSOAUTH_ERROR_CODES:
-        return text
+    for code in GPSOAUTH_ERROR_CODES:
+        if code.lower() == text.lower():
+            return code
     return f"UNRECOGNIZED ({len(text)} chars)"
 
 

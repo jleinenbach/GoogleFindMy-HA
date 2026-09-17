@@ -858,7 +858,8 @@ class FcmPushClient[NotificationContextT]:  # pylint:disable=too-many-instance-a
         sa = SelectiveAck()
         sa.id.extend([persistent_id])
         iqs.extension.data = sa.SerializeToString()
-        self.logger.debug("Sending selective ack for message id %s", persistent_id)
+        # The persistent id is a server-assigned MCS identifier (R-1).
+        self.logger.debug("Sending selective ack (id_len=%d)", len(persistent_id))
         await self._send_msg(iqs)
 
     async def _send_heartbeat(self) -> None:

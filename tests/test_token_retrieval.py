@@ -469,3 +469,88 @@ async def test_async_request_token_uses_default_aas_provider(
         cache=cache,
     )
     assert result == "ya29.async-default"
+
+
+def test_structured_error_text_is_classified_before_it_reaches_the_message(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The gpsoauth `Error` field is server text. The exception message is
+    logged one hop later (`adm_token_retrieval` logs it at ERROR), so it must
+    carry the classified kind, never the field's wording (AGENTS.md R-1)."""
+    leaked = "BadAuthentication for user@example.com token aas_et/SECRET"
+
+    def _bad_auth(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        return {"Error": leaked}
+
+    _install_fake_gpsoauth(monkeypatch, _bad_auth)
+
+    with pytest.raises(InvalidAasTokenError) as excinfo:
+        token_retrieval._perform_oauth_sync(
+            "user@example.com",
+            "aas_et/fake",
+            "android_device_manager",
+            False,
+            android_id=0x1234,
+        )
+    message = str(excinfo.value)
+    assert "SECRET" not in message
+    assert "user@example.com" not in message
+    assert f"UNRECOGNIZED ({len(leaked)} chars)" in message
+
+
+_CALL_ARGS = ("user@example.com", "aas_et/fake", "android_device_manager", False)
+
+
+@pytest.mark.parametrize(
+    ("typed", "text"),
+    [
+        (True, "HTTP 403 Forbidden for user@example.com token aas_et/SECRET"),
+        (False, "gpsoauth rejected: BadAuthentication aas_et/SECRET user@example.com"),
+    ],
+    ids=["typed-autherror", "vocabulary-in-generic-text"],
+)
+def test_producer_error_text_is_described_not_quoted(
+    monkeypatch: pytest.MonkeyPatch, typed: bool, text: str
+) -> None:
+    """Both InvalidAasTokenError paths that start from an exception (typed
+    AuthError, generic text with gpsoauth vocabulary) carry the markers and
+    the length of the producer text, never the text (AGENTS.md R-1)."""
+    if typed:
+        monkeypatch.setattr(
+            token_retrieval,
+            "gpsoauth_exceptions",
+            SimpleNamespace(AuthError=_MockAuthError),
+        )
+
+    def _boom(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        raise (_MockAuthError if typed else RuntimeError)(text)
+
+    _install_fake_gpsoauth(monkeypatch, _boom)
+
+    with pytest.raises(InvalidAasTokenError) as excinfo:
+        token_retrieval._perform_oauth_sync(*_CALL_ARGS, android_id=0x1234)
+    message = str(excinfo.value)
+    assert "SECRET" not in message
+    assert "user@example.com" not in message
+    assert f"({len(text)} chars)" in message
+    assert "markers=[" in message
+
+
+def test_transport_error_text_is_typed_not_quoted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The retryable fall-through names the producer exception type and the
+    text length; the text itself (which may carry a token) stays out."""
+    text = "connection reset by peer while sending aas_et/SECRET"
+
+    def _boom(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        raise ConnectionError(text)
+
+    _install_fake_gpsoauth(monkeypatch, _boom)
+
+    with pytest.raises(RuntimeError) as excinfo:
+        token_retrieval._perform_oauth_sync(*_CALL_ARGS, android_id=0x1234)
+    assert not isinstance(excinfo.value, InvalidAasTokenError)
+    message = str(excinfo.value)
+    assert "SECRET" not in message
+    assert f"ConnectionError ({len(text)} chars)" in message
