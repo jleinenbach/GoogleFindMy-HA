@@ -8,7 +8,7 @@ undecodable protobuf, the prefix of a shared secret. This guard watches that
 class; `test_guard_logging_identifiers.py` watches class (c) identifiers and
 the two do not overlap (address-like leaves there, payload-like leaves here).
 
-Four shapes are recognised inside a log call's arguments:
+Five shapes are recognised inside a log call's arguments:
 
   (A) a `.hex()` call, whatever the receiver is called;
   (B) a slice (`x[:n]`, `x[a:b]`) whose name chain carries a payload-like
@@ -20,7 +20,14 @@ Four shapes are recognised inside a log call's arguments:
   (D) a name bound in the same function from an HTTP response body
       (`x = await resp.text()`, `resp.read()`, `resp.json()`), whatever the
       name is called and whether or not it is sliced: `text[:400]` is the
-      raw body under a neutral name.
+      raw body under a neutral name;
+  (E) an unsliced argument whose own name is a whole body (`hex_response`,
+      `response_hex`, `result_hex`, `hex_string`, `response_bytes`,
+      `raw_data`, `raw_bytes`, `raw_response`, `payload`, `body`, `blob`,
+      `merged_device_data`), passed whole to `%s`. The list is exact names,
+      not the substring pattern of (B): `payload_len`, `raw_prefix` or
+      `status_raw` carry a length, a prefix or a status, and a substring
+      rule over them reported 31 sites of which two were payloads.
 
 The EID is allowed at any level, in full or truncated (`AGENTS.md`, class
 (a)); the leaves that carry it are listed in `_ROTATING_LEAVES` and excused
@@ -29,8 +36,10 @@ frame (`payload[:4].hex()` in the BLE scanner: frame byte plus three EID
 bytes, rotating) and is excused by (path, leaf, format-string prefix), so the
 exception covers that one call and not every `payload` line of the module.
 
-Blind spot, stated on purpose: the guard sees only shapes (A) to (D). Shape
-(D) follows one assignment (plain or annotated, not a walrus), not a chain:
+Blind spot, stated on purpose: the guard sees only shapes (A) to (E). Shape
+(E) knows an exact list of names: a whole payload under any other name,
+or wrapped (`str(payload)`, `repr(payload)`, `payload.decode()`, an
+f-string), is not reported. Shape (D) follows one assignment (plain or annotated, not a walrus), not a chain:
 a body copied a second time (`snippet = text[:200]`, or an f-string built
 from it and logged later) is not followed. It trusts names: any `.read()`
 counts as a body (a file too), and a local helper called `_describe_body`
@@ -88,6 +97,25 @@ _ROTATING_LEAVES: frozenset[str] = frozenset({"eid", "eid_hex", "truncated_eid_h
 # exactly_one_log_call` fails when the site disappears or is copied.
 _REVIEWED: frozenset[tuple[str, str, str]] = frozenset(
     {("fmdn_finder/ble_scanner.py", "payload", "BLE scan: resolved")}
+)
+
+# Exact names of values that are a whole payload (shape (E)); an unsliced
+# argument with one of these names is the payload itself.
+_WHOLE_BODY_NAMES = frozenset(
+    {
+        "hex_response",
+        "response_hex",
+        "result_hex",
+        "hex_string",
+        "response_bytes",
+        "raw_data",
+        "raw_bytes",
+        "raw_response",
+        "payload",
+        "body",
+        "blob",
+        "merged_device_data",
+    }
 )
 
 # Methods that read an HTTP response body (shape (D)); a name bound from one
@@ -221,6 +249,15 @@ def _body_leaves(argument: ast.AST, bodies: frozenset[str]) -> list[tuple[str, s
     return found
 
 
+def _whole_body_leaves(argument: ast.AST) -> list[tuple[str, str]]:
+    """(shape, name) when the argument itself is a whole-body name (shape (E))."""
+    if isinstance(argument, (ast.Name, ast.Attribute)):
+        chain = _chain(argument)
+        if chain and chain[0] in _WHOLE_BODY_NAMES:
+            return [("whole", chain[0])]
+    return []
+
+
 def _is_log_call(node: ast.Call) -> bool:
     func = node.func
     if not isinstance(func, ast.Attribute):
@@ -296,6 +333,7 @@ def scan(
                 for _shape, leaf in [
                     *_payload_leaves(argument),
                     *_body_leaves(argument, bodies),
+                    *_whole_body_leaves(argument),
                 ]:
                     if leaf in seen or leaf in rotating:
                         continue

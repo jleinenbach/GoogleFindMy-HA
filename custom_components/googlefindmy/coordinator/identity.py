@@ -766,10 +766,12 @@ class IdentityOperations(_MixinBase):
                     if isinstance(payload, Mapping):
                         _update_preserve_metadata(merged_device_data, payload)
 
+            # Key names only: the merged cache record is the device payload
+            # (AGENTS.md section 5).
             _LOGGER.debug(
-                "Building Identity for %s: cached_data=%s",
+                "Building Identity for %s: cached_keys=%s",
                 canonical_id,
-                merged_device_data,
+                sorted(merged_device_data, key=str),
             )
 
             direct_pair_date = _extract_pair_date(merged_device_data)

@@ -84,6 +84,7 @@ def _wire_callback(
 
 async def _drive_callback(
     ctx: location_request._CallbackContext,
+    hex_response: str = "deadbeef",
 ) -> None:
     """Build the real locate callback, invoke it, and await the decrypt handoff."""
     loop = asyncio.get_running_loop()
@@ -98,7 +99,7 @@ async def _drive_callback(
     # The callback runs in the receiver's worker thread and hands the async decrypt
     # off to the loop via run_coroutine_threadsafe; calling it from the running loop
     # schedules the coroutine, which we then await via the context event.
-    callback(_CANONIC_ID, "deadbeef")
+    callback(_CANONIC_ID, hex_response)
     await asyncio.wait_for(ctx.event.wait(), timeout=5.0)
 
 
@@ -145,3 +146,30 @@ async def test_owner_key_rederive_required_also_reaches_ctx_error(
 
     assert isinstance(ctx.error, OwnerKeyLookupTransientError)
     assert isinstance(ctx.error, _OwnerKeyRederiveRequired)
+
+
+async def test_callback_never_logs_the_raw_protobuf_payload(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """AGENTS.md section 5: the FCM payload never reaches the log, at any level.
+
+    The callback used to open with a `[DIAG-RAW-DUMP]` DEBUG record carrying
+    the whole hex payload. Only its length may appear.
+    """
+    import hashlib
+
+    hex_response = "".join(
+        hashlib.sha256(f"fcm-{i}".encode()).hexdigest() for i in range(4)
+    )
+    ctx = _wire_callback(monkeypatch, decrypt_exc=RuntimeError("stop here"))
+    caplog.set_level(logging.DEBUG, logger=location_request.__name__)
+
+    await _drive_callback(ctx, hex_response=hex_response)
+
+    assert f"FCM response length: {len(hex_response)} chars" in caplog.text
+    assert "[DIAG-RAW-DUMP]" not in caplog.text
+    assert all(
+        hex_response[i : i + 8] not in caplog.text
+        for i in range(0, len(hex_response) - 7)
+    ), "a window of the raw payload reached the log"

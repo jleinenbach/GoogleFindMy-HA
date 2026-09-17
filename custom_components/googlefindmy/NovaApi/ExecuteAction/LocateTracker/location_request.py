@@ -449,12 +449,8 @@ def _make_location_callback(  # noqa: PLR0915, PLR0913
     ) -> None:
         """Processes the location update received via FCM."""
         try:
-            # [DIAGNOSTIC] Capture full protobuf payload for offline schema inspection
-            _LOGGER.debug(
-                "[DIAG-RAW-DUMP] Device: %s | Raw Protobuf: %s",
-                response_canonic_id,
-                hex_response,
-            )
+            # The raw protobuf payload is never logged (AGENTS.md section 5);
+            # its length follows below, which is all a diagnostic needs.
             _LOGGER.info("FCM callback triggered for %s, processing response...", name)
             _LOGGER.debug("FCM response length: %d chars", len(hex_response))
 
