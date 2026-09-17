@@ -952,9 +952,17 @@ artifacts remain exempt when explicitly flagged by repo configuration).
     categories `/language:python` and `/language:actions`. The pass/fail
     verdict of the PR check is not decided by the workflow file: it comes from
     the repository's code scanning setting "check failure" (newly introduced
-    alerts of error level or high/critical security severity). The check is
-    not a required status check (`gh api repos/<owner>/<repo>/rulesets`
-    returns no ruleset for `main`); merging is not blocked by it.
+    alerts of error level or high/critical security severity). Merging into
+    `main` IS blocked on CodeQL: the repository ruleset on `main` (`gh api
+    repos/<owner>/<repo>/rules/branches/main`) carries a `code_scanning` rule
+    for the tool `CodeQL` (`security_alerts_threshold: high_or_higher`,
+    `alerts_threshold: errors`), which blocks the merge while the analysis is
+    pending, when no CodeQL analysis exists for the merge ref, or when the PR
+    introduces alerts at or above those thresholds (repository admins can
+    bypass via the PR bypass path, like every rule of that ruleset). Measured
+    on 2026-09-17 with probe PR #1299 (two new CodeQL alerts, `error`/`high`;
+    `CI Success` green; merge state `BLOCKED`) against control PR #1300 (no
+    new alerts; `CLEAN`).
   * **Not every change is human-reviewed.** `.github/workflows/release-stamp.yml`
     can push a version stamp directly to the owning branch (or, when branch
     rules reject the direct push, step "Resolve the owning branch and push the
@@ -962,9 +970,16 @@ artifacts remain exempt when explicitly flagged by repo configuration).
     requirement), and
     `.github/workflows/hassfest-auto-fix.yml` commits manifest key-sorts via
     `stefanzweifel/git-auto-commit-action`. Human review is the norm for feature
-    PRs, not a guarantee on every commit.
-  * **A narrow manifest CVE gate does block PRs.** The required `test` job
-    (`.github/workflows/ci.yml`, `poetry run pytest`) runs
+    PRs, not a guarantee on every commit. Known limit: when
+    `hassfest-auto-fix.yml` pushes a sort commit onto a PR head with
+    `GITHUB_TOKEN`, GitHub creates the `pull_request` runs for that commit "in an
+    approval-required state" (docs: actions/concepts/security/github_token), so
+    `CI Success` is missing until a maintainer approves the runs in the Actions
+    UI or the author pushes again.
+  * **A narrow manifest CVE gate does block PRs.** The `test` job
+    (`.github/workflows/ci.yml`, `poetry run pytest`), aggregated into the
+    required `CI Success` check (job `ci-success`, `needs:` all CI jobs;
+    required by the repository ruleset on `main`), runs
     `tests/test_pip_audit_security.py::TestManifestOnlyPipAuditGate::test_no_fixable_integration_owned_vulnerability`,
     which fails the PR when `script/audit_manifest.py` finds an actionable,
     fixable, integration-owned manifest or transitive-dependency vulnerability
@@ -981,9 +996,10 @@ artifacts remain exempt when explicitly flagged by repo configuration).
     behaviour, not its declared intent.
   * **Negative** ("there is **no** X", "not enforced", "does not block"): before
     asserting an absence, search for the counterexample that would falsify it,
-    and treat a **gate embedded in the required `test` job** (a pytest test that
-    fails the PR) as a real gate even when no dedicated workflow exists. A false
-    "no gate" is the same drift as a false "gate exists".
+    and treat a **gate embedded in the `test` job behind the required
+    `CI Success` check** (a pytest test that fails the PR) as a real gate even
+    when no dedicated workflow exists. A false "no gate" is the same drift as
+    a false "gate exists".
   * **Scope / quantifier** ("scoped to X", "**only** X", "**every** / **all**
     X"): enumerate the full set (e.g. grep every entry in `requirements.txt`,
     not just the named packages) and check the stated boundary against it. State
@@ -1047,7 +1063,7 @@ artifacts remain exempt when explicitly flagged by repo configuration).
 
 ### 11.8 Release & operations
 
-* CI **security gate**: lint/type/tests must pass; the required `test` job enforces a **narrow** manifest CVE gate (the `test_no_fixable_integration_owned_vulnerability` pytest gate over `audit_manifest`), while the separate `pip-audit` workflow runs report-only; a broad full-tree CVE scan and an SBOM scan remain hardening targets, not yet enforced.
+* CI **security gate**: lint/type/tests must pass and roll up into `CI Success`, a required status check of the `main` ruleset (together with the `code_scanning` rule for CodeQL); the `test` job enforces a **narrow** manifest CVE gate (the `test_no_fixable_integration_owned_vulnerability` pytest gate over `audit_manifest`), while the separate `pip-audit` workflow runs report-only; a broad full-tree CVE scan and an SBOM scan remain hardening targets, not yet enforced.
 * Logs are **incident-ready** but privacy-preserving (use OWASP vocabulary).
 * All doc updates comply with **Rule §9.DOC**.
 
@@ -1059,7 +1075,7 @@ artifacts remain exempt when explicitly flagged by repo configuration).
 * [ ] Archive extraction is traversal-safe; paths validated with `pathlib`.
 * [ ] `secrets` used for tokens; cryptography aligns with BSI TR-02102-1 guidance.
 * [ ] Logs/diagnostics redact tokens, PII, coordinates, device IDs, and derived identifiers.
-* [ ] The **whole runtime stack** uses `>=` floors (the Chrome/ChromeDriver-currency rationale is what is scoped to the browser packages, not hard pins across the stack); **most test/tooling** deps also use `>=` floors, only a constrained subset is exact-pinned (`pytest-asyncio==1.3.0`, `constraints-test-stubs.txt`); the required `test` job enforces a **narrow** manifest CVE gate (`test_no_fixable_integration_owned_vulnerability`), the separate `pip-audit` workflow runs report-only on PRs + weekly auto-update PRs; Semgrep SAST runs on PRs only (workflow triggers on `pull_request` alone, baseline scan against the PR base, gate fails on new `ERROR`/`HIGH`/`CRITICAL` findings); CodeQL scans the full tree (PR merge ref, push to `main`, weekly); not every change is human-reviewed (release-stamp/hassfest-auto-fix auto-commit); a broad full-tree CVE scan and an SBOM scan remain hardening targets.
+* [ ] The **whole runtime stack** uses `>=` floors (the Chrome/ChromeDriver-currency rationale is what is scoped to the browser packages, not hard pins across the stack); **most test/tooling** deps also use `>=` floors, only a constrained subset is exact-pinned (`pytest-asyncio==1.3.0`, `constraints-test-stubs.txt`); the `test` job (behind the required `CI Success` check of the `main` ruleset) enforces a **narrow** manifest CVE gate (`test_no_fixable_integration_owned_vulnerability`), the separate `pip-audit` workflow runs report-only on PRs + weekly auto-update PRs; Semgrep SAST runs on PRs only (workflow triggers on `pull_request` alone, baseline scan against the PR base, gate fails on new `ERROR`/`HIGH`/`CRITICAL` findings); CodeQL scans the full tree (PR merge ref, push to `main`, weekly) and blocks merges into `main` via the ruleset's `code_scanning` rule; not every change is human-reviewed (release-stamp/hassfest-auto-fix auto-commit); a broad full-tree CVE scan and an SBOM scan remain hardening targets.
 * [ ] Async: no loop blockers; `to_thread`/`TaskGroup`; proper cancel handling.
 * [ ] I/O optimized (batch/atomic); caches with clear TTL/invalidations.
 * [ ] HA-specific: Coordinator, injected session, `get_url`, config-flow test, Repairs/Diagnostics, HA Store.
