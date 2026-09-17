@@ -706,12 +706,16 @@ For any work that migrates entity-registry records during reload/startup flows, 
 
 ## 5) Security & privacy guards
 
-* **Never log** tokens, email addresses, precise coordinates, device IDs, or raw API payloads.
+* **Never log** tokens, email addresses, precise coordinates, raw API payloads, or class (c) identifiers in clear text. Device identifiers are graded by one question: *can somebody who holds only the log file use the value without owning this Home Assistant instance or this Google account?*
+  * (a) **Rotating identifiers** (EID, the `request_uuid` this integration generates, the BLE MAC of an FMDN advertisement that resolved to one of the user's own trackers, which rotates with the EID, or once per 24 h while unwanted-tracking mode is active, `docs/FMDN.md` S3.5): allowed at any level, in full or truncated. The MAC of an advertisement that did not resolve belongs to somebody else's tracker until proven otherwise and is class (c); a caller-supplied value (the `stop_sound` service accepts a `request_uuid`) is graded by its content, not by the parameter name; the EID is truncated by convention (`EID_LOG_PREFIX_LENGTH` in `fmdn_finder/`: 8 hex chars of `eid_hex`, 8 bytes of the raw `eid`). Truncation does not turn a stable value into class (a): a prefix or suffix of a class (b) or (c) identifier keeps its class, and class (c) may only appear in the masked form defined under (c).
+  * (b) **Registry identifiers of this instance** (`entry_id`, `config_subentry_id`, Home Assistant `device_id`) and the Google canonical ids of the user's own trackers: allowed at any level, they carry no meaning outside this instance and this account. User-provided device names are derived information (see "Redact rigorously" below). A record that can repeat unattended (polling, transport recovery, background sweeps) carries a count or an index at WARNING and above and the name only at DEBUG ("Count@WARNING, Name@DEBUG", pinned for the locate transport by `test_location_request_r6_name_sweep.py`); a record bound to one invocation (a manual locate, a button press, a service call) may name the device at any level, because the caller asked for that device by name and has to see which one failed. An automation can repeat an invocation, so a new invocation-bound record prefers the count-or-index form unless the name is what the operator has to act on; the invocation-bound records that exist today (93 log calls above DEBUG carried a device-name argument on 2026-09-17, counted by AST) are a documented exception, not a template. A device name is the operator's own label inside the operator's own instance; the PII ban (section 1, "Behavioral safety") covers data about persons that the integration handles (e-mail addresses, account identifiers, coordinates), it does not turn every label into PII. A label that names a person other than the operator is class (c) once the log leaves the instance; the operator redacts it before attaching a log, because the integration cannot know which labels are personal. An `entity_id` is a slug of that name and follows the same rule.
+  * (c) **Hardware addresses** (BLE or Wi-Fi MAC of scanners, proxies, phones), stable identifiers of third parties (foreign trackers, other accounts) and clear-text identifiers of anybody who is not the operator: never in clear text. The permitted masked forms are the masking helpers for e-mail and account values (`_mask_email_for_logs`, `_redact_account_for_log`) and, for addresses, the last four characters (`AA:BB:CC:DD:EE:FF` becomes `...E:FF`); any longer part of the value is clear text.
+  * When in doubt, treat a value as (c): a log file leaves the operator's control the moment it is attached to an issue, and a stable identifier is still valid years later, while a rotating one is stale before anybody reads it.
 * **Diagnostics redaction:** use a central `TO_REDACT` list in `diagnostics.py`.
 * **HTTP views & map tokens:** no secrets in URLs; server-side validation; short-lived, entry-scoped tokens.
 * **Data minimization:** store only what is necessary (HA Store); document retention in README.
 * **Network:** set timeouts; use backoff; fail closed on uncertainty.
-* **Redact rigorously:** ensure not only direct secrets but also potentially identifying **derived information** (e.g., user-provided device names if sensitive, correlated external IDs) are redacted from logs and diagnostics.
+* **Redact rigorously:** ensure not only direct secrets but also potentially identifying **derived information** (e.g., user-provided device names if sensitive, correlated external IDs) are redacted from diagnostics and from log records that can repeat unattended (count or index at WARNING and above, the name at DEBUG); a record bound to one invocation may name the device, see the graded rule above.
 
 ---
 
@@ -722,7 +726,7 @@ Prioritize a small but protective suite:
 1. **Config flow** — user flow (success/invalid), duplicate abort (`async_set_unique_id` + `_abort_if_unique_id_configured`), connectivity pre-check, **reauth** (success/failure → reload on success), **reconfigure** step.
 2. **Lifecycle** — `async_setup_entry`, `async_unload_entry`, **reload** (no zombie listeners; entities reattach cleanly).
 3. **Coordinator & availability** — happy path; transient errors raise `UpdateFailed`; entities flip to `unavailable`; single “down/back” log.
-4. **Diagnostics** — `diagnostics.py` returns data with strict **redaction** (no tokens/emails/locations/IDs).
+4. **Diagnostics** — `diagnostics.py` returns data with strict **redaction** (no tokens/emails/locations; device, canonical and EID keys go through `TO_REDACT`, the instance's own `entry_id` stays, section 5 class (b)).
 5. **Services** — success/error paths with localized messages; throttling/rate-limits where applicable.
 6. **Discovery & dynamic devices** (if supported) — announcement, IP update, add/remove devices post-setup.
 7. **Token cache** — expiry detection, refresh, failure propagation, no hidden fallbacks (§4).
@@ -895,7 +899,7 @@ artifacts remain exempt when explicitly flagged by repo configuration).
 
 **Logging & privacy**
 
-* **Redact** tokens, PII, coordinates, device IDs.
+* **Redact** tokens, PII, coordinates, and class (c) identifiers (section 5); class (b) identifiers may appear at any level.
 * Use a central redaction list in diagnostics; keep logs actionable yet non-sensitive.
 
 **Supply chain**
@@ -1074,7 +1078,7 @@ artifacts remain exempt when explicitly flagged by repo configuration).
 * [ ] No `eval/exec`; subprocess without `shell=True`; parameterized I/O; safe loaders.
 * [ ] Archive extraction is traversal-safe; paths validated with `pathlib`.
 * [ ] `secrets` used for tokens; cryptography aligns with BSI TR-02102-1 guidance.
-* [ ] Logs/diagnostics redact tokens, PII, coordinates, device IDs, and derived identifiers.
+* [ ] Logs redact tokens, PII, coordinates and class (c) identifiers (section 5) at every level, and derived identifiers (user-provided names, `entity_id`) from records that can repeat unattended at WARNING and above; diagnostics redact device, canonical and EID keys through `TO_REDACT` (the instance's own `entry_id` is class (b) and stays).
 * [ ] The **whole runtime stack** uses `>=` floors (the Chrome/ChromeDriver-currency rationale is what is scoped to the browser packages, not hard pins across the stack); **most test/tooling** deps also use `>=` floors, only a constrained subset is exact-pinned (`pytest-asyncio==1.3.0`, `constraints-test-stubs.txt`); the `test` job (behind the required `CI Success` check of the `main` ruleset) enforces a **narrow** manifest CVE gate (`test_no_fixable_integration_owned_vulnerability`), the separate `pip-audit` workflow runs report-only on PRs + weekly auto-update PRs; Semgrep SAST runs on PRs only (workflow triggers on `pull_request` alone, baseline scan against the PR base, gate fails on new `ERROR`/`HIGH`/`CRITICAL` findings); CodeQL scans the full tree (PR merge ref, push to `main`, weekly) and blocks merges into `main` via the ruleset's `code_scanning` rule; not every change is human-reviewed (release-stamp/hassfest-auto-fix auto-commit); a broad full-tree CVE scan and an SBOM scan remain hardening targets.
 * [ ] Async: no loop blockers; `to_thread`/`TaskGroup`; proper cancel handling.
 * [ ] I/O optimized (batch/atomic); caches with clear TTL/invalidations.
