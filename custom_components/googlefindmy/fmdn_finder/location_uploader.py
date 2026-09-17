@@ -597,11 +597,9 @@ async def _encrypt_and_upload_location(
         _LOGGER.error("Failed to encrypt location: %s", err, exc_info=True)
         raise ValueError(f"Encryption failed: {err}") from err
 
-    _LOGGER.debug(
-        "Encrypted location: %d bytes, ephemeral key Sx=%s...",
-        len(encrypted_and_tag),
-        ecdh_shared_x.hex()[:16],
-    )
+    # Ciphertext length only; the ECDH shared secret is key material and is
+    # never logged (AGENTS.md section 5).
+    _LOGGER.debug("Encrypted location: %d bytes", len(encrypted_and_tag))
 
     # 3. Create LocationReport protobuf with proper structure
     location_report = LocationReport()

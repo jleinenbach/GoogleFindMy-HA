@@ -2613,13 +2613,13 @@ class FcmReceiverHA:
             # Log FCM pushes that have no registered callback (e.g. sound
             # confirmations, device status updates).  This fires only in
             # response to a user-initiated action (Play Sound button etc.)
-            # so it does not create log spam during normal operation.
+            # so it does not create log spam during normal operation. Length
+            # only: raw API payloads are never logged (AGENTS.md section 5).
             _LOGGER.debug(
                 "FCM push for %s has no registered callback "
-                "(may be action confirmation): payload_len=%d, hex_prefix=%s",
+                "(may be action confirmation): payload_len=%d",
                 canonic_id[:8],
                 len(hex_string),
-                hex_string[:120] if hex_string else "(empty)",
             )
 
             tracked = [
@@ -2896,9 +2896,12 @@ class FcmReceiverHA:
                 self._entry_to_tokens.setdefault(entry_id, set()).add(token)
 
             if prev != new_entries:
+                # Entry ids only: no prefix of the push token is logged
+                # (AGENTS.md section 5: tokens).
                 _LOGGER.debug(
-                    "Updated FCM token routing: token=%s… -> %s",
-                    token[:8],
+                    "Updated FCM token routing: %d token(s) known, entries %s -> %s",
+                    len(self._token_to_entries),
+                    ",".join(sorted(prev)) or "<none>",
                     ",".join(sorted(new_entries)) or "<none>",
                 )
         except Exception as err:

@@ -1273,3 +1273,64 @@ async def test_reregister_unregister_network_failure_is_visible_at_debug(
     logged = "\n".join(record.getMessage() for record in caplog.records)
     assert "failed (ignored, best-effort)" in logged
     assert _OLD_APP_ID not in logged  # still redacted
+
+
+class _JsonFakeSession:
+    """Session stub for ``fcm_register``, which posts ``json=`` not ``data=``."""
+
+    def __init__(self, responses: list[_FakeResponse]) -> None:
+        self._responses = responses
+        self.calls: list[dict[str, Any]] = []
+
+    def post(
+        self, *, url: str, headers: dict[str, str], json: dict[str, Any], timeout: Any
+    ) -> _FakeResponse:
+        self.calls.append({"url": url, "json": json, "headers": dict(headers)})
+        return self._responses.pop(0)
+
+
+@pytest.mark.asyncio
+async def test_fcm_register_verbose_log_keeps_endpoint_host_not_token(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The verbose registration log names the push host, never the token.
+
+    The endpoint is ``FCM_SEND_URL + token``; a 48-character prefix of it used
+    to reach the DEBUG log, twelve characters of which were the subscription
+    token (`AGENTS.md` section 5: tokens are never logged). The host is the
+    diagnostic (which push service); the path is the secret.
+    """
+    token = "dq9x3EtH2kY:APA91bF0VzWc8ghUGrOpN1JmQ5aTe4bRxL7sKdZyCvIiHpMuWn"
+
+    class _R(_FakeResponse):
+        async def json(self) -> dict[str, Any]:
+            return {"token": "fcm-token"}
+
+    session = _JsonFakeSession([_R(200, "{}", {})])
+    config = FcmRegisterConfig(
+        project_id="proj",
+        app_id="app",
+        api_key="key",
+        messaging_sender_id="1234567890123",
+        bundle_id="bundle",
+    )
+    register = FcmRegister(config, http_client_session=session)
+    register._log_debug_verbose = True
+
+    with caplog.at_level(logging.DEBUG):
+        await register.fcm_register(
+            {"token": token},
+            {"token": "inst-token"},
+            {"public": "pub", "private": "priv", "secret": "sec"},
+        )
+
+    logged = "\n".join(
+        record.getMessage()
+        for record in caplog.records
+        if "FCM registration data" in record.getMessage()
+    )
+    assert logged, "verbose registration record missing"
+    assert "fcm.googleapis.com" in logged
+    assert all(token[i : i + 8] not in logged for i in range(0, len(token) - 7)), (
+        "a window of the subscription token reached the log"
+    )

@@ -216,9 +216,10 @@ class IdentityOperations(_MixinBase):
         if device_id not in device_set:
             device_set.add(device_id)
             if len(device_set) > 1:
+                # The device ids identify the shared tracker; no prefix of
+                # the key is logged (AGENTS.md section 5: key material).
                 _LOGGER.info(
-                    "Shared tracker detected: identity_key=%s... shared by %d devices: %s",
-                    identity_key[:8].hex(),
+                    "Shared tracker detected: one identity key shared by %d devices: %s",
                     len(device_set),
                     sorted(device_set),
                 )

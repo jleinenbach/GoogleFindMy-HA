@@ -650,6 +650,58 @@ async def test_debug_logs_omit_coordinates(hass_mock, caplog):
     assert encrypt_mock.call_args.kwargs["message"] == b"52.5200000,13.4050000"
 
 
+@pytest.mark.asyncio
+async def test_debug_logs_omit_ecdh_shared_secret(hass_mock, caplog):
+    """AGENTS.md section 5: key material never reaches the log.
+
+    The "Encrypted location" DEBUG record used to carry the first eight bytes
+    of the ECDH shared secret; the byte count of the ciphertext stays. Same
+    path and mocks as `test_debug_logs_omit_coordinates`, with a shared
+    secret that has no repeating pattern so a window assertion is meaningful.
+    """
+    import hashlib
+
+    caplog.set_level(
+        logging.DEBUG,
+        logger="custom_components.googlefindmy.fmdn_finder.location_uploader",
+    )
+    shared_x = hashlib.sha256(b"ecdh-shared-secret").digest()
+    encrypt_mock = MagicMock(return_value=(b"\x00" * 32, shared_x))
+    upload_mock = AsyncMock(return_value=True)
+
+    with (
+        patch(
+            "custom_components.googlefindmy.fmdn_finder.location_uploader._resolve_scanner_location",
+            return_value=_resolved_location(5),
+        ),
+        patch(
+            "custom_components.googlefindmy.FMDNCrypto.foreign_tracker_cryptor.encrypt",
+            encrypt_mock,
+        ),
+        patch(
+            "custom_components.googlefindmy.fmdn_finder.google_uploader.async_upload_to_google_fmdn",
+            upload_mock,
+        ),
+    ):
+        result = await async_process_fmdn_beacon_detection(
+            hass=hass_mock,
+            eid=b"\xab" * 20,
+            area=None,
+            rssi=None,
+            scanner_address="AA:BB:CC:DD:EE:FF",
+            scanner_device_id="scanner_123",
+            fmdn_device_id="device_456",
+            entity_id="sensor.bermuda_fmdn_test",
+        )
+
+    assert result is True
+    assert "Encrypted location: 32 bytes" in caplog.text
+    sx_hex = shared_x.hex()
+    assert all(
+        sx_hex[i : i + 8] not in caplog.text for i in range(0, len(sx_hex) - 7)
+    ), "a window of the ECDH shared secret reached the log"
+
+
 def test_mask_address_for_logs_keeps_only_the_last_four_characters():
     """AGENTS.md section 5, class (c): addresses are truncated to their last
     four characters. Both shapes the Bermuda scanner name can take are covered:

@@ -40,6 +40,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from http import HTTPStatus
 from typing import Any, cast
+from urllib.parse import urlsplit
 
 from aiohttp import ClientSession, ClientTimeout
 from cryptography.hazmat.primitives import serialization
@@ -985,10 +986,13 @@ class FcmRegister:
         }
         url = FCM_REGISTRATION + f"projects/{self.config.project_id}/registrations"
         if self._log_debug_verbose:
+            # The endpoint is FCM_SEND_URL + token; only the host is logged
+            # (which push service), never a prefix of the token (AGENTS.md
+            # section 5).
             _logger.debug(
-                "FCM registration data (url=%s): endpoint=%s…, appPubKey=%s, p256dh=%s…",
+                "FCM registration data (url=%s): endpoint_host=%s, appPubKey=%s, p256dh=%s…",
                 url,
-                (payload["web"]["endpoint"][:48] + "…"),
+                urlsplit(payload["web"]["endpoint"]).netloc,
                 bool(payload["web"]["applicationPubKey"]),
                 self._redact(payload["web"]["p256dh"]),
             )

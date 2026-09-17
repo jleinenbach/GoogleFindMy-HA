@@ -378,6 +378,32 @@ class TestRegisterIdentityKey:
             "Shared tracker detected" in record.message for record in caplog.records
         )
 
+    def test_shared_tracker_info_omits_key_material(
+        self, coord: IdentityStub, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """AGENTS.md section 5: key material is never logged, not even a prefix.
+
+        The record identifies the shared tracker by its device ids; the
+        identity key added nothing a reader could use except the key itself.
+        """
+        import hashlib
+
+        key = hashlib.sha256(b"shared-identity-key").digest()
+        coord._register_identity_key("dev-1", key)
+        with caplog.at_level("INFO", logger=identity_mod.__name__):
+            coord._register_identity_key("dev-2", key)
+        key_hex = key.hex()
+        assert key_hex[:16] not in caplog.text
+        assert all(
+            key_hex[i : i + 8] not in caplog.text for i in range(0, len(key_hex) - 7)
+        ), "a window of the identity key reached the log"
+        assert any(
+            "Shared tracker detected" in record.message
+            and "dev-1" in record.message
+            and "dev-2" in record.message
+            for record in caplog.records
+        )
+
 
 # ---------------------------------------------------------------------------
 # M6 ``_reset_resolver_offset`` (multiple defensive branches)
