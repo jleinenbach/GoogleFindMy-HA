@@ -767,12 +767,14 @@ class IdentityOperations(_MixinBase):
                         _update_preserve_metadata(merged_device_data, payload)
 
             # Key names only: the merged cache record is the device payload
-            # (AGENTS.md section 5).
-            _LOGGER.debug(
-                "Building Identity for %s: cached_keys=%s",
-                canonical_id,
-                sorted(merged_device_data, key=str),
-            )
+            # (AGENTS.md section 5). The sort is guarded: it runs per device
+            # on the event loop and would otherwise be evaluated with DEBUG off.
+            if _LOGGER.isEnabledFor(logging.DEBUG):
+                _LOGGER.debug(
+                    "Building Identity for %s: cached_keys=%s",
+                    canonical_id,
+                    sorted(merged_device_data, key=str),
+                )
 
             direct_pair_date = _extract_pair_date(merged_device_data)
             direct_secrets_date = _extract_secrets_creation_date(merged_device_data)

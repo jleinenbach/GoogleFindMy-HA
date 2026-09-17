@@ -130,23 +130,50 @@ def _get_text_format() -> Any:
     return _text_format_module
 
 
+_unknown_fields_module: Any | None = None
+
+
+def _get_unknown_fields() -> Any:
+    """Lazily import ``google.protobuf.unknown_fields`` (no stubs shipped)."""
+
+    global _unknown_fields_module
+    if _unknown_fields_module is None:
+        _unknown_fields_module = import_module("google.protobuf.unknown_fields")
+    return _unknown_fields_module
+
+
 def _unknown_field_numbers(message: Message) -> list[int]:
     """Field numbers of the unknown fields a decoded message carries.
 
-    Read from the text format with unknown fields printed (``str(message)``
-    omits them on current protobuf runtimes, so the old probe never fired);
-    the numbers are schema drift diagnostics, the values behind them are wire
-    content and are not returned.
+    Read from the runtime's unknown-field set of the message and of every
+    known sub-message it holds (``str(message)`` omits unknown fields on
+    current protobuf runtimes, so the old probe never fired). The numbers are
+    schema drift diagnostics, the values behind them are wire content and are
+    not returned. No text serialisation: this runs on the event loop inside
+    the DEBUG branch of the device-list walk, twice per poll, and a
+    ``text_format`` pass over every device message would stall the loop for
+    large lists (``AGENTS.md`` 11.3, async-first).
     """
     if not isinstance(message, Message):
         # Test doubles stand in for the message in the debug branch.
         return []
-    text = _get_text_format().MessageToString(message, print_unknown_fields=True)
     numbers: set[int] = set()
-    for line in text.splitlines():
-        head = line.strip().split(":", 1)[0].split(" ", 1)[0]
-        if head.isdigit():
-            numbers.add(int(head))
+    pending: list[Message] = [message]
+    while pending:
+        current = pending.pop()
+        unknown = _get_unknown_fields().UnknownFieldSet(current)
+        numbers.update(field.field_number for field in unknown)
+        for descriptor, value in current.ListFields():
+            # `message_type` is set for message-typed fields on every runtime;
+            # the upb descriptor has no `label`, so repeated is read from the
+            # value (map fields yield message values via `.values()`).
+            if descriptor.message_type is None:
+                continue
+            if isinstance(value, Message):
+                pending.append(value)
+            else:
+                items = value.values() if hasattr(value, "values") else value
+                pending.extend(item for item in items if isinstance(item, Message))
     return sorted(numbers)
 
 

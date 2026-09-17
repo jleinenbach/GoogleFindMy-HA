@@ -59,7 +59,12 @@ def exception_origin(exc: BaseException) -> str:
     Replaces ``traceback.format_exc()`` in records that must not carry the
     producer's message: the location is kept, the text is withheld.
     """
-    frames = traceback.extract_tb(exc.__traceback__)
+    # ``lookup_lines=False``: only file, line and name are used, and the
+    # default would read each frame's source line through ``linecache``
+    # (disk I/O on the event loop for a diagnostic string).
+    frames = traceback.StackSummary.extract(
+        traceback.walk_tb(exc.__traceback__), lookup_lines=False
+    )
     if not frames:
         return "no traceback"
     frame = frames[-1]

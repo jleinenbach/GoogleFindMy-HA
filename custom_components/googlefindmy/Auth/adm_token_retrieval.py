@@ -54,7 +54,10 @@ from typing import Any, cast
 
 # Prefer relative imports inside the package for robustness
 from ..const import CONF_OAUTH_TOKEN, DATA_AAS_TOKEN, DATA_AUTH_METHOD
-from .aas_token_retrieval import async_get_aas_token  # entry-scoped AAS provider
+from .aas_token_retrieval import (  # entry-scoped AAS provider
+    _mask_email_for_logs,
+    async_get_aas_token,
+)
 from .gpsoauth_loader import (
     GpsoauthModule,
     classify_gpsoauth_error,
@@ -94,15 +97,10 @@ gpsoauth = _gpsoauth_proxy
 # ---------------------------------------------------------------------------
 
 
-def _mask_email(email: str | None) -> str:
-    """Return a privacy-friendly representation of an email for logs."""
-    if not email or "@" not in email:
-        return "<unknown>"
-    local, domain = email.split("@", 1)
-    if not local:
-        return f"*@{domain}"
-    masked_local = (local[0] + "***") if len(local) > 1 else "*"
-    return f"{masked_local}@{domain}"
+# Single masking helper for the Auth package (Auth/AGENTS.md: mask account
+# identifiers via ``_mask_email_for_logs``); the local name is kept for the
+# call sites and the tests that address it.
+_mask_email = _mask_email_for_logs
 
 
 def _clip(value: object, limit: int = 200) -> str:

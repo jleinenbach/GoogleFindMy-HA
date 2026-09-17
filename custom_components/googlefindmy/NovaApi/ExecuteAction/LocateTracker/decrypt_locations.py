@@ -1245,20 +1245,24 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
 
         # Structure only: field names, types and lengths. Neither the
         # registration message (its text format prints the key escaped) nor
-        # the key bytes themselves are logged (AGENTS.md section 5).
-        _LOGGER.debug(
-            "[DIAG-SECRETS] Structure Analysis:\n"
-            "  - DeviceReg Fields: %s\n"
-            "  - Secrets Container Type: %s\n"
-            "  - Secrets Serialized Length: %s bytes\n"
-            "  - EncryptedIdentityKey Length: %s bytes\n"
-            "  - EncryptedIdentityKey Type: %s",
-            [field.name for field, _value in device_registration.ListFields()],
-            type(encrypted_user_secrets),
-            serialized_length if serialized_length is not None else "Unknown",
-            len(raw_encrypted_identity_key) if raw_encrypted_identity_key else "None",
-            type(raw_encrypted_identity_key),
-        )
+        # the key bytes themselves are logged (AGENTS.md section 5). Guarded:
+        # the field walk runs per device on the event loop.
+        if _LOGGER.isEnabledFor(logging.DEBUG):
+            _LOGGER.debug(
+                "[DIAG-SECRETS] Structure Analysis:\n"
+                "  - DeviceReg Fields: %s\n"
+                "  - Secrets Container Type: %s\n"
+                "  - Secrets Serialized Length: %s bytes\n"
+                "  - EncryptedIdentityKey Length: %s bytes\n"
+                "  - EncryptedIdentityKey Type: %s",
+                [field.name for field, _value in device_registration.ListFields()],
+                type(encrypted_user_secrets),
+                serialized_length if serialized_length is not None else "Unknown",
+                len(raw_encrypted_identity_key)
+                if raw_encrypted_identity_key
+                else "None",
+                type(raw_encrypted_identity_key),
+            )
 
         if (
             serialized_length is not None
