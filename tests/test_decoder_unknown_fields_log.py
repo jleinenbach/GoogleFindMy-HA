@@ -71,14 +71,19 @@ def test_unknown_field_numbers_do_not_serialise_to_text(
     """The probe reads the unknown-field set, never the text format.
 
     It runs on the event loop inside the DEBUG branch, twice per poll; a
-    ``text_format`` pass over every device message would stall the loop
-    (``AGENTS.md`` 11.3). Nested messages are walked as well.
+    ``text_format`` pass over every device message would stall the loop, and
+    so would a lazy ``import_module`` on first use (``AGENTS.md`` 11.3).
+    Nested messages are walked as well.
     """
 
     def _no_text_format() -> None:
         raise AssertionError("text_format must not be used for unknown fields")
 
+    def _no_import(_name: str) -> None:
+        raise AssertionError("no lazy import on the event-loop path")
+
     monkeypatch.setattr(decoder, "_get_text_format", _no_text_format)
+    monkeypatch.setattr(decoder, "import_module", _no_import)
     device_list = _device_with_unknown_fields("s3cr3t-value")
     assert decoder._unknown_field_numbers(device_list.deviceMetadata[0]) == [1023, 1024]
     assert decoder._unknown_field_numbers(device_list) == [1023, 1024]

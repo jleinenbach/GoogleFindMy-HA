@@ -15,6 +15,11 @@ import subprocess
 from importlib import import_module
 from typing import TYPE_CHECKING, Any, Protocol
 
+# Imported at module load (integration setup runs in the executor): the probe
+# runs on the event loop, where a lazy ``import_module`` would be blocking
+# filesystem work (AGENTS.md 11.3).
+from google.protobuf.unknown_fields import UnknownFieldSet
+
 from google.protobuf.message import DecodeError, Message
 
 try:
@@ -130,18 +135,6 @@ def _get_text_format() -> Any:
     return _text_format_module
 
 
-_unknown_fields_module: Any | None = None
-
-
-def _get_unknown_fields() -> Any:
-    """Lazily import ``google.protobuf.unknown_fields`` (no stubs shipped)."""
-
-    global _unknown_fields_module
-    if _unknown_fields_module is None:
-        _unknown_fields_module = import_module("google.protobuf.unknown_fields")
-    return _unknown_fields_module
-
-
 def _unknown_field_numbers(message: Message) -> list[int]:
     """Field numbers of the unknown fields a decoded message carries.
 
@@ -161,8 +154,7 @@ def _unknown_field_numbers(message: Message) -> list[int]:
     pending: list[Message] = [message]
     while pending:
         current = pending.pop()
-        unknown = _get_unknown_fields().UnknownFieldSet(current)
-        numbers.update(field.field_number for field in unknown)
+        numbers.update(field.field_number for field in UnknownFieldSet(current))
         for descriptor, value in current.ListFields():
             # `message_type` is set for message-typed fields on every runtime;
             # the upb descriptor has no `label`, so repeated is read from the
