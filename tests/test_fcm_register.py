@@ -21,6 +21,7 @@ from custom_components.googlefindmy.Auth.firebase_messaging.fcmregister import (
     FcmRegister,
     FcmRegisterConfig,
     FcmRegisterHTTPError,
+    _classify_error_code,
 )
 
 # Coroutine regression tests below carry an explicit ``@pytest.mark.asyncio``
@@ -1235,6 +1236,29 @@ async def test_reregister_unregister_error_is_visible_at_debug(
 
 
 @pytest.mark.asyncio
+async def test_reregister_unregister_error_free_text_stays_out_of_log(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The unregister `Error=` parser classifies the value like `gcm_register`.
+
+    Same class as the register path: a server that echoes an identifier
+    after `Error=` must not reach the DEBUG record verbatim.
+    """
+    echoed = "account 5738291047365182930 rejected"
+    session = _FakeSession(
+        [_FakeResponse(200, f"Error={echoed}", {"Content-Type": "text/plain"})]
+    )
+    register = _build_reregister(session, old_app_id=_OLD_APP_ID)
+
+    with caplog.at_level(logging.DEBUG):
+        await register.reregister_keeping_identity()
+
+    logged = "\n".join(record.getMessage() for record in caplog.records)
+    assert "5738291047365182930" not in logged
+    assert f"ineffective (Error=UNRECOGNIZED ({len(echoed)} chars), ignored)" in logged
+
+
+@pytest.mark.asyncio
 async def test_reregister_unregister_no_marker_is_visible_at_debug(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -1434,6 +1458,55 @@ async def test_register_verbose_log_omits_gcm_credentials(
     assert "GCM subscription: fields=" in logged
     assert "security_token" in logged  # the field name is the diagnostic
     assert f"token=•••{token[-6:]}" in logged
+
+
+@pytest.mark.asyncio
+async def test_gcm_register_error_line_keeps_free_text_out_of_log(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A structured `Error=` line is logged as a code, never as its text.
+
+    The `/c2dm/register3` body `Error=<value>` used to reach the WARNING
+    and the final ERROR record verbatim (upper-cased), so a server that
+    echoes a token or an account identifier after `Error=` leaked it past
+    `_describe_body`, which only covers the unstructured branch.
+    """
+    echoed = "ya29.a0AfB_byDq9x3EtH2kY7VzWc8ghUGrOpN1JmQ5aTe4bRxL7sKdZyCvIiHpMuWn"  # nosemgrep: generic.secrets.security.detected-google-oauth-access-token.detected-google-oauth-access-token
+    responses = [
+        _FakeResponse(200, f"Error={echoed}", {"Content-Type": "text/plain"}),
+        _FakeResponse(200, "Error=INVALID_SENDER", {"Content-Type": "text/plain"}),
+    ]
+    session = _FakeSession(responses)
+    register = FcmRegister(_checkin_config(), http_client_session=session)
+
+    async def fast_sleep(_: float) -> None:
+        return None
+
+    monkeypatch.setattr(asyncio, "sleep", fast_sleep)
+
+    with caplog.at_level(logging.DEBUG):
+        result = await register.gcm_register(
+            {"androidId": 1, "securityToken": 2}, retries=2
+        )
+
+    assert result is None
+    logged = "\n".join(record.getMessage() for record in caplog.records)
+    for window in _windows(echoed.upper()):
+        assert window not in logged, "a window of the echoed value reached the log"
+    assert f"Error=UNRECOGNIZED ({len(echoed)} chars)" in logged
+    assert "Error=INVALID_SENDER" in logged  # a code in identifier shape stays
+
+
+def test_classify_error_code_shapes() -> None:
+    """Identifier shape passes, anything else is sized; an empty value stays falsy."""
+    assert (
+        _classify_error_code(" phone_registration_error ") == "PHONE_REGISTRATION_ERROR"
+    )
+    assert _classify_error_code("INVALID_SENDER") == "INVALID_SENDER"
+    assert _classify_error_code("ACCOUNT_12345") == "UNRECOGNIZED (13 chars)"
+    assert _classify_error_code("ya29.a0AfB_x") == "UNRECOGNIZED (12 chars)"
+    assert _classify_error_code("A" * 41) == "UNRECOGNIZED (41 chars)"
+    assert _classify_error_code("   ") == ""  # falsy: caller keeps the no-marker branch
 
 
 # ---------------------------------------------------------------------

@@ -23,7 +23,10 @@ Seven shapes are recognised inside a log call's arguments:
       raw body under a neutral name. The taint follows assignments: a name
       bound from an expression that references a body name is a body too
       (`snippet = _decode(content)[:512]`), unless the reference sits under
-      a log-safe wrapper (`len`, `_describe_body`, `_describe_error_response`);
+      a log-safe wrapper (`len`, `_describe_body`, `_describe_error_response`),
+      through tuple unpacking and `for` targets as well (`for line in
+      text.splitlines(): key, _, value = line.partition("=")` taints
+      `line`, `key` and `value`);
   (E) an unsliced argument whose own name is a whole body (`hex_response`,
       `response_hex`, `result_hex`, `hex_string`, `response_bytes`,
       `raw_data`, `raw_bytes`, `raw_response`, `payload`, `body`, `blob`,
@@ -63,8 +66,9 @@ itself: a copy bound first (`shown = {**gcm_data, ...}`) or built by
 `dict(gcm_data, token=...)` and then logged is not followed. Shape (G) trusts
 the annotation: a message bound locally (`msg = Stanza.FromString(raw)`), a
 parameter without annotation, or a message reached through an attribute
-(`self._last_msg`) is not reported. Shape (D) reads plain and annotated assignments, not a walrus, and follows
-them to a fixpoint within the function. It trusts names: any `.read()`
+(`self._last_msg`) is not reported. Shape (D) reads plain and annotated assignments, tuple unpacking (starred
+included) and `for` targets, not a walrus, `with ... as` or an augmented
+assignment, and follows them to a fixpoint within the function. It trusts names: any `.read()`
 counts as a body (a file too), and the helpers in `_SAFE_WRAPPERS` are
 trusted whatever they return. The fixpoint over-approximates in the other
 direction: a scalar derived from a body (`empty = content == b""`) is a
@@ -161,6 +165,7 @@ _SAFE_WRAPPERS = frozenset(
         "_describe_body",
         "_classify_body",
         "_classify_error_body",
+        "_classify_error_code",
         "_describe_error_response",
     }
 )
@@ -241,14 +246,33 @@ def _payload_leaves(argument: ast.AST) -> list[tuple[str, str]]:
 _LOG_WRAPPERS = frozenset({"_log_verbose", "_log_warn_with_limit"})
 
 
-def _assignments(function: ast.AST) -> list[tuple[list[ast.AST], ast.AST]]:
-    """(targets, value) of every plain or annotated assignment in `function`."""
-    found: list[tuple[list[ast.AST], ast.AST]] = []
+def _names_in_target(target: ast.AST) -> list[str]:
+    """Names bound by an assignment or loop target, unpacking included."""
+    if isinstance(target, ast.Name):
+        return [target.id]
+    if isinstance(target, (ast.Tuple, ast.List)):
+        return [name for element in target.elts for name in _names_in_target(element)]
+    if isinstance(target, ast.Starred):
+        return _names_in_target(target.value)
+    return []
+
+
+def _assignments(function: ast.AST) -> list[tuple[list[str], ast.AST]]:
+    """(bound names, value) of every binding in `function`.
+
+    Plain and annotated assignments, tuple unpacking
+    (`key, _, value = line.partition("=")`) and `for` targets
+    (`for line in text.splitlines()`), whose value is the iterable.
+    """
+    found: list[tuple[list[str], ast.AST]] = []
     for node in ast.walk(function):
         if isinstance(node, ast.Assign):
-            found.append((list(node.targets), node.value))
+            names = [n for target in node.targets for n in _names_in_target(target)]
+            found.append((names, node.value))
         elif isinstance(node, ast.AnnAssign) and node.value is not None:
-            found.append(([node.target], node.value))
+            found.append((_names_in_target(node.target), node.value))
+        elif isinstance(node, (ast.For, ast.AsyncFor)):
+            found.append((_names_in_target(node.target), node.iter))
     return found
 
 
@@ -275,12 +299,12 @@ def _body_names(function: ast.AST) -> frozenset[str]:
     changed = True
     while changed:
         changed = False
-        for targets, value in assignments:
+        for bound, value in assignments:
             if not (_is_body_read(value) or _body_leaves(value, frozenset(names))):
                 continue
-            for target in targets:
-                if isinstance(target, ast.Name) and target.id not in names:
-                    names.add(target.id)
+            for name in bound:
+                if name not in names:
+                    names.add(name)
                     changed = True
     return frozenset(names)
 
@@ -288,14 +312,14 @@ def _body_names(function: ast.AST) -> frozenset[str]:
 def _log_aliases(function: ast.AST) -> frozenset[str]:
     """Names bound in `function` from a log method (`log_fn = _LOGGER.info`)."""
     names: set[str] = set()
-    for targets, value in _assignments(function):
+    for bound, value in _assignments(function):
         if any(
             isinstance(node, ast.Attribute)
             and node.attr in _LOG_LEVELS
             and "LOG" in ast.unparse(node.value).upper()
             for node in ast.walk(value)
         ):
-            names.update(t.id for t in targets if isinstance(t, ast.Name))
+            names.update(bound)
     return frozenset(names)
 
 
@@ -595,15 +619,24 @@ async def fetch(self, resp, first):
     log_fn("a: %s", snippet)
     log_fn("b: %s %s", described, size)
     _LOGGER.error("c: %s", content)
+    for line in content.splitlines():
+        key, _, value = line.partition("=")
+        code = value.strip().upper()
+    _LOGGER.warning("d: %s %s", key, code)
+    _LOGGER.warning("e: %s", _classify_error_code(value))
 """
     function = ast.parse(source).body[0]
-    assert _body_names(function) == frozenset({"content", "snippet"})
+    assert _body_names(function) == frozenset(
+        {"content", "snippet", "line", "key", "_", "value", "code"}
+    )
     assert _log_aliases(function) == frozenset({"log_fn"})
     offenders, scanned = _scan_tree(ast.parse(source), "fixture.py")
-    assert scanned == 3
+    assert scanned == 5
     assert [(line, leaf) for _p, line, leaf, _f in offenders] == [
         (8, "snippet"),
         (10, "content"),
+        (14, "key"),
+        (14, "code"),
     ]
 
 

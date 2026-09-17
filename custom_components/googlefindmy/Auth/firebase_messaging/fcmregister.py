@@ -76,6 +76,37 @@ from .proto.checkin_pb2 import (
 _logger = logging.getLogger(__name__)
 
 
+# Identifier shape of a C2DM/GCM `Error=` code: upper-case letters and
+# underscores, `INVALID_SENDER` (14) to `PHONE_REGISTRATION_ERROR` (24) today.
+_ERROR_CODE_MIN_LEN = 3
+_ERROR_CODE_MAX_LEN = 40
+
+
+def _classify_error_code(value: str) -> str:
+    """Return the `Error=` value of a register response as a loggable code.
+
+    The C2DM/GCM endpoints answer `Error=<CODE>` with codes in identifier
+    shape (`PHONE_REGISTRATION_ERROR`, `INVALID_SENDER`); anything else on
+    that line is server-supplied text that may echo a token or an account
+    identifier and stays out of the log (AGENTS.md section 5). A value is
+    kept only when it is upper-case letters and underscores, 3 to 40
+    characters; otherwise the record names the size, not the text. An empty
+    value stays empty so the caller keeps its no-marker branch.
+    """
+    code = value.strip().upper()
+    if not code:
+        # `Error=` without a value: keep the falsy result so the caller takes
+        # the "no marker" branch, as it did before the classification.
+        return ""
+    if (
+        _ERROR_CODE_MIN_LEN <= len(code) <= _ERROR_CODE_MAX_LEN
+        and code.isascii()
+        and code.replace("_", "").isalpha()
+    ):
+        return code
+    return f"UNRECOGNIZED ({len(value.strip())} chars)"
+
+
 def _describe_body(text: str) -> str:
     """Describe an HTTP error body for the log without quoting it.
 
@@ -586,7 +617,7 @@ class FcmRegister:
                     token = value.strip()
                     break
                 if lower_key == "error":
-                    error_code = value.strip().upper()
+                    error_code = _classify_error_code(value)
 
             if token:
                 _logger.info(
@@ -777,7 +808,7 @@ class FcmRegister:
                 deleted = True
                 break
             if lower_key == "error":
-                error_code = value.strip().upper()
+                error_code = _classify_error_code(value)
 
         if deleted:
             _logger.debug(
