@@ -15,6 +15,7 @@ from custom_components.googlefindmy.fmdn_finder.location_uploader import (
     _calculate_accuracy_from_rssi,
     _haversine_distance,
     _location_from_zone_state,
+    _mask_address_for_logs,
     _should_upload_location,
     async_process_fmdn_beacon_detection,
 )
@@ -647,3 +648,49 @@ async def test_debug_logs_omit_coordinates(hass_mock, caplog):
     # The encrypted payload is unchanged: full precision stays in the upload.
     encrypt_mock.assert_called_once()
     assert encrypt_mock.call_args.kwargs["message"] == b"52.5200000,13.4050000"
+
+
+def test_mask_address_for_logs_keeps_only_the_last_four_characters():
+    """AGENTS.md section 5, class (c): addresses are truncated to their last
+    four characters. Both shapes the Bermuda scanner name can take are covered:
+    a colon-separated MAC and the `bermuda_<slug>` fallback name.
+    """
+    assert _mask_address_for_logs("AA:BB:CC:DD:EE:FF") == "...E:FF"
+    assert _mask_address_for_logs("bermuda_aabbccddeeff") == "...eeff"
+    assert _mask_address_for_logs("") == "none"
+    assert _mask_address_for_logs(None) == "none"
+
+
+@pytest.mark.asyncio
+async def test_debug_log_masks_scanner_name_without_location(hass_mock, caplog):
+    """AGENTS.md section 5, class (c): the scanner name never reaches the log
+    in clear text.
+
+    The "no location" branch is the only DEBUG site that carries the scanner
+    name. The name is the Bermuda scanner device's name and falls back to a
+    slug of the scanner's BLE MAC, so it is a hardware address in disguise;
+    the log keeps four characters to tell proxies apart and nothing more.
+    """
+    caplog.set_level(
+        logging.DEBUG,
+        logger="custom_components.googlefindmy.fmdn_finder.location_uploader",
+    )
+    with patch(
+        "custom_components.googlefindmy.fmdn_finder.location_uploader._resolve_scanner_location",
+        return_value=None,
+    ):
+        result = await async_process_fmdn_beacon_detection(
+            hass=hass_mock,
+            eid=b"\xab" * 20,
+            area="Living room",
+            rssi=None,
+            scanner_address="bermuda_aabbccddeeff",
+            scanner_device_id=None,
+            fmdn_device_id=None,
+            entity_id="sensor.bermuda_fmdn_test",
+        )
+
+    assert result is False
+    assert "scanner=...eeff" in caplog.text
+    assert "bermuda_aabbccddeeff" not in caplog.text
+    assert "aabbccddeeff" not in caplog.text

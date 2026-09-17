@@ -716,7 +716,10 @@ async def _async_upload_semantic_location(  # noqa: PLR0913, PLR0917
         google_device_id: Google device ID for semantic_name update
         coordinator: GoogleFindMy coordinator for semantic_name update
     """
-    from .location_uploader import async_process_fmdn_beacon_detection  # noqa: PLC0415
+    from .location_uploader import (  # noqa: PLC0415
+        _mask_address_for_logs,
+        async_process_fmdn_beacon_detection,
+    )
 
     _LOGGER.debug(
         "Uploading semantic location: EID=%s..., area=%s, scanner=%s",
@@ -724,7 +727,7 @@ async def _async_upload_semantic_location(  # noqa: PLR0913, PLR0917
         if len(eid) >= EID_LOG_PREFIX_LENGTH
         else eid.hex(),
         area,
-        scanner,
+        _mask_address_for_logs(scanner),
     )
 
     # Use the location uploader with the semantic area

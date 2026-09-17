@@ -27,6 +27,7 @@ from typing import TYPE_CHECKING, Any
 
 from ..const import DATA_EID_RESOLVER, DOMAIN
 from ..eid_resolver import FMDN_FRAME_TYPE, MODERN_FRAME_TYPE
+from .location_uploader import _mask_address_for_logs
 
 if TYPE_CHECKING:
     from homeassistant.core import CALLBACK_TYPE, HomeAssistant
@@ -141,14 +142,22 @@ async def async_setup_ble_scanner(hass: HomeAssistant) -> bool:
             # Rate-limited debug log for unresolved advertisements.
             prefix = payload[:4].hex()
             now = time.monotonic()
-            last = unresolved_log_at.get(prefix, 0.0)
-            if now - last >= _UNRESOLVED_LOG_INTERVAL:
+            # The first sighting of a prefix always logs. A default of 0.0
+            # would suppress it whenever the monotonic clock is still below
+            # the interval (a freshly booted host or CI runner).
+            last = unresolved_log_at.get(prefix)
+            if last is None or now - last >= _UNRESOLVED_LOG_INTERVAL:
                 unresolved_log_at[prefix] = now
+                # An advertisement that did not resolve belongs to somebody
+                # else's tracker until proven otherwise: its MAC is class (c)
+                # (AGENTS.md section 5) and is logged masked. The resolved
+                # branch above logs the MAC of the user's own tracker in full,
+                # class (a), because it rotates with the EID.
                 _LOGGER.debug(
                     "BLE scan: unresolved FMDN adv prefix=%s "
                     "mac=%s rssi=%d frame=0x%02x len=%d",
                     prefix,
-                    ble_address,
+                    _mask_address_for_logs(ble_address),
                     rssi,
                     frame_type if frame_type is not None else 0,
                     len(payload),
