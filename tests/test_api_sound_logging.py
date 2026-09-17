@@ -23,7 +23,6 @@ from tests.helpers.api_stub import (
     FakeReceiver,
     StubCache,
     install_receiver_provider,
-    run_coro,
 )
 
 # 240 hex characters (120 bytes) with no repeating substring: eight SHA-256
@@ -56,7 +55,8 @@ def _assert_body_absent(text: str) -> None:
     )
 
 
-def test_play_sound_debug_record_omits_raw_response(
+@pytest.mark.asyncio
+async def test_play_sound_debug_record_omits_raw_response(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     api = _api_with_token(monkeypatch)
@@ -67,7 +67,7 @@ def test_play_sound_debug_record_omits_raw_response(
     monkeypatch.setattr(api_module, "async_submit_start_sound_request", _submit)
     caplog.set_level(logging.DEBUG, logger=api_module._LOGGER.name)
 
-    result = run_coro(api.async_play_sound("device-1"))
+    result = await api.async_play_sound("device-1")
 
     assert result.accepted
     _assert_body_absent(caplog.text)
@@ -80,7 +80,8 @@ def test_play_sound_debug_record_omits_raw_response(
     )
 
 
-def test_stop_sound_debug_record_omits_raw_response(
+@pytest.mark.asyncio
+async def test_stop_sound_debug_record_omits_raw_response(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     api = _api_with_token(monkeypatch)
@@ -91,7 +92,7 @@ def test_stop_sound_debug_record_omits_raw_response(
     monkeypatch.setattr(api_module, "async_submit_stop_sound_request", _submit)
     caplog.set_level(logging.DEBUG, logger=api_module._LOGGER.name)
 
-    run_coro(api.async_stop_sound("device-1", "uuid-1234"))
+    await api.async_stop_sound("device-1", "uuid-1234")
 
     _assert_body_absent(caplog.text)
     assert any(

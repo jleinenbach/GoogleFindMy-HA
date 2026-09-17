@@ -963,7 +963,10 @@ class FcmPushClient[NotificationContextT]:  # pylint:disable=too-many-instance-a
         elif isinstance(msg, HeartbeatPing):
             await self._handle_ping(msg)
         elif isinstance(msg, HeartbeatAck):
-            self.logger.debug("Received heartbeat ack: %s", msg)
+            # Type and field names, not the text format: the ack carries only
+            # stream counters, but a message passed whole to %s is a wire dump
+            # (AGENTS.md section 5), and every other MCS record uses _msg_str.
+            self.logger.debug("Received heartbeat ack: %s", self._msg_str(msg))
         elif isinstance(msg, IqStanza):
             pass
         else:

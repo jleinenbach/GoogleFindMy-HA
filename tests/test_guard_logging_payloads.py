@@ -8,7 +8,7 @@ undecodable protobuf, the prefix of a shared secret. This guard watches that
 class; `test_guard_logging_identifiers.py` watches class (c) identifiers and
 the two do not overlap (address-like leaves there, payload-like leaves here).
 
-Six shapes are recognised inside a log call's arguments:
+Seven shapes are recognised inside a log call's arguments:
 
   (A) a `.hex()` call, whatever the receiver is called;
   (B) a slice (`x[:n]`, `x[a:b]`) whose name chain carries a payload-like
@@ -33,7 +33,14 @@ Six shapes are recognised inside a log call's arguments:
       (`{**gcm_data, "token": redacted}`), whatever the mapping is called:
       every key the mapping carries reaches the record, and redacting one
       of them by name leaves the others (the AidLogin pair `android_id`,
-      `security_token` next to the token) in full.
+      `security_token` next to the token) in full;
+  (G) a function parameter annotated with a protobuf message type (a name
+      imported from a `_pb2` module in the same file, or the `MessageProto`
+      alias), passed whole to the record: bare, under `str()`/`repr()` or
+      inside an f-string. `%s` renders the text format with every
+      server-supplied field value (`HeartbeatAck` carried three stream
+      counters, a `DataMessageStanza` carries the push); `_msg_str` names
+      the type and the fields instead.
 
 The EID is allowed at any level, in full or truncated (`AGENTS.md`, class
 (a)); the leaves that carry it are listed in `_ROTATING_LEAVES` and excused
@@ -42,12 +49,15 @@ frame (`payload[:4].hex()` in the BLE scanner: frame byte plus three EID
 bytes, rotating) and is excused by (path, leaf, format-string prefix), so the
 exception covers that one call and not every `payload` line of the module.
 
-Blind spot, stated on purpose: the guard sees only shapes (A) to (F). Shape
+Blind spot, stated on purpose: the guard sees only shapes (A) to (G). Shape
 (E) knows an exact list of names: a whole payload under any other name,
 or wrapped (`str(payload)`, `repr(payload)`, `payload.decode()`, an
 f-string), is not reported. Shape (F) sees the dict display in the call
 itself: a copy bound first (`shown = {**gcm_data, ...}`) or built by
-`dict(gcm_data, token=...)` and then logged is not followed. Shape (D) follows one assignment (plain or annotated, not a walrus), not a chain:
+`dict(gcm_data, token=...)` and then logged is not followed. Shape (G) trusts
+the annotation: a message bound locally (`msg = Stanza.FromString(raw)`), a
+parameter without annotation, or a message reached through an attribute
+(`self._last_msg`) is not reported. Shape (D) follows one assignment (plain or annotated, not a walrus), not a chain:
 a body copied a second time (`snippet = text[:200]`, or an f-string built
 from it and logged later) is not followed. It trusts names: any `.read()`
 counts as a body (a file too), and a local helper called `_describe_body`
@@ -136,6 +146,11 @@ _BODY_READERS = frozenset({"text", "read", "json"})
 # guard does not descend into their arguments (shape (D)). `len` and `type`
 # yield a number or a name; the two describers yield a content class.
 _SAFE_WRAPPERS = frozenset({"len", "type", "_describe_body", "_classify_body"})
+
+# Aliases under which a protobuf message travels as a parameter type
+# (shape (G)); the concrete message classes come from the `_pb2` imports of
+# each module.
+_MESSAGE_ALIASES = frozenset({"MessageProto", "RuntimeMessage"})
 
 # Callables that serialise a whole protobuf message (shape (C)).
 _SERIALISERS = frozenset(
@@ -282,6 +297,72 @@ def _expansion_leaves(argument: ast.AST) -> list[tuple[str, str]]:
     return found
 
 
+def _message_type_names(tree: ast.AST) -> frozenset[str]:
+    """Protobuf message types a module imports (`from ..._pb2 import A, B`)."""
+    names = set(_MESSAGE_ALIASES)
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.ImportFrom)
+            and node.module is not None
+            and node.module.endswith("_pb2")
+        ):
+            names.update(alias.asname or alias.name for alias in node.names)
+    return frozenset(names)
+
+
+def _message_params(function: ast.AST, types: frozenset[str]) -> frozenset[str]:
+    """Parameters of `function` annotated with a protobuf message type (shape (G)).
+
+    The annotation may be a bare name, a dotted name, a union (`Msg | None`)
+    or a subscript (`list[Msg]`, whose `repr` renders every element); the
+    last segment of every name in it is matched against `types`. Declared
+    imprecision: `type[Msg]` and `Callable[[Msg], ...]` would match too,
+    though they carry a class or a callable, not a message; the package has
+    no such parameter today (twelve message parameters, all message-typed).
+    """
+    if not isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        return frozenset()
+    args = function.args
+    names: set[str] = set()
+    for arg in [*args.posonlyargs, *args.args, *args.kwonlyargs]:
+        if arg.annotation is None:
+            continue
+        parts = re.split(r"[^\w.]+", ast.unparse(arg.annotation))
+        if any(part.split(".")[-1] in types for part in parts if part):
+            names.add(arg.arg)
+    return frozenset(names)
+
+
+def _message_leaves(
+    argument: ast.AST, messages: frozenset[str]
+) -> list[tuple[str, str]]:
+    """(shape, name) when a message parameter is passed whole (shape (G)).
+
+    Whole means bare, wrapped in `str()`/`repr()`, or interpolated into an
+    f-string; `_msg_str(msg)`, `type(msg).__name__` and field access are not
+    the message.
+    """
+    node = argument
+    if (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id in {"str", "repr"}
+        and len(node.args) == 1
+    ):
+        node = node.args[0]
+    if isinstance(node, ast.Name) and node.id in messages:
+        return [("message", node.id)]
+    if isinstance(node, ast.JoinedStr):
+        return [
+            ("message", value.value.id)
+            for value in node.values
+            if isinstance(value, ast.FormattedValue)
+            and isinstance(value.value, ast.Name)
+            and value.value.id in messages
+        ]
+    return []
+
+
 def _is_log_call(node: ast.Call) -> bool:
     func = node.func
     if not isinstance(func, ast.Attribute):
@@ -325,24 +406,32 @@ def scan(
             continue
         relative = path.relative_to(root).as_posix()
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-        # Body names are scoped to their function (shape (D)).
+        # Body names (shape (D)) and message parameters (shape (G)) are
+        # scoped to their function.
         bodies_by_call: dict[int, frozenset[str]] = {}
+        messages_by_call: dict[int, frozenset[str]] = {}
+        message_types = _message_type_names(tree)
         for function in ast.walk(tree):
             if isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 bodies = _body_names(function)
-                if bodies:
+                messages = _message_params(function, message_types)
+                if bodies or messages:
                     # Union, not overwrite: a nested function keeps the bodies
-                    # of the function that encloses it.
+                    # and message parameters of the function that encloses it.
                     for inner in ast.walk(function):
                         if isinstance(inner, ast.Call):
                             bodies_by_call[id(inner)] = (
                                 bodies_by_call.get(id(inner), frozenset()) | bodies
+                            )
+                            messages_by_call[id(inner)] = (
+                                messages_by_call.get(id(inner), frozenset()) | messages
                             )
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call) or not _is_log_call(node):
                 continue
             scanned += 1
             bodies = bodies_by_call.get(id(node), frozenset())
+            messages = messages_by_call.get(id(node), frozenset())
             # `.log(level, msg, ...)` carries the format string at index 1.
             msg_index = 1 if node.func.attr == "log" else 0
             first = node.args[msg_index] if len(node.args) > msg_index else None
@@ -359,6 +448,7 @@ def scan(
                     *_body_leaves(argument, bodies),
                     *_whole_body_leaves(argument),
                     *_expansion_leaves(argument),
+                    *_message_leaves(argument, messages),
                 ]:
                     if leaf in seen or leaf in rotating:
                         continue
@@ -409,6 +499,39 @@ def test_shape_f_reports_every_unpacked_mapping() -> None:
             for _shape, leaf in _expansion_leaves(argument)
         ]
         assert leaves == expected, source
+
+
+def test_shape_g_reports_message_parameters_passed_whole() -> None:
+    """Shape (G) names a message-typed parameter passed whole, in any wrapping.
+
+    Positive fixture with the same purpose as the shape (F) case. The module
+    imports `HeartbeatAck` from a `_pb2` module and types `p` with the alias.
+    """
+    source = """
+from .proto.mcs_pb2 import HeartbeatAck, DataMessageStanza as Stanza
+
+async def handle(self, msg: HeartbeatAck, p: MessageProto | None, raw: bytes):
+    LOG.debug("a: %s", msg)
+    LOG.debug("b: %s", str(p))
+    LOG.debug("c: %s", f"got {msg!r}")
+    LOG.debug("d: %s", self._msg_str(msg))
+    LOG.debug("e: %s %s", type(msg).__name__, msg.stream_id)
+    LOG.debug("f: %s", raw)
+"""
+    tree = ast.parse(source)
+    types = _message_type_names(tree)
+    assert {"HeartbeatAck", "Stanza", "MessageProto"} <= types
+    function = tree.body[1]
+    messages = _message_params(function, types)
+    assert messages == frozenset({"msg", "p"})
+    calls = [node.value for node in function.body]
+    reported = [
+        leaf
+        for call in calls
+        for argument in call.args[1:]
+        for _shape, leaf in _message_leaves(argument, messages)
+    ]
+    assert reported == ["msg", "p", "msg"]
 
 
 def test_each_reviewed_site_matches_exactly_one_log_call() -> None:
