@@ -865,8 +865,9 @@ When you need to inspect or download the results locally:
 1. Open the relevant workflow run from the PR or commit.
 2. Expand the **Run hassfest (may rewrite manifest)** step to review the console
    output, or download the generated artifact directly from the workflow UI.
-3. If you need a fresh validation pass, trigger the workflow manually from the
-   **Run workflow** button in the Actions tab or by re-running the job on the PR.
+3. If you need a fresh validation pass, re-run the job from the PR (the
+   workflow has no `workflow_dispatch` trigger, so there is no **Run workflow**
+   button).
 
 ## Legacy CLI helpers & token cache selection
 
