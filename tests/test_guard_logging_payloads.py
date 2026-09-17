@@ -34,8 +34,9 @@ the name (`str(response)[:16]`, `bytes(payload)[:16]`: the chain follows the
 callee, not the arguments), `binascii.hexlify()`, `base64.b64encode()` or
 `repr(bytes)` are not reported; nor is a message passed whole to `%s`
 (`str(message)` is its text format). Arguments of a logging wrapper that is
-not itself a log call are unchecked, whatever they carry; the one wrapper
-the package has, `_log_verbose`, is treated as a log call by name. Shape
+not itself a log call are unchecked, whatever they carry; the two wrappers
+the package has, `_log_verbose` and `_log_warn_with_limit`, are treated as
+log calls by name. Shape
 (C) also reports `len(x.SerializeToString())`, which would log only a
 length; the tree binds serialised bytes to a variable first, so that
 false positive has no instance today. Section 5 and the
@@ -150,7 +151,7 @@ def _payload_leaves(argument: ast.AST) -> list[tuple[str, str]]:
 
 # Logging wrappers of the package: a call to one of these is a log call even
 # though the receiver is `self`.
-_LOG_WRAPPERS = frozenset({"_log_verbose"})
+_LOG_WRAPPERS = frozenset({"_log_verbose", "_log_warn_with_limit"})
 
 
 def _is_log_call(node: ast.Call) -> bool:
