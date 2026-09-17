@@ -2182,7 +2182,7 @@ async def test_async_get_adm_token_isolated_retry_records_withhold_producer_text
     ``str(exc)`` of a library or transport error may echo the AAS token, the
     account or the response text, so the records carry ``describe_exception``.
     """
-    echoed = "Rejected token ya29.a0AfB_LEAKED for user@example.com"
+    echoed = "Rejected token ECHOED-TOKEN-4f8xLEAK for user@example.com"
 
     async def fake_perform(*_: Any, **__: Any) -> str:
         raise RuntimeError(echoed)
@@ -2211,6 +2211,6 @@ async def test_async_get_adm_token_isolated_retry_records_withhold_producer_text
     ]
     assert [r.levelno for r in exchange_records] == [logging.INFO, logging.ERROR]
     for record in exchange_records:
-        assert "ya29." not in record.getMessage()
+        assert "4f8xLEAK" not in record.getMessage()
         assert "user@example.com" not in record.getMessage()
         assert f"RuntimeError ({len(echoed)} chars withheld)" in record.getMessage()

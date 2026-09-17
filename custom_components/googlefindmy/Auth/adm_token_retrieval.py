@@ -64,7 +64,7 @@ from .gpsoauth_loader import (
 from .gpsoauth_loader import (
     gpsoauth as _gpsoauth_proxy,
 )
-from .log_safety import describe_exception
+from .log_safety import describe_exception, exception_origin
 from .token_cache import TokenCache
 from .token_retrieval import (
     InvalidAasTokenError,
@@ -228,8 +228,9 @@ async def _seed_username_in_cache(username: str, *, cache: TokenCache) -> None:
             )
     except Exception as exc:  # Defensive: never fail token flow on seeding.
         _LOGGER.debug(
-            "Username cache seeding skipped; best-effort fallback active.",
-            exc_info=exc,
+            "Username cache seeding skipped; best-effort fallback active. (%s at %s)",
+            describe_exception(exc),
+            exception_origin(exc),
         )
 
 
@@ -256,8 +257,9 @@ async def _resolve_android_id_for_entry(username: str, *, cache: TokenCache) -> 
             await cache.set(cache_key, android_id)
         except Exception as err:  # noqa: BLE001
             _LOGGER.debug(
-                "Failed to persist android_id from FCM credentials; cache write skipped.",
-                exc_info=err,
+                "Failed to persist android_id from FCM credentials; cache write skipped. (%s at %s)",
+                describe_exception(err),
+                exception_origin(err),
             )
         return android_id
 
@@ -273,8 +275,9 @@ async def _resolve_android_id_for_entry(username: str, *, cache: TokenCache) -> 
         await cache.set(cache_key, android_id)
     except Exception as err:  # noqa: BLE001
         _LOGGER.debug(
-            "Failed to persist generated android_id; cache write skipped.",
-            exc_info=err,
+            "Failed to persist generated android_id; cache write skipped. (%s at %s)",
+            describe_exception(err),
+            exception_origin(err),
             extra={"account": _mask_email(username)},
         )
     return android_id
@@ -365,17 +368,19 @@ async def _resolve_android_id_for_isolated_flow(
             cached_android_id = _coerce_android_id(await cache_get(cache_key), "cache")
         except Exception as err:  # noqa: BLE001
             _LOGGER.debug(
-                "Isolated exchange: failed to read cached android_id for account.",
+                "Isolated exchange: failed to read cached android_id for account. (%s at %s)",
+                describe_exception(err),
+                exception_origin(err),
                 extra={"account": _mask_email(username)},
-                exc_info=err,
             )
         if android_id is None:
             try:
                 cached_fcm = await cache_get("fcm_credentials")
             except Exception as err:  # noqa: BLE001
                 _LOGGER.debug(
-                    "Isolated exchange: failed to read cached FCM credentials; continuing without cached bundle.",
-                    exc_info=err,
+                    "Isolated exchange: failed to read cached FCM credentials; continuing without cached bundle. (%s at %s)",
+                    describe_exception(err),
+                    exception_origin(err),
                 )
             else:
                 android_id = _extract_android_id_from_credentials(cached_fcm)
@@ -386,9 +391,10 @@ async def _resolve_android_id_for_isolated_flow(
                 await cache_set(cache_key, android_id)
             except Exception as err:  # noqa: BLE001
                 _LOGGER.debug(
-                    "Isolated exchange: failed to persist android_id from secrets for account.",
+                    "Isolated exchange: failed to persist android_id from secrets for account. (%s at %s)",
+                    describe_exception(err),
+                    exception_origin(err),
                     extra={"account": _mask_email(username)},
-                    exc_info=err,
                 )
         return android_id
 
@@ -405,9 +411,10 @@ async def _resolve_android_id_for_isolated_flow(
             await cache_set(cache_key, android_id)
         except Exception as err:  # noqa: BLE001
             _LOGGER.debug(
-                "Isolated exchange: failed to persist generated android_id for account.",
+                "Isolated exchange: failed to persist generated android_id for account. (%s at %s)",
+                describe_exception(err),
+                exception_origin(err),
                 extra={"account": _mask_email(username)},
-                exc_info=err,
             )
 
     return android_id
@@ -515,18 +522,20 @@ async def async_get_adm_token(  # noqa: PLR0912,PLR0915
                                 )
                             except Exception as err:  # noqa: BLE001
                                 _LOGGER.debug(
-                                    "Failed to read auth_method before OAuth fallback for account.",
+                                    "Failed to read auth_method before OAuth fallback for account. (%s at %s)",
+                                    describe_exception(err),
+                                    exception_origin(err),
                                     extra={"account": _mask_email(user)},
-                                    exc_info=err,
                                 )
                             await cache.set(
                                 DATA_AUTH_METHOD, _AUTH_METHOD_INDIVIDUAL_TOKENS
                             )
                         except Exception as err:  # noqa: BLE001
                             _LOGGER.debug(
-                                "Failed to switch auth_method for OAuth fallback on account.",
+                                "Failed to switch auth_method for OAuth fallback on account. (%s at %s)",
+                                describe_exception(err),
+                                exception_origin(err),
                                 extra={"account": _mask_email(user)},
-                                exc_info=err,
                             )
                         else:
                             fallback_active = True
@@ -603,9 +612,10 @@ async def async_get_adm_token(  # noqa: PLR0912,PLR0915
                 current_method = await cache.get(DATA_AUTH_METHOD)
             except Exception as err:  # noqa: BLE001
                 _LOGGER.debug(
-                    "Failed to read auth_method during OAuth fallback reset for account.",
+                    "Failed to read auth_method during OAuth fallback reset for account. (%s at %s)",
+                    describe_exception(err),
+                    exception_origin(err),
                     extra={"account": _mask_email(user)},
-                    exc_info=err,
                 )
             else:
                 if current_method == auth_method_for_reset:

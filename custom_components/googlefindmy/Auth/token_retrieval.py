@@ -29,6 +29,7 @@ from .gpsoauth_loader import (
 from .gpsoauth_loader import (
     gpsoauth as _gpsoauth_proxy,
 )
+from .log_safety import describe_exception, exception_origin
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -172,7 +173,11 @@ async def _resolve_android_id(*, cache: TokenCache, username: str) -> int:
     try:
         fcm_creds = await cache.get("fcm_credentials")
     except Exception as err:  # noqa: BLE001
-        _LOGGER.debug("Failed to read FCM credentials from cache", exc_info=err)
+        _LOGGER.debug(
+            "Failed to read FCM credentials from cache (%s at %s)",
+            describe_exception(err),
+            exception_origin(err),
+        )
         fcm_creds = None
 
     android_id = _extract_android_id_from_credentials(fcm_creds)
@@ -181,14 +186,20 @@ async def _resolve_android_id(*, cache: TokenCache, username: str) -> int:
             await cache.set(cache_key, android_id)
         except Exception as err:  # noqa: BLE001
             _LOGGER.debug(
-                "Failed to persist android_id from FCM credentials", exc_info=err
+                "Failed to persist android_id from FCM credentials (%s at %s)",
+                describe_exception(err),
+                exception_origin(err),
             )
         return android_id
 
     try:
         cached_android_id = await cache.get(cache_key)
     except Exception as err:  # noqa: BLE001
-        _LOGGER.debug("Failed to read cached android_id", exc_info=err)
+        _LOGGER.debug(
+            "Failed to read cached android_id (%s at %s)",
+            describe_exception(err),
+            exception_origin(err),
+        )
         cached_android_id = None
 
     android_id = _coerce_android_id(cached_android_id, "cache")
@@ -203,7 +214,11 @@ async def _resolve_android_id(*, cache: TokenCache, username: str) -> int:
     try:
         await cache.set(cache_key, android_id)
     except Exception as err:  # noqa: BLE001
-        _LOGGER.debug("Failed to persist generated android_id", exc_info=err)
+        _LOGGER.debug(
+            "Failed to persist generated android_id (%s at %s)",
+            describe_exception(err),
+            exception_origin(err),
+        )
     return android_id
 
 

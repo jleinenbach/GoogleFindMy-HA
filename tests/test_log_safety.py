@@ -11,14 +11,14 @@ from custom_components.googlefindmy.Auth.log_safety import (
 )
 from custom_components.googlefindmy.NovaApi.nova_request import NovaHTTPError
 
-_ECHO = "Rejected token ya29.a0AfB_LEAKED for user@example.com"
+_ECHO = "Rejected token ECHOED-TOKEN-4f8xLEAK for user@example.com"
 
 
 def test_foreign_exception_is_reduced_to_type_and_length() -> None:
     """A producer's text is withheld; only its type and size are printed."""
     summary = describe_exception(RuntimeError(_ECHO))
     assert summary == f"RuntimeError ({len(_ECHO)} chars withheld)"
-    assert "ya29." not in summary
+    assert "4f8xLEAK" not in summary
     assert "example.com" not in summary
 
 
@@ -34,7 +34,7 @@ def test_oserror_prints_errno_not_text() -> None:
     err = ConnectionRefusedError(errno.ECONNREFUSED, f"refused {_ECHO}")
     summary = describe_exception(err)
     assert summary == f"ConnectionRefusedError (errno={errno.ECONNREFUSED})"
-    assert "ya29." not in summary
+    assert "4f8xLEAK" not in summary
 
 
 def test_empty_message_is_the_bare_type() -> None:
@@ -68,7 +68,7 @@ def test_exception_origin_names_the_frame_without_text() -> None:
         origin = exception_origin(err)
     assert origin.startswith("test_log_safety.py:")
     assert origin.endswith(" in _producer")
-    assert "ya29." not in origin
+    assert "4f8xLEAK" not in origin
 
 
 def test_exception_origin_without_traceback() -> None:

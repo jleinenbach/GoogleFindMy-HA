@@ -56,7 +56,7 @@ from .gpsoauth_loader import (
 from .gpsoauth_loader import (
     gpsoauth as _gpsoauth_proxy,
 )
-from .log_safety import describe_exception
+from .log_safety import describe_exception, exception_origin
 from .token_cache import TokenCache
 from .username_provider import username_string
 
@@ -221,8 +221,9 @@ async def _get_or_generate_android_id(
             await cache.set(cache_key, android_id)
         except Exception as err:  # noqa: BLE001
             _LOGGER.debug(
-                "Skipping cache write for android_id derived from FCM bundle; persistence failed",
-                exc_info=err,
+                "Skipping cache write for android_id derived from FCM bundle; persistence failed (%s at %s)",
+                describe_exception(err),
+                exception_origin(err),
             )
         return android_id
 
@@ -284,16 +285,17 @@ async def _exchange_oauth_for_aas(
         resp = await loop.run_in_executor(None, _run)
     except Exception as err:  # noqa: BLE001
         if gpsoauth_exceptions and isinstance(err, gpsoauth_exceptions.AuthError):
-            # Per Auth/AGENTS.md (lines 99-102, 133-135): keep raw exception
-            # text out of the log message; surface a sanitized ``error_kind``
-            # via ``extra`` and preserve traceback context via ``exc_info``.
+            # Per Auth/AGENTS.md (logging guardrails): keep raw exception
+            # text out of the record; surface a sanitized ``error_kind`` via
+            # ``extra`` and the type plus frame instead of a traceback.
             _LOGGER.warning(
-                "gpsoauth authentication error.",
+                "gpsoauth authentication error. (%s at %s)",
+                describe_exception(err),
+                exception_origin(err),
                 extra={
                     "user": _mask_email_for_logs(username),
                     "error_kind": "auth_error",
                 },
-                exc_info=err,
             )
             new_err = RuntimeError("gpsoauth authentication failed (kind=auth_error)")
             new_err.error_kind = "auth_error"  # type: ignore[attr-defined]
@@ -313,12 +315,13 @@ async def _exchange_oauth_for_aas(
             wrapped_msg = "gpsoauth exchange failed (kind=exchange_error)"
             log_level = _LOGGER.error
         log_level(
-            "gpsoauth exchange failed unexpectedly.",
+            "gpsoauth exchange failed unexpectedly (%s at %s).",
+            describe_exception(err),
+            exception_origin(err),
             extra={
                 "user": _mask_email_for_logs(username),
                 "error_kind": wrapped_kind,
             },
-            exc_info=err,
         )
         new_err = RuntimeError(wrapped_msg)
         new_err.error_kind = wrapped_kind  # type: ignore[attr-defined]
@@ -339,7 +342,7 @@ async def _exchange_oauth_for_aas(
         error_value = resp.get("Error", "") if isinstance(resp, dict) else ""
         error_details = resp.get("ErrorDetails", "") if isinstance(resp, dict) else ""
         key_count = len(resp) if isinstance(resp, dict) else 0
-        # Per Auth/AGENTS.md (lines 99-102, 133-135): keep raw gpsoauth
+        # Per Auth/AGENTS.md (logging guardrails): keep raw gpsoauth
         # response bodies (esp. ``ErrorDetails``) out of the log message;
         # surface only sanitized flags/keys via ``extra``. The gpsoauth
         # ``Error`` field is a documented closed set (``BadAuthentication``,
@@ -424,7 +427,11 @@ async def _generate_aas_token(*, cache: TokenCache) -> str:  # noqa: PLR0912, PL
         try:
             await cache.set(DATA_AAS_TOKEN, oauth_token)
         except Exception as err:  # noqa: BLE001
-            _LOGGER.debug("Failed to persist cached AAS token shortcut.", exc_info=err)
+            _LOGGER.debug(
+                "Failed to persist cached AAS token shortcut. (%s at %s)",
+                describe_exception(err),
+                exception_origin(err),
+            )
         return oauth_token
 
     if not oauth_token:

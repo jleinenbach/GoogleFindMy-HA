@@ -802,9 +802,11 @@ class FcmPushClient[NotificationContextT]:  # pylint:disable=too-many-instance-a
         try:
             self.callback(ret_val, msg.persistent_id, self.callback_context)
             self._reset_error_count(ErrorType.NOTIFY)
-        except Exception:
-            self.logger.exception(
-                "Unexpected exception calling notification callback\n"
+        except Exception as callback_err:
+            self.logger.error(
+                "Unexpected exception calling notification callback: %s at %s",
+                describe_exception(callback_err),
+                exception_origin(callback_err),
             )
             self._try_increment_error_count(ErrorType.NOTIFY)
 

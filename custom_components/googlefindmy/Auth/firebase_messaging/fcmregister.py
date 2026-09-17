@@ -48,7 +48,7 @@ from cryptography.hazmat.primitives.asymmetric import ec
 
 from google.protobuf.json_format import MessageToDict
 
-from ..log_safety import describe_exception
+from ..log_safety import describe_exception, exception_origin
 from ._typing import (
     CredentialsUpdatedCallable,
     JSONDict,
@@ -692,7 +692,12 @@ class FcmRegister:
 
         msg = f"Unable to complete GCM register after {retries} attempts"
         if isinstance(last_error, Exception):
-            _logger.error(msg, exc_info=last_error)
+            _logger.error(
+                "%s: %s at %s",
+                msg,
+                describe_exception(last_error),
+                exception_origin(last_error),
+            )
         else:
             _logger.error("%s, last error was: %s", msg, last_error)
         # If the retry budget was exhausted on persistent 401/404 responses
@@ -1094,17 +1099,21 @@ class FcmRegister:
             except Exception as e:
                 last_error = e
                 _logger.error(
-                    "Error during FCM register at %s (attempt %d/%d)",
+                    "Error during FCM register at %s (attempt %d/%d) (%s at %s)",
                     url,
                     attempt,
                     retries,
-                    exc_info=e,
+                    describe_exception(e),
+                    exception_origin(e),
                 )
                 await asyncio.sleep(1)
 
         if isinstance(last_error, Exception):
             _logger.error(
-                "FCM register ultimately failed at %s", url, exc_info=last_error
+                "FCM register ultimately failed at %s: %s at %s",
+                url,
+                describe_exception(last_error),
+                exception_origin(last_error),
             )
         return None
 
@@ -1132,8 +1141,9 @@ class FcmRegister:
                 raise
             except Exception as e:
                 _logger.warning(
-                    "Existing credentials check-in failed; re-registering",
-                    exc_info=e,
+                    "Existing credentials check-in failed; re-registering (%s at %s)",
+                    describe_exception(e),
+                    exception_origin(e),
                 )
 
         self.credentials = await self.register()
@@ -1142,7 +1152,11 @@ class FcmRegister:
             try:
                 self.credentials_updated_callback(credentials)
             except Exception as e:  # avoid caller breaking the flow
-                _logger.debug("credentials_updated_callback raised", exc_info=e)
+                _logger.debug(
+                    "credentials_updated_callback raised (%s at %s)",
+                    describe_exception(e),
+                    exception_origin(e),
+                )
 
         if credentials is None:
             raise RuntimeError("Registration did not yield credentials")
@@ -1156,7 +1170,11 @@ class FcmRegister:
             try:
                 self.credentials_updated_callback(self.credentials)
             except Exception as e:
-                _logger.debug("credentials_updated_callback raised", exc_info=e)
+                _logger.debug(
+                    "credentials_updated_callback raised (%s at %s)",
+                    describe_exception(e),
+                    exception_origin(e),
+                )
         if self.credentials is None:
             raise RuntimeError("Fallback registration did not yield credentials")
         return self.credentials
@@ -1194,7 +1212,11 @@ class FcmRegister:
             # than rotating a working android_id/keys via a full register().
             raise
         except Exception as e:
-            _logger.debug("Check-in exception detail", exc_info=e)
+            _logger.debug(
+                "Check-in exception detail (%s at %s)",
+                describe_exception(e),
+                exception_origin(e),
+            )
             return await self._fallback_full_register(
                 "Check-in with existing identity failed"
             )
@@ -1231,7 +1253,11 @@ class FcmRegister:
             try:
                 self.credentials_updated_callback(res)
             except Exception as e:
-                _logger.debug("credentials_updated_callback raised", exc_info=e)
+                _logger.debug(
+                    "credentials_updated_callback raised (%s at %s)",
+                    describe_exception(e),
+                    exception_origin(e),
+                )
 
         # Step 4: Best-effort unregister of the now-orphaned OLD subscription.
         # Runs only AFTER the new registration is fully secured and persisted,

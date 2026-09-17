@@ -991,3 +991,38 @@ async def test_async_get_aas_token_retry_records_withhold_producer_text(
         assert "LEAKED" not in record.getMessage()
         assert "user@example.com" not in record.getMessage()
         assert f"RuntimeError ({len(echoed)} chars withheld)" in record.getMessage()
+
+
+@pytest.mark.asyncio
+async def test_exchange_oauth_for_aas_foreign_error_record_has_no_traceback(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A foreign exchange error is logged without traceback and without its text.
+
+    The last line of a rendered traceback is ``str(err)``; the record carries
+    ``describe_exception`` and ``exception_origin`` instead of ``exc_info``.
+    """
+    echoed = "server said: token ECHOED-TOKEN-4f8xLEAK is invalid"
+
+    def fake_exchange(*_: Any, **__: Any) -> dict[str, Any]:
+        raise RuntimeError(echoed)
+
+    monkeypatch.setattr(aas_token_retrieval.gpsoauth, "exchange_token", fake_exchange)
+    caplog.set_level(logging.DEBUG, logger=aas_token_retrieval.__name__)
+
+    with pytest.raises(RuntimeError):
+        await aas_token_retrieval._exchange_oauth_for_aas(
+            "user@example.com", "oauth-secret-value", 0xDEADBEEF
+        )
+
+    records = [
+        r
+        for r in caplog.records
+        if "gpsoauth exchange failed unexpectedly" in r.message
+    ]
+    assert len(records) == 1
+    record = records[0]
+    assert record.exc_info is None
+    assert "4f8xLEAK" not in record.getMessage()
+    assert f"RuntimeError ({len(echoed)} chars withheld)" in record.getMessage()
+    assert getattr(record, "error_kind") == "exchange_error"

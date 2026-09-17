@@ -1669,7 +1669,7 @@ async def test_checkin_transient_warning_withholds_producer_text(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     """The check-in retry warning prints a transport error by type and size."""
-    echoed = "connection refused for token ya29.a0AfB_LEAKED"
+    echoed = "connection refused for token ECHOED-TOKEN-4f8xLEAK"
     session = _SequencedCheckinSession([RuntimeError(echoed)] * 8)
     creds = {"gcm": {"android_id": 1, "security_token": 2}}
     register = FcmRegister(_checkin_config(), creds, http_client_session=session)
@@ -1682,5 +1682,5 @@ async def test_checkin_transient_warning_withholds_producer_text(
     warnings = [r for r in caplog.records if "GCM check-in error" in r.message]
     assert warnings
     for record in warnings:
-        assert "ya29." not in record.getMessage()
+        assert "4f8xLEAK" not in record.getMessage()
         assert f"RuntimeError ({len(echoed)} chars withheld)" in record.getMessage()
