@@ -831,11 +831,13 @@ class FcmPushClient[NotificationContextT]:  # pylint:disable=too-many-instance-a
         await self._send_msg(req)
 
     async def _handle_iq(self, p: IqStanza) -> None:
-        if not p.extension:
+        # `HasField`, not truthiness: an unset sub-message is still a truthy
+        # default instance, so `not p.extension` never held and a stanza
+        # without extension fell through to the "extension id 0" warning.
+        if not p.HasField("extension"):
             # `_msg_str` names the type and fields; the whole stanza in text
             # format is a payload dump (AGENTS.md section 5). The old call
-            # also had no placeholder for its argument, so logging reported
-            # a formatting error instead of the record.
+            # also had no placeholder for its argument.
             self._log_warn_with_limit(
                 "Unexpected IqStanza id received with no extension: %s",
                 self._msg_str(p),

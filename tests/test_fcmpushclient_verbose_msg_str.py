@@ -12,6 +12,8 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
+
 from custom_components.googlefindmy.Auth.firebase_messaging.fcmpushclient import (
     FcmPushClient,
 )
@@ -60,3 +62,47 @@ def test_verbose_msg_str_names_fields_not_values() -> None:
 
 def test_non_verbose_msg_str_is_the_type_name() -> None:
     assert _msg_str(verbose=False) == "DataMessageStanza"
+
+
+@pytest.mark.asyncio
+async def test_handle_iq_without_extension_logs_type_not_dump() -> None:
+    """An IqStanza without extension is reported by type, not as a text dump.
+
+    The branch used to test `not p.extension`, which never holds for an unset
+    sub-message (a default instance is truthy), so the stanza fell through to
+    the "extension id 0" warning; and its format string had no placeholder for
+    the stanza it was handed. Both are pinned here: the no-extension branch is
+    taken, and the record names the type only.
+    """
+    from custom_components.googlefindmy.Auth.firebase_messaging.proto.mcs_pb2 import (
+        IqStanza,
+    )
+
+    warnings: list[tuple[str, tuple[object, ...]]] = []
+
+    class _Slim:
+        config = SimpleNamespace(log_debug_verbose=False)
+
+        def _log_warn_with_limit(self, msg: str, *args: object) -> None:
+            warnings.append((msg, args))
+
+        _msg_str = FcmPushClient._msg_str
+        _handle_iq = FcmPushClient._handle_iq
+
+    stanza = IqStanza()
+    stanza.type = IqStanza.IqType.GET
+    stanza.id = "iq-3f9a1c7e"
+    await _Slim()._handle_iq(stanza)
+
+    assert len(warnings) == 1
+    msg, args = warnings[0]
+    assert msg.count("%s") == 1 and msg.count("%") == 1
+    assert args == ("IqStanza",)
+    assert (msg % args).endswith("no extension: IqStanza")
+
+    # With an extension of an unknown id the other branch is taken.
+    warnings.clear()
+    stanza.extension.id = 99
+    stanza.extension.data = b""
+    await _Slim()._handle_iq(stanza)
+    assert warnings == [("Unexpected extension id received: %s", (99,))]
