@@ -738,9 +738,11 @@ async def test_locate_warns_and_returns_empty_on_an_unaccepted_request(
 
     The outcome has TWO halves, and asserting only the first is what let the first
     revision of this step ship a leak. ``name`` falls back to the raw canonical
-    device id, which AGENTS.md section 5 keeps out of logs and the tree's "R6 /
-    Count@WARNING, Name@DEBUG" pattern keeps out of user-facing records in
-    particular. So the branch may raise the LEVEL without raising the IDENTIFIED
+    device id (class (b) under AGENTS.md section 5, allowed at any level) or is
+    the user-provided name, which the tree's "R6 / Count@WARNING, Name@DEBUG"
+    pattern keeps out of records that can repeat unattended; section 5 lets a
+    record that answers one user action name the device, and this branch keeps
+    the split anyway. So the branch may raise the LEVEL without raising the IDENTIFIED
     sentence with it: the WARNING carries the operation and the reason, the DEBUG
     record carries the device. A test that pinned only "one record, at WARNING"
     stayed green while the id sat in it, which is why the absence in that record

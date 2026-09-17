@@ -6,13 +6,15 @@ when area changes are detected on Bermuda tracker entities.
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock
+import logging
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from custom_components.googlefindmy.fmdn_finder.bermuda_listener import (
     ATTR_AREA,
     BERMUDA_TRACKER_SUFFIX,
+    _async_upload_semantic_location,
     async_setup_bermuda_listener,
     async_unload_bermuda_listener,
 )
@@ -499,3 +501,39 @@ async def test_find_googlefindmy_device_ignores_non_device_tracker_entities() ->
     assert result is not None
     # Should find the device_tracker, not the sensor
     assert result["device_id"] == "target_device_id"
+
+
+@pytest.mark.asyncio
+async def test_semantic_upload_debug_log_masks_scanner_name(
+    hass_mock: MagicMock, caplog: pytest.LogCaptureFixture
+) -> None:
+    """AGENTS.md section 5, class (c): the Bermuda scanner name is logged
+    masked, while the uploader still receives it in full.
+
+    Bermuda's `scanner` attribute is the scanner device's name and falls back
+    to `bermuda_<slug of the MAC>` (`bermuda_device.make_name`), so the value
+    is graded as a hardware address. Only the uploader boundary is mocked; the
+    DEBUG line under test runs for real.
+    """
+    caplog.set_level(
+        logging.DEBUG,
+        logger="custom_components.googlefindmy.fmdn_finder.bermuda_listener",
+    )
+    upload_mock = AsyncMock()
+    with patch(
+        "custom_components.googlefindmy.fmdn_finder.location_uploader.async_process_fmdn_beacon_detection",
+        upload_mock,
+    ):
+        await _async_upload_semantic_location(
+            hass_mock,
+            eid=b"\xab" * 20,
+            area="Kitchen",
+            config_entry_id="entry_1",
+            scanner="AA:BB:CC:DD:EE:FF",
+            google_device_id="google_dev_1",
+        )
+
+    assert "scanner=...E:FF" in caplog.text
+    assert "AA:BB:CC:DD:EE:FF" not in caplog.text
+    upload_mock.assert_awaited_once()
+    assert upload_mock.await_args.kwargs["scanner_address"] == "AA:BB:CC:DD:EE:FF"

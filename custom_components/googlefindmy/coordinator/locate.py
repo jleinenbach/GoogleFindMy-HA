@@ -811,13 +811,14 @@ class LocateOperations(_MixinBase):
                 # repeats unattended.
                 # Second, `name` falls back to the raw canonical id when no
                 # display name is cached (see where it is bound above). The rule
-                # is AGENTS.md section 5 (never log device ids, redact derived
-                # identifying information); the LEVEL split is the tree's own
-                # reading of it, the "R6 / Count@WARNING, Name@DEBUG" pattern that
+                # is AGENTS.md section 5: the canonical id is a class (b)
+                # identifier (allowed at any level), the user-provided name is
+                # derived information, and section 5 states the level split
+                # itself, the "R6 / Count@WARNING, Name@DEBUG" pattern that
                 # `test_location_request_r6_name_sweep.py` states and that the
-                # signal class itself cites in its docstring. Section 5 alone
-                # carries no level caveat, so citing only it would overstate the
-                # licence. That is why the sentence is split the way the transport
+                # signal class itself cites in its docstring. Because `name` may
+                # fall back to the id, the split is applied to the whole value.
+                # That is why the sentence is split the way the transport
                 # layer splits its own:
                 # the WARNING carries the operation and the reason, the identified
                 # half stays at DEBUG. An earlier revision of this step logged
@@ -825,12 +826,13 @@ class LocateOperations(_MixinBase):
                 # sibling branches of this method, which do the same. The defence
                 # does not hold, and the reason is worth keeping: it was THIS step
                 # that raised the line from DEBUG to WARNING, so it was this step
-                # that put a possible device id into the default log. Matching
-                # neighbours is not a licence to promote a leak; what a branch
-                # does at DEBUG and what it may do at WARNING are two different
-                # questions. The neighbours stay as they are -- lowering them is a
-                # decision about the whole method -- but this branch does not add
-                # to them.
+                # that put a possible device name into the default log. Section 5
+                # settles the question the neighbours raised: a record that
+                # answers one user action may name the device, a record that can
+                # repeat unattended carries a count or an index. This branch is
+                # one line per user action, so naming would be allowed; it keeps
+                # the split anyway, because the DEBUG record beneath it already
+                # carries the device and the test pins exactly that shape.
                 _LOGGER.warning("Manual locate failed: %s", not_accepted_err)
                 _LOGGER.debug(
                     "Manual locate for %s failed (request not accepted): %s",

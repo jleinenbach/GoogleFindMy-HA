@@ -52,6 +52,25 @@ UPLOAD_CACHE_CLEANUP_COUNT = 50  # Number of old entries to remove
 
 # Log formatting
 EID_LOG_PREFIX_LENGTH = 8  # Number of hex chars to show in logs
+ADDRESS_LOG_SUFFIX_LENGTH = 4  # Chars of a scanner name/address kept in logs
+
+
+def _mask_address_for_logs(address: str | None) -> str:
+    """Return the log-safe rendering of a scanner name or hardware address.
+
+    `AGENTS.md` section 5 grades identifiers by whether somebody who holds only
+    the log file can use the value. A Bermuda scanner name is class (c): it is
+    the scanner device's name and falls back to a slug of the scanner's BLE MAC
+    (`bermuda_device.make_name`), which stays valid for years and can be found
+    again over the air. The contract's treatment for class (c) is a truncation
+    to the last four characters, so `AA:BB:CC:DD:EE:FF` becomes `...E:FF` and
+    `bermuda_aabbccddeeff` becomes `...eeff`: enough to tell two proxies apart
+    in a diagnosis, not enough to reconstruct the address.
+    """
+    if not address:
+        return "none"
+    return f"...{address[-ADDRESS_LOG_SUFFIX_LENGTH:]}"
+
 
 # Data storage keys
 DATA_FMDN_UPLOAD_CACHE = "fmdn_finder_upload_cache"
@@ -101,7 +120,8 @@ async def async_process_fmdn_beacon_detection(  # noqa: PLR0913
         eid: Ephemeral Identity Key (20 or 32 bytes) from FMDN beacon
         area: Bermuda area/room name
         rssi: Signal strength (dBm)
-        scanner_address: BLE scanner MAC address
+        scanner_address: Bermuda scanner name (the scanner device's name, which
+            falls back to a slug of its BLE MAC); logged masked, class (c)
         scanner_device_id: HA device registry ID of scanner
         fmdn_device_id: HA device registry ID of FMDN device
         entity_id: Bermuda entity ID for logging
@@ -128,7 +148,7 @@ async def async_process_fmdn_beacon_detection(  # noqa: PLR0913
         _LOGGER.debug(
             "No location available for scanner (area=%s, scanner=%s), skipping upload",
             area,
-            scanner_address,
+            _mask_address_for_logs(scanner_address),
         )
         return False
 
@@ -227,7 +247,8 @@ async def _resolve_scanner_location(
     Args:
         hass: Home Assistant instance
         area: Bermuda area/room name
-        scanner_address: BLE scanner MAC address
+        scanner_address: Bermuda scanner name (the scanner device's name, which
+            falls back to a slug of its BLE MAC); logged masked, class (c)
         scanner_device_id: HA device registry ID of scanner
 
     Returns:

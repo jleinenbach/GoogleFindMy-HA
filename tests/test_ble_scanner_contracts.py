@@ -20,6 +20,7 @@ callback for direct invocation (DoD: import path exercised only via patch).
 
 from __future__ import annotations
 
+import logging
 import sys
 from types import ModuleType, SimpleNamespace
 from unittest.mock import MagicMock, Mock
@@ -323,6 +324,34 @@ async def test_callback_rate_limits_unresolved_logs(
     callback(info, None)  # interval elapsed -> logs again
     assert debug.call_count == first + 1
     assert resolver.resolve_eid.call_count == 3  # resolver hit every time
+
+
+@pytest.mark.asyncio
+async def test_callback_masks_unresolved_advertisement_mac(
+    fake_bluetooth: SimpleNamespace,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AGENTS.md section 5: the MAC of an advertisement that did not resolve
+    is somebody else's tracker until proven otherwise (class (c)) and reaches
+    the DEBUG log masked, while the resolver still receives it in full.
+
+    The clock is pinned below the rate-limit interval on purpose: the first
+    sighting of a prefix must log regardless of the monotonic clock's value
+    (a freshly booted CI runner starts below 300 s; a `get(prefix, 0.0)`
+    default silently suppressed the first sighting there).
+    """
+    resolver = Mock()
+    resolver.resolve_eid.return_value = None
+    _bucket, callback = await _setup_and_capture(fake_bluetooth, resolver)
+    monkeypatch.setattr(ble_scanner.time, "monotonic", lambda: 10.0)
+    caplog.set_level(logging.DEBUG, logger=ble_scanner._LOGGER.name)
+
+    callback(_service_info({FEAA_SERVICE_UUID: _payload()}), None)
+
+    assert "mac=...E:FF" in caplog.text
+    assert "AA:BB:CC:DD:EE:FF" not in caplog.text
+    assert resolver.resolve_eid.call_args.kwargs["ble_address"] == "AA:BB:CC:DD:EE:FF"
 
 
 # --------------------------------------------------------------------------- #
