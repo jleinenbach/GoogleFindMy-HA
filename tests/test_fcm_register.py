@@ -1388,6 +1388,54 @@ async def test_gcm_check_in_verbose_log_omits_credentials(
     assert "security_token" in logged  # the field name is the diagnostic
 
 
+@pytest.mark.asyncio
+async def test_register_verbose_log_omits_gcm_credentials(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The verbose `GCM subscription` record names fields, never the values.
+
+    `gcm_check_in_and_register()` returns the token together with
+    ``android_id`` and ``security_token`` (the AidLogin pair). The record used
+    to expand the whole mapping and redact only ``token``; the two credentials
+    reached the DEBUG log in full (`AGENTS.md` section 5).
+    """
+    android_id = 5_738_291_047_365_182_930
+    security_token = 8_361_940_275_183_064_927
+    token = "dq9x3EtH2kY:APA91bF0VzWc8ghUGrOpN1JmQ5aTe4bRxL7sKdZyCvIiHpMuWn"
+    gcm_data = {
+        "token": token,
+        "app_id": "app",
+        "android_id": android_id,
+        "security_token": security_token,
+    }
+
+    async def fake_gcm(*_: object) -> dict[str, object]:
+        return dict(gcm_data)
+
+    async def fake_fcm(*_: object) -> dict[str, object]:
+        return {"installation": {"token": "inst"}, "registration": {"token": "reg"}}
+
+    register = FcmRegister(_checkin_config())
+    register._log_debug_verbose = True
+    register.generate_keys = lambda: {"public": "p", "private": "s", "secret": "a"}  # type: ignore[method-assign]
+    register.gcm_check_in_and_register = fake_gcm  # type: ignore[method-assign]
+    register.fcm_install_and_register = fake_fcm  # type: ignore[method-assign]
+
+    with caplog.at_level(logging.DEBUG):
+        result = await register.register()
+
+    assert result["gcm"] == gcm_data
+    logged = "\n".join(record.getMessage() for record in caplog.records)
+    assert str(android_id) not in logged
+    assert str(security_token) not in logged
+    assert all(token[i : i + 8] not in logged for i in range(0, len(token) - 7)), (
+        "a window of the subscription token reached the log"
+    )
+    assert "GCM subscription: fields=" in logged
+    assert "security_token" in logged  # the field name is the diagnostic
+    assert f"token=•••{token[-6:]}" in logged
+
+
 # ---------------------------------------------------------------------
 # Error bodies never reach the log (AGENTS.md section 5; Auth AGENTS.md
 # "Logging": response bodies stay out of the message). Each non-OK path used

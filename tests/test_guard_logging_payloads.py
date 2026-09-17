@@ -8,7 +8,7 @@ undecodable protobuf, the prefix of a shared secret. This guard watches that
 class; `test_guard_logging_identifiers.py` watches class (c) identifiers and
 the two do not overlap (address-like leaves there, payload-like leaves here).
 
-Five shapes are recognised inside a log call's arguments:
+Six shapes are recognised inside a log call's arguments:
 
   (A) a `.hex()` call, whatever the receiver is called;
   (B) a slice (`x[:n]`, `x[a:b]`) whose name chain carries a payload-like
@@ -24,10 +24,16 @@ Five shapes are recognised inside a log call's arguments:
   (E) an unsliced argument whose own name is a whole body (`hex_response`,
       `response_hex`, `result_hex`, `hex_string`, `response_bytes`,
       `raw_data`, `raw_bytes`, `raw_response`, `payload`, `body`, `blob`,
-      `merged_device_data`), passed whole to `%s`. The list is exact names,
-      not the substring pattern of (B): `payload_len`, `raw_prefix` or
-      `status_raw` carry a length, a prefix or a status, and a substring
-      rule over them reported 31 sites of which two were payloads.
+      `merged_device_data`, `gcm_data`, `fcm_data`), passed whole to `%s`.
+      The list is exact names, not the substring pattern of (B):
+      `payload_len`, `raw_prefix` or `status_raw` carry a length, a prefix
+      or a status, and a substring rule over them reported 31 sites of
+      which two were payloads;
+  (F) a mapping unpacked into a dict display that is a log argument
+      (`{**gcm_data, "token": redacted}`), whatever the mapping is called:
+      every key the mapping carries reaches the record, and redacting one
+      of them by name leaves the others (the AidLogin pair `android_id`,
+      `security_token` next to the token) in full.
 
 The EID is allowed at any level, in full or truncated (`AGENTS.md`, class
 (a)); the leaves that carry it are listed in `_ROTATING_LEAVES` and excused
@@ -36,10 +42,12 @@ frame (`payload[:4].hex()` in the BLE scanner: frame byte plus three EID
 bytes, rotating) and is excused by (path, leaf, format-string prefix), so the
 exception covers that one call and not every `payload` line of the module.
 
-Blind spot, stated on purpose: the guard sees only shapes (A) to (E). Shape
+Blind spot, stated on purpose: the guard sees only shapes (A) to (F). Shape
 (E) knows an exact list of names: a whole payload under any other name,
 or wrapped (`str(payload)`, `repr(payload)`, `payload.decode()`, an
-f-string), is not reported. Shape (D) follows one assignment (plain or annotated, not a walrus), not a chain:
+f-string), is not reported. Shape (F) sees the dict display in the call
+itself: a copy bound first (`shown = {**gcm_data, ...}`) or built by
+`dict(gcm_data, token=...)` and then logged is not followed. Shape (D) follows one assignment (plain or annotated, not a walrus), not a chain:
 a body copied a second time (`snippet = text[:200]`, or an f-string built
 from it and logged later) is not followed. It trusts names: any `.read()`
 counts as a body (a file too), and a local helper called `_describe_body`
@@ -115,6 +123,8 @@ _WHOLE_BODY_NAMES = frozenset(
         "body",
         "blob",
         "merged_device_data",
+        "gcm_data",
+        "fcm_data",
     }
 )
 
@@ -258,6 +268,20 @@ def _whole_body_leaves(argument: ast.AST) -> list[tuple[str, str]]:
     return []
 
 
+def _expansion_leaves(argument: ast.AST) -> list[tuple[str, str]]:
+    """(shape, name) for every mapping unpacked into a dict display (shape (F)).
+
+    `ast.Dict` marks a `**` entry with a `None` key; the value is the mapping.
+    """
+    found: list[tuple[str, str]] = []
+    for node in ast.walk(argument):
+        if isinstance(node, ast.Dict):
+            for key, value in zip(node.keys, node.values, strict=True):
+                if key is None:
+                    found.append(("expansion", _base_leaf(value) or "?"))
+    return found
+
+
 def _is_log_call(node: ast.Call) -> bool:
     func = node.func
     if not isinstance(func, ast.Attribute):
@@ -334,6 +358,7 @@ def scan(
                     *_payload_leaves(argument),
                     *_body_leaves(argument, bodies),
                     *_whole_body_leaves(argument),
+                    *_expansion_leaves(argument),
                 ]:
                     if leaf in seen or leaf in rotating:
                         continue
@@ -359,6 +384,31 @@ def test_no_log_call_passes_raw_payload_bytes() -> None:
         "rotating site goes into `_REVIEWED` as (path, leaf, format-string prefix):\n"
         + "\n".join(f"{path}:{line}: {leaf}" for path, line, leaf, _fmt in offenders)
     )
+
+
+def test_shape_f_reports_every_unpacked_mapping() -> None:
+    """Shape (F) names the mapping behind each `**` entry, wherever it sits.
+
+    Positive fixture: the package is clean, so without this case a detector
+    that returned nothing would keep `test_no_log_call_passes_raw_payload_bytes`
+    green. The last snippet is the fixed record and must stay silent.
+    """
+    cases = {
+        'LOG.debug("x: %s", {**gcm_data, "token": redacted})': ["gcm_data"],
+        'LOG.debug("x: %s", repr({"inner": {**creds}}))': ["creds"],
+        'LOG.debug("x: %s", {**a, "k": 1, **self.b})': ["a", "b"],
+        'LOG.debug("x: %s", {"k": v})': [],
+        'LOG.debug("x: fields=%s token=%s", sorted(gcm_data), redacted)': [],
+    }
+    for source, expected in cases.items():
+        call = ast.parse(source).body[0].value
+        assert isinstance(call, ast.Call)
+        leaves = [
+            leaf
+            for argument in call.args
+            for _shape, leaf in _expansion_leaves(argument)
+        ]
+        assert leaves == expected, source
 
 
 def test_each_reviewed_site_matches_exactly_one_log_call() -> None:

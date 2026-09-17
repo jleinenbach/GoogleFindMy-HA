@@ -1221,9 +1221,13 @@ class FcmRegister:
             raise RuntimeError(
                 "Unable to establish subscription with Google Cloud Messaging."
             )
+        # The mapping carries the AidLogin pair (android_id, security_token)
+        # next to the token: name the fields, redact the token, never expand
+        # the mapping into the record (AGENTS.md section 5).
         self._log_verbose(
-            "GCM subscription: %s",
-            {**gcm_data, "token": self._redact(gcm_data.get("token"))},
+            "GCM subscription: fields=%s token=%s",
+            sorted(gcm_data),
+            self._redact(gcm_data.get("token")),
         )
 
         fcm_data = await self.fcm_install_and_register(gcm_data, keys)
