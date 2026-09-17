@@ -8,7 +8,7 @@ undecodable protobuf, the prefix of a shared secret. This guard watches that
 class; `test_guard_logging_identifiers.py` watches class (c) identifiers and
 the two do not overlap (address-like leaves there, payload-like leaves here).
 
-Three shapes are recognised inside a log call's arguments:
+Four shapes are recognised inside a log call's arguments:
 
   (A) a `.hex()` call, whatever the receiver is called;
   (B) a slice (`x[:n]`, `x[a:b]`) whose name chain carries a payload-like
@@ -16,7 +16,11 @@ Three shapes are recognised inside a log call's arguments:
       `_bytes`, `body`, `blob`, `token`);
   (C) a serialised protobuf message (`MessageToJson(...)`,
       `MessageToDict(...)`, `MessageToString(...)`, `.SerializeToString()`),
-      which dumps every field of a wire message including credentials.
+      which dumps every field of a wire message including credentials;
+  (D) a name bound in the same function from an HTTP response body
+      (`x = await resp.text()`, `resp.read()`, `resp.json()`), whatever the
+      name is called and whether or not it is sliced: `text[:400]` is the
+      raw body under a neutral name.
 
 The EID is allowed at any level, in full or truncated (`AGENTS.md`, class
 (a)); the leaves that carry it are listed in `_ROTATING_LEAVES` and excused
@@ -25,10 +29,11 @@ frame (`payload[:4].hex()` in the BLE scanner: frame byte plus three EID
 bytes, rotating) and is excused by (path, leaf, format-string prefix), so the
 exception covers that one call and not every `payload` line of the module.
 
-Blind spot, stated on purpose: the guard sees only shapes (A) to (C). A raw
-value copied into a neutrally named variable before the call
-(`preview = resp[:200]; _LOGGER.debug("%s", preview)`), an unsliced raw value
-under a neutral name (`text`, `data`, `msg`), a slice whose whole chain is
+Blind spot, stated on purpose: the guard sees only shapes (A) to (D). Shape
+(D) follows one assignment, not a chain: a body copied a second time
+(`snippet = text[:200]`, or an f-string built from it and logged later) is
+not followed. A raw value under a neutral name that was not read from a
+response in the same function (`data`, `msg`), a slice whose whole chain is
 neutrally named (`page.read()[:16]`), a wrapping call whose arguments hide
 the name (`str(response)[:16]`, `bytes(payload)[:16]`: the chain follows the
 callee, not the arguments), `binascii.hexlify()`, `base64.b64encode()` or
@@ -82,6 +87,15 @@ _ROTATING_LEAVES: frozenset[str] = frozenset({"eid", "eid_hex", "truncated_eid_h
 _REVIEWED: frozenset[tuple[str, str, str]] = frozenset(
     {("fmdn_finder/ble_scanner.py", "payload", "BLE scan: resolved")}
 )
+
+# Methods that read an HTTP response body (shape (D)); a name bound from one
+# of these in the same function is a body, whatever it is called.
+_BODY_READERS = frozenset({"text", "read", "json"})
+
+# Helpers whose return value is log-safe even when a body goes in: the
+# guard does not descend into their arguments (shape (D)). `len` and `type`
+# yield a number or a name; the two describers yield a content class.
+_SAFE_WRAPPERS = frozenset({"len", "type", "_describe_body", "_classify_body"})
 
 # Callables that serialise a whole protobuf message (shape (C)).
 _SERIALISERS = frozenset(
@@ -154,6 +168,53 @@ def _payload_leaves(argument: ast.AST) -> list[tuple[str, str]]:
 _LOG_WRAPPERS = frozenset({"_log_verbose", "_log_warn_with_limit"})
 
 
+def _body_names(function: ast.AST) -> frozenset[str]:
+    """Names bound in `function` from a response-body read (shape (D))."""
+    names: set[str] = set()
+    for node in ast.walk(function):
+        if not isinstance(node, ast.Assign):
+            continue
+        value = node.value
+        if isinstance(value, ast.Await):
+            value = value.value
+        if (
+            isinstance(value, ast.Call)
+            and isinstance(value.func, ast.Attribute)
+            and value.func.attr in _BODY_READERS
+        ):
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    names.add(target.id)
+    return frozenset(names)
+
+
+def _body_leaves(argument: ast.AST, bodies: frozenset[str]) -> list[tuple[str, str]]:
+    """(shape, name) for every reference to a body name inside one argument.
+
+    A reference under a log-safe wrapper (`len(text)`, `_describe_body(text)`)
+    is not a leak; the walk stops there.
+    """
+    found: list[tuple[str, str]] = []
+
+    def walk(node: ast.AST) -> None:
+        if isinstance(node, ast.Call):
+            func = node.func
+            name = (
+                func.attr
+                if isinstance(func, ast.Attribute)
+                else getattr(func, "id", "")
+            )
+            if name in _SAFE_WRAPPERS:
+                return
+        if isinstance(node, ast.Name) and node.id in bodies:
+            found.append(("body", node.id))
+        for child in ast.iter_child_nodes(node):
+            walk(child)
+
+    walk(argument)
+    return found
+
+
 def _is_log_call(node: ast.Call) -> bool:
     func = node.func
     if not isinstance(func, ast.Attribute):
@@ -197,10 +258,20 @@ def scan(
             continue
         relative = path.relative_to(root).as_posix()
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        # Body names are scoped to their function (shape (D)).
+        bodies_by_call: dict[int, frozenset[str]] = {}
+        for function in ast.walk(tree):
+            if isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                bodies = _body_names(function)
+                if bodies:
+                    for inner in ast.walk(function):
+                        if isinstance(inner, ast.Call):
+                            bodies_by_call[id(inner)] = bodies
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call) or not _is_log_call(node):
                 continue
             scanned += 1
+            bodies = bodies_by_call.get(id(node), frozenset())
             # `.log(level, msg, ...)` carries the format string at index 1.
             msg_index = 1 if node.func.attr == "log" else 0
             first = node.args[msg_index] if len(node.args) > msg_index else None
@@ -212,7 +283,10 @@ def scan(
             arguments: list[ast.AST] = [*node.args, *(kw.value for kw in node.keywords)]
             seen: set[str] = set()
             for argument in arguments:
-                for _shape, leaf in _payload_leaves(argument):
+                for _shape, leaf in [
+                    *_payload_leaves(argument),
+                    *_body_leaves(argument, bodies),
+                ]:
                     if leaf in seen or leaf in rotating:
                         continue
                     if _is_reviewed(reviewed, relative, leaf, fmt):

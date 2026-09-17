@@ -1386,3 +1386,115 @@ async def test_gcm_check_in_verbose_log_omits_credentials(
     assert str(security_token) not in logged
     assert "GCM check-in response: fields=" in logged
     assert "security_token" in logged  # the field name is the diagnostic
+
+
+# ---------------------------------------------------------------------
+# Error bodies never reach the log (AGENTS.md section 5; Auth AGENTS.md
+# "Logging": response bodies stay out of the message). Each non-OK path used
+# to quote a slice of the body; the records now carry `_describe_body`.
+# ---------------------------------------------------------------------
+
+_ERROR_PAGE = (
+    "<!DOCTYPE html><html><body>Error 400: the request parameter "
+    "echo=dq9x3EtH2kY:APA91bF0VzWc8ghUGrOpN1JmQ5aTe4bRxL7sKdZyCvIiHpMuWn "
+    "was rejected</body></html>"
+)
+
+
+def _windows(value: str) -> list[str]:
+    return [value[i : i + 8] for i in range(0, len(value) - 7)]
+
+
+@pytest.mark.parametrize(
+    ("text", "kind"),
+    [
+        ("", "empty"),
+        ("  \n", "empty"),
+        ("<html>", "html"),
+        ('{"error": 1}', "json"),
+        ("Error=PHONE_REGISTRATION_ERROR", "error-marker"),
+        ("token=abc", "text"),
+    ],
+)
+def test_describe_body_names_the_class_and_length(text: str, kind: str) -> None:
+    from custom_components.googlefindmy.Auth.firebase_messaging.fcmregister import (
+        _describe_body,
+    )
+
+    assert _describe_body(text) == f"kind={kind} len={len(text)}"
+
+
+@pytest.mark.asyncio
+async def test_gcm_check_in_non_ok_log_omits_body(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    session = _SequencedCheckinSession(
+        [_FakeResponse(500, _ERROR_PAGE, {"Content-Type": "text/html"})] * 8
+    )
+    register = FcmRegister(_checkin_config(), http_client_session=session)
+    monkeypatch.setattr(asyncio, "sleep", _fast_sleep)
+
+    with caplog.at_level(logging.DEBUG):
+        assert await register.gcm_check_in(1, 2) is None
+
+    assert f"body=kind=html len={len(_ERROR_PAGE)}" in caplog.text
+    assert all(w not in caplog.text for w in _windows(_ERROR_PAGE))
+
+
+@pytest.mark.asyncio
+async def test_gcm_register_unexpected_response_log_omits_body(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    session = _FakeSession(
+        [_FakeResponse(503, _ERROR_PAGE, {"Content-Type": "text/html"})] * 2
+    )
+    register = FcmRegister(_checkin_config(), http_client_session=session)
+    monkeypatch.setattr(asyncio, "sleep", _fast_sleep)
+
+    with caplog.at_level(logging.DEBUG):
+        result = await register.gcm_register(
+            {"androidId": 1, "securityToken": 2}, retries=2
+        )
+
+    assert result is None
+    assert "Unexpected register response (status=503" in caplog.text
+    assert f"kind=html len={len(_ERROR_PAGE)}" in caplog.text
+    assert all(w not in caplog.text for w in _windows(_ERROR_PAGE))
+
+
+@pytest.mark.asyncio
+async def test_fcm_install_non_ok_log_omits_body(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    session = _JsonFakeSession(
+        [_FakeResponse(503, _ERROR_PAGE, {"Content-Type": "text/html"})]
+    )
+    register = FcmRegister(_checkin_config(), http_client_session=session)
+
+    with caplog.at_level(logging.DEBUG):
+        assert await register.fcm_install() is None
+
+    assert f"kind=html len={len(_ERROR_PAGE)}" in caplog.text
+    assert all(w not in caplog.text for w in _windows(_ERROR_PAGE))
+
+
+@pytest.mark.asyncio
+async def test_fcm_register_non_ok_log_omits_body(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    session = _JsonFakeSession(
+        [_FakeResponse(503, _ERROR_PAGE, {"Content-Type": "text/html"})] * 2
+    )
+    register = FcmRegister(_checkin_config(), http_client_session=session)
+    monkeypatch.setattr(asyncio, "sleep", _fast_sleep)
+
+    with caplog.at_level(logging.DEBUG):
+        result = await register.fcm_register(
+            {"token": "t"},
+            {"token": "inst"},
+            {"public": "p", "private": "k", "secret": "s"},
+        )
+
+    assert result is None
+    assert f"kind=html len={len(_ERROR_PAGE)}" in caplog.text
+    assert all(w not in caplog.text for w in _windows(_ERROR_PAGE))

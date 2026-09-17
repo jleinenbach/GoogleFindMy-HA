@@ -912,13 +912,13 @@ class FcmPushClient[NotificationContextT]:  # pylint:disable=too-many-instance-a
 
         if isinstance(msg, LoginResponse):
             if str(msg.error):
-                # The error code and message only, not the whole response in
-                # text format (AGENTS.md section 5).
+                # Structured code and type only: `message` is server-supplied
+                # free text and stays out of the record (Auth AGENTS.md,
+                # "Logging": raw error text and response bodies).
                 self.logger.error(
-                    "Received login error response: code=%s type=%s message=%s",
+                    "Received login error response: code=%s type=%s",
                     msg.error.code,
                     msg.error.type,
-                    msg.error.message,
                 )
                 if self._try_increment_error_count(ErrorType.LOGIN):
                     self.do_listen = False

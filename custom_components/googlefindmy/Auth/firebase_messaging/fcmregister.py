@@ -76,6 +76,29 @@ from .proto.checkin_pb2 import (
 _logger = logging.getLogger(__name__)
 
 
+def _describe_body(text: str) -> str:
+    """Describe an HTTP error body for the log without quoting it.
+
+    Response bodies stay out of log messages (AGENTS.md section 5; Auth
+    AGENTS.md "Logging"): a Google error page can echo request parameters,
+    and the registration endpoints answer with credentials on success. The
+    content class (HTML page, JSON, `Error=` marker line, other text) and
+    the length carry the diagnostic; the bytes do not.
+    """
+    stripped = text.lstrip()
+    if not stripped:
+        kind = "empty"
+    elif stripped[:1] == "<":
+        kind = "html"
+    elif stripped[:1] in ("{", "["):
+        kind = "json"
+    elif stripped.startswith("Error="):
+        kind = "error-marker"
+    else:
+        kind = "text"
+    return f"kind={kind} len={len(text)}"
+
+
 class FcmRegisterHTTPError(RuntimeError):
     """Raised when an FCM/GCM endpoint returns a fatal HTTP status (401/404).
 
@@ -360,7 +383,7 @@ class FcmRegister:
                         max_attempts,
                         GCM_CHECKIN_URL,
                         status,
-                        text[:200],
+                        _describe_body(text),
                     )
                     if status in _FATAL_HTTP_STATUSES:
                         # 401/404 indicate invalid credentials or a moved
@@ -537,8 +560,7 @@ class FcmRegister:
             )
 
             if status == HTTPStatus.NOT_FOUND or html_like:
-                snippet = response_text[:200]
-                last_error = f"Unexpected register response (status={status}, ctype={content_type}): {snippet}"
+                last_error = f"Unexpected register response (status={status}, ctype={content_type}): {_describe_body(response_text)}"
                 # Last-wins: cache reflects THIS response, not a stale
                 # earlier fatal. Non-fatal HTML responses clear the latch.
                 last_fatal_status = (
@@ -612,10 +634,7 @@ class FcmRegister:
                         last_error,
                     )
             else:
-                snippet = response_text[:200]
-                if html_like:
-                    snippet += " [html]"
-                last_error = f"Unexpected register response (status={status}, ctype={content_type}): {snippet}"
+                last_error = f"Unexpected register response (status={status}, ctype={content_type}): {_describe_body(response_text)}"
                 # Last-wins: cache reflects THIS response, not a stale
                 # earlier fatal. Non-fatal statuses (e.g. 5xx) clear the
                 # latch so a final transient response is not escalated
@@ -852,7 +871,7 @@ class FcmRegister:
                     "Error during fcm_install at %s (status=%s): %s",
                     url,
                     resp.status,
-                    text[:300],
+                    _describe_body(text),
                 )
                 if resp.status in _FATAL_HTTP_STATUSES:
                     raise FcmRegisterHTTPError(
@@ -1023,7 +1042,7 @@ class FcmRegister:
                             attempt,
                             retries,
                             status,
-                            text[:400],
+                            _describe_body(text),
                         )
                         if status in _FATAL_HTTP_STATUSES:
                             # Retrying 401/404 with the same payload only
