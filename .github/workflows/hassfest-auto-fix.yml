@@ -1,9 +1,11 @@
 name: hassfest (auto-fix)
 
+# PR-only on purpose: `main` is validated (blocking) by the `hassfest` job in
+# ci.yml, and the `main` branch rules are meant to reject a GITHUB_TOKEN push of
+# an auto-sort commit (changes to `main` come through a pull request), so the
+# push leg is dropped rather than left to fail.
 on:
   pull_request:
-  push:
-    branches: [ main ]
 
 permissions:
   contents: write
@@ -14,8 +16,8 @@ jobs:
     steps:
       - uses: actions/checkout@v5
         with:
-          repository: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name || github.repository }}
-          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.ref || github.ref }}
+          repository: ${{ github.event.pull_request.head.repo.full_name }}
+          ref: ${{ github.event.pull_request.head.ref }}
           fetch-depth: 0
 
       - name: Run hassfest (may rewrite manifest)
