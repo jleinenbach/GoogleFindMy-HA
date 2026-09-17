@@ -24,7 +24,10 @@ from custom_components.googlefindmy.NovaApi.nova_request import (
 )
 from tests.test_nova_request import _DummyResponse, _DummySession, _StubCache
 
-_TOKEN = "ya29.a0AfB_byDq9x3EtH2kY7VzWc8ghUGrOpN1JmQ5aTe4bRxL7sKdZyCvIiHpMuWn"
+# Deliberate fixture in the shape of a Google OAuth access token: the red
+# probe of this test showed exactly this shape reaching the INFO record in
+# full, because the old redaction only matched `Bearer ...`. Not a secret.
+_TOKEN = "ya29.a0AfB_byDq9x3EtH2kY7VzWc8ghUGrOpN1JmQ5aTe4bRxL7sKdZyCvIiHpMuWn"  # nosemgrep: generic.secrets.security.detected-google-oauth-access-token.detected-google-oauth-access-token
 _EMAIL = "someone.private@example.org"
 _HTML_BODY = (
     "<!DOCTYPE html><html><body><h1>Error 501</h1><p>The request for "
