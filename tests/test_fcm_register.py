@@ -1498,14 +1498,17 @@ async def test_gcm_register_error_line_keeps_free_text_out_of_log(
 
 
 def test_classify_error_code_shapes() -> None:
-    """Identifier shape passes, anything else is sized; an empty value stays falsy."""
+    """Documented codes pass, anything else is sized; an empty value stays falsy."""
     assert (
         _classify_error_code(" phone_registration_error ") == "PHONE_REGISTRATION_ERROR"
     )
     assert _classify_error_code("INVALID_SENDER") == "INVALID_SENDER"
+    assert _classify_error_code("INVALID_PARAMETERS") == "INVALID_PARAMETERS"
     assert _classify_error_code("ACCOUNT_12345") == "UNRECOGNIZED (13 chars)"
-    assert _classify_error_code("ya29.a0AfB_x") == "UNRECOGNIZED (12 chars)"
-    assert _classify_error_code("A" * 41) == "UNRECOGNIZED (41 chars)"
+    assert _classify_error_code("tok.a0AfB_x") == "UNRECOGNIZED (11 chars)"
+    # Identifier shape is not enough: only the documented codes pass.
+    assert _classify_error_code("SECRETAUTHTOKEN") == "UNRECOGNIZED (15 chars)"
+    assert _classify_error_code("NOT_A_DOCUMENTED_CODE") == "UNRECOGNIZED (21 chars)"
     assert _classify_error_code("   ") == ""  # falsy: caller keeps the no-marker branch
 
 
