@@ -183,10 +183,14 @@ Inside an `except` handler whose types are not all defined in this package
 the exception through `Auth.log_safety.describe_exception(exc)` instead of
 `exc`, `str(exc)` or `_clip(exc)`: it prints the type plus `error_kind` or
 `errno` when present, the message of exceptions raised by this package, the bare
-type name for an empty message, `(unprintable)` when `str()` itself fails, and
+type name for an empty message, `(unprintable)` when `str()` or a metadata
+property (`error_kind`, `errno`) itself fails, and
 otherwise the withheld character count. `exception_origin(exc)` names the innermost frame when a location
-is needed. `tests/test_guard_logging_payloads.py` (shape (I)) fails the suite
+is needed. The same applies to a parameter annotated with such a type
+(`def _classify(entry_id: str, err: BaseException)`): the callee logs an
+exception it did not catch, and the name is bound for the whole function;
+so is a name assigned from `task.exception()` in a done callback.
+`tests/test_guard_logging_payloads.py` (shape (I)) fails the suite
 on a bare exception in such a record under `Auth/`, and on any `exc_info=`
 value other than `False`/`None` or any `logger.exception(...)` under `Auth/`,
-whatever the handler; `fcm_receiver_ha.py` is
-deferred there with its site count pinned.
+whatever the handler.

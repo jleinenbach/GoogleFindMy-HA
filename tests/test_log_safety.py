@@ -85,3 +85,27 @@ def test_unprintable_exception_is_named_not_rendered() -> None:
 
     _Broken.__module__ = "gpsoauth.exceptions"
     assert describe_exception(_Broken()) == "_Broken (unprintable)"
+
+
+def test_raising_metadata_property_is_named_not_raised() -> None:
+    """A producer whose ``error_kind`` or ``errno`` property raises is contained.
+
+    The helper runs inside catch-all handlers (``_handle_notification_async``
+    and its siblings); a second exception from the summary would escape the
+    handler that was meant to contain the first one.
+    """
+
+    class _Hostile(Exception):
+        @property
+        def error_kind(self) -> str:
+            raise RuntimeError("no kind")
+
+    class _HostileOS(OSError):
+        @property
+        def errno(self) -> int:  # type: ignore[override]
+            raise RuntimeError("no errno")
+
+    _Hostile.__module__ = "gpsoauth.exceptions"
+    _HostileOS.__module__ = "aiohttp.client_exceptions"
+    assert describe_exception(_Hostile("text")) == "_Hostile (unprintable)"
+    assert describe_exception(_HostileOS("text")) == "_HostileOS (unprintable)"

@@ -33,16 +33,22 @@ def describe_exception(exc: BaseException, *, limit: int = _TEXT_LIMIT) -> str:
     ``errno`` for :class:`OSError`, the clipped message for exceptions of
     this package, the bare type name for an empty message, and otherwise
     the type name with the character count of the text that is withheld.
+    ``<Name> (unprintable)`` when ``__str__`` or a metadata property
+    (``error_kind``, ``errno``) raises: the helper runs inside catch-all
+    handlers and never raises itself.
     """
     name = type(exc).__name__
-    kind = getattr(exc, "error_kind", None)
-    if isinstance(kind, str) and kind:
-        return f"{name} (kind={kind})"
-    if isinstance(exc, OSError) and exc.errno is not None:
-        return f"{name} (errno={exc.errno})"
+    # Total by construction: this helper runs inside catch-all handlers, so
+    # a producer whose metadata property or ``__str__`` raises must not
+    # escape as a second exception from the handler.
     try:
+        kind = getattr(exc, "error_kind", None)
+        if isinstance(kind, str) and kind:
+            return f"{name} (kind={kind})"
+        if isinstance(exc, OSError) and exc.errno is not None:
+            return f"{name} (errno={exc.errno})"
         text = str(exc)
-    except Exception:  # noqa: BLE001 - a producer's __str__ may itself fail
+    except Exception:  # noqa: BLE001 - a producer's property or __str__ may fail
         return f"{name} (unprintable)"
     if type(exc).__module__.startswith(_OWN_PACKAGE):
         return (
