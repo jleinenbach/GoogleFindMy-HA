@@ -1,3 +1,4 @@
+# custom_components/googlefindmy/fmdn_finder/bermuda_listener.py
 """Bermuda BLE Integration - FMDN Location Upload Listener.
 
 Listens to Bermuda device_tracker state changes to detect area changes
@@ -86,6 +87,9 @@ ATTR_SOURCE = "source"
 DATA_BERMUDA_UNSUBSCRIBE = "fmdn_finder_bermuda_unsub"
 DATA_LAST_AREA_CACHE = "fmdn_finder_last_area"
 DATA_AREA_DEBOUNCE = "fmdn_finder_area_debounce"
+# Bermuda tracker entities without a Home Assistant device, so that the
+# WARNING about them is raised once per entity with a running count.
+DATA_BERMUDA_ORPHANS = "fmdn_finder_bermuda_orphans"
 
 # Debouncing - area must be stable for this duration before triggering upload
 AREA_STABILIZATION_SECONDS = (
@@ -94,7 +98,9 @@ AREA_STABILIZATION_SECONDS = (
 MIN_UPLOAD_INTERVAL_SECONDS = 60  # Minimum time between uploads for same device
 
 # Log formatting
-EID_LOG_PREFIX_LENGTH = 8  # Number of hex chars to show in logs
+EID_LOG_PREFIX_LENGTH = (
+    8  # Prefix kept in log records: 8 bytes of a raw EID (16 hex chars)
+)
 
 
 @dataclass
@@ -124,6 +130,7 @@ async def async_setup_bermuda_listener(hass: HomeAssistant) -> None:
     hass.data.setdefault(DOMAIN, {})
     hass.data[DOMAIN].setdefault(DATA_LAST_AREA_CACHE, {})
     hass.data[DOMAIN].setdefault(DATA_AREA_DEBOUNCE, {})
+    hass.data[DOMAIN].setdefault(DATA_BERMUDA_ORPHANS, set())
 
     @callback  # type: ignore[misc, untyped-decorator, unused-ignore]
     def _bermuda_state_changed(event: Event[EventStateChangedData]) -> None:
@@ -193,12 +200,15 @@ async def async_setup_bermuda_listener(hass: HomeAssistant) -> None:
             )
             return
 
-        # Area changed - log and start debounce
-        _LOGGER.info(
-            "Bermuda area change detected: %s -> %s (entity: %s), starting %ds stabilization",
+        # Area changed - log and start debounce. AGENTS.md section 5 (b): the
+        # listener fires per state change, and area names are operator labels
+        # like device names (a label may name a person), so the record with
+        # the entity_id and the areas stays at DEBUG.
+        _LOGGER.debug(
+            "Bermuda area change detected for %s: %s -> %s, starting %ds stabilization",
+            entity_id,
             old_area,
             new_area,
-            entity_id,
             AREA_STABILIZATION_SECONDS,
         )
 
@@ -262,7 +272,7 @@ async def _async_debounced_area_upload(
 
     # Check if area changed during stabilization
     if debounce_state.area != expected_area:
-        _LOGGER.info(
+        _LOGGER.debug(
             "Area changed during stabilization for %s: %s -> %s, skipping upload",
             entity_id,
             expected_area,
@@ -290,7 +300,11 @@ async def _async_debounced_area_upload(
     # Mark as scheduled to prevent duplicates
     debounce_state.upload_scheduled = True
 
-    _LOGGER.info(
+    # On the upload path the operator-visible record is the "Triggering FMDN
+    # upload" INFO in _async_handle_area_change (device id, class b); this
+    # per-debounce record carries only labels and stays at DEBUG (AGENTS.md
+    # section 5 b).
+    _LOGGER.debug(
         "Area '%s' stable for %ds for %s, triggering FMDN upload",
         expected_area,
         AREA_STABILIZATION_SECONDS,
@@ -322,10 +336,28 @@ async def _async_handle_area_change(
     entity_entry = ent_reg.async_get(entity_id)
 
     if not entity_entry or not entity_entry.device_id:
-        _LOGGER.warning("Cannot find device for Bermuda entity %s", entity_id)
+        # Repeats on every area change of that entity: WARNING once per entity
+        # with the running count of such entities (AGENTS.md section 5 b,
+        # count at WARNING), afterwards and with the entity_id only at DEBUG.
+        orphans: set[str] = hass.data.setdefault(DOMAIN, {}).setdefault(
+            DATA_BERMUDA_ORPHANS, set()
+        )
+        first_report = entity_id not in orphans
+        orphans.add(entity_id)
+        _LOGGER.log(
+            logging.WARNING if first_report else logging.DEBUG,
+            "Cannot find a device for a Bermuda tracker entity (entities currently without a device: %d); skipping its area change",
+            len(orphans),
+        )
+        _LOGGER.debug("Cannot find device for Bermuda entity %s", entity_id)
         return
 
     ha_device_id = entity_entry.device_id
+    # The entity has a device (again): leave the orphan set so that a later
+    # missing-device interval is reported once more and the count stays true.
+    domain_data = hass.data.get(DOMAIN)
+    if domain_data is not None and DATA_BERMUDA_ORPHANS in domain_data:
+        domain_data[DATA_BERMUDA_ORPHANS].discard(entity_id)
 
     # Debug: Log entity and device information
     dev_reg = dr.async_get(hass)
@@ -373,13 +405,19 @@ async def _async_handle_area_change(
         )
         return
 
-    _LOGGER.info(
-        "Triggering FMDN upload: device=%s, area=%s, EID=%s...",
-        google_device_id,
-        area,
+    # The area name is an operator label and stays at DEBUG (AGENTS.md
+    # section 5 b); the device id (class b) and the EID prefix (class a) may
+    # appear at INFO.
+    eid_prefix = (
         eid[:EID_LOG_PREFIX_LENGTH].hex()
         if len(eid) >= EID_LOG_PREFIX_LENGTH
-        else eid.hex(),
+        else eid.hex()
+    )
+    _LOGGER.info(
+        "Triggering FMDN upload: device=%s, EID=%s...", google_device_id, eid_prefix
+    )
+    _LOGGER.debug(
+        "Triggering FMDN upload for device=%s in area '%s'", google_device_id, area
     )
 
     # Trigger the location upload
@@ -529,9 +567,13 @@ async def _async_find_googlefindmy_device(  # noqa: PLR0911
         google_device_id = google_device_id.split(":")[-1]
 
     _LOGGER.info(
-        "Found GoogleFindMy device %s for HA device %s (entity: %s)",
+        "Found GoogleFindMy device %s for HA device %s",
         google_device_id,
         ha_device_id,
+    )
+    _LOGGER.debug(
+        "GoogleFindMy device %s resolved via entity %s",
+        google_device_id,
         gfm_entity.entity_id,
     )
 
@@ -757,6 +799,13 @@ async def async_unload_bermuda_listener(hass: HomeAssistant) -> None:
     if unsubscribe:
         unsubscribe()
         domain_data.pop(DATA_BERMUDA_UNSUBSCRIBE, None)
+        # Drop every listener cache. A debounce task that is still sleeping
+        # through the unload then finds no debounce state when it wakes and
+        # exits before the upload (and before it could recreate the orphan
+        # set); a later setup starts with fresh caches.
+        domain_data.pop(DATA_AREA_DEBOUNCE, None)
+        domain_data.pop(DATA_LAST_AREA_CACHE, None)
+        domain_data.pop(DATA_BERMUDA_ORPHANS, None)
         _LOGGER.info("Bermuda FMDN beacon listener unloaded")
     else:
         _LOGGER.debug("No Bermuda listener to unload")

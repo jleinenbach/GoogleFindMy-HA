@@ -1508,12 +1508,19 @@ class RegistryOperations(_MixinBase):
                 continue
 
             if canonical_unique_id and entry.unique_id != canonical_unique_id:
+                # AGENTS.md section 5 (b): the migration runs on the polling
+                # path and repeats until it succeeds, so INFO and ERROR carry
+                # the unique_ids (class b) only; entity_id and label at DEBUG.
                 _LOGGER.info(
-                    "Migrating tracker entity %s for device '%s' from legacy unique_id=%s to canonical unique_id=%s",
+                    "Migrating tracker entity from legacy unique_id=%s to canonical unique_id=%s",
+                    entry.unique_id,
+                    canonical_unique_id,
+                )
+                _LOGGER.debug(
+                    "Migrating tracker entity %s for device '%s' (legacy unique_id=%s)",
                     entry.entity_id,
                     device_label,
                     entry.unique_id,
-                    canonical_unique_id,
                 )
                 try:
                     update_entity = getattr(ent_reg, "async_update_entity", None)
@@ -1532,11 +1539,15 @@ class RegistryOperations(_MixinBase):
                         )
                         return entry
                 except ValueError as err:
+                    # The registry's own error text names the entity_id; the
+                    # only ValueError here is the unique_id being rejected.
                     _LOGGER.error(
-                        "Failed to migrate tracker entity %s to canonical unique_id=%s: %s",
-                        entry.entity_id,
+                        "Failed to migrate tracker entity from legacy unique_id=%s to canonical unique_id=%s: the entity registry rejected the new unique_id",
+                        entry.unique_id,
                         canonical_unique_id,
-                        err,
+                    )
+                    _LOGGER.debug(
+                        "Migration failure detail for %s: %s", entry.entity_id, err
                     )
                     return entry
 
@@ -1559,11 +1570,15 @@ class RegistryOperations(_MixinBase):
 
             if canonical_unique_id and unique_id != canonical_unique_id:
                 _LOGGER.info(
-                    "Migrating tracker entity %s for device '%s' from heuristic unique_id=%s to canonical unique_id=%s",
+                    "Migrating tracker entity from heuristic unique_id=%s to canonical unique_id=%s",
+                    unique_id,
+                    canonical_unique_id,
+                )
+                _LOGGER.debug(
+                    "Migrating heuristic tracker entity %s for device '%s' (unique_id=%s)",
                     entry.entity_id,
                     device_label,
                     unique_id,
-                    canonical_unique_id,
                 )
                 try:
                     update_entity = getattr(ent_reg, "async_update_entity", None)
@@ -1582,11 +1597,15 @@ class RegistryOperations(_MixinBase):
                         )
                         return cast("EntityRegistryEntry", entry)
                 except ValueError as err:
+                    # The registry's own error text names the entity_id; the
+                    # only ValueError here is the unique_id being rejected.
                     _LOGGER.error(
-                        "Failed to migrate heuristic tracker entity %s to canonical unique_id=%s: %s",
-                        entry.entity_id,
+                        "Failed to migrate heuristic tracker entity from unique_id=%s to canonical unique_id=%s: the entity registry rejected the new unique_id",
+                        unique_id,
                         canonical_unique_id,
-                        err,
+                    )
+                    _LOGGER.debug(
+                        "Migration failure detail for %s: %s", entry.entity_id, err
                     )
                     return cast("EntityRegistryEntry", entry)
 

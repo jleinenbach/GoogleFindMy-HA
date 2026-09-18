@@ -6,8 +6,8 @@ When a locate request fails with an unexpected error, the broad surfacing block
 last place the failure is observable. Two plan requirements pin its behavior:
 
 * **R6** (AGENTS.md Section 5 redaction): the user-facing WARNING must not carry a
-  raw device display name; it states a count/index instead, while the full name
-  stays at DEBUG only (the Count@WARNING / Name@DEBUG line from PR #1129).
+  raw device display name (a count/index may stand in its place), while the full
+  name stays at DEBUG only (the Count@WARNING / Name@DEBUG line from PR #1129).
 * **R9c**: the surfacing record must contain the *full* cause chain so a gRPC
   server detail nested two levels deep (surfacing -> SpotError -> GRPCError) is
   not overwritten by the first level's ``str(exc)``.
@@ -113,7 +113,7 @@ async def test_r6_surfacing_warning_omits_device_name_keeps_it_at_debug(
     """RED (R6): a unique device name must not leak into a user-facing WARNING.
 
     With a sentinel display name and a forced unexpected error, the surfacing block
-    must keep the raw name out of any WARNING/ERROR record (count/index only) and
+    must keep the raw name out of any WARNING/ERROR record and
     only ever expose it at DEBUG. RED today: the broad ``except Exception`` block
     logs ``"Error requesting location for %s"`` with the raw name at ERROR.
     """
