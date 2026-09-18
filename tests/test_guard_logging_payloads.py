@@ -1032,11 +1032,19 @@ def _is_foreign_exception_annotation(
 
 # Generic heads whose members are instances: a union, or a container whose
 # `%s` renders every element with its text; a mapping renders keys and
-# values (`{OSError('text'): 1}`), so both slots count. `Annotated[X, ...]`
-# carries `X` in its first slot. Any other head (`ExceptionGroup[OSError]`,
-# `defaultdict[str, OSError]`, `Counter[OSError]`) is checked as a name
-# itself; `type[X]` and `Callable[..., X]` fall through that check because
-# neither head is an exception.
+# values (`{OSError('text'): 1}`), so both slots count, and so do the
+# stdlib containers (`defaultdict[str, OSError]`, `deque[OSError]`,
+# `Counter[OSError]`; Codex review on 714596f), a mapping view, a mapping
+# proxy, an `asyncio` future, task or queue (`<Future finished
+# result=OSError('text')>`, `<Queue maxsize=0 _queue=[OSError('text')]>`,
+# `LifoQueue` and `PriorityQueue` inherit that rendering),
+# `Container` and `Reversible` (a list satisfies both). `Annotated[X, ...]`
+# carries `X` in its first slot. Not carriers, because their instances do
+# not render their members: `Awaitable`, `Coroutine`, `Generator`,
+# `AsyncIterator`, `weakref.ref`, `AbstractContextManager`. Any other head
+# (`ExceptionGroup[OSError]`) is checked as a name itself; `type[X]` and
+# `Callable[..., X]` fall through that check because neither head is an
+# exception. `test_member_carriers_expose_their_members` pins every entry.
 _MEMBER_CARRIERS = frozenset(
     {
         "Optional",
@@ -1057,6 +1065,27 @@ _MEMBER_CARRIERS = frozenset(
         "Dict",
         "Mapping",
         "MutableMapping",
+        "MutableSequence",
+        "MutableSet",
+        "AbstractSet",
+        "KeysView",
+        "ValuesView",
+        "ItemsView",
+        "defaultdict",
+        "DefaultDict",
+        "deque",
+        "Deque",
+        "OrderedDict",
+        "Counter",
+        "ChainMap",
+        "MappingProxyType",
+        "Future",
+        "Task",
+        "Queue",
+        "LifoQueue",
+        "PriorityQueue",
+        "Container",
+        "Reversible",
     }
 )
 
@@ -2035,6 +2064,9 @@ def _qualified(
 def _carrier_alias(err: Maybe[ClientError], many: Seq[OSError]) -> None:
     _LOGGER.error("carrier alias: %s %s", err, many)
 
+
+def _stdlib(errors: defaultdict[str, OSError], queue: deque[ClientError], pending: Future[OSError]) -> None:
+    _LOGGER.error("stdlib: %s %s %s", errors, queue, pending)
 """
 
 
@@ -2068,8 +2100,10 @@ def test_shape_i_reports_annotated_exception_parameters() -> None:
     a suffix, resolved as a class at import time (line 117, `InvalidTag`), and types
     reachable only module-qualified or through a module alias (line 123,
     `InvalidSignature` and `AlreadyFinalized`, neither imported by name), and
-    carriers imported under an alias (line 127, `Maybe[...]`, `Seq[...]`).
-    Not reported:
+    carriers imported under an alias (line 127, `Maybe[...]`, `Seq[...]`),
+    and the stdlib containers and an `asyncio` future (line 131,
+    `defaultdict[str, OSError]`, `deque[...]`, `Future[...]`; Codex review
+    on 714596f). Not reported:
     the wrapped
     argument (line 21), an own type (line 25), which carries text this
     package wrote, and `type[Exception]` (line 52, the only parameter of its
@@ -2112,6 +2146,9 @@ def test_shape_i_reports_annotated_exception_parameters() -> None:
         (123, "other"),
         (127, "err"),
         (127, "many"),
+        (131, "errors"),
+        (131, "pending"),
+        (131, "queue"),
     ]
     outside, _ = _scan_tree(tree, "coordinator/fixture.py")
     assert outside == []
@@ -2432,6 +2469,67 @@ def test_shape_i_follows_bound_exceptions_by_data_flow() -> None:
     ]
     outside, _ = _scan_tree(tree, "coordinator/fixture.py")
     assert outside == []
+
+
+_RENDERING_HEADS = (
+    "AbstractSet",
+    "ChainMap",
+    "Collection",
+    "Container",
+    "Counter",
+    "DefaultDict",
+    "Deque",
+    "Dict",
+    "FrozenSet",
+    "Future",
+    "ItemsView",
+    "Iterable",
+    "Iterator",
+    "KeysView",
+    "LifoQueue",
+    "List",
+    "Mapping",
+    "MappingProxyType",
+    "MutableMapping",
+    "MutableSequence",
+    "MutableSet",
+    "Optional",
+    "OrderedDict",
+    "PriorityQueue",
+    "Queue",
+    "Reversible",
+    "Sequence",
+    "Set",
+    "Task",
+    "Tuple",
+    "Union",
+    "ValuesView",
+    "defaultdict",
+    "deque",
+    "dict",
+    "frozenset",
+    "list",
+    "set",
+    "tuple",
+)
+
+
+def test_member_carriers_expose_their_members() -> None:
+    """Every rendering head flattens to its members; a dropped entry is caught here.
+
+    The parameter fixture pins three heads; the other entries would vanish
+    silently on a later clean-up (review of 2026-09-18, X-03). The list is
+    spelled out on purpose: a test that iterated over `_MEMBER_CARRIERS`
+    would lose the case together with the entry. One case per head, the
+    member is `OSError` in every slot the head takes.
+    """
+    assert set(_RENDERING_HEADS) == _MEMBER_CARRIERS
+    for head in _RENDERING_HEADS:
+        annotation = ast.parse(f"{head}[OSError]", mode="eval").body
+        members = [ast.unparse(m) for m in _annotation_members(annotation)]
+        assert members == ["OSError"], head
+    kept = ast.parse("ExceptionGroup[OSError]", mode="eval").body
+    assert [ast.unparse(m) for m in _annotation_members(kept)] == ["ExceptionGroup"]
 
 
 def test_import_helpers_survive_a_hostile_module_getattr(

@@ -34,29 +34,45 @@ def describe_exception(exc: BaseException, *, limit: int = _TEXT_LIMIT) -> str:
     this package, the bare type name for an empty message, and otherwise
     the type name with the character count of the text that is withheld.
     ``<Name> (unprintable)`` when ``__str__`` or a metadata property
-    (``error_kind``, ``errno``) raises: the helper runs inside catch-all
-    handlers and never raises itself.
+    (``error_kind``, ``errno``, the class name or module) raises, and
+    ``<unnamed>`` for a class whose name is not a plain ``str``: the helper
+    runs inside catch-all handlers and never raises itself, whatever the
+    producer raises, ``BaseException`` subclasses included. ``errno`` is
+    printed only when it is an ``int``.
     """
-    name = type(exc).__name__
     # Total by construction: this helper runs inside catch-all handlers, so
-    # a producer whose metadata property or ``__str__`` raises must not
-    # escape as a second exception from the handler.
+    # a producer whose metadata property, ``__str__``, ``__getattribute__``
+    # or metaclass raises must not escape as a second exception from the
+    # handler. ``BaseException`` on purpose: a ``KeyboardInterrupt`` or
+    # ``SystemExit`` raised from an exception object's own attribute read
+    # is the producer's doing, not the user's (under Home Assistant SIGINT is
+    # loop-bound; in the CLI a Ctrl-C landing inside these few reads is
+    # absorbed once, the next one is not); nothing here awaits, so a task
+    # cancellation cannot surface inside these reads.
+    try:
+        name = type(exc).__name__
+        if type(name) is not str:  # a metaclass may hand back text of its own
+            name = "<unnamed>"
+    except BaseException:  # noqa: BLE001 - a metaclass may fail on __name__
+        name = "<unnamed>"
     try:
         kind = getattr(exc, "error_kind", None)
         if isinstance(kind, str) and kind:
             return f"{name} (kind={kind})"
-        if isinstance(exc, OSError) and exc.errno is not None:
+        if isinstance(exc, OSError) and isinstance(exc.errno, int):
             return f"{name} (errno={exc.errno})"
+        # ``str()`` returns what ``__str__`` returns, a ``str`` subclass
+        # included, so its length and truth are the producer's code too.
         text = str(exc)
-    except Exception:  # noqa: BLE001 - a producer's property or __str__ may fail
+        size = len(text)
+        own = bool(type(exc).__module__.startswith(_OWN_PACKAGE))
+    except BaseException:  # noqa: BLE001 - a producer's property or __str__ may fail
         return f"{name} (unprintable)"
-    if type(exc).__module__.startswith(_OWN_PACKAGE):
-        return (
-            f"{name}: {text}" if len(text) <= limit else f"{name}: {text[: limit - 1]}…"
-        )
-    if not text:
+    if own:
+        return f"{name}: {text}" if size <= limit else f"{name}: {text[: limit - 1]}…"
+    if size == 0:
         return name
-    return f"{name} ({len(text)} chars withheld)"
+    return f"{name} ({size} chars withheld)"
 
 
 def exception_origin(exc: BaseException) -> str:
@@ -67,11 +83,17 @@ def exception_origin(exc: BaseException) -> str:
     """
     # ``lookup_lines=False``: only file, line and name are used, and the
     # default would read each frame's source line through ``linecache``
-    # (disk I/O on the event loop for a diagnostic string).
-    frames = traceback.StackSummary.extract(
-        traceback.walk_tb(exc.__traceback__), lookup_lines=False
-    )
-    if not frames:
-        return "no traceback"
-    frame = frames[-1]
-    return f"{PurePath(frame.filename).name}:{frame.lineno} in {frame.name}"
+    # (disk I/O on the event loop for a diagnostic string). Total like
+    # :func:`describe_exception`: a producer's ``__getattribute__`` may
+    # fail on ``__traceback__``, and a foreign traceback object may fail
+    # while it is walked; ``BaseException`` for the same reason as there.
+    try:
+        frames = traceback.StackSummary.extract(
+            traceback.walk_tb(exc.__traceback__), lookup_lines=False
+        )
+        if not frames:
+            return "no traceback"
+        frame = frames[-1]
+        return f"{PurePath(frame.filename).name}:{frame.lineno} in {frame.name}"
+    except BaseException:  # noqa: BLE001 - the traceback is the producer's too
+        return "no traceback (unprintable)"
