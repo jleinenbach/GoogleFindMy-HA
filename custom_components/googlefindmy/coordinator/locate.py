@@ -829,7 +829,8 @@ class LocateOperations(_MixinBase):
                 # that put a possible device name into the default log. Section 5
                 # settles the question the neighbours raised: a record that
                 # answers one user action may name the device, a record that can
-                # repeat unattended carries a count or an index. This branch is
+                # repeat unattended keeps the name out (a count or an index may
+                # stand in its place). This branch is
                 # one line per user action, so naming would be allowed; it keeps
                 # the split anyway, because the DEBUG record beneath it already
                 # carries the device and the test pins exactly that shape.

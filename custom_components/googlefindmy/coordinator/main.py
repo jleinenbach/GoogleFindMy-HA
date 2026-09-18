@@ -1856,8 +1856,9 @@ class GoogleFindMyCoordinator(
         """
         snapshot: list[dict[str, Any]] = []
         wall_now = time.time()
+        device_total = len(devices)
 
-        for dev in devices:
+        for device_index, dev in enumerate(devices, start=1):
             entry = self._build_base_snapshot_entry(dev)
 
             # Prefer cached result
@@ -1925,8 +1926,17 @@ class GoogleFindMyCoordinator(
 
             # Optional history fallback
             if self.allow_history_fallback:
+                # AGENTS.md section 5 (b): this record repeats on every poll,
+                # so WARNING carries the index and the name/entity_id go to DEBUG.
                 _LOGGER.warning(
-                    "No live state for %s (entity_id=%s); attempting history fallback via Recorder.",
+                    "No live state for device %d of %d; attempting history fallback via Recorder.",
+                    device_index,
+                    device_total,
+                )
+                _LOGGER.debug(
+                    "History fallback for device %d of %d: %s (entity_id=%s)",
+                    device_index,
+                    device_total,
                     entry["name"],
                     entity_id,
                 )
@@ -1939,8 +1949,15 @@ class GoogleFindMyCoordinator(
                     self.increment_stat("history_fallback_used")
                 else:
                     _LOGGER.warning(
-                        "No historical GPS data found for %s (entity_id=%s). "
+                        "No historical GPS data found for device %d of %d. "
                         "Entity may be excluded from Recorder.",
+                        device_index,
+                        device_total,
+                    )
+                    _LOGGER.debug(
+                        "No historical GPS data for device %d of %d: %s (entity_id=%s)",
+                        device_index,
+                        device_total,
                         entry["name"],
                         entity_id,
                     )
