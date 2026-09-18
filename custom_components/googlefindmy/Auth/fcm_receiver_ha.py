@@ -85,6 +85,10 @@ from custom_components.googlefindmy._reauth_reason import ReauthReasonCode
 from custom_components.googlefindmy.Auth.firebase_messaging.fcmregister import (
     FcmRegisterHTTPError,
 )
+from custom_components.googlefindmy.Auth.log_safety import (
+    describe_exception,
+    exception_origin,
+)
 from custom_components.googlefindmy.exceptions import FatalRegistrationError
 from custom_components.googlefindmy.location_row_markers import (
     strip_transient_keys,
@@ -769,11 +773,12 @@ class FcmReceiverHA:
             ir.async_delete_issue(
                 self._hass, DOMAIN, f"fcm_short_run_crash_loop_{entry_id}"
             )
-        except Exception:  # noqa: BLE001 - best-effort UI cleanup
+        except Exception as cleanup_err:  # noqa: BLE001 - best-effort UI cleanup
             _LOGGER.debug(
-                "[entry=%s] Failed to delete short-run crash-loop repair issue",
+                "[entry=%s] Failed to delete short-run crash-loop repair issue (%s at %s)",
                 entry_id,
-                exc_info=True,
+                describe_exception(cleanup_err),
+                exception_origin(cleanup_err),
             )
 
     @staticmethod
@@ -804,12 +809,13 @@ class FcmReceiverHA:
         ):
             try:
                 ir.async_delete_issue(hass, DOMAIN, issue_id)
-            except Exception:  # noqa: BLE001 - best-effort UI cleanup
+            except Exception as cleanup_err:  # noqa: BLE001 - best-effort UI cleanup
                 _LOGGER.debug(
-                    "[entry=%s] Failed to delete repair issue %s on removal",
+                    "[entry=%s] Failed to delete repair issue %s on removal (%s at %s)",
                     entry_id,
                     issue_id,
-                    exc_info=True,
+                    describe_exception(cleanup_err),
+                    exception_origin(cleanup_err),
                 )
 
     @staticmethod
@@ -835,7 +841,7 @@ class FcmReceiverHA:
                     _LOGGER.debug(
                         "[entry=%s] Failed to override cache entry_id: %s",
                         entry_id,
-                        err,
+                        describe_exception(err),
                     )
             elif not normalized:
                 try:
@@ -844,14 +850,16 @@ class FcmReceiverHA:
                     _LOGGER.debug(
                         "[entry=%s] Failed to attach entry_id to cache: %s",
                         entry_id,
-                        err,
+                        describe_exception(err),
                     )
         else:
             try:
                 setattr(cache, "entry_id", entry_id)
             except Exception as err:  # noqa: BLE001 - best-effort
                 _LOGGER.debug(
-                    "[entry=%s] Failed to tag cache with entry_id: %s", entry_id, err
+                    "[entry=%s] Failed to tag cache with entry_id: %s",
+                    entry_id,
+                    describe_exception(err),
                 )
 
     # -------------------- Optional HA attach --------------------
@@ -911,13 +919,21 @@ class FcmReceiverHA:
                 exc = t.exception()
             except asyncio.CancelledError:
                 return
-            except Exception:
-                _LOGGER.exception(
-                    "Unhandled exception retrieving task result (%s)", label
+            except Exception as result_err:
+                _LOGGER.error(
+                    "Unhandled exception retrieving task result (%s): %s at %s",
+                    label,
+                    describe_exception(result_err),
+                    exception_origin(result_err),
                 )
                 return
             if exc:
-                _LOGGER.exception("Background task failed (%s)", label, exc_info=exc)
+                _LOGGER.error(
+                    "Background task failed (%s): %s at %s",
+                    label,
+                    describe_exception(exc),
+                    exception_origin(exc),
+                )
 
         task.add_done_callback(_done)
 
@@ -939,7 +955,9 @@ class FcmReceiverHA:
                 try:
                     _CACHE_PROVIDER.reset(token)
                 except Exception as err:  # noqa: BLE001
-                    _LOGGER.debug("Cache provider reset failed: %s", err)
+                    _LOGGER.debug(
+                        "Cache provider reset failed: %s", describe_exception(err)
+                    )
 
     @contextmanager
     def _driving_generation_scope(
@@ -1061,7 +1079,7 @@ class FcmReceiverHA:
                 _LOGGER.debug(
                     "[entry=%s] Coordinator listener notification failed: %s",
                     entry_id,
-                    err,
+                    describe_exception(err),
                 )
 
     # -------------------- Basic readiness (aggregate) --------------------
@@ -1118,14 +1136,18 @@ class FcmReceiverHA:
                 self.creds[entry_id] = creds_val
         except Exception as err:  # noqa: BLE001
             _LOGGER.debug(
-                "[entry=%s] Failed to load cached FCM credentials: %s", entry_id, err
+                "[entry=%s] Failed to load cached FCM credentials: %s",
+                entry_id,
+                describe_exception(err),
             )
 
         try:
             tokens_val = await cache.get("fcm_routing_tokens")
         except Exception as err:  # noqa: BLE001
             _LOGGER.debug(
-                "[entry=%s] Failed to load cached routing tokens: %s", entry_id, err
+                "[entry=%s] Failed to load cached routing tokens: %s",
+                entry_id,
+                describe_exception(err),
             )
             return
 
@@ -1204,7 +1226,9 @@ class FcmReceiverHA:
                     loaded_from_cache = True
         except Exception as err:  # noqa: BLE001 - best-effort creds load
             _LOGGER.debug(
-                "Failed to load entry-scoped FCM creds for %s: %s", entry_id, err
+                "Failed to load entry-scoped FCM creds for %s: %s",
+                entry_id,
+                describe_exception(err),
             )
         return creds, loaded_from_cache
 
@@ -1326,7 +1350,9 @@ class FcmReceiverHA:
                 )
             except Exception as err:  # noqa: BLE001
                 _LOGGER.error(
-                    "Failed to construct FCM client for %s: %s", entry_id, err
+                    "Failed to construct FCM client for %s: %s",
+                    entry_id,
+                    describe_exception(err),
                 )
                 return None
 
@@ -1676,7 +1702,9 @@ class FcmReceiverHA:
                         backoff = 1.0  # reset only after a successful start
                     except Exception as err:
                         _LOGGER.info(
-                            "[entry=%s] FCM client failed to start: %s", entry_id, err
+                            "[entry=%s] FCM client failed to start: %s",
+                            entry_id,
+                            describe_exception(err),
                         )
 
                     # Defense 2 snapshot: timestamp the entry into the
@@ -2030,7 +2058,11 @@ class FcmReceiverHA:
                 _LOGGER.debug("[entry=%s] FCM supervisor cancelled", entry_id)
                 raise
             except Exception as err:  # noqa: BLE001
-                _LOGGER.error("[entry=%s] FCM supervisor crashed: %s", entry_id, err)
+                _LOGGER.error(
+                    "[entry=%s] FCM supervisor crashed: %s",
+                    entry_id,
+                    describe_exception(err),
+                )
             finally:
                 _LOGGER.info("[entry=%s] FCM supervisor stopped", entry_id)
                 # AP4 (finding 4b, related sweep): a supervisor cancelled by a
@@ -2191,7 +2223,7 @@ class FcmReceiverHA:
             "[entry=%s] FCM registration client error (status=%s): %s",
             entry_id,
             status_raw,
-            err,
+            describe_exception(err),
         )
 
     @staticmethod
@@ -2349,20 +2381,21 @@ class FcmReceiverHA:
             _LOGGER.info(
                 "[entry=%s] FCM registration failed (transient): %s - will retry",
                 entry_id,
-                err,
+                describe_exception(err),
             )
         elif isinstance(err, (KeyError, ValueError, TypeError)):
             _LOGGER.error(
-                "[entry=%s] FCM registration hit corrupt credentials (%s): %s "
+                "[entry=%s] FCM registration hit corrupt credentials: %s "
                 "- invalidating FCM tokens to force re-registration",
                 entry_id,
-                type(err).__name__,
-                err,
+                describe_exception(err),
             )
             await self._invalidate_fcm_tokens(entry_id, generation)
         else:
             _LOGGER.error(
-                "[entry=%s] FCM registration unexpected error: %s", entry_id, err
+                "[entry=%s] FCM registration unexpected error: %s",
+                entry_id,
+                describe_exception(err),
             )
 
     # Public entrypoint kept for back-compat (starts supervisors lazily if needed)
@@ -2440,7 +2473,7 @@ class FcmReceiverHA:
                         _LOGGER.debug(
                             "[entry=%s] Failed to flush pending routing tokens: %s",
                             entry.entry_id,
-                            err,
+                            describe_exception(err),
                         )
 
                 self._dispatch_to_hass_loop(
@@ -2457,7 +2490,10 @@ class FcmReceiverHA:
                     label=f"mirror_creds_{entry.entry_id}",
                 )
         except Exception as err:
-            _LOGGER.debug("Entry-scoped credentials persistence skipped: %s", err)
+            _LOGGER.debug(
+                "Entry-scoped credentials persistence skipped: %s",
+                describe_exception(err),
+            )
 
         # Update routing with any token we already have
         token = self.get_fcm_token(entry.entry_id)
@@ -2482,7 +2518,7 @@ class FcmReceiverHA:
                     _LOGGER.debug(
                         "[entry=%s] Failed to load persisted routing tokens: %s",
                         entry.entry_id,
-                        err,
+                        describe_exception(err),
                     )
 
             self._dispatch_to_hass_loop(
@@ -2645,8 +2681,12 @@ class FcmReceiverHA:
                 entry_id, canonic_id, hex_string, target_entries
             )
 
-        except Exception:
-            _LOGGER.exception("Failed to handle FCM notification safely")
+        except Exception as handle_err:
+            _LOGGER.error(
+                "Failed to handle FCM notification safely (%s at %s)",
+                describe_exception(handle_err),
+                exception_origin(handle_err),
+            )
 
     # -------------------- Routing helpers --------------------
 
@@ -2690,7 +2730,7 @@ class FcmReceiverHA:
         try:
             decoded = base64.b64decode(payload_dict)
         except (binascii.Error, ValueError) as err:
-            _LOGGER.error("FCM Base64 decode failed: %s", err)
+            _LOGGER.error("FCM Base64 decode failed: %s", describe_exception(err))
             return None
 
         return binascii.hexlify(decoded).decode("utf-8")
@@ -2793,7 +2833,11 @@ class FcmReceiverHA:
                     tally(coordinator_payload)
                 coordinator_payload["_accuracy_counted"] = True
             except Exception as tally_err:  # pragma: no cover - diagnostics only
-                _LOGGER.debug("Accuracy tally failed for %s: %s", key[1][:8], tally_err)
+                _LOGGER.debug(
+                    "Accuracy tally failed for %s: %s",
+                    key[1][:8],
+                    describe_exception(tally_err),
+                )
 
         semantic_name = coordinator_payload.get("semantic_name")
         ghf = _coordinator_google_home_filter(coordinator)
@@ -2803,7 +2847,11 @@ class FcmReceiverHA:
                     key[1], semantic_name
                 )
             except Exception as gf_err:
-                _LOGGER.debug("Google Home filter error for %s: %s", key[1][:8], gf_err)
+                _LOGGER.debug(
+                    "Google Home filter error for %s: %s",
+                    key[1][:8],
+                    describe_exception(gf_err),
+                )
                 should_filter, replacement_attrs = False, None
 
             if should_filter:
@@ -2851,7 +2899,11 @@ class FcmReceiverHA:
             )
             coordinator.increment_stat("background_updates")
         except Exception as err:  # noqa: BLE001
-            _LOGGER.error("Coordinator cache update failed for %s: %s", device_id, err)
+            _LOGGER.error(
+                "Coordinator cache update failed for %s: %s",
+                device_id,
+                describe_exception(err),
+            )
             return False
         return True
 
@@ -2905,7 +2957,7 @@ class FcmReceiverHA:
                     ",".join(sorted(new_entries)) or "<none>",
                 )
         except Exception as err:
-            _LOGGER.debug("Token routing update skipped: %s", err)
+            _LOGGER.debug("Token routing update skipped: %s", describe_exception(err))
 
     async def _persist_routing_token(self, entry_id: str, token: str) -> None:
         """Persist routing tokens per entry (best-effort, entry-scoped if cache available)."""
@@ -2923,7 +2975,9 @@ class FcmReceiverHA:
                 await cache.set("fcm_routing_tokens", sorted(tokens))
             except Exception as err:
                 _LOGGER.debug(
-                    "Persisting routing token failed for %s: %s", entry_id, err
+                    "Persisting routing token failed for %s: %s",
+                    entry_id,
+                    describe_exception(err),
                 )
             return
 
@@ -2941,7 +2995,9 @@ class FcmReceiverHA:
                 await cache.set("fcm_routing_tokens", sorted(tokens))
             except Exception as err:
                 _LOGGER.debug(
-                    "Persisting routing token failed for %s: %s", entry_id, err
+                    "Persisting routing token failed for %s: %s",
+                    entry_id,
+                    describe_exception(err),
                 )
             return
 
@@ -2994,7 +3050,10 @@ class FcmReceiverHA:
                 if ids:
                     return ids[0].id
         except Exception as err:  # noqa: BLE001
-            _LOGGER.debug("Failed to extract canonical id from FCM response: %s", err)
+            _LOGGER.debug(
+                "Failed to extract canonical id from FCM response: %s",
+                describe_exception(err),
+            )
         return None
 
     async def _extract_canonic_id_async(self, hex_response: str) -> str | None:
@@ -3015,12 +3074,14 @@ class FcmReceiverHA:
         """
         try:
             await _call_in_executor(callback, canonic_id, hex_string)
-        except Exception:
+        except Exception as callback_err:
             # Do NOT log the full payload - use length only for safety
-            _LOGGER.exception(
-                "FCM locate callback failed (canonic_id=%s, payload_len=%d)",
+            _LOGGER.error(
+                "FCM locate callback failed (canonic_id=%s, payload_len=%d, %s at %s)",
                 canonic_id[:8] if canonic_id else "unknown",
                 len(hex_string) if hex_string else 0,
+                describe_exception(callback_err),
+                exception_origin(callback_err),
             )
 
     # -------------------- Push-path decode → debounce → flush --------------------
@@ -3064,7 +3125,9 @@ class FcmReceiverHA:
 
         except Exception as err:  # noqa: BLE001
             _LOGGER.error(
-                "Error processing background update for %s: %s", canonic_id, err
+                "Error processing background update for %s: %s",
+                canonic_id,
+                describe_exception(err),
             )
 
     def _schedule_flush(self, key: tuple[str, str]) -> None:
@@ -3080,7 +3143,12 @@ class FcmReceiverHA:
             except asyncio.CancelledError:
                 return
             except Exception as err:
-                _LOGGER.error("Flush task for %s/%s failed: %s", key[0], key[1], err)
+                _LOGGER.error(
+                    "Flush task for %s/%s failed: %s",
+                    key[0],
+                    key[1],
+                    describe_exception(err),
+                )
 
         task = asyncio.create_task(
             _delayed(), name=f"{DOMAIN}.fcm_flush[{key[0]}:{key[1][:8]}]"
@@ -3127,7 +3195,7 @@ class FcmReceiverHA:
                 _LOGGER.debug(
                     "Failed to fan-out push update for %s to one coordinator: %s",
                     key[1][:8],
-                    err,
+                    describe_exception(err),
                 )
 
     # -------------------- Decode helper --------------------
@@ -3153,7 +3221,9 @@ class FcmReceiverHA:
                 escalate = coordinator.note_decrypt_failure(stale=stale, error=error)
             except Exception as err:  # noqa: BLE001 - never break the push path
                 _LOGGER.debug(
-                    "note_decrypt_failure failed for entry %s: %s", entry_id, err
+                    "note_decrypt_failure failed for entry %s: %s",
+                    entry_id,
+                    describe_exception(err),
                 )
                 continue
             if escalate and hass is not None:
@@ -3197,7 +3267,7 @@ class FcmReceiverHA:
                 _LOGGER.debug(
                     "note_background_decrypt_success failed for entry %s: %s",
                     entry_id,
-                    err,
+                    describe_exception(err),
                 )
 
     async def _decode_background_location_async(  # noqa: PLR0911, PLR0912
@@ -3327,9 +3397,8 @@ class FcmReceiverHA:
             return dict(best_record) if best_record is not None else dict(locations[0])
         except Exception as err:  # noqa: BLE001
             _LOGGER.error(
-                "Failed to decode background location data (%s): %s",
-                type(err).__name__,
-                err,
+                "Failed to decode background location data: %s",
+                describe_exception(err),
             )
             return {}
 
@@ -3413,7 +3482,7 @@ class FcmReceiverHA:
                 _LOGGER.debug(
                     "[entry=%s] Failed to save FCM credentials to entry cache: %s",
                     entry_id,
-                    err,
+                    describe_exception(err),
                 )
             else:
                 self._pending_creds.pop(entry_id, None)
@@ -3431,7 +3500,7 @@ class FcmReceiverHA:
                 _LOGGER.debug(
                     "[entry=%s] Failed to save FCM credentials to entry cache: %s",
                     entry_id,
-                    err,
+                    describe_exception(err),
                 )
             else:
                 self._pending_creds.pop(entry_id, None)
@@ -3577,10 +3646,16 @@ class FcmReceiverHA:
                     timeout,
                 )
             except ConnectionError as err:
-                _LOGGER.debug("[entry=%s] FCM client stop network error: %s", eid, err)
+                _LOGGER.debug(
+                    "[entry=%s] FCM client stop network error: %s",
+                    eid,
+                    describe_exception(err),
+                )
             except Exception as err:  # noqa: BLE001
                 _LOGGER.debug(
-                    "[entry=%s] FCM client stop unexpected error: %s", eid, err
+                    "[entry=%s] FCM client stop unexpected error: %s",
+                    eid,
+                    describe_exception(err),
                 )
             finally:
                 self.pcs.pop(eid, None)
@@ -3794,7 +3869,7 @@ class FcmReceiverHA:
                         "[entry=%s] Manual locate presence check failed for %s: %s",
                         candidate_entry,
                         canonic_id[:8],
-                        err,
+                        describe_exception(err),
                     )
 
             has_display = False
@@ -3962,7 +4037,7 @@ class FcmReceiverHA:
             _LOGGER.debug(
                 "[entry=%s] Forced-reconnect stop() raised (ignored): %s",
                 entry_id,
-                err,
+                describe_exception(err),
             )
         self.nudge_retry(entry_id)
         return await self._await_entry_started(

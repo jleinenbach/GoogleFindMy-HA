@@ -183,10 +183,34 @@ Inside an `except` handler whose types are not all defined in this package
 the exception through `Auth.log_safety.describe_exception(exc)` instead of
 `exc`, `str(exc)` or `_clip(exc)`: it prints the type plus `error_kind` or
 `errno` when present, the message of exceptions raised by this package, the bare
-type name for an empty message, `(unprintable)` when `str()` itself fails, and
-otherwise the withheld character count. `exception_origin(exc)` names the innermost frame when a location
-is needed. `tests/test_guard_logging_payloads.py` (shape (I)) fails the suite
+type name for an empty message, `(unprintable)` when `str()`, a metadata
+property (`error_kind`, `errno`) or the class's own name or module itself
+fails, whatever it raises (`<unnamed>` when the class name is not a plain
+`str`), and otherwise the withheld character count. `exception_origin(exc)` names the innermost frame when a location
+is needed. The same applies to a parameter annotated with such a type
+(`def _classify(entry_id: str, err: BaseException)`): the callee logs an
+exception it did not catch, and the name is bound for the whole function;
+so is a name assigned from `task.exception()` in a done callback, and so is
+a name the same function derives from one of those in the forms the guard
+follows (an alias, attribute or subscript target, `detail = err`,
+`self.last = err`; its text or a derivation of it, `shown = str(err)`,
+`msg += str(err)`, `"x %s" % err`, `str(err) or ""`, `str(err).lower()`,
+`err.strerror`, `getattr(err, "msg")`, a container display, element or
+built-in copy such as `list(errors)`, a container mutated by `append`; a
+tuple or starred unpacking by position, or as a whole from `err.args`; a
+`for` target whose iterable mentions the name, `for i, err in
+enumerate(errors)`; a `match` capture such as `case ClientError() as err`
+or `case ClientError(args=[first])`); inside a handler the same holds for
+the handler name (`except OSError as exc: text = str(exc)` binds `text`
+there). The guard's module docstring lists the forms it does not follow
+(a helper's return value, a lambda, a handler name aliased out of its
+handler and narrowed before the log call, `with ... as`); those remain a
+review matter, not a guard one.
+`tests/test_guard_logging_payloads.py` (shape (I)) fails the suite
 on a bare exception in such a record under `Auth/`, and on any `exc_info=`
 value other than `False`/`None` or any `logger.exception(...)` under `Auth/`,
-whatever the handler; `fcm_receiver_ha.py` is
-deferred there with its site count pinned.
+whatever the handler. A record whose value only looks like exception text
+(the key of a `KeyError` raised by a literal lookup on the package's own
+dict, `fcm_refresh_install_token`) is pinned in the guard's `_REVIEWED`
+set with its reason; a pin names one call by path, leaf and format-string
+prefix and fails the suite when the call is copied or disappears.

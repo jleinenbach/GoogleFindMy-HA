@@ -85,3 +85,100 @@ def test_unprintable_exception_is_named_not_rendered() -> None:
 
     _Broken.__module__ = "gpsoauth.exceptions"
     assert describe_exception(_Broken()) == "_Broken (unprintable)"
+
+
+def test_raising_metadata_property_is_named_not_raised() -> None:
+    """A producer whose ``error_kind`` or ``errno`` property raises is contained.
+
+    The helper runs inside catch-all handlers (``_handle_notification_async``
+    and its siblings); a second exception from the summary would escape the
+    handler that was meant to contain the first one.
+    """
+
+    class _Hostile(Exception):
+        @property
+        def error_kind(self) -> str:
+            raise RuntimeError("no kind")
+
+    class _HostileOS(OSError):
+        @property
+        def errno(self) -> int:  # type: ignore[override]
+            raise RuntimeError("no errno")
+
+    _Hostile.__module__ = "gpsoauth.exceptions"
+    _HostileOS.__module__ = "aiohttp.client_exceptions"
+    assert describe_exception(_Hostile("text")) == "_Hostile (unprintable)"
+    assert describe_exception(_HostileOS("text")) == "_HostileOS (unprintable)"
+
+
+def test_base_exception_from_a_producer_property_is_contained() -> None:
+    """A metadata property or ``__str__`` raising outside ``Exception`` is contained too.
+
+    ``except Exception`` left ``KeyboardInterrupt`` and ``SystemExit`` from
+    a producer's attribute read free to escape the catch-all logging paths
+    (Codex review on 714596f); the helper promises never to raise itself.
+    """
+
+    class _Interrupting(Exception):
+        @property
+        def error_kind(self) -> str:
+            raise KeyboardInterrupt
+
+    class _Exiting(Exception):
+        def __str__(self) -> str:
+            raise SystemExit(3)
+
+    class _NamelessMeta(type):
+        @property
+        def __name__(cls) -> str:  # type: ignore[override]
+            raise RuntimeError("no name")
+
+    class _Nameless(Exception, metaclass=_NamelessMeta):
+        pass
+
+    _Interrupting.__module__ = "gpsoauth.exceptions"
+    _Exiting.__module__ = "aiohttp.client_exceptions"
+    assert describe_exception(_Interrupting("text")) == "_Interrupting (unprintable)"
+    assert describe_exception(_Exiting("text")) == "_Exiting (unprintable)"
+    assert describe_exception(_Nameless("text")) == "<unnamed> (4 chars withheld)"
+
+
+def test_exception_origin_survives_a_hostile_traceback_read() -> None:
+    """``__traceback__`` read through a raising ``__getattribute__`` yields no frame, no raise."""
+
+    class _Opaque(Exception):
+        def __getattribute__(self, name: str) -> object:
+            if name == "__traceback__":
+                raise KeyboardInterrupt
+            return super().__getattribute__(name)
+
+    assert exception_origin(_Opaque("text")) == "no traceback (unprintable)"
+
+
+def test_text_subclass_and_string_errno_are_contained() -> None:
+    """A ``str`` subclass from ``__str__`` and a non-int ``errno`` stay out of the record."""
+
+    class _Text(str):
+        __slots__ = ()
+
+        def __len__(self) -> int:
+            raise RuntimeError("no length")
+
+    class _Sized(Exception):
+        def __str__(self) -> str:
+            return _Text("abc")
+
+    class _NamedMeta(type):
+        @property
+        def __name__(cls) -> str:  # type: ignore[override]
+            return _Text("LEAKED-NAME")  # not a plain str: withheld
+
+    class _Named(Exception, metaclass=_NamedMeta):
+        pass
+
+    _Sized.__module__ = "gpsoauth.exceptions"
+    assert describe_exception(_Sized()) == "_Sized (unprintable)"
+    assert (
+        describe_exception(OSError("TOKEN-LEAK", "x")) == "OSError (20 chars withheld)"
+    )
+    assert describe_exception(_Named("text")).startswith("<unnamed> (")
