@@ -26,6 +26,20 @@ _OWN_PACKAGE = "custom_components.googlefindmy"
 _TEXT_LIMIT = 200
 
 
+def _clip(text: str, limit: int) -> str:
+    """Return ``text`` with at most ``limit`` characters, none below one.
+
+    ``text`` is an exact ``str`` by the time it gets here. ``limit - 1``
+    would be a negative index below one and would cut from the end, so a
+    limit that cannot carry the ellipsis yields nothing at all.
+    """
+    if len(text) <= limit:
+        return text
+    if limit <= 0:
+        return ""
+    return f"{text[: limit - 1]}…"
+
+
 def describe_exception(exc: BaseException, *, limit: int = _TEXT_LIMIT) -> str:
     """Return a log-safe one-line summary of ``exc``.
 
@@ -33,24 +47,74 @@ def describe_exception(exc: BaseException, *, limit: int = _TEXT_LIMIT) -> str:
     ``errno`` for :class:`OSError`, the clipped message for exceptions of
     this package, the bare type name for an empty message, and otherwise
     the type name with the character count of the text that is withheld.
+    ``<Name> (unprintable)`` when ``__str__`` or a metadata property
+    (``error_kind``, ``errno``, the class name or module) raises, and
+    ``<unnamed>`` for a class whose name is not a plain ``str``: the helper
+    runs inside catch-all handlers and never raises itself, whatever the
+    producer raises, ``BaseException`` subclasses included. Every
+    producer-controlled value is reduced to an exact type inside that block
+    before it is rendered, clipped or sized: the text from ``__str__`` and
+    an ``error_kind`` to an exact ``str``, ``errno`` to an exact ``int``
+    (printed for :class:`OSError` only). A subclass can therefore neither
+    fail nor lie during the formatting that follows, and ``error_kind`` is
+    clipped at ``limit`` like the message is. The module name is the one
+    exception to that rule: it is not converted but rejected, a class whose
+    ``__module__`` is not an exact ``str`` counts as foreign. Two producer
+    predicates run before the reduction and stay that way on purpose: the
+    truthiness of ``error_kind`` and the ``isinstance`` checks. A producer
+    can use them to pick the branch it ends up in, and every branch is
+    log-safe, so the choice is his and the outcome is ours.
     """
-    name = type(exc).__name__
-    kind = getattr(exc, "error_kind", None)
-    if isinstance(kind, str) and kind:
-        return f"{name} (kind={kind})"
-    if isinstance(exc, OSError) and exc.errno is not None:
-        return f"{name} (errno={exc.errno})"
+    # Total by construction: this helper runs inside catch-all handlers, so
+    # a producer whose metadata property, ``__str__``, ``__getattribute__``
+    # or metaclass raises must not escape as a second exception from the
+    # handler. ``BaseException`` on purpose: a ``KeyboardInterrupt`` or
+    # ``SystemExit`` raised from an exception object's own attribute read
+    # is the producer's doing, not the user's (under Home Assistant SIGINT is
+    # loop-bound; in the CLI a Ctrl-C landing inside these few reads is
+    # absorbed once, the next one is not); nothing here awaits, so a task
+    # cancellation cannot surface inside these reads.
     try:
-        text = str(exc)
-    except Exception:  # noqa: BLE001 - a producer's __str__ may itself fail
-        return f"{name} (unprintable)"
-    if type(exc).__module__.startswith(_OWN_PACKAGE):
-        return (
-            f"{name}: {text}" if len(text) <= limit else f"{name}: {text[: limit - 1]}…"
+        name = type(exc).__name__
+        if type(name) is not str:  # a metaclass may hand back text of its own
+            name = "<unnamed>"
+    except BaseException:  # noqa: BLE001 - a metaclass may fail on __name__
+        name = "<unnamed>"
+    try:
+        kind = getattr(exc, "error_kind", None)
+        if isinstance(kind, str) and kind:
+            # Same normalisation as the message below: a ``str`` subclass
+            # here is the producer's code, and it is neither rendered nor
+            # measured before it has been reduced to the base class's value.
+            kind = str.__str__(kind)
+            return f"{name} (kind={_clip(kind, limit)})"
+        if isinstance(exc, OSError) and isinstance(exc.errno, int):
+            # ``int(...)`` coerces to an exact ``int`` through the producer's
+            # ``__int__``/``__index__``, whose result CPython forces to be an
+            # ``int``: he may pick the number, he cannot render text for it.
+            return f"{name} (errno={int(exc.errno)})"
+        # ``str()`` returns what ``__str__`` returns, a ``str`` subclass
+        # included, so its length, its formatting and its slicing are the
+        # producer's code too. ``str.__str__`` hands back the base class's
+        # value, so everything after this ``try`` runs on an exact ``str``:
+        # the rendering below cannot raise a second failure, and the size
+        # that decides about clipping is measured on the exact value.
+        text = str.__str__(str(exc))
+        size = len(text)
+        # The one predicate that releases the producer's text in full, so
+        # the module name is held to the same exactness as the text itself;
+        # the dot keeps a neighbouring package (``…googlefindmy_fork``) out.
+        module = type(exc).__module__
+        own = type(module) is str and (
+            module == _OWN_PACKAGE or module.startswith(f"{_OWN_PACKAGE}.")
         )
-    if not text:
+    except BaseException:  # noqa: BLE001 - a producer's property or __str__ may fail
+        return f"{name} (unprintable)"
+    if own:
+        return f"{name}: {_clip(text, limit)}"
+    if size == 0:
         return name
-    return f"{name} ({len(text)} chars withheld)"
+    return f"{name} ({size} chars withheld)"
 
 
 def exception_origin(exc: BaseException) -> str:
@@ -61,11 +125,17 @@ def exception_origin(exc: BaseException) -> str:
     """
     # ``lookup_lines=False``: only file, line and name are used, and the
     # default would read each frame's source line through ``linecache``
-    # (disk I/O on the event loop for a diagnostic string).
-    frames = traceback.StackSummary.extract(
-        traceback.walk_tb(exc.__traceback__), lookup_lines=False
-    )
-    if not frames:
-        return "no traceback"
-    frame = frames[-1]
-    return f"{PurePath(frame.filename).name}:{frame.lineno} in {frame.name}"
+    # (disk I/O on the event loop for a diagnostic string). Total like
+    # :func:`describe_exception`: a producer's ``__getattribute__`` may
+    # fail on ``__traceback__``, and a foreign traceback object may fail
+    # while it is walked; ``BaseException`` for the same reason as there.
+    try:
+        frames = traceback.StackSummary.extract(
+            traceback.walk_tb(exc.__traceback__), lookup_lines=False
+        )
+        if not frames:
+            return "no traceback"
+        frame = frames[-1]
+        return f"{PurePath(frame.filename).name}:{frame.lineno} in {frame.name}"
+    except BaseException:  # noqa: BLE001 - the traceback is the producer's too
+        return "no traceback (unprintable)"
