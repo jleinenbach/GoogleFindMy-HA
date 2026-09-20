@@ -828,14 +828,16 @@ normal issue — one per item — for hardening suggestions.
 Contributions are welcome and encouraged!
 
 New to the codebase?
-[GitDiagram](https://gitdiagram.com/jleinenbach/googlefindmy-ha) renders an
-interactive architecture diagram of `jleinenbach/GoogleFindMy-HA`: a quick way
-to see how the config flow, the coordinator, the `Auth` package, the entity
-platforms and the `NovaApi`/`SpotApi` clients relate before you open
-`custom_components/googlefindmy/`. The diagram is generated automatically by a
-third-party service and cached, so it can lag behind `main` and is meant for
-orientation only: the nested `AGENTS.md` files and the documents under `docs/`
-remain the authoritative reference.
+[GitDiagram](https://gitdiagram.com/bskando/googlefindmy-ha) renders an
+interactive architecture diagram of `BSkando/GoogleFindMy-HA`, the upstream
+repository that the HACS badge, `manifest.json` and `pyproject.toml` point at: a
+quick way to see how the config flow, the coordinator, the `Auth` package, the
+entity platforms and the `NovaApi`/`SpotApi` clients relate before you open
+`custom_components/googlefindmy/`. It is produced by a third-party service and
+served from a cache, so the first visit may have to generate it, and it is built
+from the upstream tree: work that has not landed there yet will not show up in
+it. Treat it as orientation only; the nested `AGENTS.md` files and the documents
+under `docs/` remain the authoritative reference.
 
 To contribute, please:
 1. Fork the repository
