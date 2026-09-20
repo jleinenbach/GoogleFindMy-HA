@@ -186,7 +186,9 @@ the exception through `Auth.log_safety.describe_exception(exc)` instead of
 type name for an empty message, `(unprintable)` when `str()`, a metadata
 property (`error_kind`, `errno`) or the class's own name or module itself
 fails, whatever it raises (`<unnamed>` when the class name is not a plain
-`str`), and otherwise the withheld character count. `exception_origin(exc)` names the innermost frame when a location
+`str`), and otherwise the withheld character count. A class whose
+`__module__` is not an exact `str` counts as foreign rather than as this
+package's own, so its message stays withheld. `exception_origin(exc)` names the innermost frame when a location
 is needed. The same applies to a parameter annotated with such a type
 (`def _classify(entry_id: str, err: BaseException)`): the callee logs an
 exception it did not catch, and the name is bound for the whole function;

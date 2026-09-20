@@ -142,7 +142,15 @@ a value forwarded to a helper whose parameter is unannotated
 annotation only, the caller is not followed into the callee), an alias
 resolved to a symbol without a suffix in a module that cannot be imported
 (`from mylib import Result as ClientError`: the symbol's name decides, not
-the alias's, and `mylib` cannot be asked), a module alias whose name ends
+the alias's, and `mylib` cannot be asked),
+a local type alias used as an annotation (`type TransportFailure =
+ClientError` or `Failure: TypeAlias = ClientError`, then `err:
+TransportFailure`: the alias name is neither imported nor suffixed, and
+resolving it needs a pass that collects the module's alias definitions
+before the annotations are classified; deferred to a follow-up PR,
+measured on 2026-09-20: four PEP 695 aliases under `Auth/` and seven in
+the package, all of them `dict`, `Mapping`, `ConfigEntry`, `Coroutine`
+or `Any` types, none an exception), a module alias whose name ends
 in a suffix (`import errorlib as Error`, resolved to the module, a module is
 not a type), a `TypeVar` bound to an exception, `traceback.format_exc()`,
 an own exception built from a foreign one, and every module outside `Auth/`
