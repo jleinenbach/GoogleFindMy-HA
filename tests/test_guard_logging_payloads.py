@@ -108,7 +108,8 @@ str(err)`, `"x %s" % err`, `str(err) or ""`, `str(err).lower()`, an
 f-string, `", ".join(...)`, `err.args`, `err.strerror`, `getattr(err,
 "msg")`, a conditional, a container display or a built-in that rearranges
 one (`list(errors)`, `map(str, errors)`), `errors[0]`, a comprehension, a
-container mutated by `append`/`extend`/`add`/`update`), tuple and list
+container mutated by `append`/`extend`/`add`/`update`, a queue filled
+by `put`/`put_nowait`), tuple and list
 unpacking matched by position (`err, count = t.exception(), 0` binds `err`
 only, starred targets included) or, from a carrying value that is no
 display, as a whole (`code, text = err.args`), a `for`,
@@ -133,7 +134,13 @@ of its handler (`except Exception as exc: last_error = exc`): the package
 narrows such a name before each of its three log calls (`fcmregister.py`:
 one by `isinstance`, two by a `str` assignment in the same branch) and a
 flow-insensitive binding would report all three,
-`getattr(t, "exception")()`, a lambda default (`lambda e=err:`), a binding
+`getattr(t, "exception")()`, a lambda default (`lambda e=err:`), an
+insertion written as a function rather than a method
+(`heapq.heappush(parts, err)`, `bisect.insort(parts, err)`: the receiver
+of such a call is the module, so a mutator entry would bind the wrong
+name; measured on 2026-09-20, the package has no such site, and the three
+`.put(` calls it does have sit in `eid_resolver.py`, outside this guard's
+scope), a binding
 in one method read in another (`self.last = err` in `m`, logged in `n`:
 the flow stays inside one function), `with cm as err` (what `__enter__`
 returns is the manager's business, not the name's),
@@ -838,6 +845,9 @@ _MUTATORS = frozenset(
         "update",
         "setdefault",
         "appendleft",
+        "extendleft",
+        "put",
+        "put_nowait",
         "__setitem__",
         "__iadd__",
         "__ior__",
@@ -2345,6 +2355,13 @@ def _stdlib_containers(err: ClientError, keys, m, parts) -> None:
     by_keyword = m.get("k", default=err)
     parts.__iadd__([err])
     _LOGGER.error("stdlib: %s %s %s %s", keyed, queued, by_keyword, parts)
+
+
+def _queue_writes(err: ClientError, q, dq) -> None:
+    q.put_nowait(err)
+    q.put(str(err))
+    dq.extendleft([err])
+    _LOGGER.error("queues: %s %s", q, dq)
 """
 
 
@@ -2395,7 +2412,12 @@ def test_shape_i_follows_bound_exceptions_by_data_flow() -> None:
     slot of `.get` and `.pop` on an unbound mapping; the fourth review of
     2026-09-18), `sys.exc_info()` passed directly or through its second slot
     (line 175), and four more container forms (line 183: `dict.fromkeys`,
-    `deque`, a keyword default, `__iadd__`; the fifth review). Not reported: a tuple target fed by a
+    `deque`, a keyword default, `__iadd__`; the fifth review) and two queue
+    writes (line 190: `put_nowait` and `put` fill an `asyncio.Queue`,
+    `extendleft` fills a `deque`, and `str(queue)` renders what is inside
+    it; the Codex review of 2026-09-20 on `6ae6af90`, which found the queue
+    added as a rendering carrier while its insertion methods were missing
+    from the mutator set). Not reported: a tuple target fed by a
     helper's result (line 34, `_pick` is not followed), a code attribute and
     a classifier's result (line 57, `code` and `kind`), a local annotation
     whose value is a helper's result and a lambda that is called (line 116:
@@ -2474,6 +2496,8 @@ def test_shape_i_follows_bound_exceptions_by_data_flow() -> None:
         (183, "keyed"),
         (183, "parts"),
         (183, "queued"),
+        (190, "dq"),
+        (190, "q"),
     ]
     outside, _ = _scan_tree(tree, "coordinator/fixture.py")
     assert outside == []
