@@ -26,6 +26,20 @@ _OWN_PACKAGE = "custom_components.googlefindmy"
 _TEXT_LIMIT = 200
 
 
+def _clip(text: str, limit: int) -> str:
+    """Return ``text`` with at most ``limit`` characters, none below one.
+
+    ``text`` is an exact ``str`` by the time it gets here. ``limit - 1``
+    would be a negative index below one and would cut from the end, so a
+    limit that cannot carry the ellipsis yields nothing at all.
+    """
+    if len(text) <= limit:
+        return text
+    if limit <= 0:
+        return ""
+    return f"{text[: limit - 1]}…"
+
+
 def describe_exception(exc: BaseException, *, limit: int = _TEXT_LIMIT) -> str:
     """Return a log-safe one-line summary of ``exc``.
 
@@ -37,10 +51,19 @@ def describe_exception(exc: BaseException, *, limit: int = _TEXT_LIMIT) -> str:
     (``error_kind``, ``errno``, the class name or module) raises, and
     ``<unnamed>`` for a class whose name is not a plain ``str``: the helper
     runs inside catch-all handlers and never raises itself, whatever the
-    producer raises, ``BaseException`` subclasses included. ``errno`` is
-    printed only when it is an ``int``. Text from ``__str__`` is normalised
-    to an exact ``str`` before it is measured or rendered, so a ``str``
-    subclass cannot fail or lie during the formatting that follows.
+    producer raises, ``BaseException`` subclasses included. Every
+    producer-controlled value is reduced to an exact type inside that block
+    before it is rendered, clipped or sized: the text from ``__str__`` and
+    an ``error_kind`` to an exact ``str``, ``errno`` to an exact ``int``
+    (printed for :class:`OSError` only). A subclass can therefore neither
+    fail nor lie during the formatting that follows, and ``error_kind`` is
+    clipped at ``limit`` like the message is. The module name is the one
+    exception to that rule: it is not converted but rejected, a class whose
+    ``__module__`` is not an exact ``str`` counts as foreign. Two producer
+    predicates run before the reduction and stay that way on purpose: the
+    truthiness of ``error_kind`` and the ``isinstance`` checks. A producer
+    can use them to pick the branch it ends up in, and every branch is
+    log-safe, so the choice is his and the outcome is ours.
     """
     # Total by construction: this helper runs inside catch-all handlers, so
     # a producer whose metadata property, ``__str__``, ``__getattribute__``
@@ -60,9 +83,16 @@ def describe_exception(exc: BaseException, *, limit: int = _TEXT_LIMIT) -> str:
     try:
         kind = getattr(exc, "error_kind", None)
         if isinstance(kind, str) and kind:
-            return f"{name} (kind={kind})"
+            # Same normalisation as the message below: a ``str`` subclass
+            # here is the producer's code, and it is neither rendered nor
+            # measured before it has been reduced to the base class's value.
+            kind = str.__str__(kind)
+            return f"{name} (kind={_clip(kind, limit)})"
         if isinstance(exc, OSError) and isinstance(exc.errno, int):
-            return f"{name} (errno={exc.errno})"
+            # ``int(...)`` coerces to an exact ``int`` through the producer's
+            # ``__int__``/``__index__``, whose result CPython forces to be an
+            # ``int``: he may pick the number, he cannot render text for it.
+            return f"{name} (errno={int(exc.errno)})"
         # ``str()`` returns what ``__str__`` returns, a ``str`` subclass
         # included, so its length, its formatting and its slicing are the
         # producer's code too. ``str.__str__`` hands back the base class's
@@ -71,11 +101,17 @@ def describe_exception(exc: BaseException, *, limit: int = _TEXT_LIMIT) -> str:
         # that decides about clipping is measured on the exact value.
         text = str.__str__(str(exc))
         size = len(text)
-        own = bool(type(exc).__module__.startswith(_OWN_PACKAGE))
+        # The one predicate that releases the producer's text in full, so
+        # the module name is held to the same exactness as the text itself;
+        # the dot keeps a neighbouring package (``…googlefindmy_fork``) out.
+        module = type(exc).__module__
+        own = type(module) is str and (
+            module == _OWN_PACKAGE or module.startswith(f"{_OWN_PACKAGE}.")
+        )
     except BaseException:  # noqa: BLE001 - a producer's property or __str__ may fail
         return f"{name} (unprintable)"
     if own:
-        return f"{name}: {text}" if size <= limit else f"{name}: {text[: limit - 1]}…"
+        return f"{name}: {_clip(text, limit)}"
     if size == 0:
         return name
     return f"{name} ({size} chars withheld)"

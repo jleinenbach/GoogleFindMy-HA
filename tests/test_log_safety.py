@@ -179,6 +179,9 @@ def test_text_subclass_and_string_errno_are_contained() -> None:
     _Sized.__module__ = "gpsoauth.exceptions"
     # The length is measured on the exact ``str``, not on the subclass that
     # refuses to be measured, so the size is printed instead of ``unprintable``.
+    # ``_Text.__len__`` is therefore unreachable from here since the text is
+    # normalised; it stays as the guard that would fire if that normalisation
+    # were removed, and the lying counterpart is pinned in the test below.
     assert describe_exception(_Sized()) == "_Sized (3 chars withheld)"
     assert (
         describe_exception(OSError("TOKEN-LEAK", "x")) == "OSError (20 chars withheld)"
@@ -233,3 +236,119 @@ def test_own_exception_text_is_rendered_as_an_exact_str() -> None:
     assert describe_exception(_OwnLying()) == "_OwnLying: abc"
     # Control: a foreign producer keeps its text withheld, at its true size.
     assert describe_exception(_Foreign()) == "_Foreign (4 chars withheld)"
+
+    class _ForeignLying(Exception):
+        def __str__(self) -> str:
+            return _Lying("abc")
+
+    _ForeignLying.__module__ = "gpsoauth.exceptions"
+    # The withheld size is the true one: the count comes from the exact
+    # ``str``, not from the subclass that claims to be over the limit.
+    assert describe_exception(_ForeignLying()) == "_ForeignLying (3 chars withheld)"
+
+
+def test_producer_metadata_is_normalised_before_rendering() -> None:
+    """``error_kind``, ``errno`` and ``__module__`` are exact before they are used."""
+
+    # The hostile dunders below are unreachable while the normalisation holds:
+    # each is the detector for exactly one mutant, not dead code. The same
+    # holds for ``_Text.__len__`` in the containment test above.
+
+    class _Kind(str):
+        __slots__ = ()
+
+        def __format__(self, format_spec: str, /) -> str:
+            return "KIND-LEAK"
+
+    class _Errno(int):
+        __slots__ = ()
+
+        def __format__(self, format_spec: str, /) -> str:
+            return "ERRNO-LEAK"
+
+    class _Module(str):
+        __slots__ = ()
+
+        def startswith(  # type: ignore[override]
+            self, prefix: object, /, *args: object, **kwargs: object
+        ) -> bool:
+            return True
+
+    class _Kinded(Exception):
+        error_kind = _Kind("bad_auth")
+
+    class _LongKinded(Exception):
+        error_kind = "k" * 250
+
+    class _Errnoed(OSError):
+        pass
+
+    class _Foreign(Exception):
+        def __str__(self) -> str:
+            return "TOKEN-LEAK for user@example.com"
+
+    _Kinded.__module__ = "gpsoauth.exceptions"
+    _LongKinded.__module__ = "gpsoauth.exceptions"
+    _Foreign.__module__ = _Module("gpsoauth.exceptions")
+
+    # The kind is rendered from the base class's value, not from __format__.
+    assert describe_exception(_Kinded()) == "_Kinded (kind=bad_auth)"
+    # An over-long kind is clipped like the message is, at the same limit.
+    assert (
+        describe_exception(_LongKinded())
+        == "_LongKinded (kind=" + "k" * 199 + "\u2026)"
+    )
+    # An ``errno`` subclass is printed by value, not by its own formatting.
+    errnoed = _Errnoed("x")
+    errnoed.errno = _Errno(13)
+    assert describe_exception(errnoed) == "_Errnoed (errno=13)"
+    # A module name that lies about its prefix does not release the text.
+    assert describe_exception(_Foreign()) == "_Foreign (31 chars withheld)"
+
+
+def test_a_neighbouring_package_is_not_this_package() -> None:
+    """Ownership needs the exact name or a dotted child, not a shared prefix."""
+
+    class _Fork(Exception):
+        def __str__(self) -> str:
+            return "SECRET-BODY"
+
+    class _Own(Exception):
+        def __str__(self) -> str:
+            return "own text"
+
+    _Fork.__module__ = "custom_components.googlefindmy_fork.evil"
+    _Own.__module__ = "custom_components.googlefindmy"
+
+    assert describe_exception(_Fork()) == "_Fork (11 chars withheld)"
+    assert describe_exception(_Own()) == "_Own: own text"
+
+
+def test_a_limit_that_cannot_carry_the_ellipsis_yields_no_text() -> None:
+    """Below one character there is nothing to show, not a slice from the end."""
+
+    class _Own(Exception):
+        def __str__(self) -> str:
+            return "SECRET-BODY"
+
+    class _Kinded(Exception):
+        error_kind = "bad_authentication"
+
+    _Own.__module__ = "custom_components.googlefindmy.Auth.producer"
+    _Kinded.__module__ = "gpsoauth.exceptions"
+
+    # ``limit - 1`` would be a negative index here and would cut from the end,
+    # handing out the tail of the producer's text under a limit of zero.
+    assert describe_exception(_Own(), limit=0) == "_Own: "
+    assert describe_exception(_Own(), limit=1) == "_Own: \u2026"
+    assert describe_exception(_Kinded(), limit=0) == "_Kinded (kind=)"
+    assert describe_exception(_Kinded(), limit=1) == "_Kinded (kind=\u2026)"
+
+    class _Exact(Exception):
+        def __str__(self) -> str:
+            return "x" * 20
+
+    _Exact.__module__ = "custom_components.googlefindmy.Auth.producer"
+    # A text of exactly ``limit`` characters is still shown in full: the
+    # ellipsis costs a character, so clipping it would shorten it below limit.
+    assert describe_exception(_Exact(), limit=20) == "_Exact: " + "x" * 20
