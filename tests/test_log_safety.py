@@ -177,8 +177,59 @@ def test_text_subclass_and_string_errno_are_contained() -> None:
         pass
 
     _Sized.__module__ = "gpsoauth.exceptions"
-    assert describe_exception(_Sized()) == "_Sized (unprintable)"
+    # The length is measured on the exact ``str``, not on the subclass that
+    # refuses to be measured, so the size is printed instead of ``unprintable``.
+    assert describe_exception(_Sized()) == "_Sized (3 chars withheld)"
     assert (
         describe_exception(OSError("TOKEN-LEAK", "x")) == "OSError (20 chars withheld)"
     )
     assert describe_exception(_Named("text")).startswith("<unnamed> (")
+
+
+def test_own_exception_text_is_rendered_as_an_exact_str() -> None:
+    """A ``str`` subclass from ``__str__`` cannot fail or lie while rendering."""
+
+    class _Unformattable(str):
+        __slots__ = ()
+
+        def __format__(self, format_spec: str, /) -> str:
+            raise RuntimeError("no format")
+
+    class _Unsliceable(str):
+        __slots__ = ()
+
+        def __getitem__(self, key: object, /) -> str:
+            raise RuntimeError("no slice")
+
+    class _Lying(str):
+        __slots__ = ()
+
+        def __len__(self) -> int:
+            return 300  # three characters claiming to be over the limit
+
+    class _Own(Exception):
+        def __str__(self) -> str:
+            return _Unformattable("abc")
+
+    class _OwnLong(Exception):
+        def __str__(self) -> str:
+            return _Unsliceable("x" * 250)
+
+    class _OwnLying(Exception):
+        def __str__(self) -> str:
+            return _Lying("abc")
+
+    class _Foreign(Exception):
+        def __str__(self) -> str:
+            return _Unformattable("abcd")
+
+    for own in (_Own, _OwnLong, _OwnLying):
+        own.__module__ = "custom_components.googlefindmy.Auth.producer"
+    _Foreign.__module__ = "gpsoauth.exceptions"
+
+    # Rendering, clipping and measuring all run on the exact ``str``.
+    assert describe_exception(_Own()) == "_Own: abc"
+    assert describe_exception(_OwnLong()) == "_OwnLong: " + "x" * 199 + "\u2026"
+    assert describe_exception(_OwnLying()) == "_OwnLying: abc"
+    # Control: a foreign producer keeps its text withheld, at its true size.
+    assert describe_exception(_Foreign()) == "_Foreign (4 chars withheld)"

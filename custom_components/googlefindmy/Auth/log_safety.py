@@ -38,7 +38,9 @@ def describe_exception(exc: BaseException, *, limit: int = _TEXT_LIMIT) -> str:
     ``<unnamed>`` for a class whose name is not a plain ``str``: the helper
     runs inside catch-all handlers and never raises itself, whatever the
     producer raises, ``BaseException`` subclasses included. ``errno`` is
-    printed only when it is an ``int``.
+    printed only when it is an ``int``. Text from ``__str__`` is normalised
+    to an exact ``str`` before it is measured or rendered, so a ``str``
+    subclass cannot fail or lie during the formatting that follows.
     """
     # Total by construction: this helper runs inside catch-all handlers, so
     # a producer whose metadata property, ``__str__``, ``__getattribute__``
@@ -62,8 +64,12 @@ def describe_exception(exc: BaseException, *, limit: int = _TEXT_LIMIT) -> str:
         if isinstance(exc, OSError) and isinstance(exc.errno, int):
             return f"{name} (errno={exc.errno})"
         # ``str()`` returns what ``__str__`` returns, a ``str`` subclass
-        # included, so its length and truth are the producer's code too.
-        text = str(exc)
+        # included, so its length, its formatting and its slicing are the
+        # producer's code too. ``str.__str__`` hands back the base class's
+        # value, so everything after this ``try`` runs on an exact ``str``:
+        # the rendering below cannot raise a second failure, and the size
+        # that decides about clipping is measured on the exact value.
+        text = str.__str__(str(exc))
         size = len(text)
         own = bool(type(exc).__module__.startswith(_OWN_PACKAGE))
     except BaseException:  # noqa: BLE001 - a producer's property or __str__ may fail
