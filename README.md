@@ -827,6 +827,16 @@ normal issue — one per item — for hardening suggestions.
 
 Contributions are welcome and encouraged!
 
+New to the codebase?
+[GitDiagram](https://gitdiagram.com/jleinenbach/googlefindmy-ha) renders an
+interactive architecture diagram of `jleinenbach/GoogleFindMy-HA`: a quick way
+to see how the config flow, the coordinator, the `Auth` package, the entity
+platforms and the `NovaApi`/`SpotApi` clients relate before you open
+`custom_components/googlefindmy/`. The diagram is generated automatically by a
+third-party service and cached, so it can lag behind `main` and is meant for
+orientation only: the nested `AGENTS.md` files and the documents under `docs/`
+remain the authoritative reference.
+
 To contribute, please:
 1. Fork the repository
 2. Create a feature branch
