@@ -93,10 +93,9 @@ jobs:
           # Detect that branch-name-agnostically by comparing PSR's view with the
           # real topological line tip. Fail-safe: on a false mismatch the
           # maintainer just hand-tags; no wrong number is ever proposed/stamped.
-          # `|| true` keeps a semantic-release crash (e.g. a bad pyproject) from
-          # aborting here: an empty PSR_LAST just routes to the hand-tag draft
-          # (safe). Real PSR errors still surface loudly in the dry-run preview
-          # step above (`--noop version`), which is the diagnostic path.
+          # `git describe` exits 128 when no tag is reachable; that is legitimate
+          # (a first release), so `|| true` turns it into an empty REAL_TIP,
+          # which routes to `propose` below.
           REAL_TIP="$(git describe --tags --abbrev=0 HEAD 2>/dev/null || true)"
           # Strip an optional single leading `v` (BSkando tags `vX.Y.Z`,
           # jleinenbach `X.Y.Z[.N]`) so a genuine `v`-prefixed line tip is
@@ -114,7 +113,24 @@ jobs:
             echo "::notice::ignoring non-PEP-440 line tip '${REAL_TIP}' for PSR routing (not a version tag)."
             REAL_TIP=""
           fi
-          PSR_LAST="$(poetry run semantic-release version --print-last-released 2>/dev/null || true)"
+          # --- Ask semantic-release: a crash is NOT "nothing to propose" ------
+          # rc 0 is always an answer, even an empty one (no release tag yet, or a
+          # branch outside [tool.semantic_release.branches]). rc != 0 is a crash
+          # or a CLI usage error (e.g. an option renamed by a dependency bump) and
+          # fails this step with the captured stderr. stderr stays out of the log
+          # on success: PSR always emits warning noise there (foreign tags etc.).
+          PSR_ERR="$(mktemp "${RUNNER_TEMP:-/tmp}/psr-stderr.XXXXXX")" || {
+            echo "::error::mktemp for the semantic-release stderr capture failed; nothing was drafted."
+            exit 1
+          }
+          psr_crashed() {
+            echo "::error::'semantic-release version $1' failed with exit code $2. This is a crash, NOT 'no release due'; nothing was drafted. stderr follows (the dry-run preview reproduces it):"
+            cat "$PSR_ERR"
+            exit "$2"
+          }
+          PSR_RC=0
+          PSR_LAST="$(poetry run semantic-release version --print-last-released 2>"$PSR_ERR")" || PSR_RC=$?
+          [ "$PSR_RC" -eq 0 ] || psr_crashed --print-last-released "$PSR_RC"
 
           MODE=propose
           if [ -n "$REAL_TIP" ] && [ "$REAL_TIP" != "$PSR_LAST" ]; then
@@ -125,8 +141,14 @@ jobs:
             # --print prints the CURRENT version (not a new one) when no releasing
             # commit exists since the last tag; guard against drafting a stale
             # release for an already-released version.
-            PROPOSED="$(poetry run semantic-release version --print 2>/dev/null || true)"
-            if [ -z "$PROPOSED" ] || [ "$PROPOSED" = "$PSR_LAST" ]; then
+            PSR_RC=0
+            PROPOSED="$(poetry run semantic-release version --print 2>"$PSR_ERR")" || PSR_RC=$?
+            [ "$PSR_RC" -eq 0 ] || psr_crashed --print "$PSR_RC"
+            if [ -z "$PROPOSED" ]; then
+              echo "::notice::semantic-release proposes nothing for ${REF_NAME} (exit 0, empty answer; branch not matched by [tool.semantic_release.branches]?). Nothing to draft."
+              exit 0
+            fi
+            if [ "$PROPOSED" = "$PSR_LAST" ]; then
               echo "::notice::No release due on ${REF_NAME}: no releasing commits since ${PSR_LAST:-the last tag}. Nothing to draft."
               exit 0
             fi
