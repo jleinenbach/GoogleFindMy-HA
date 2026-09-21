@@ -93,9 +93,10 @@ jobs:
           # Detect that branch-name-agnostically by comparing PSR's view with the
           # real topological line tip. Fail-safe: on a false mismatch the
           # maintainer just hand-tags; no wrong number is ever proposed/stamped.
-          # `git describe` exits 128 when no tag is reachable; that is legitimate
-          # (a first release), so `|| true` turns it into an empty REAL_TIP,
-          # which routes to `propose` below.
+          # `|| true` turns every failure of `git describe` into an empty
+          # REAL_TIP, which routes to `propose` below. The expected failure is
+          # exit 128 when no tag is reachable (a first release); any other
+          # failure takes the same route.
           REAL_TIP="$(git describe --tags --abbrev=0 HEAD 2>/dev/null || true)"
           # Strip an optional single leading `v` (BSkando tags `vX.Y.Z`,
           # jleinenbach `X.Y.Z[.N]`) so a genuine `v`-prefixed line tip is
@@ -125,7 +126,7 @@ jobs:
             exit 1
           }
           psr_crashed() {
-            echo "::error::'semantic-release version $1' failed with exit code $2 (a crash, a usage error or a refusal such as a detached HEAD), NOT 'no release due'; nothing was drafted. Its stderr follows:"
+            echo "::error::'poetry run semantic-release version $1' failed with exit code $2 (a semantic-release crash, usage error or refusal such as a detached HEAD, or poetry failing to start it), NOT 'no release due'; nothing was drafted. Its stderr follows:"
             cat "$PSR_ERR"
             exit "$2"
           }

@@ -9,10 +9,12 @@ release. It must keep two situations apart that look alike from the outside:
   release tag yet, a branch outside ``[tool.semantic_release.branches]``).
   semantic-release exits 0 in all of these, and the step stays green with a
   ``::notice::``.
-* semantic-release *crashes* or rejects its command line (exit 1 for a crash,
-  exit 2 for a click usage error, for example an option renamed by a
-  dependency bump). The step must fail with an ``::error::`` line and the
-  captured stderr, and must not open a draft.
+* semantic-release *crashes*, rejects its command line or refuses to run
+  (exit 1 for a crash, exit 2 for a click usage error, for example an option
+  renamed by a dependency bump; exit 1 as well for the refusal "Detached HEAD
+  ... no release will be made" on a run dispatched on a tag ref). The step
+  must fail with an ``::error::`` line and the captured stderr, and must not
+  open a draft.
 
 These tests execute the REAL ``run`` block, extracted from the workflow with
 ``yaml.safe_load`` and started as ``bash -e`` like the GitHub runner does for
@@ -158,7 +160,7 @@ _SCENARIOS: dict[str, _Scenario] = {
         poetry_calls=(_LAST, _PRINT),
         gh_creates=(),
         stdout_has=(
-            "::error::'semantic-release version --print' failed with exit code 1",
+            "::error::'poetry run semantic-release version --print' failed with exit code 1",
         ),
         stdout_lacks=("::notice::No release due",),
     ),
@@ -172,7 +174,7 @@ _SCENARIOS: dict[str, _Scenario] = {
         poetry_calls=(_LAST,),
         gh_creates=(),
         stdout_has=(
-            "::error::'semantic-release version --print-last-released' failed with exit code 1",
+            "::error::'poetry run semantic-release version --print-last-released' failed with exit code 1",
         ),
         stdout_lacks=("::notice::No release due", "hand-tag draft"),
     ),
@@ -186,7 +188,7 @@ _SCENARIOS: dict[str, _Scenario] = {
         poetry_calls=(_LAST,),
         gh_creates=(),
         stdout_has=(
-            "::error::'semantic-release version --print-last-released' failed with exit code 1",
+            "::error::'poetry run semantic-release version --print-last-released' failed with exit code 1",
         ),
         stdout_lacks=("::notice::No release due", "Proposed next version"),
     ),
@@ -200,7 +202,7 @@ _SCENARIOS: dict[str, _Scenario] = {
         poetry_calls=(_LAST,),
         gh_creates=(),
         stdout_has=(
-            "::error::'semantic-release version --print-last-released' failed with exit code 2",
+            "::error::'poetry run semantic-release version --print-last-released' failed with exit code 2",
         ),
         stdout_lacks=("::notice::No release due", "hand-tag draft"),
     ),
@@ -214,7 +216,7 @@ _SCENARIOS: dict[str, _Scenario] = {
         poetry_calls=(_LAST, _PRINT),
         gh_creates=(),
         stdout_has=(
-            "::error::'semantic-release version --print' failed with exit code 2",
+            "::error::'poetry run semantic-release version --print' failed with exit code 2",
         ),
         stdout_lacks=("::notice::No release due",),
     ),
