@@ -115,16 +115,17 @@ jobs:
           fi
           # --- Ask semantic-release: a crash is NOT "nothing to propose" ------
           # rc 0 is always an answer, even an empty one (no release tag yet, or a
-          # branch outside [tool.semantic_release.branches]). rc != 0 is a crash
-          # or a CLI usage error (e.g. an option renamed by a dependency bump) and
-          # fails this step with the captured stderr. stderr stays out of the log
-          # on success: PSR always emits warning noise there (foreign tags etc.).
+          # branch outside [tool.semantic_release.branches]). rc != 0 is a crash,
+          # a CLI usage error (e.g. an option renamed by a dependency bump) or a
+          # refusal such as a detached HEAD (a dispatch on a tag ref), and fails
+          # this step with the captured stderr. stderr stays out of the log on
+          # success: PSR always emits warning noise there (foreign tags etc.).
           PSR_ERR="$(mktemp "${RUNNER_TEMP:-/tmp}/psr-stderr.XXXXXX")" || {
             echo "::error::mktemp for the semantic-release stderr capture failed; nothing was drafted."
             exit 1
           }
           psr_crashed() {
-            echo "::error::'semantic-release version $1' failed with exit code $2. This is a crash, NOT 'no release due'; nothing was drafted. stderr follows (the dry-run preview reproduces it):"
+            echo "::error::'semantic-release version $1' failed with exit code $2 (a crash, a usage error or a refusal such as a detached HEAD), NOT 'no release due'; nothing was drafted. Its stderr follows:"
             cat "$PSR_ERR"
             exit "$2"
           }
