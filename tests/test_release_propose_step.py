@@ -19,9 +19,10 @@ These tests execute the REAL ``run`` block, extracted from the workflow with
 ``run`` steps without an explicit ``shell``. ``poetry``, ``git`` and ``gh`` are
 stubs on ``PATH``. Reach, stated so it is not mistaken for more: the stubs
 simulate semantic-release, git and the GitHub CLI; they do not prove how the
-real tools behave. The exit-code contract they encode is taken from the
-python-semantic-release documentation of ``version --print`` and
-``--print-last-released``. The runner's handling of workflow commands and of
+real tools behave. The exit-code contract they encode is the one of
+python-semantic-release 10.6.1 (``src/semantic_release/cli/commands/version.py``
+and click): an answer exits 0 even when it is empty, a crash exits 1, a click
+usage error exits 2. The runner's handling of workflow commands and of
 ``RUNNER_TEMP`` is outside this test as well.
 
 Every stub logs its calls to a file, not to stdout: the stubs run inside
@@ -44,6 +45,8 @@ import yaml
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _WORKFLOW = _REPO_ROOT / ".github" / "workflows" / "release.yml"
 _STEP_NAME = "Propose a version and open a draft release"
+# The env keys the step declares; the stub environment provides exactly these.
+_STEP_ENV = {"GH_TOKEN": "stub-token", "REF_NAME": "main"}
 
 _LAST = "run semantic-release version --print-last-released"
 _PRINT = "run semantic-release version --print"
@@ -187,6 +190,20 @@ _SCENARIOS: dict[str, _Scenario] = {
         ),
         stdout_lacks=("::notice::No release due", "Proposed next version"),
     ),
+    "d3_last_released_usage_error_crash": _Scenario(
+        tip="1.7.15.18",
+        last_out="",
+        last_rc=2,
+        print_out="",
+        print_rc=0,
+        expected_rc=2,
+        poetry_calls=(_LAST,),
+        gh_creates=(),
+        stdout_has=(
+            "::error::'semantic-release version --print-last-released' failed with exit code 2",
+        ),
+        stdout_lacks=("::notice::No release due", "hand-tag draft"),
+    ),
     "h_print_usage_error_crash": _Scenario(
         tip="1.7.15",
         last_out="1.7.15",
@@ -248,15 +265,19 @@ def _propose_step() -> dict[str, Any]:
     """Return the one proposal step of ``release.yml``; refuse anything else."""
 
     workflow = yaml.safe_load(_WORKFLOW.read_text(encoding="utf-8"))
-    steps = [
-        step
-        for step in workflow["jobs"]["release"]["steps"]
-        if step.get("name") == _STEP_NAME
-    ]
+    job = workflow["jobs"]["release"]
+    # The test starts the block as `bash -e`, the runner's form for a run step
+    # without an explicit shell; any shell setting would make that a different
+    # interpreter from the one the runner uses.
+    for scope, owner in (("workflow", workflow), ("job", job)):
+        shell = (owner.get("defaults") or {}).get("run", {}).get("shell")
+        assert shell is None, f"{scope} sets defaults.run.shell={shell!r}"
+    steps = [step for step in job["steps"] if step.get("name") == _STEP_NAME]
     assert len(steps) == 1, (
         f"expected exactly one step named {_STEP_NAME!r}, got {len(steps)}"
     )
     step: dict[str, Any] = steps[0]
+    assert "shell" not in step, f"the step sets shell={step['shell']!r}"
     return step
 
 
@@ -269,8 +290,8 @@ def _propose_run_block() -> str:
     # An expression would be substituted by the runner before bash sees the
     # script; executing it verbatim here would test something else.
     assert "${{" not in run, "the run block must reach its inputs through env only"
-    assert set(step["env"]) == {"GH_TOKEN", "REF_NAME"}, (
-        "the step's env changed; extend the stub environment below to match"
+    assert set(step["env"]) == set(_STEP_ENV), (
+        "the step's env changed; extend _STEP_ENV to match"
     )
     return run
 
@@ -287,17 +308,21 @@ def _log_lines(path: Path) -> list[str]:
     return path.read_text(encoding="utf-8").splitlines()
 
 
-@pytest.mark.parametrize("scenario_id", list(_SCENARIOS))
-def test_propose_step_scenario(tmp_path: Path, scenario_id: str) -> None:
-    """Run the real proposal step against stubs and check its outcome.
+@dataclass(frozen=True)
+class _StepRun:
+    """Outcome of one execution of the proposal step."""
 
-    Beyond the exit code this checks the step output (``::error::`` naming the
-    failing call, the captured stderr on failure, no stderr noise on success)
-    and the exact call sequence of every stub, so a stub that is never reached
-    cannot make a scenario pass.
-    """
+    returncode: int
+    output: str
+    poetry_calls: list[str]
+    git_calls: list[str]
+    gh_creates: list[str]
+    unexpected_calls: list[str]
 
-    scenario = _SCENARIOS[scenario_id]
+
+def _run_step(tmp_path: Path, scenario: _Scenario, runner_temp: Path) -> _StepRun:
+    """Execute the real proposal step under ``bash -e`` against the stubs."""
+
     bash = shutil.which("bash")
     # Deliberately no skip: a skipped behaviour test would be a silent pass.
     assert bash is not None, "bash is required to execute the workflow step"
@@ -313,8 +338,6 @@ def test_propose_step_scenario(tmp_path: Path, scenario_id: str) -> None:
 
     logs = tmp_path / "logs"
     logs.mkdir()
-    runner_temp = tmp_path / "runner-temp"
-    runner_temp.mkdir()
     poetry_log = logs / "poetry.log"
     git_log = logs / "git.log"
     gh_log = logs / "gh.log"
@@ -323,11 +346,10 @@ def test_propose_step_scenario(tmp_path: Path, scenario_id: str) -> None:
     # Built from scratch, without os.environ, so nothing from the calling shell
     # or from CI (BASH_ENV, GITHUB_*) reaches the step.
     env = {
+        **_STEP_ENV,
         "PATH": f"{bin_dir}:/usr/bin:/bin",
         "HOME": str(tmp_path),
         "RUNNER_TEMP": str(runner_temp),
-        "REF_NAME": "main",
-        "GH_TOKEN": "stub-token",
         "STUB_TIP": scenario.tip,
         "STUB_LAST_OUT": scenario.last_out,
         "STUB_LAST_RC": str(scenario.last_rc),
@@ -347,20 +369,43 @@ def test_propose_step_scenario(tmp_path: Path, scenario_id: str) -> None:
         check=False,
         env=env,
     )
-    output = proc.stdout.decode("utf-8", errors="replace")
+    return _StepRun(
+        returncode=proc.returncode,
+        output=proc.stdout.decode("utf-8", errors="replace"),
+        poetry_calls=_log_lines(poetry_log),
+        git_calls=_log_lines(git_log),
+        gh_creates=[
+            line for line in _log_lines(gh_log) if line.startswith("release create ")
+        ],
+        unexpected_calls=_log_lines(unexpected_log),
+    )
 
-    assert not unexpected_log.exists(), (
-        f"the step called a stub in an unexpected way: {_log_lines(unexpected_log)}\n{output}"
+
+@pytest.mark.parametrize("scenario_id", list(_SCENARIOS))
+def test_propose_step_scenario(tmp_path: Path, scenario_id: str) -> None:
+    """Run the real proposal step against stubs and check its outcome.
+
+    Beyond the exit code this checks the step output (``::error::`` naming the
+    failing call, the captured stderr on failure, no stderr noise on success)
+    and the exact call sequence of every stub, so a stub that is never reached
+    cannot make a scenario pass.
+    """
+
+    scenario = _SCENARIOS[scenario_id]
+    runner_temp = tmp_path / "runner-temp"
+    runner_temp.mkdir()
+    run = _run_step(tmp_path, scenario, runner_temp)
+    output = run.output
+
+    assert not run.unexpected_calls, (
+        f"the step called a stub in an unexpected way: {run.unexpected_calls}\n{output}"
     )
-    assert proc.returncode == scenario.expected_rc, (
-        f"exit code {proc.returncode}, expected {scenario.expected_rc}\n{output}"
+    assert run.returncode == scenario.expected_rc, (
+        f"exit code {run.returncode}, expected {scenario.expected_rc}\n{output}"
     )
-    assert _log_lines(poetry_log) == list(scenario.poetry_calls), output
-    assert _log_lines(git_log) == [_DESCRIBE], output
-    creates = [
-        line for line in _log_lines(gh_log) if line.startswith("release create ")
-    ]
-    assert creates == list(scenario.gh_creates), output
+    assert run.poetry_calls == list(scenario.poetry_calls), output
+    assert run.git_calls == [_DESCRIBE], output
+    assert run.gh_creates == list(scenario.gh_creates), output
 
     for needle in scenario.stdout_has:
         assert needle in output, f"missing {needle!r} in step output\n{output}"
@@ -375,6 +420,25 @@ def test_propose_step_scenario(tmp_path: Path, scenario_id: str) -> None:
         assert "STUB-CRASH-TRACE" in output, (
             f"a failing call must show the captured semantic-release stderr\n{output}"
         )
+
+
+def test_propose_step_stops_when_stderr_capture_fails(tmp_path: Path) -> None:
+    """Without a place for the semantic-release stderr the step stops loudly.
+
+    ``mktemp`` cannot create a file in a missing ``RUNNER_TEMP``. The step must
+    fail with its own ``::error::`` line before semantic-release runs, instead
+    of the bare ``mktemp`` message that ``set -e`` alone would leave.
+    """
+
+    run = _run_step(tmp_path, _SCENARIOS["a_propose"], tmp_path / "missing-dir")
+
+    assert not run.unexpected_calls, run.output
+    assert run.returncode == 1, run.output
+    assert "::error::mktemp for the semantic-release stderr capture failed" in (
+        run.output
+    )
+    assert run.poetry_calls == [], run.output
+    assert run.gh_creates == [], run.output
 
 
 def test_static_no_or_true_after_semantic_release() -> None:
