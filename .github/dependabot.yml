@@ -17,6 +17,16 @@ updates:
       - "automated-pr"
     commit-message:
       prefix: "chore(deps)"
+    ignore:
+      # python-semantic-release 10.6.2 declares `click<8.5.0,~=8.1.0`; `~=8.1.0`
+      # means `>=8.1,<8.2`, so the lock would downgrade click from 8.4.2 to
+      # 8.1.8 (affected by PYSEC-2026-2132 / CVE-2026-7246, fixed in 8.3.3).
+      # 10.6.1 works with GitPython >= 3.1.61, which the lock already has.
+      # This skips 10.6.2 only; a later release still comes through, so check
+      # click in the lock of the next grouped PR. Drop this entry once a
+      # newer python-semantic-release is locked.
+      - dependency-name: "python-semantic-release"
+        versions: ["10.6.2"]
     groups:
       # Group minor/patch updates together
       python-minor:
