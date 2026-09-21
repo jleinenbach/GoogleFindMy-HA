@@ -977,6 +977,18 @@ the first column-0 `}` and has neither `must_contain` nor `max_lines`. Most
 fragments these tests execute therefore still contain an unbraked part; the
 brakes cover the guard blocks, not everything that runs.
 
+The same rule applies to GitHub workflow steps, which
+`tests/test_release_propose_step.py` executes as well. There the anchor is
+structural rather than textual: the step is selected with `yaml.safe_load` by its
+exact `name`, and the test refuses to run unless exactly one step matches, the
+`run` block contains no `${{` expression (the runner would substitute it, so a
+verbatim run would test something else) and the step's `env` keys equal the set
+the stub environment provides. The block runs as `bash -e`, the runner's start
+form for `run` steps without an explicit `shell`, with an environment built from
+scratch rather than from `os.environ`. Stubs on `PATH` log their calls to files,
+not to stdout: inside `$(...)` a stdout marker lands in the captured variable. A
+missing `bash` fails the test instead of skipping it.
+
 ## Device registry expectations
 
 The coordinator device-registry tests retain Home Assistant's 2025.10
