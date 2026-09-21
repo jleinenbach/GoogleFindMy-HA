@@ -979,16 +979,17 @@ brakes cover the guard blocks, not everything that runs.
 
 The same rule applies to GitHub workflow steps, which
 `tests/test_release_propose_step.py` executes as well. There the anchor is
-structural rather than textual: the step is selected with `yaml.safe_load` by its
-exact `name`, and the test refuses to run unless exactly one step matches, the
-`run` block contains no `${{` expression (the runner would substitute it, so a
-verbatim run would test something else), the step's `env` keys equal the keys of
-`_STEP_ENV`, from which the stub environment is built, and neither the step nor
-`defaults.run` of the job or the workflow sets a `shell`. The block then runs as
-`bash -e`, the runner's start form for `run` steps without an explicit `shell`,
-with an environment built from scratch rather than from `os.environ`. Stubs on `PATH` log their calls to files,
-not to stdout: inside `$(...)` a stdout marker lands in the captured variable. A
-missing `bash` fails the test instead of skipping it.
+structural rather than textual: the step is selected with `yaml.safe_load` by
+its exact `name`, and the test refuses to run unless exactly one step matches,
+the `run` block contains no `${{` expression (the runner would substitute it, so
+a verbatim run would test something else), the step's `env` keys equal the keys
+of `_STEP_ENV`, from which the stub environment is built, and neither the step
+nor `defaults.run` of the job or the workflow sets a `shell`. The block then
+runs as `bash -e`, the runner's start form for `run` steps without an explicit
+`shell`, with an environment built from scratch rather than from `os.environ`.
+Stubs on `PATH` log their calls to files, not to stdout: inside `$(...)` a
+stdout marker lands in the captured variable. A missing `bash` fails the test
+instead of skipping it.
 
 ## Device registry expectations
 
