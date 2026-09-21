@@ -196,7 +196,7 @@ jobs:
                 changed=1
               else
                 echo "::notice title=pip-audit (no effective fix)::The update run changed the lock but did not reduce the fixable count (${fixable} -> ${fixable_after}). No pull request is opened."
-                git checkout -- pyproject.toml poetry.lock poetry-requirements.txt audit.json
+                git checkout -- pyproject.toml poetry.lock
                 fixable_after="$fixable"
               fi
             fi
@@ -218,6 +218,9 @@ jobs:
           base: ${{ github.event.repository.default_branch }}
           branch: security/pip-audit-autofix
           delete-branch: true
+          add-paths: |
+            pyproject.toml
+            poetry.lock
           commit-message: "pip-audit: apply available security updates"
           title: "pip-audit: automatic security updates"
           body: |
