@@ -182,7 +182,10 @@ jobs:
             # approval-required state anyway (docs: github_token).
             echo "direct push to ${STAMP_BRANCH} rejected by branch rules; opening the stamp PR"
             FB_BRANCH="release-stamp/${TAG_NAME}"
-            git push origin "HEAD:${FB_BRANCH}"
+            # HEAD is the detached tag checkout, so git cannot infer that a new
+            # destination is meant to be a branch and stops with "not a full
+            # refname". Spell out the full ref (git-push, <refspec>).
+            git push origin "HEAD:refs/heads/${FB_BRANCH}"
             PR_URL="$(gh pr create --base "${STAMP_BRANCH}" --head "${FB_BRANCH}" \
               --title "chore(release): ${TAG_NAME}" \
               --body "Automated version stamp for release ${TAG_NAME}. [skip ci]")"
