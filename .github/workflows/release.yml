@@ -76,7 +76,8 @@ jobs:
           # every other stderr line and all of stdout stay visible. Layer 1: a wide
           # COLUMNS stops rich from wrapping a record. Layer 2: rich indents the
           # continuation lines of a wrapped record by 20 columns; those that follow
-          # a folded record are dropped with it, so a narrower console cannot leak them.
+          # a folded record are dropped with it, so a console narrowed down to rich's
+          # 80-column default cannot leak them.
           # Locked by tests/test_release_preview_step.py.
           export COLUMNS=1000
           PSR_ERR="$(mktemp "${RUNNER_TEMP:-/tmp}/psr-preview.XXXXXX")" || {
@@ -101,7 +102,11 @@ jobs:
               index($0, warning) { folding = 1; next }
               folding && index($0, indent) == 1 { next }
               { folding = 0; print }
-            ' "$PSR_ERR" >&2
+            ' "$PSR_ERR" >&2 || {
+              echo "::error::filtering the semantic-release stderr failed (awk exit $?); its unfiltered stderr follows:"
+              cat "$PSR_ERR"
+              exit 1
+            }
             echo "semantic-release --noop $1: ${folded} unparseable tag warning(s) folded"
           }
           psr_preview version

@@ -5,7 +5,7 @@ The step ``Preview (dry run)`` calls ``semantic-release --noop version`` and
 ``semantic-release --noop changelog``. python-semantic-release logs one
 ``Couldn't parse tag`` WARNING per tag outside its ``tag_format`` (four-segment
 maintenance tags, old beta tags, foreign tags); in this repository that was
-1380 warnings in one preview, most of the log. The step folds them into one
+1380 warnings in one preview (CI run 35692265353), most of the log. The step folds them into one
 count line per call and keeps everything else:
 
 * no line of a folded warning reaches the log, including the continuation
@@ -23,7 +23,9 @@ stated so it is not mistaken for more: the stub does not prove how the real
 tools wrap; the folding was checked once against the real semantic-release
 when it was introduced, and that check is not repeated here. One visible change is
 intended: the filtered stderr of a call now appears after that call's stdout
-instead of interleaved with it.
+instead of interleaved with it. The stub removes its own stderr capture
+through ``/proc/self/fd/2``, so ``test_preview_stops_when_count_fails`` needs
+Linux, like the CI runners of this repository.
 """
 
 from __future__ import annotations
@@ -52,7 +54,10 @@ _TOKEN_WARNING = "WARNING  Token value is missing!"
 
 # Wording from a CI log of this workflow: one record wrapped once (with the
 # timestamp column), one wrapped twice, one on a single line as it appears
-# with a wide console. A foreign two-line warning sits between them.
+# with a wide console. A foreign two-line warning sits between them, and a
+# foreign line padded with more than 20 inner spaces (as rich pads it before
+# the path column) follows a folded record directly: only continuation lines
+# that START with the indent may be dropped.
 _VERSION_STDERR = "\n".join(
     [
         "[05:51:05] WARNING  Couldn't parse tag 1.6-beta3 as as Version:  "
@@ -60,13 +65,13 @@ _VERSION_STDERR = "\n".join(
         f"{_INDENT}'1.6-beta3' is not a valid Version",
         f"[05:51:05] {_FOREIGN_WARNING}   config.py:195",
         _FOREIGN_CONTINUATION,
-        f"           {_TOKEN_WARNING}                        config.py:805",
         "           WARNING  Couldn't parse tag 1.6-beta4_100 as as       "
         "algorithm.py:49",
         f"{_INDENT}Version: '1.6-beta4_100' is not a valid",
         f"{_INDENT}Version",
         "           WARNING  Couldn't parse tag 1.7.15.18 as as Version: "
         "'1.7.15.18' is not a valid Version algorithm.py:49",
+        f"           {_TOKEN_WARNING}                        config.py:805",
     ]
 )
 _CHANGELOG_STDERR = "\n".join(
@@ -165,6 +170,7 @@ def _run_step(
     changelog_rc: int = 0,
     runner_temp: Path | None = None,
     drop_stderr_file: str = "",
+    failing_awk: bool = False,
 ) -> _StepRun:
     """Execute the real preview step under ``bash -e`` against the stub."""
 
@@ -179,6 +185,10 @@ def _run_step(
     stub = bin_dir / "poetry"
     stub.write_text(_POETRY_STUB, encoding="utf-8")
     stub.chmod(0o755)
+    if failing_awk:
+        awk_stub = bin_dir / "awk"
+        awk_stub.write_text("#!/bin/sh\nexit 2\n", encoding="utf-8")
+        awk_stub.chmod(0o755)
 
     fixtures = tmp_path / "fixtures"
     fixtures.mkdir()
@@ -341,6 +351,28 @@ def test_preview_stops_when_count_fails(tmp_path: Path) -> None:
     assert not run.unexpected_calls, run.output
     assert run.returncode == 1, run.output
     assert "::error::counting the folded tag warnings failed" in run.output
+    assert not any("unparseable tag warning(s) folded" in line for line in lines), (
+        run.output
+    )
+    assert run.poetry_calls == _CALLS[:1], run.output
+
+
+def test_preview_stops_when_filter_fails(tmp_path: Path) -> None:
+    """A failing filter stops the step and shows the unfiltered stderr.
+
+    ``awk`` is replaced by a stub that exits 2 without output.
+    """
+
+    run = _run_step(tmp_path, failing_awk=True)
+    lines = run.output.splitlines()
+
+    assert not run.unexpected_calls, run.output
+    assert run.returncode == 1, run.output
+    assert (
+        "::error::filtering the semantic-release stderr failed (awk exit 2)"
+        in run.output
+    )
+    assert run.output.count("Couldn't parse tag") == 3, run.output
     assert not any("unparseable tag warning(s) folded" in line for line in lines), (
         run.output
     )

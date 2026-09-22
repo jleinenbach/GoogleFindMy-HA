@@ -76,6 +76,10 @@ exit 0
 _GH_STUB = """#!/usr/bin/env bash
 if [ "$1 $2" = "pr create" ]; then
   printf '%s\\n' "$*" >> "$STUB_GH_LOG"
+  if [ "${STUB_GH_CREATE_RC:-0}" -ne 0 ]; then
+    echo "STUB-GH-FAILURE" >&2
+    exit "$STUB_GH_CREATE_RC"
+  fi
   echo "https://example.invalid/pr/1"
   exit 0
 fi
@@ -249,7 +253,9 @@ def _log_lines(path: Path) -> list[str]:
     return path.read_text(encoding="utf-8").splitlines()
 
 
-def _run_step(tmp_path: Path, world: _World, tag: str) -> _StepRun:
+def _run_step(
+    tmp_path: Path, world: _World, tag: str, gh_create_rc: int = 0
+) -> _StepRun:
     """Execute the real push step under ``bash -e`` inside the checkout."""
 
     bash = shutil.which("bash")
@@ -272,6 +278,7 @@ def _run_step(tmp_path: Path, world: _World, tag: str) -> _StepRun:
         "TAG_NAME": tag,
         "GH_TOKEN": "stub-token",
         "STUB_GH_LOG": str(gh_log),
+        "STUB_GH_CREATE_RC": str(gh_create_rc),
         "STUB_UNEXPECTED_LOG": str(unexpected_log),
     }
     proc = subprocess.run(
@@ -327,6 +334,32 @@ def test_fallback_push_creates_stamp_branch(tmp_path: Path, tag: str) -> None:
         f"pr create --base main --head release-stamp/{tag} "
     ), run.gh_calls
     assert "::notice::stamp PR opened: https://example.invalid/pr/1" in run.output
+
+
+def test_fallback_names_manual_pr_command_when_pr_creation_fails(
+    tmp_path: Path,
+) -> None:
+    """A failing ``gh pr create`` stops the step and names the manual command.
+
+    The stamp branch is already on the remote at that point. A rerun would
+    find two branches containing the tag and skip with a notice, so the step
+    must say how to complete the stamp by hand.
+    """
+
+    tag = "1.7.15.18"
+    world = _seed(tmp_path, tag, "ruleset")
+    run = _run_step(tmp_path, world, tag, gh_create_rc=1)
+
+    assert not run.unexpected_calls, run.output
+    assert run.returncode == 1, run.output
+    assert "STUB-GH-FAILURE" in run.output
+    assert (
+        f"::error::pushed release-stamp/{tag}, but opening the stamp PR failed; "
+        f"open it by hand: gh pr create --base main --head release-stamp/{tag}"
+    ) in run.output
+    assert "::notice::stamp PR opened" not in run.output
+    assert _remote_ref(world, f"refs/heads/release-stamp/{tag}") == world.stamp_sha
+    assert _remote_ref(world, "refs/heads/main") == world.seed_main
 
 
 def test_direct_push_updates_owning_branch(tmp_path: Path) -> None:
