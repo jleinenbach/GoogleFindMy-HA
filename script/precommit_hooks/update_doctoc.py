@@ -10,6 +10,9 @@ from collections.abc import Iterable
 from pathlib import Path
 from urllib.parse import quote
 
+import cmarkgfm
+from cmarkgfm.cmark import Options
+
 START_MARKER = (
     "<!-- START doctoc generated TOC please keep comment here to allow auto update -->"
 )
@@ -18,10 +21,17 @@ END_MARKER = (
 )
 HEADER_LINE = "**Table of Contents**  *generated with [DocToc](https://github.com/thlorenz/doctoc)*"
 
-_HEADING_RE = re.compile(r"^(?P<hashes>#{1,6})\s+(?P<title>.+?)\s*$")
-_FENCE_RE = re.compile(r"^(?P<indent> *)(?P<fence>`{3,}|~{3,})(?P<info>.*)$")
-# CommonMark allows up to three spaces of indentation before a fence.
-_MAX_FENCE_INDENT = 3
+# CommonMark requires a space or a tab after the hashes, no other white space.
+_HEADING_RE = re.compile(r"^(?P<hashes>#{1,6})[ \t]+(?P<title>.+?)\s*$")
+_LINE_END_RE = re.compile(r"\r\n|\r|\n")
+# A rendered heading starting in the first column of line ``line``. Text and
+# attribute values are escaped by the renderer and raw HTML is omitted, so
+# every match is a heading the renderer produced. ``_HEADING_RE`` on the
+# source line already rules out headings in list items, block quotes and
+# indented ones; the column check states the same on the rendered side.
+_RENDERED_HEADING_RE = re.compile(r'<h[1-6] data-sourcepos="(?P<line>\d+):1-')
+# Appended after a blank line: only a block left open can hide this heading.
+_PROBE = ("", "# probe")
 _PERCENT_ESCAPE_RE = re.compile(r"%([a-fA-F]|\d){2}")
 _REMOVE_CHARS = "/?!:[]`.,()*\"';{}+=<>~$|#@&–—\\"
 _REMOVE_TRANSLATION = str.maketrans("", "", _REMOVE_CHARS)
@@ -32,61 +42,86 @@ class TocGenerationError(RuntimeError):
     """Raised when the DocToc markers or the document structure are malformed."""
 
 
+def _render(lines: list[str]) -> str:
+    """Render ``lines`` as GitHub does, with the source position of each block."""
+
+    html: str = cmarkgfm.github_flavored_markdown_to_html(
+        "\n".join(lines) + "\n", options=Options.CMARK_OPT_SOURCEPOS
+    )
+    return html
+
+
+def _heading_lines(html: str) -> set[int]:
+    """Return the lines on which a heading starts in the first column.
+
+    A heading inside a list item or a block quote, or an indented one, starts
+    in a later column.
+    """
+
+    return {int(match.group("line")) for match in _RENDERED_HEADING_RE.finditer(html)}
+
+
+def _hides_probe(lines: list[str]) -> bool:
+    """Return True when a block left open at the end of ``lines`` hides a heading.
+
+    Only a code fence, or an HTML block that ends at a marker such as ``-->``,
+    can still be open after the blank line of ``_PROBE``; every other block
+    ends there or at the unindented heading.
+    """
+
+    return len(lines) + len(_PROBE) not in _heading_lines(_render([*lines, *_PROBE]))
+
+
+def _raise_unclosed(lines: list[str], html: str) -> None:
+    """Raise ``TocGenerationError`` naming the line of the block left open."""
+
+    # The block starts right after the longest prefix that leaves the probe
+    # visible. A block closed later can hide the probe behind a shorter
+    # prefix, so the search runs backwards.
+    start = next(
+        end + 1
+        for end in range(len(lines) - 1, -1, -1)
+        if not _hides_probe(lines[:end])
+    )
+    kind = "code fence" if f'<pre data-sourcepos="{start}:' in html else "HTML block"
+    raise TocGenerationError(f"{kind} opened on line {start} is never closed")
+
+
 def _iter_headings(lines: Iterable[str]) -> list[tuple[int, str]]:
     """Collect Markdown headings and their levels in document order.
 
-    Lines inside fenced code blocks are skipped: a shell comment such as
-    ``# 1. Edit pyproject.toml`` is not a heading, and GitHub creates no anchor
-    for it, so listing it in the table of contents yields a dead link.
+    The document is parsed by ``cmark-gfm``, the renderer behind GitHub, so a
+    line counts as a heading exactly when GitHub renders it as one. A shell
+    comment such as ``# 1. Edit pyproject.toml`` inside a code fence, a ``#``
+    line inside an HTML block and raw ``<h2>`` markup are therefore never
+    listed; each would yield a dead link in the table of contents.
 
-    Fences follow CommonMark for blocks outside containers. Lists and block
-    quotes are not modelled; a closing fence is therefore accepted with up to
-    three spaces more indentation than its opener. That covers a fence inside
-    a list item whose opener is indented at most three spaces; the price is
-    that, on top level, a bare fence line indented four to six spaces inside a
-    fence indented one to three spaces is taken as the closer. A fence that is
-    still open at the end of the document raises ``TocGenerationError``
-    instead of silently dropping every later heading.
+    Only ATX headings (``## Title``) that start in the first column on top
+    level are collected, as before: headings inside list items and block
+    quotes, indented headings and setext headings are left out.
+
+    A code fence, or an HTML block that ends only at a marker such as ``-->``,
+    that is still open at the end of the document raises
+    ``TocGenerationError`` instead of silently dropping every later heading.
     """
 
+    source = list(lines)
+    # The probe cannot change how the lines above it are read, so one
+    # rendering serves both the check and the headings.
+    html = _render([*source, *_PROBE])
+    found = _heading_lines(html)
+    if len(source) + len(_PROBE) not in found:
+        _raise_unclosed(source, html)
     headings: list[tuple[int, str]] = []
-    # Character, length, indentation and line number of the open fence.
-    open_fence: tuple[str, int, int, int] | None = None
-    for line_number, raw_line in enumerate(lines, start=1):
-        fence = _FENCE_RE.match(raw_line)
-        if fence:
-            marker = fence.group("fence")
-            char, length = marker[0], len(marker)
-            indent = len(fence.group("indent"))
-            info = fence.group("info").strip()
-            if open_fence is None:
-                # An opening fence may carry an info string such as ``bash``,
-                # but a backtick fence's info string may not contain a backtick.
-                if indent <= _MAX_FENCE_INDENT and not (char == "`" and "`" in info):
-                    open_fence = (char, length, indent, line_number)
-                    continue
-            elif (
-                char == open_fence[0]
-                and length >= open_fence[1]
-                and indent <= open_fence[2] + _MAX_FENCE_INDENT
-                and not info
-            ):
-                # A closing fence matches the opener and carries no info string.
-                open_fence = None
-                continue
-        if open_fence is not None:
+    for line_number in sorted(found):
+        if line_number > len(source):
             continue
-        match = _HEADING_RE.match(raw_line)
-        if not match:
+        match = _HEADING_RE.match(source[line_number - 1])
+        if match is None:
             continue
-        level = len(match.group("hashes"))
         title = match.group("title").strip()
         if title:
-            headings.append((level, title))
-    if open_fence is not None:
-        raise TocGenerationError(
-            f"code fence opened on line {open_fence[3]} is never closed"
-        )
+            headings.append((len(match.group("hashes")), title))
     return headings
 
 
@@ -152,7 +187,8 @@ def _replace_toc(content: str) -> str:
     before = content[:start_index]
     after = content[end_index + len(END_MARKER) :]
 
-    headings = _iter_headings(content.splitlines())
+    # Split at the line endings cmark-gfm knows, so line numbers agree.
+    headings = _iter_headings(_LINE_END_RE.split(content))
     toc_lines = _render_toc(headings)
     toc_block = "\n".join(toc_lines)
 

@@ -14,7 +14,10 @@ def _titles(document: str) -> list[str]:
     """Return the heading titles the hook would put into the table of contents."""
 
     return [
-        title for _level, title in update_doctoc._iter_headings(document.splitlines())
+        title
+        for _level, title in update_doctoc._iter_headings(
+            update_doctoc._LINE_END_RE.split(document)
+        )
     ]
 
 
@@ -163,19 +166,18 @@ def test_backtick_in_info_string_still_opens_a_tilde_fence() -> None:
     assert _titles(document) == ["After"]
 
 
-def test_relative_closer_tolerance_is_a_known_top_level_limit() -> None:
-    """Pin the documented price of not modelling lists.
+def test_closer_indented_past_three_spaces_is_fence_content() -> None:
+    """A fence line indented four spaces past the margin does not close a fence.
 
-    On top level, CommonMark treats a bare fence line indented four spaces
-    past the margin as code; the hook accepts it as the closer of a fence
-    that was itself indented, so the next line is read as a heading.
+    The line is code, so the heading below stays inside the fence; with no
+    closer after it the fence stays open and the hook fails loudly.
     """
 
-    document = "   ```\n      ```\n# Code\n   ```\n"
+    document = "   ```\n      ```\n# Code\n   ```\n# After\n"
 
-    with pytest.raises(update_doctoc.TocGenerationError):
-        _titles(document)
-    assert _titles("   ```\n      ```\n# Code\n") == ["Code"]
+    assert _titles(document) == ["After"]
+    with pytest.raises(update_doctoc.TocGenerationError, match="line 1 "):
+        _titles("   ```\n      ```\n# Code\n")
 
 
 def test_main_leaves_file_untouched_when_a_fence_is_unclosed(
@@ -228,3 +230,552 @@ def test_replace_toc_skips_headings_inside_code_blocks() -> None:
 
     assert "- [Poetry lock file management](#poetry-lock-file-management)" in updated
     assert "1. Edit pyproject.toml" not in updated.split(update_doctoc.END_MARKER)[0]
+
+
+def test_fence_marker_inside_html_comment_opens_no_code_block() -> None:
+    """A fence line inside an HTML comment neither opens a block nor raises."""
+
+    document = "<!--\n```\n-->\n\n# Real\n"
+
+    assert _titles(document) == ["Real"]
+
+
+def test_fence_pair_inside_html_comments_hides_no_heading() -> None:
+    """Two commented fence lines must not pair up and swallow a heading."""
+
+    document = "<!--\n```\n-->\n\n# Kept\n\n<!--\n```\n-->\n"
+
+    assert _titles(document) == ["Kept"]
+
+
+def test_heading_inside_html_comment_is_not_collected() -> None:
+    """GitHub renders no anchor for a heading line inside an HTML comment."""
+
+    document = "<!--\n# Hidden\n-->\n\n# Real\n"
+
+    assert _titles(document) == ["Real"]
+
+
+def test_single_line_html_comment_closes_on_its_own_line() -> None:
+    """An HTML comment that ends on its start line leaves later headings alone."""
+
+    document = "<!-- note -->\n# Real\n"
+
+    assert _titles(document) == ["Real"]
+
+
+@pytest.mark.parametrize(
+    ("opener", "closer"),
+    [
+        ("<pre>", "</pre>"),
+        ("<?php", "?>"),
+        ("<!DOCTYPE html", ">"),
+        ("<![CDATA[", "]]>"),
+    ],
+)
+def test_marker_ended_html_block_spans_blank_lines(opener: str, closer: str) -> None:
+    """Conditions 1, 3, 4 and 5 end at their marker, not at a blank line."""
+
+    document = f"{opener}\n\n# Hidden\n{closer}\n# Real\n"
+
+    assert _titles(document) == ["Real"]
+
+
+def test_block_tag_html_ends_at_blank_line() -> None:
+    """Condition 6 (a known block tag) ends at the next blank line."""
+
+    document = "<DIV class='note'>\n# Hidden\n\n# Real\n</div>\n"
+
+    assert _titles(document) == ["Real"]
+
+
+def test_block_tag_with_trailing_text_opens_an_html_block() -> None:
+    """Condition 6 needs no lone tag: text after ``<div>`` still opens a block."""
+
+    document = "<div>text\n# Hidden\n\n# Real\n"
+
+    assert _titles(document) == ["Real"]
+
+
+def test_uppercase_block_tag_interrupts_a_paragraph() -> None:
+    """Unlike condition 7, a block tag in any case interrupts a paragraph."""
+
+    document = "text\n<DIV>\n# Hidden\n\n# Real\n"
+
+    assert _titles(document) == ["Real"]
+
+
+def test_heading_ends_the_paragraph_before_a_lone_tag() -> None:
+    """After an ATX heading no paragraph is open, so a lone tag opens a block."""
+
+    document = "text\n# Top\n<span>\n# Hidden\n\n# Real\n"
+
+    assert _titles(document) == ["Top", "Real"]
+
+
+def test_lone_tag_after_blank_line_opens_an_html_block() -> None:
+    """Condition 7: a lone complete tag starts a block that ends at a blank line."""
+
+    document = "text\n\n<custom-tag/>\n# Hidden\n\n# Real\n"
+
+    assert _titles(document) == ["Real"]
+
+
+def test_lone_tag_cannot_interrupt_a_paragraph() -> None:
+    """Condition 7 inside a paragraph is inline HTML; a heading still follows."""
+
+    document = "text\n<span>\n# Real\n"
+
+    assert _titles(document) == ["Real"]
+
+
+def test_anchor_line_before_heading_opens_no_html_block() -> None:
+    """``<a id="x"></a>`` as used in AGENTS.md is no lone tag; the heading stays."""
+
+    document = '<a id="rule"></a>\n# Real\n'
+
+    assert _titles(document) == ["Real"]
+
+
+def test_indented_code_line_does_not_count_as_paragraph() -> None:
+    """After an indented code block a lone tag may open an HTML block."""
+
+    document = "\n    code\n<span>\n# Hidden\n\n# Real\n"
+
+    assert _titles(document) == ["Real"]
+
+
+def test_html_comment_inside_fence_opens_no_html_block() -> None:
+    """Inside a fenced code block ``<!--`` is code, not an HTML block."""
+
+    document = "```\n<!--\n```\n# Real\n"
+
+    assert _titles(document) == ["Real"]
+
+
+def test_unclosed_html_comment_raises_instead_of_dropping_headings() -> None:
+    """A marker-ended HTML block left open fails loudly like an open fence."""
+
+    document = "# Top\n<!--\n# Hidden\n"
+
+    with pytest.raises(update_doctoc.TocGenerationError, match="line 2"):
+        update_doctoc._iter_headings(document.splitlines())
+
+
+def test_block_tag_html_open_at_end_of_document_does_not_raise() -> None:
+    """Conditions 6 and 7 may legally run to the end of the document."""
+
+    document = "# Top\n\n<div>\n# Hidden\n"
+
+    assert _titles(document) == ["Top"]
+    # Without a final newline the blank line before the probe comes from the
+    # probe alone, and it is what ends such a block.
+    assert _titles(document.rstrip("\n")) == ["Top"]
+
+
+@pytest.mark.parametrize(
+    ("document", "expected"),
+    [
+        pytest.param(
+            "text\n```\n```\n<span>\n# H\n", [], id="fence-close-ends-paragraph"
+        ),
+        pytest.param(
+            "text\n<!-- c -->\n<span>\n# H\n", [], id="one-line-html-ends-paragraph"
+        ),
+        pytest.param("<PRE>\n\n# H\n</pre>\n# R\n", ["R"], id="type1-start-any-case"),
+        pytest.param("<pre>\n\n# H\n</PRE>\n# R\n", ["R"], id="type1-end-any-case"),
+        pytest.param("<preview>\n\n# H\n", ["H"], id="type1-needs-name-boundary"),
+        pytest.param("<!-x\n\n# H\n", ["H"], id="type4-needs-a-letter"),
+        pytest.param("<!x\n# H\n", ["H"], id="type4-needs-an-uppercase-letter"),
+        pytest.param("<!X\n# H\n>\n# R\n", ["R"], id="type4-uppercase-letter"),
+        pytest.param("text\n<hr/>\n# H\n", [], id="type6-self-closing"),
+        pytest.param("text\n<divx>\n# H\n", ["H"], id="type6-needs-name-boundary"),
+        pytest.param("text\n</div>\n# H\n", [], id="type6-closing-tag"),
+        pytest.param("\n    <div>\n# H\n", ["H"], id="type6-indented-four-is-code"),
+        pytest.param("\n</span>\n# H\n", [], id="type7-closing-tag"),
+        pytest.param("    <!--\n# H\n", ["H"], id="type2-indented-four-is-code"),
+        pytest.param("<div>\n   \n# H\n", ["H"], id="whitespace-line-is-blank"),
+        pytest.param(
+            "text\n    <div>\n<span>\n# H\n", ["H"], id="type6-indented-four-continues"
+        ),
+        pytest.param(
+            "text\n    <!--\n<span>\n# H\n", ["H"], id="type2-indented-four-continues"
+        ),
+    ],
+)
+def test_html_block_start_and_end_follow_commonmark(
+    document: str, expected: list[str]
+) -> None:
+    """Each HTML block rule matches the CommonMark reference renderer."""
+
+    assert _titles(document) == expected
+
+
+@pytest.mark.parametrize(
+    "document",
+    [
+        pytest.param("1. Step\n\n   <details>\n# Real\n", id="type6-after-blank"),
+        pytest.param("- item\n  <div>\n# Real\n", id="type6-in-paragraph"),
+        pytest.param("- item\n  <!-- note\n\n# Real\n", id="type2-unclosed"),
+        pytest.param(
+            "- item\n  <!-- note\n\n# Real\n\n<!-- x -->\n", id="type2-closed-later"
+        ),
+    ],
+)
+def test_indented_html_block_ends_with_its_list_item(document: str) -> None:
+    """A dedented line leaves the list item and the HTML block inside it."""
+
+    assert _titles(document) == ["Real"]
+
+
+def test_blank_line_keeps_an_indented_html_comment_open() -> None:
+    """A blank line inside a list item does not end a comment started there.
+
+    The fence line after the blank line is still comment text. Expectation
+    checked against cmark-gfm, which GitHub uses.
+    """
+
+    document = "- item\n  <!--\n\n  ```\n  -->\n# Real\n"
+
+    assert _titles(document) == ["Real"]
+
+
+@pytest.mark.parametrize(
+    ("document", "expected"),
+    [
+        pytest.param("  <div>\n# Hidden\n\n# Real\n", ["Real"], id="type6"),
+        pytest.param(
+            "  <!--\n```\n-->\n\n# Kept\n\n  <!--\n```\n-->\n",
+            ["Kept"],
+            id="type2-fence-pair",
+        ),
+        pytest.param("  <!--\n```\n-->\n# Real\n", ["Real"], id="type2-fence"),
+        pytest.param(
+            "  <div>\n<!--\n</div>\n\n# Real\n-->\n",
+            ["Real"],
+            id="type6-comment-start",
+        ),
+        pytest.param(
+            "text\n*\n  <div>\n# Hidden\n\n# Real\n",
+            ["Real"],
+            id="empty-item-cannot-interrupt",
+        ),
+        pytest.param(
+            "text\n2. x\n   <div>\n# Hidden\n\n# Real\n",
+            ["Real"],
+            id="ordered-item-cannot-interrupt",
+        ),
+        pytest.param(
+            "-x\n  <div>\n# Hidden\n\n# Real\n", ["Real"], id="marker-needs-space"
+        ),
+        pytest.param(
+            "- a\n# Top\n  <div>\n# Hidden\n\n# Real\n",
+            ["Top", "Real"],
+            id="heading-closes-item",
+        ),
+        pytest.param(
+            "- a\n```\n```\n  <div>\n# Hidden\n\n# Real\n",
+            ["Real"],
+            id="fence-closes-item",
+        ),
+        pytest.param(
+            "1.\n  <div>\n# Hidden\n\n# Real\n", ["Real"], id="empty-item-column"
+        ),
+        pytest.param(
+            "-  a\n  <div>\n# Hidden\n\n# Real\n", ["Real"], id="gap-sets-column"
+        ),
+        pytest.param(
+            "-    x\n  <!--\n# Hidden\n-->\n# Real\n",
+            ["Real"],
+            id="gap-of-four-sets-column",
+        ),
+        pytest.param(
+            "* * *\n  <div>\n# Hidden\n\n# Real\n",
+            ["Real"],
+            id="thematic-break-is-no-item",
+        ),
+        pytest.param(
+            "- - -\n  <div>\n# Hidden\n\n# Real\n",
+            ["Real"],
+            id="dashed-thematic-break-is-no-item",
+        ),
+        pytest.param(
+            "- a\n---\n  <div>\n# Hidden\n\n# Real\n",
+            ["Real"],
+            id="thematic-break-closes-item",
+        ),
+        pytest.param(
+            "- a\nb\n* * *\n  <div>\n# Hidden\n\n# Real\n",
+            ["Real"],
+            id="thematic-break-is-not-lazy",
+        ),
+        pytest.param(
+            "- a\n___\n  <div>\n# Hidden\n\n# Real\n",
+            ["Real"],
+            id="underscore-thematic-break",
+        ),
+        pytest.param(
+            "text\n* * *\n<span>\n# Hidden\n\n# Real\n",
+            ["Real"],
+            id="thematic-break-ends-paragraph",
+        ),
+    ],
+)
+def test_indented_html_block_outside_a_list_ends_only_at_its_end_condition(
+    document: str, expected: list[str]
+) -> None:
+    """Without an open list item, a dedent does not end an HTML block.
+
+    Expectations checked against cmark-gfm, which GitHub uses.
+    """
+
+    assert _titles(document) == expected
+
+
+@pytest.mark.parametrize(
+    "document",
+    [
+        pytest.param("- a\n\n  x\n- b\n  <div>\n# Real\n", id="sibling-item"),
+        pytest.param(
+            "1.  Step\n    x\n\n   <!--\n# Hidden\n-->\n# Real\n",
+            id="wide-content-column",
+        ),
+        pytest.param("-      code\n  <div>\n# Real\n", id="wide-gap-is-code"),
+        pytest.param("-   a\n- b\n  <!--\n# Real\n-->\n", id="marker-is-not-lazy"),
+        pytest.param("+ a\n  <div>\n# Real\n", id="plus-marker"),
+        pytest.param("1) a\n   <div>\n# Real\n", id="parenthesis-marker"),
+        pytest.param("- a\n\n\n  <!--\n# Real\n-->\n", id="blank-lines-keep-item"),
+        pytest.param(
+            "- a\n\n    x\nb\n  <!--\n# Real\n-->\n",
+            id="paragraph-indent-is-relative",
+        ),
+        pytest.param(
+            "- a\n\n    x\nb\n  <div>\n# Real\n",
+            id="paragraph-indent-is-relative-type6",
+        ),
+    ],
+)
+def test_list_item_content_column_bounds_the_html_block(document: str) -> None:
+    """The content column of the open list item decides where the block ends."""
+
+    assert _titles(document) == ["Real"]
+
+
+@pytest.mark.parametrize(
+    "document",
+    [
+        pytest.param("-\n<span>\n# Hidden\n\n# Real\n", id="empty-item-no-paragraph"),
+        pytest.param(
+            "-     code\n<span>\n# Hidden\n\n# Real\n", id="code-item-no-paragraph"
+        ),
+    ],
+)
+def test_item_without_paragraph_text_lets_a_lone_tag_open_a_block(
+    document: str,
+) -> None:
+    """An empty item or one holding indented code leaves no paragraph open."""
+
+    assert _titles(document) == ["Real"]
+
+
+@pytest.mark.parametrize(
+    ("document", "github_titles"),
+    [
+        pytest.param(
+            "- a\n<span>\n# Hidden\n\n# Real\n", ["Real"], id="lone-tag-after-item"
+        ),
+        pytest.param(
+            "- a\n</pre>\n# Hidden\n\n# Real\n", ["Real"], id="closing-tag-after-item"
+        ),
+        pytest.param(
+            "1. a\n<x-y/>\n# Hidden\n\n# Real\n", ["Real"], id="custom-tag-after-item"
+        ),
+        pytest.param(
+            "1. a\n-\n  <div>\n# Real\n", ["Real"], id="empty-item-after-item"
+        ),
+        pytest.param(
+            "-   a\n2. b\n   <div>\n# Kept\n\n# Real\n",
+            ["Kept", "Real"],
+            id="numbered-item-after-item",
+        ),
+        pytest.param(
+            "   1. a\n2. b\nc\n   <div>\n# Real\n", ["Real"], id="div-after-numbered"
+        ),
+    ],
+)
+def test_line_leaving_the_item_of_a_paragraph_may_interrupt_it(
+    document: str, github_titles: list[str]
+) -> None:
+    """A line that leaves the paragraph's list item is not held by the paragraph.
+
+    An empty item, an item not numbered 1 and a lone HTML tag cannot interrupt
+    a paragraph. cmark-gfm (GitHub) applies that only to a line that stays in
+    the paragraph's list item; a line indented less closes the item first and
+    may then open either.
+    """
+
+    assert _titles(document) == github_titles
+
+
+def test_lone_tag_leaving_the_item_holds_the_fence_below() -> None:
+    """GitHub reads the fence and the heading below a lone tag as HTML.
+
+    The HTML block ends at a blank line, so nothing is left open.
+    """
+
+    assert _titles("- a\n<span>\n```\n# Hidden\n") == []
+    assert _titles("- a\n<span>\n```\n# Hidden\n\n# Real\n") == ["Real"]
+
+
+def test_lazy_line_keeps_the_list_item_open() -> None:
+    """A lazy paragraph continuation does not close its list item."""
+
+    document = "- item\ntext\n  <!--\n# Hidden\n-->\n# Real\n"
+
+    assert _titles(document) == ["Hidden", "Real"]
+
+
+@pytest.mark.parametrize(
+    ("tag", "expected"),
+    [
+        pytest.param("source", ["Real"], id="source-is-a-block-tag"),
+        pytest.param("search", ["Hidden", "Real"], id="search-is-not"),
+    ],
+)
+def test_block_tag_names_follow_cmark_gfm(tag: str, expected: list[str]) -> None:
+    """GitHub's cmark-gfm knows ``source`` as a block tag, but not ``search``."""
+
+    document = f"text\n<{tag}>\n# Hidden\n\n# Real\n"
+
+    assert _titles(document) == expected
+
+
+def test_html_indented_four_spaces_opens_a_block_in_a_nested_item() -> None:
+    """In a nested list item, HTML indented four spaces starts an HTML block.
+
+    The comment holds the fence line, and ``Real`` closes both items.
+    """
+
+    document = "- a\n  - b\n    <!--\n  ```\n  -->\n# Real\n"
+
+    assert _titles(document) == ["Real"]
+
+
+@pytest.mark.parametrize(
+    "document",
+    [
+        pytest.param("- # In item\n\n# Real\n", id="list-item"),
+        pytest.param("> # In quote\n\n# Real\n", id="block-quote"),
+        pytest.param("   # Indented\n\n# Real\n", id="indented"),
+        pytest.param("Setext\n======\n\n# Real\n", id="setext"),
+        pytest.param("# Setext\n===\n\n# Real\n", id="setext-after-nbsp"),
+        pytest.param("# Paragraph\n\n# Real\n", id="nbsp-is-no-separator"),
+        pytest.param("#\n\n# Real\n", id="empty-heading"),
+        pytest.param("#  \n\n# Real\n", id="empty-heading-with-spaces"),
+    ],
+)
+def test_only_top_level_atx_headings_in_the_first_column_are_listed(
+    document: str,
+) -> None:
+    """Headings in containers, indented, setext or empty ones stay out."""
+
+    assert _titles(document) == ["Real"]
+
+
+def test_tab_after_the_hashes_separates_the_title() -> None:
+    """CommonMark accepts a tab after the hashes, as GitHub does."""
+
+    assert update_doctoc._iter_headings(["##\tTabbed"]) == [(2, "Tabbed")]
+
+
+def test_raw_html_cannot_pose_as_a_rendered_heading() -> None:
+    """Raw HTML is omitted by the renderer, even with a forged source position."""
+
+    document = '<h1 data-sourcepos="4:1-4:5">x</h1>\n\n```\n# Code\n```\n# Real\n'
+
+    assert _titles(document) == ["Real"]
+
+
+def test_lone_tag_right_after_a_table_hides_the_next_heading() -> None:
+    """A table is no paragraph, so on GitHub a lone tag after it opens a block.
+
+    Plain CommonMark has no tables and would read the same lines as a
+    paragraph that the heading interrupts.
+    """
+
+    document = "| a | b |\n|---|---|\n<span>\n## Hidden\n\n## Real\n"
+
+    assert _titles(document) == ["Real"]
+
+
+def test_a_real_heading_named_like_the_probe_is_kept() -> None:
+    """The probe is recognised by its line, never by its text."""
+
+    assert _titles("# probe\n\n# Real\n# probe\n") == ["probe", "Real", "probe"]
+    with pytest.raises(update_doctoc.TocGenerationError, match="line 2 "):
+        _titles("# Real\n```\n# probe\n")
+
+
+@pytest.mark.parametrize(
+    ("document", "message"),
+    [
+        pytest.param(
+            "```\n# a\n```\n\n<!--\n# b\n",
+            "HTML block opened on line 5 is never closed",
+            id="comment-after-closed-fence",
+        ),
+        pytest.param(
+            "<!--\n# a\n-->\n\n~~~\n# b\n",
+            "code fence opened on line 5 is never closed",
+            id="fence-after-closed-comment",
+        ),
+        pytest.param(
+            "<!--\n```\n# a\n",
+            "HTML block opened on line 1 is never closed",
+            id="fence-line-inside-open-comment",
+        ),
+    ],
+)
+def test_unclosed_block_names_its_kind_and_opening_line(
+    document: str, message: str
+) -> None:
+    """The error points at the block that is still open, not at an earlier one."""
+
+    with pytest.raises(update_doctoc.TocGenerationError, match=f"^{message}$"):
+        _titles(document)
+
+
+@pytest.mark.parametrize(
+    ("line_end", "expected"),
+    [
+        pytest.param("\r\n", ["A", "B"], id="crlf"),
+        pytest.param("\r", ["A", "B"], id="cr"),
+    ],
+)
+def test_replace_toc_reads_the_line_endings_of_cmark_gfm(
+    line_end: str, expected: list[str]
+) -> None:
+    """CR and CRLF end a line; the headings are found as with LF."""
+
+    document = line_end.join(
+        [update_doctoc.START_MARKER, update_doctoc.END_MARKER, "# A", "", "## B", ""]
+    )
+
+    toc = update_doctoc._replace_toc(document).split(update_doctoc.END_MARKER)[0]
+
+    assert [line for line in toc.splitlines() if line.lstrip().startswith("- [")] == [
+        f"{'  ' * index}- [{title}](#{title.lower()})"
+        for index, title in enumerate(expected)
+    ]
+
+
+def test_replace_toc_does_not_split_at_a_form_feed() -> None:
+    """A form feed is no line end for cmark-gfm, so the text stays a paragraph."""
+
+    document = "\n".join(
+        [update_doctoc.START_MARKER, update_doctoc.END_MARKER, "x\x0c# Hidden", ""]
+    )
+
+    toc = update_doctoc._replace_toc(document).split(update_doctoc.END_MARKER)[0]
+
+    assert "Hidden" not in toc
