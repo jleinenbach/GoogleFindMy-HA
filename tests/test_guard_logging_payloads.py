@@ -97,13 +97,14 @@ annotated with a broad or foreign exception type (`err: BaseException`,
 `err: ClientError`, `err: ssl.SSLError | None`, `*errors: BaseException`, an import alias
 resolved to its suffix, a local type alias resolved to its value: the PEP 695
 statement, the conventional `X: TypeAlias = ...`, a plain assignment including a
-multiple, a tuple, a starred and a nested target and a string value, and a type
-parameter's bound or PEP 696 default, followed through chains, unions, carriers,
-subscript heads over every hop and string annotations, wherever in the module it
-is defined, except that a type parameter counts only inside its own function or
-alias; the expansion is additive, so
-the guard reports at least what it reported before, and it stops fail-closed at
-512 members or 64 alias hops) binds the name for the whole function, and so does a name
+multiple, a tuple, a starred and a nested target and a string value, a generic
+alias applied to its arguments, and a type parameter's bound, constraints or PEP
+696 default, followed through chains, unions, carriers, subscript heads over
+every hop, starred and `Unpack`ed slots and string annotations, wherever in the
+module it is defined, except that a type parameter counts only inside its own
+function, class or alias, where it shadows an alias of the same name; the
+expansion is additive, so the guard reports at least what it reported before,
+and it stops fail-closed at 512 members or 64 alias hops) binds the name for the whole function, and so does a name
 assigned, annotated or not, from `task.exception()` (the done callback of
 `_track_task`), so a callee that
 logs a caught exception it did not catch itself is a sink too (found in
@@ -180,12 +181,15 @@ covered by the string branch of `_annotation_members`. a `TypeVar` bound to an e
 (`T = TypeVar("T", bound=ClientError)`) as much as in the PEP 695 form
 (`def f[T](err: T)` without a bound): a name whose value is a call says nothing
 about its type, and an unbounded parameter names none. What *is* read is the
-bound and the PEP 696 default themselves (`def f[T: ClientError]`,
-`type Box[T = ClientError]`): both promise that the bound value has that type,
-which is what this shape looks for, and they are the only part of
-`type_params` this guard reads. They count inside the function that declares
-them (nested functions included) or for the alias that uses them, never for
-another `T` of the same module; a class's type parameters are not read. A conditional alias value
+bound, the constraints and the PEP 696 default themselves (`def f[T:
+ClientError]`, `T: (ClientError, int)`, `type Box[T = ClientError]`): each
+promises that the bound value has that type, which is what this shape looks
+for, and a default counts beside an argument too (fail-closed). A generic
+alias's arguments are bound into its value where it is used (`type Maybe[T] =
+T | None` with `Maybe[ClientError]`). They count inside the function or class
+that declares them (nested scopes included) or for the alias that uses them,
+never for another `T` of the same module, and there they shadow a module alias
+of the same name. A conditional alias value
 (`X = A if c else B`) is not collected either, `traceback.format_exc()`,
 an own exception built from a foreign one, and every module outside `Auth/`
 (119 such sites counted on 2026-09-17). Reported although harmless, on purpose:
@@ -225,10 +229,10 @@ from __future__ import annotations
 
 import ast
 import builtins
-import copy
 import importlib
 import re
 import types
+from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
@@ -622,7 +626,24 @@ def _message_params(function: ast.AST, types: frozenset[str]) -> frozenset[str]:
     ]:
         if arg.annotation is None:
             continue
-        parts = re.split(r"[^\w.]+", ast.unparse(arg.annotation))
+        try:
+            text = ast.unparse(arg.annotation)
+        except RecursionError:
+            # A union of 1000 members nests too deep for `ast.unparse` and
+            # ended the scan; the names are then read off the nodes, which
+            # `ast.walk` visits without recursion. Every segment counts there,
+            # not only the first and the last: wider, never narrower.
+            text = " ".join(
+                node.id
+                if isinstance(node, ast.Name)
+                else node.attr
+                if isinstance(node, ast.Attribute)
+                else str(node.value)
+                for node in ast.walk(arg.annotation)
+                if isinstance(node, (ast.Name, ast.Attribute))
+                or (isinstance(node, ast.Constant) and isinstance(node.value, str))
+            )
+        parts = re.split(r"[^\w.]+", text)
         if any(
             part.split(".")[-1] in types or part.split(".")[0] in types
             for part in parts
@@ -1102,17 +1123,16 @@ def _local_type_aliases(
 
     The import-alias table maps a name to a name; a local alias binds a name to
     an expression, which that table cannot carry. Four sources, all of them in
-    Home-Assistant code: the PEP 695 statement (`type X = ClientError`), the
-    bound or PEP 696 default of an alias's own type parameter where its value
-    uses it (`type Box[T: ClientError] = list[T]` binds `Box`), the
-    conventional form (`X: TypeAlias = ClientError`, also through
+    Home-Assistant code: the PEP 695 statement (`type X = ClientError`), kept
+    whole when it declares type parameters (`type Maybe[T] = T | None`, bound
+    where it is used, see `_apply_generic_alias`), the conventional form (`X: TypeAlias = ClientError`, also through
     `typing.TypeAlias`, `"TypeAlias"` and `from typing import TypeAlias as TA`)
     and a plain assignment whose value is a type expression or a string that
     parses as one (`X = ClientError`, `X = "ClientError"`, `A = B =
     ClientError`, `A, B = ClientError, OSError`, `*A, B = str, ClientError`,
-    `(A, B), C = (ClientError, OSError), ValueError`). A function's type
-    parameters are not in this table: `_type_param_scopes` adds them to the
-    table of their own function only. The plain form is not
+    `(A, B), C = (ClientError, OSError), ValueError`). A function's or a
+    class's type parameters are not in this table: `_type_param_scopes` adds
+    them to the table of their own scope only. The plain form is not
     an afterthought: of this package's seven PEP 695 aliases none points at an
     exception, and all six aliases that do are plain assignments (measured
     2026-09-20).
@@ -1176,16 +1196,15 @@ def _local_type_aliases(
     for node in ast.walk(tree):
         if isinstance(node, ast.TypeAlias):
             if isinstance(node.name, ast.Name):
-                _bind(node.name.id, node.value)
-                # A bound or a PEP 696 default of the alias's own parameter is
-                # substituted *into* the value (`type Box[T: ClientError] =
-                # list[T]` also binds `list[ClientError]`), so it counts exactly
-                # where the value places it: `Callable[[T], None]` and `type[T]`
-                # stay as silent as when written out. A function's parameters
-                # are scoped by `_type_param_scopes`.
-                params = _type_param_bindings(node)
-                if params:
-                    _bind(node.name.id, _substitute_type_params(node.value, params))
+                # A generic alias is kept whole: its value means something
+                # only with its parameters bound, and the arguments that bind
+                # them are known at the use site (`_apply_generic_alias`). A
+                # function's or class's parameters are scoped by
+                # `_type_param_scopes`.
+                _bind(
+                    node.name.id,
+                    _GenericAlias(node) if node.type_params else node.value,
+                )
         elif isinstance(node, ast.AnnAssign):
             if isinstance(node.target, ast.Name) and node.value is not None:
                 members = _annotation_members(node.annotation, aliases)
@@ -1199,83 +1218,186 @@ def _local_type_aliases(
     return {name: tuple(values) for name, values in local.items()}
 
 
-class _TypeParamSubstitution(ast.NodeTransformer):
-    """Replace each type parameter by the union of its bound and default."""
+class _GenericAlias(ast.AST):
+    """A PEP 695 alias with type parameters, kept whole in the alias table.
 
-    def __init__(self, params: dict[str, tuple[ast.AST, ...]]) -> None:
-        self.params = params
-
-    def visit_Name(self, node: ast.Name) -> ast.AST:
-        values = self.params.get(node.id)
-        if not values:
-            return node
-        union = values[0]
-        for value in values[1:]:
-            union = ast.BinOp(left=union, op=ast.BitOr(), right=value)
-        return copy.deepcopy(union)
-
-    def visit_Constant(self, node: ast.Constant) -> ast.AST:
-        # `list["T"]` and `"list[T]"`: a string that names a parameter is read
-        # the way an annotation string is, then substituted.
-        if isinstance(node.value, str):
-            parsed = _parse_type_string(node.value)
-            if parsed is not None and any(
-                isinstance(n, ast.Name) and n.id in self.params
-                for n in ast.walk(parsed)
-            ):
-                return self.visit(parsed)
-        return node
-
-
-def _substitute_type_params(
-    value: ast.AST, params: dict[str, tuple[ast.AST, ...]]
-) -> ast.AST:
-    """`value` with every parameter in `params` replaced, on a copy.
-
-    Nesting too deep for the recursive transformer ends in the bound itself,
-    fail-closed: the substitution then reports rather than going silent.
+    Its value means something only with its parameters bound: by the arguments
+    at the use site (`Maybe[ClientError]` for `type Maybe[T] = T | None`), else
+    by their PEP 696 defaults, and always by their bounds or constraints. The
+    table keeps the statement rather than a substituted copy, so the binding
+    happens where the arguments are known. `_fields` is empty, so `ast.walk`
+    does not enter it.
     """
-    try:
-        return _TypeParamSubstitution(params).visit(copy.deepcopy(value))
-    except RecursionError:
-        return _ALIAS_LIMIT_MEMBER
+
+    _fields = ()
+
+    def __init__(self, node: ast.TypeAlias) -> None:
+        super().__init__()
+        self.node = node
+
+
+class _Binding:
+    """What a type parameter stands for, with the environment and hops to read it in.
+
+    `seen` belongs to where the node was written: an argument is read with the
+    caller's hops, not with the alias head the value added, so `L[L[ClientError]]`
+    repeats `L` without being a cycle.
+    """
+
+    __slots__ = ("env", "node", "seen")
+
+    def __init__(
+        self,
+        node: ast.AST,
+        env: Mapping[str, tuple[_Binding, ...]],
+        seen: frozenset[str],
+    ) -> None:
+        self.node = node
+        self.env = env
+        self.seen = seen
+
+
+_NO_ENV: Mapping[str, tuple[_Binding, ...]] = types.MappingProxyType({})
+# Appended in place of a bound type parameter's own name: the name is no type
+# (`type Res[V, TError] = V | TError` with `Res[int, str]` names no exception),
+# but the member keeps the width count that cuts a doubling chain of defaults.
+_PARAM_MEMBER = ast.Name(id="<type parameter>", ctx=ast.Load(), lineno=0, col_offset=0)
+
+
+def _param_values(param: ast.AST) -> tuple[tuple[ast.AST, ...], ast.AST | None]:
+    """A type parameter's bound, read as its members if it is a constraint tuple, and its default.
+
+    `T: (ClientError, int)` constrains `T` to exactly one of the two, the
+    promise a union makes, so each member counts like a bound; a bound or a
+    default promises that the bound value has that type, which is what shape
+    (I) looks for. An unbounded parameter names none.
+    """
+    bound = getattr(param, "bound", None)
+    if bound is None:
+        bounds: tuple[ast.AST, ...] = ()
+    elif isinstance(bound, ast.Tuple):
+        bounds = tuple(bound.elts)
+    else:
+        bounds = (bound,)
+    return bounds, getattr(param, "default_value", None)
 
 
 def _type_param_bindings(node: ast.AST) -> dict[str, tuple[ast.AST, ...]]:
-    """Type parameter -> its bound and PEP 696 default, `{}` when it has neither.
-
-    Both promise that the bound value is that type (`T: ClientError`,
-    `T = ClientError`), which is exactly what shape (I) looks for; an
-    unbounded parameter names none.
-    """
+    """Type parameter -> its bound or constraints and PEP 696 default, `{}` when none."""
     bindings: dict[str, tuple[ast.AST, ...]] = {}
     for param in getattr(node, "type_params", ()):
         name = getattr(param, "name", "")
-        values = tuple(
-            value
-            for value in (
-                getattr(param, "bound", None),
-                getattr(param, "default_value", None),
-            )
-            if value is not None
-        )
+        bounds, default = _param_values(param)
+        values = bounds + ((default,) if default is not None else ())
         if name and values:
             bindings[name] = bindings.get(name, ()) + values
     return bindings
 
 
+def _distribute_arguments(
+    params: list[ast.AST], args: list[ast.AST]
+) -> tuple[list[list[ast.AST] | None], list[ast.AST]]:
+    """The arguments of each parameter (`None` when none is given) and the surplus.
+
+    Positional; a `TypeVarTuple` takes the middle and the parameters behind it
+    count from the end (PEP 646), a sole `ParamSpec` takes every argument (PEP
+    612). Surplus arguments are handed back so the caller reads them
+    fail-closed: `Id[int, ClientError]` is a type error, not a harmless one.
+    """
+    if len(params) == 1 and isinstance(params[0], ast.ParamSpec):
+        return [list(args) or None], []
+    star = next(
+        (i for i, param in enumerate(params) if isinstance(param, ast.TypeVarTuple)),
+        None,
+    )
+    given: list[list[ast.AST] | None]
+    if star is None:
+        given = [[arg] for arg in args[: len(params)]]
+        given += [None] * (len(params) - len(given))
+        return given, list(args[len(params) :])
+    front: list[list[ast.AST] | None] = [[arg] for arg in args[:star]]
+    rest = list(args[star:])
+    split = max(len(rest) - (len(params) - star - 1), 0)
+    back: list[list[ast.AST] | None] = [[arg] for arg in rest[split:]]
+    given = front + [None] * (star - len(front)) + [rest[:split] or None] + back
+    given += [None] * (len(params) - len(given))
+    return given, []
+
+
+def _apply_generic_alias(
+    alias: _GenericAlias,
+    args: list[ast.AST],
+    caller: Mapping[str, tuple[_Binding, ...]],
+    caller_seen: frozenset[str],
+    aliases: dict[str, str],
+    local: dict[str, tuple[ast.AST, ...]],
+    seen: frozenset[str],
+    members: list[ast.AST],
+) -> None:
+    """Append the members of `alias`'s value with its parameters bound.
+
+    Each parameter stands for its argument, read in the caller's environment,
+    and for its PEP 696 default and its bound or constraints: a bound promises
+    that any argument has that type (`type Box[T: ClientError] = list[T]` with
+    `Box[str]` stays reported), and a default counts beside an argument as
+    well, the one rule for bound and default this guard keeps (fail-closed). A bound and a default are read
+    with the earlier parameters bound and every other one unbound, because a
+    default may name only earlier parameters (PEP 696): `type Box[T:
+    ClientError, U = T] = list[U]` follows `U` to `T` to `ClientError` in one
+    pass, and no order of defaults can loop. The value sees these parameters
+    and nothing of the caller: its own `T` is not the `T` of the function
+    that uses the alias. The arguments keep the caller's hops (`caller_seen`),
+    the value and its bounds and defaults the hops that include the alias
+    head (`seen`), so a nested use of the same alias is no cycle. The
+    parameters are bound lazily, where the value is walked, so there is no
+    copy and no transformer whose recursion a wide union could exhaust.
+    """
+    params = list(alias.node.type_params)
+    names = [getattr(param, "name", "") for param in params]
+    env: dict[str, tuple[_Binding, ...]] = dict.fromkeys(names, ())
+    given, surplus = _distribute_arguments(params, args)
+    for param, name, got in zip(params, names, given):
+        bounds, default = _param_values(param)
+        scope = types.MappingProxyType(dict(env))
+        bindings = [_Binding(bound, scope, seen) for bound in bounds]
+        if got is not None:
+            bindings += [_Binding(arg, caller, caller_seen) for arg in got]
+        if default is not None:
+            # Beside an argument too: the default is read as a member wherever
+            # it is declared, the rule this guard set for bound and default
+            # alike (fail-closed; `Box[str]` with `T = ClientError` reports).
+            bindings.append(_Binding(default, scope, seen))
+        env[name] = tuple(bindings)
+    for arg in surplus:
+        _collect_annotation_members(arg, aliases, local, caller_seen, members, caller)
+    _collect_annotation_members(alias.node.value, aliases, local, seen, members, env)
+
+
+def _origin(value: ast.AST) -> ast.AST:
+    """The tree node an alias-table value came from."""
+    return value.node if isinstance(value, _GenericAlias) else value
+
+
 def _type_param_scopes(
     tree: ast.AST, local: dict[str, tuple[ast.AST, ...]]
 ) -> dict[int, dict[str, tuple[ast.AST, ...]]]:
-    """`id(node)` -> `local` plus the type parameters of every enclosing function.
+    """`id(node)` -> the alias table as seen inside the functions and classes that declare type parameters.
 
-    A type parameter is scoped to its function, nested functions included: the
-    module-wide table let the bound of `def a[T: ClientError]` reach the
-    unbounded `T` of `def b[T](err: T)` and reported `err`. A parameter that a
-    nested function or class declares again shadows the inherited one, bound
-    or not (`def a[T: ClientError](): def b[T](err: T)` is silent). A class's
-    type parameters shadow but are not read (see the module docstring). Nodes
-    that inherit no bounded parameter are absent and read `local` itself.
+    A type parameter is scoped to the function or class that declares it,
+    nested scopes included, and a class reads its parameters like a function
+    (`class K[T: ClientError]` with `def m(self, err: T)` is reported). A
+    declared parameter shadows every entry of its name in this alias table
+    made outside the declaring node, bounded or not: an enclosing function's
+    parameter (`def a[T: ClientError](): def b[T](err: T)` is silent) as much
+    as a module alias (`T: TypeAlias = ClientError`, then `def a[T: int]():
+    def g(err: T)` is silent). A binding inside the declaring node (`def a[T:
+    int](): T = ClientError`) rebinds the name and stays, and inside that node
+    the scope is flattened like the table itself: a binding in one nested
+    function counts for its siblings too (fail-closed). An import alias is not
+    in this table and is not shadowed (`from aiohttp import ClientError as
+    Failure`, then `def g[Failure: int](err: Failure)` stays reported, as it
+    was before type parameters were read). Nodes inside no declaring scope
+    are absent and read `local` itself.
     """
     scopes: dict[int, dict[str, tuple[ast.AST, ...]]] = {}
     tables: dict[
@@ -1283,28 +1405,38 @@ def _type_param_scopes(
     ] = {}
     stack: list[tuple[ast.AST, dict[str, tuple[ast.AST, ...]]]] = [(tree, {})]
     while stack:
-        node, inherited = stack.pop()
+        node, overrides = stack.pop()
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            declared = {
-                getattr(p, "name", "") for p in getattr(node, "type_params", ())
-            }
-            if declared & inherited.keys():
-                inherited = {k: v for k, v in inherited.items() if k not in declared}
-            if not isinstance(node, ast.ClassDef):
+            declared = [
+                name
+                for name in (
+                    getattr(p, "name", "") for p in getattr(node, "type_params", ())
+                )
+                if name
+            ]
+            if declared:
                 params = _type_param_bindings(node)
-                if params:
-                    inherited = {**inherited, **params}
-        if inherited:
-            # One merged table per inherited set, shared by all its nodes; the
+                inside = (
+                    {id(n) for n in ast.walk(node)}
+                    if any(name in local for name in declared)
+                    else set()
+                )
+                overrides = dict(overrides)
+                for name in declared:
+                    own = tuple(
+                        value
+                        for value in local.get(name, ())
+                        if id(_origin(value)) in inside
+                    )
+                    overrides[name] = own + params.get(name, ())
+        if overrides:
+            # One merged table per override set, shared by all its nodes; the
             # set itself is kept alive next to it so its `id` is not reused.
-            cached = tables.get(id(inherited))
+            cached = tables.get(id(overrides))
             if cached is None:
-                table = dict(local)
-                for name, values in inherited.items():
-                    table[name] = local.get(name, ()) + values
-                cached = tables[id(inherited)] = (table, inherited)
+                cached = tables[id(overrides)] = ({**local, **overrides}, overrides)
             scopes[id(node)] = cached[0]
-        stack.extend((child, inherited) for child in ast.iter_child_nodes(node))
+        stack.extend((child, overrides) for child in ast.iter_child_nodes(node))
     return scopes
 
 
@@ -1449,14 +1581,14 @@ _MEMBER_CARRIERS = frozenset(
 def _subscript_slots(head_name: str, inner: list[ast.AST]) -> list[ast.AST] | None:
     """The slots a subscript head exposes, the one rule for both readings.
 
-    `Annotated[X, ...]` exposes its first slot, a carrier all of them, any other
-    head none: `type[X]` and `Callable[..., X]` carry a class, not an instance,
+    `Annotated[X, ...]` and `Unpack[X]` (PEP 646) expose their first slot, a
+    carrier all of them, any other head none: `type[X]` and `Callable[..., X]` carry a class, not an instance,
     and `ExceptionGroup[OSError]` is checked as a name itself. `None` means "no
     slot counts, the head is the member". The alias branch applies this same
     rule to the head the alias resolves to, so a later change here carries both
     readings at once.
     """
-    if head_name == "Annotated":
+    if head_name in ("Annotated", "Unpack"):
         return inner[:1]
     if head_name in _MEMBER_CARRIERS:
         return inner
@@ -1483,6 +1615,13 @@ def _annotation_members(
     `Counter = MyCounter` with `err: Counter[ClientError]` is reported because
     `Counter` is a carrier; all three would go silent.
 
+    A generic alias is applied to its arguments (`_apply_generic_alias`): in
+    `type Maybe[T] = T | None` with `err: Maybe[ClientError]`, `T` stands for
+    `ClientError` wherever the value places it, and nowhere else, so
+    `Callable[[T], None]` stays as silent as when written out. A union is
+    flattened without recursion, so its width costs no frames, and a starred
+    or `Unpack`ed slot (`tuple[*tuple[ClientError]]`) counts like the slot.
+
     Two limits, both fail-closed with a synthetic `BaseException` member and
     both set rather than derived: `_ALIAS_MEMBER_LIMIT` on the width, because
     additive expansion of a doubling chain grows as `3*2^n - 1`, and
@@ -1496,7 +1635,9 @@ def _annotation_members(
     calls measured at n=20, 710 with the budget).
     """
     members: list[ast.AST] = []
-    _collect_annotation_members(annotation, aliases or {}, local or {}, seen, members)
+    _collect_annotation_members(
+        annotation, aliases or {}, local or {}, seen, members, _NO_ENV
+    )
     return members
 
 
@@ -1506,8 +1647,16 @@ def _collect_annotation_members(
     local: dict[str, tuple[ast.AST, ...]],
     seen: frozenset[str],
     members: list[ast.AST],
+    env: Mapping[str, tuple[_Binding, ...]],
 ) -> None:
-    """Append one annotation's members to `members`, honouring both limits."""
+    """Append one annotation's members to `members`, honouring both limits.
+
+    `env` binds the type parameters of the generic alias whose value is being
+    walked; it is empty everywhere else. A plain alias value starts with an
+    empty one and a generic alias's value with the bindings of its own
+    parameters, never with the caller's: it sees its own parameters and
+    nothing of the annotation that uses it.
+    """
     if annotation is None:
         return
     if len(members) > _ALIAS_MEMBER_LIMIT or len(seen) > _ALIAS_DEPTH_LIMIT:
@@ -1516,14 +1665,27 @@ def _collect_annotation_members(
         if not members or members[-1] is not _ALIAS_LIMIT_MEMBER:
             members.append(_ALIAS_LIMIT_MEMBER)
         return
+    while isinstance(annotation, ast.Starred):
+        annotation = annotation.value
     if isinstance(annotation, ast.Constant) and isinstance(annotation.value, str):
         parsed = _parse_type_string(annotation.value)
         if parsed is None:
             return
         annotation = parsed
     if isinstance(annotation, ast.BinOp) and isinstance(annotation.op, ast.BitOr):
-        _collect_annotation_members(annotation.left, aliases, local, seen, members)
-        _collect_annotation_members(annotation.right, aliases, local, seen, members)
+        # Flattened on an explicit stack: a union of 1000 members nests 1000
+        # deep and ended the scan with a `RecursionError` while this branch
+        # recursed.
+        stack: list[ast.AST] = [annotation]
+        operands: list[ast.AST] = []
+        while stack:
+            node = stack.pop()
+            if isinstance(node, ast.BinOp) and isinstance(node.op, ast.BitOr):
+                stack += (node.right, node.left)
+            else:
+                operands.append(node)
+        for operand in operands:
+            _collect_annotation_members(operand, aliases, local, seen, members, env)
         return
     if isinstance(annotation, ast.Subscript):
         chain = _chain(annotation.value)
@@ -1541,21 +1703,42 @@ def _collect_annotation_members(
             members.append(annotation.value)
         else:
             for item in slots:
-                _collect_annotation_members(item, aliases, local, seen, members)
+                _collect_annotation_members(item, aliases, local, seen, members, env)
         # The alias branch on top, never instead: the value head (`list` in
-        # `Errs = list`) decides which slots the alias exposes.
+        # `Errs = list`) decides which slots the alias exposes, and a generic
+        # alias binds its parameters to them instead.
         values = _alias_values(head, aliases, local, seen)
         if values:
             if slots is not None:
                 members.append(annotation.value)
             deeper = seen | {head, head_name}
             for value in values:
-                _collect_annotation_members(value, aliases, local, deeper, members)
+                if not isinstance(value, _GenericAlias):
+                    _collect_annotation_members(
+                        value, aliases, local, deeper, members, _NO_ENV
+                    )
+            head_slots, generics = _alias_head_slots(
+                values, inner, aliases, local, deeper
+            )
             # The slots belong to this annotation, not to the alias value, so
             # they keep the caller's `seen`: `M[str, M[str, ClientError]]`
             # repeats `M` without being a cycle.
-            for item in _alias_head_slots(values, inner, aliases, local, deeper):
-                _collect_annotation_members(item, aliases, local, seen, members)
+            for item in head_slots:
+                _collect_annotation_members(item, aliases, local, seen, members, env)
+            for generic in generics:
+                _apply_generic_alias(
+                    generic, inner, env, seen, aliases, local, deeper, members
+                )
+        return
+    if isinstance(annotation, ast.Name) and annotation.id in env:
+        # A parameter of the alias being walked: it stands for its bindings,
+        # each read where it was written, and shadows any alias of the same
+        # name. Its own name is no member, `_PARAM_MEMBER` counts in its place.
+        members.append(_PARAM_MEMBER)
+        for binding in env[annotation.id]:
+            _collect_annotation_members(
+                binding.node, aliases, local, binding.seen, members, binding.env
+            )
         return
     members.append(annotation)
     # The outermost name of an attribute chain, so `err: Holder.InClass` reaches
@@ -1566,7 +1749,14 @@ def _collect_annotation_members(
     if values:
         deeper = seen | {name, aliases.get(name, name)}
         for value in values:
-            _collect_annotation_members(value, aliases, local, deeper, members)
+            if isinstance(value, _GenericAlias):
+                _apply_generic_alias(
+                    value, [], _NO_ENV, seen, aliases, local, deeper, members
+                )
+            else:
+                _collect_annotation_members(
+                    value, aliases, local, deeper, members, _NO_ENV
+                )
 
 
 def _alias_head_slots(
@@ -1575,20 +1765,27 @@ def _alias_head_slots(
     aliases: dict[str, str],
     local: dict[str, tuple[ast.AST, ...]],
     seen: frozenset[str],
-) -> list[ast.AST]:
-    """The slots of `inner` that an alias head exposes, over every hop of its chain.
+) -> tuple[list[ast.AST], list[_GenericAlias]]:
+    """The slots of `inner` that an alias head exposes, and the generic aliases it reaches.
 
     `type Hd0 = list`, `type Hd1 = Hd0`, `err: Hd1[ClientError]`: the value
-    head `Hd0` is itself an alias, and its value `list` decides. The heads are
-    walked with one visited set rather than a path, so every name is expanded
-    once and the work is linear in the number of definitions, and without
-    recursion, so a long chain costs no frames.
+    head `Hd0` is itself an alias, and its value `list` decides. A generic
+    alias on the way exposes no slot: `inner` binds its parameters, which the
+    caller does with the returned aliases (`type Meta[T] = Annotated[int, T]`
+    with `Meta[ClientError]` is silent, not the first slot of `Annotated`). The
+    heads are walked with one visited set rather than a path, so every name is
+    expanded once and the work is linear in the number of definitions, and
+    without recursion, so a long chain costs no frames.
     """
     slots: list[ast.AST] = []
+    generics: list[_GenericAlias] = []
     visited = set(seen)
     pending = list(values)
     while pending:
         value = pending.pop()
+        if isinstance(value, _GenericAlias):
+            generics.append(value)
+            continue
         if isinstance(value, ast.Constant) and isinstance(value.value, str):
             parsed = _parse_type_string(value.value)
             if parsed is None:
@@ -1603,7 +1800,7 @@ def _alias_head_slots(
             if name and name not in visited:
                 visited.add(name)
                 pending.extend(local.get(name, ()))
-    return slots
+    return slots, generics
 
 
 def _target_names(target: ast.AST) -> tuple[str, ...]:
@@ -3351,6 +3548,284 @@ def _alias_outer_class_shadowed[T: ClientError]() -> None:
     _Holder
 
 
+type AliasMaybe[T] = T | None
+
+
+def _alias_generic_arg_union(err: AliasMaybe[ClientError]) -> None:
+    _LOGGER.error("F-69 generic argument in a union: %s", err)  # I:err
+
+
+type AliasId[T] = T
+
+
+def _alias_generic_arg_bare(err: AliasId[ClientError]) -> None:
+    _LOGGER.error("F-70 generic argument as the value: %s", err)  # I:err
+
+
+type AliasFn[T] = Callable[[T], None]
+
+
+def _alias_generic_arg_callable(err: AliasFn[ClientError], companion: ClientError) -> None:
+    _LOGGER.error("F-71 generic argument in a callable: %s", err)  # S
+    _LOGGER.error("F-71 companion: %s", companion)  # C:companion
+
+
+type AliasMaybeStr[T] = "T | None"
+
+
+def _alias_generic_arg_string_value(err: AliasMaybeStr[ClientError]) -> None:
+    _LOGGER.error("F-72 generic argument in a string value: %s", err)  # I:err
+
+
+def _alias_generic_arg_string(err: AliasId["ClientError"]) -> None:
+    _LOGGER.error("F-73 generic argument as a string: %s", err)  # I:err
+
+
+type AliasSecondHop[T: ClientError, U = T] = list[U]
+
+
+def _alias_default_second_hop(err: AliasSecondHop) -> None:
+    _LOGGER.error("F-74 default naming an earlier parameter: %s", err)  # I:err
+
+
+type AliasPair[T, U = T] = U | None
+
+
+def _alias_default_from_argument(err: AliasPair[ClientError]) -> None:
+    _LOGGER.error("F-75 default following an argument: %s", err)  # I:err
+
+
+def _alias_generic_unbound(err: AliasId, companion: ClientError) -> None:
+    _LOGGER.error("F-76 generic alias without argument: %s", err)  # S
+    _LOGGER.error("F-76 companion: %s", companion)  # C:companion
+
+
+type AliasConstraints[T: (ClientError, int)] = T
+
+
+def _alias_constraints_bare(err: AliasConstraints) -> None:
+    _LOGGER.error("F-77 constraint tuple as the value: %s", err)  # I:err
+
+
+def _function_constraints[T: (ClientError, int)](err: T) -> None:
+    _LOGGER.error("F-78 constraint tuple of a function: %s", err)  # I:err
+
+
+type AliasConstraintsMap[T: (ClientError, int)] = dict[str, T]
+
+
+def _alias_constraints_mapping(err: AliasConstraintsMap) -> None:
+    _LOGGER.error("F-79 constraint tuple in a mapping: %s", err)  # I:err
+
+
+type AliasOwnParam[T] = list[T]
+
+
+def _alias_param_vs_function_param[T: ClientError]() -> None:
+    def _inner(err: AliasOwnParam, companion: ClientError) -> None:
+        _LOGGER.error("F-80 alias parameter is not the caller's: %s", err)  # S
+        _LOGGER.error("F-80 companion: %s", companion)  # C:companion
+
+    _inner
+
+
+def _function_param_as_argument[T: ClientError](err: AliasMaybe[T]) -> None:
+    _LOGGER.error("F-81 bounded parameter as argument: %s", err)  # I:err
+
+
+Shadowed: TypeAlias = ClientError
+
+
+def _function_param_shadows_alias[Shadowed: int]() -> None:
+    def _inner(err: Shadowed, companion: ClientError) -> None:
+        _LOGGER.error("F-82 parameter shadows a module alias: %s", err)  # S
+        _LOGGER.error("F-82 companion: %s", companion)  # C:companion
+
+    _inner
+
+
+def _function_body_rebinds_param[Rebound: int]() -> None:
+    Rebound = ClientError
+
+    def _inner(err: Rebound) -> None:
+        _LOGGER.error("F-83 body rebinds the parameter: %s", err)  # I:err
+
+    _inner
+
+
+class _BoundHolder[T: ClientError]:
+    def method(self, err: T) -> None:
+        _LOGGER.error("F-84 class parameter bound: %s", err)  # I:err
+
+
+class _ShadowHolder[Shadowed]:
+    def method(self, err: Shadowed, companion: ClientError) -> None:
+        _LOGGER.error("F-85 class parameter shadows a module alias: %s", err)  # S
+        _LOGGER.error("F-85 companion: %s", companion)  # C:companion
+
+
+type AliasOuter[U] = AliasMaybe[U]
+
+
+def _alias_generic_in_generic(err: AliasOuter[ClientError]) -> None:
+    _LOGGER.error("F-86 argument through two generic aliases: %s", err)  # I:err
+
+
+type AliasTup[*Ts] = tuple[*Ts]
+
+
+def _alias_type_var_tuple(err: AliasTup[int, ClientError]) -> None:
+    _LOGGER.error("F-87 type variable tuple: %s", err)  # I:err
+
+
+def _starred_in_tuple(err: tuple[*tuple[ClientError]]) -> None:
+    _LOGGER.error("F-88 starred slot: %s", err)  # I:err
+
+
+# `Unpack` from `typing`, not imported here so that no line above moves.
+def _unpack_in_tuple(err: tuple[Unpack[tuple[ClientError]]]) -> None:
+    _LOGGER.error("F-89 unpacked slot: %s", err)  # I:err
+
+
+def _alias_surplus_argument(err: AliasId[int, ClientError]) -> None:
+    _LOGGER.error("F-92 surplus argument: %s", err)  # I:err
+
+
+type AliasBoundArg[T: ClientError] = list[T]
+
+
+def _alias_bound_with_argument(err: AliasBoundArg[str]) -> None:
+    _LOGGER.error("F-93 bound beside an argument: %s", err)  # I:err
+
+
+type AliasDefaultArg[T = ClientError] = list[T]
+
+
+def _alias_default_beside_argument(err: AliasDefaultArg[str]) -> None:
+    _LOGGER.error("F-94 default beside an argument: %s", err)  # I:err
+
+
+def _function_bound_and_default[T: int = ClientError](err: T) -> None:
+    _LOGGER.error("F-95 bound and default: %s", err)  # I:err
+
+
+def _function_param_and_module_alias[T: int](err: AliasDirect) -> None:
+    _LOGGER.error("F-96 module alias beside a type parameter: %s", err)  # I:err
+
+
+type AliasParamSpec[**P, R] = Callable[P, R]
+
+
+def _alias_param_spec(err: AliasParamSpec[[ClientError], None], companion: ClientError) -> None:
+    _LOGGER.error("F-97 parameter specification: %s", err)  # S
+    _LOGGER.error("F-97 companion: %s", companion)  # C:companion
+
+
+type AliasAnnFirst[T] = Annotated[T, "meta"]
+
+
+def _alias_annotated_first_slot(err: AliasAnnFirst[ClientError]) -> None:
+    _LOGGER.error("F-98 argument in the first slot of Annotated: %s", err)  # I:err
+
+
+type AliasAnnMeta[T] = Annotated[int, T]
+
+
+def _alias_annotated_metadata(err: AliasAnnMeta[ClientError], companion: ClientError) -> None:
+    _LOGGER.error("F-99 argument in the metadata of Annotated: %s", err)  # S
+    _LOGGER.error("F-99 companion: %s", companion)  # C:companion
+
+
+type AliasMid[A, *Ts, B] = A | B
+
+
+def _alias_type_var_tuple_middle(
+    err: AliasMid[int, ClientError, ClientError, int], companion: ClientError
+) -> None:
+    _LOGGER.error("F-100 type variable tuple takes the middle: %s", err)  # S
+    _LOGGER.error("F-100 companion: %s", companion)  # C:companion
+
+
+type AliasHook[**P] = Callable[P, None]
+
+
+def _alias_sole_param_spec(err: AliasHook[int, ClientError], companion: ClientError) -> None:
+    _LOGGER.error("F-101 sole parameter specification: %s", err)  # S
+    _LOGGER.error("F-101 companion: %s", companion)  # C:companion
+
+
+Tv = TypeVar("Tv")
+
+
+def _bounded_elsewhere[Tv: ClientError](x: Tv) -> None:
+    pass
+
+
+def _undeclared_type_var(err: Tv, companion: ClientError) -> None:
+    _LOGGER.error("F-102 a bound stays in its own function: %s", err)  # S
+    _LOGGER.error("F-102 companion: %s", companion)  # C:companion
+
+
+type AliasNestL[T] = list[T]
+
+
+def _alias_generic_nested_same(err: AliasNestL[AliasNestL[ClientError]]) -> None:
+    _LOGGER.error("F-103 the same generic alias in its argument: %s", err)  # I:err
+
+
+type AliasNestM[K, V] = dict[K, V]
+
+
+def _alias_generic_nested_mapping(err: AliasNestM[str, AliasNestM[str, ClientError]]) -> None:
+    _LOGGER.error("F-104 the same over two parameters: %s", err)  # I:err
+
+
+def _alias_generic_nested_bare(err: AliasId[AliasId[ClientError]]) -> None:
+    _LOGGER.error("F-105 a bare parameter, nested: %s", err)  # I:err
+
+
+AliasOptArg = AliasMaybe[ClientError]
+
+
+def _alias_generic_via_plain_alias(err: AliasMaybe[AliasOptArg]) -> None:
+    _LOGGER.error("F-106 a plain alias on the same generic alias: %s", err)  # I:err
+
+
+def _alias_generic_nested_surplus(err: AliasId[int, AliasId[ClientError]]) -> None:
+    _LOGGER.error("F-107 a surplus argument with the same alias: %s", err)  # I:err
+
+
+type AliasRes[V, TError] = V | TError
+
+
+def _alias_param_named_like_error(err: AliasRes[int, str], companion: ClientError) -> None:
+    _LOGGER.error("F-108 a bound parameter's name is no member: %s", err)  # S
+    _LOGGER.error("F-108 companion: %s", companion)  # C:companion
+
+
+type AliasDefaultDoubling[T1 = "", T2 = T1 | T1, T3 = T2 | T2, T4 = T3 | T3, T5 = T4 | T4, T6 = T5 | T5, T7 = T6 | T6, T8 = T7 | T7, T9 = T8 | T8, T10 = T9 | T9, T11 = T10 | T10, T12 = T11 | T11, T13 = T12 | T12, T14 = T13 | T13, T15 = T14 | T14, T16 = T15 | T15, T17 = T16 | T16, T18 = T17 | T17, T19 = T18 | T18, T20 = T19 | T19, T21 = T20 | T20, T22 = T21 | T21] = T22
+
+
+def _alias_default_doubling_unreadable(err: AliasDefaultDoubling) -> None:
+    _LOGGER.error("F-109 doubling defaults on an unreadable leaf: %s", err)  # I:err
+
+
+type AliasSelfDefault[T = AliasSelfDefault[int]] = T
+
+
+def _alias_self_default(err: AliasSelfDefault, companion: ClientError) -> None:
+    _LOGGER.error("F-110 a default that names its own alias: %s", err)  # S
+    _LOGGER.error("F-110 companion: %s", companion)  # C:companion
+
+
+type AliasSelfBound[T: AliasSelfBound[int]] = T
+
+
+def _alias_self_bound(err: AliasSelfBound, companion: ClientError) -> None:
+    _LOGGER.error("F-111 a bound that names its own alias: %s", err)  # S
+    _LOGGER.error("F-111 companion: %s", companion)  # C:companion
+
+
 # This module binds the name `BaseException` itself. Without the identity check
 # in `_is_foreign_exception_annotation`, the `own` rule would swallow the
 # fail-closed member of a truncated expansion and F-50 and F-51 would go silent.
@@ -3365,9 +3840,10 @@ def test_shape_i_resolves_local_type_aliases() -> None:
 
     Codex on PR #1306 (`discussion_r4049621555`): `type TransportFailure =
     ClientError` used as `err: TransportFailure` was not seen, because the
-    alias name is neither imported nor suffixed. Sixty-eight forms, each one a line
-    of the form table this change was planned and reviewed against; every one
-    of them has a representative below.
+    alias name is neither imported nor suffixed. A hundred and eleven forms, each one a
+    line of the form table this change was planned and reviewed against; every
+    one of them has a representative below (F-68, F-90 and F-91 in the test
+    body, because each needs a line thousands of characters long).
 
     Reported, one marker `# I:` per line in the fixture: the plain statement
     (F-01), a union (F-02), a container (F-03), `Optional` (F-04), a chain of
@@ -3400,7 +3876,25 @@ def test_shape_i_resolves_local_type_aliases() -> None:
     closes fail-closed; without the limit it would go silent) and the bound
     of an enclosing function's type parameter in a nested function (F-62), and
     an alias parameter's bound substituted into a string slot (F-64) or into a
-    string value (F-65).
+    string value (F-65). From the second Codex round on (#1316): the argument
+    of a generic alias bound into its value, in a union (F-69), as the whole
+    value (F-70), in a string value (F-72), as a string (F-73), through two
+    generic aliases (F-86), as a type variable tuple (F-87) and as a surplus
+    argument (F-92, fail-closed); a default that names an earlier parameter,
+    without (F-74) and with (F-75) an argument; a constraint tuple as the
+    value (F-77), on a function (F-78) and in a mapping (F-79); a bounded
+    parameter as the argument (F-81); a body that rebinds its own parameter
+    (F-83); a class's bounded parameter (F-84); a starred (F-88) and an
+    `Unpack`ed (F-89) slot; a bound (F-93) and a default (F-94) beside an
+    argument; bound and default at once (F-95); a module alias inside a
+    function with a type parameter (F-96); an argument in the first slot of
+    `Annotated` (F-98); a union of 1000 members, cut fail-closed (F-91); and
+    an argument that holds a generic alias, the same one (F-103, F-104, F-105),
+    through a plain alias (F-106) or as a surplus argument (F-107), which is
+    no cycle; and a doubling chain of defaults on an unreadable leaf (F-109,
+    cut fail-closed: the placeholder of each bound parameter counts toward
+    the width limit, without it the expansion runs for half a minute and
+    ends silent).
 
     Reported *and unchanged*, which is the point of the additive expansion:
     an alias with a suffixed name on a harmless value (F-26), one that shadows
@@ -3426,7 +3920,19 @@ def test_shape_i_resolves_local_type_aliases() -> None:
     alias parameter's bound that the alias value does not use (F-61) or uses
     inside `Callable` (F-63, as silent as written out), an inherited bound that
     a nested function (F-66) or class (F-67) shadows with its own parameter,
-    and `Annotated` whose second argument names the exception (F-52). Without
+    and `Annotated` whose second argument names the exception (F-52). From
+    the second Codex round on: a generic argument inside `Callable` (F-71), a
+    generic alias without argument, bound or default (F-76), an alias's own
+    parameter against the caller's of the same name (F-80), a function's
+    (F-82) and a class's (F-85) parameter that shadows a module alias of the
+    same name, a parameter specification (F-97), an argument in the metadata
+    of `Annotated` (F-99), a type variable tuple that takes the middle (F-100),
+    a sole parameter specification that takes every argument (F-101), a
+    `TypeVar` used in a function without type parameters while another
+    function bounds the same name (F-102) and a union of 250 members around a
+    bounded parameter (F-90), and a bound parameter whose name ends like an
+    exception (F-108, the name is no member), and a default (F-110) or a bound
+    (F-111) that names its own alias, read with the value's hops. Without
     the companion, a silent case and a misspelled alias name
     would be equally absent from the pin.
     """
@@ -3502,6 +4008,47 @@ def test_shape_i_resolves_local_type_aliases() -> None:
         (671, "err"),
         (677, "companion"),
         (686, "companion"),
+        (695, "err"),
+        (702, "err"),
+        (710, "companion"),
+        (717, "err"),
+        (721, "err"),
+        (728, "err"),
+        (735, "err"),
+        (740, "companion"),
+        (747, "err"),
+        (751, "err"),
+        (758, "err"),
+        (767, "companion"),
+        (773, "err"),
+        (782, "companion"),
+        (791, "err"),
+        (798, "err"),
+        (804, "companion"),
+        (811, "err"),
+        (818, "err"),
+        (822, "err"),
+        (827, "err"),
+        (831, "err"),
+        (838, "err"),
+        (845, "err"),
+        (849, "err"),
+        (853, "err"),
+        (861, "companion"),
+        (868, "err"),
+        (876, "companion"),
+        (886, "companion"),
+        (894, "companion"),
+        (906, "companion"),
+        (913, "err"),
+        (920, "err"),
+        (924, "err"),
+        (931, "err"),
+        (935, "err"),
+        (943, "companion"),
+        (950, "err"),
+        (958, "companion"),
+        (966, "companion"),
     ]
     outside, _ = _scan_tree(tree, "coordinator/alias_fixture.py")
     assert outside == []
@@ -3510,6 +4057,39 @@ def test_shape_i_resolves_local_type_aliases() -> None:
     # and not in the fixture, which would carry a 6000-character line.
     deep = ast.parse('Deep = "' + "-" * 6000 + '1"')
     assert _scan_tree(deep, "Auth/alias_deep_string.py")[0] == []
+    # F-90 and F-91 stand here for the same reason. F-90: a union of 250
+    # members around a bounded parameter is no false report (the parameter is
+    # bound where the value is walked, not substituted into a copy whose
+    # recursion ran out). F-91: a union of 1000 plain members is no crash and
+    # is cut fail-closed at the width limit; `ast.unparse` in shape (G) and the
+    # union branch here both recursed once per member.
+    head = "import logging\n_LOGGER = logging.getLogger(__name__)\n"
+    wide = ast.parse(
+        head
+        + "type Box[T: int] = "
+        + " | ".join(["int"] * 250)
+        + " | T\n"
+        + "def f(err: Box, companion: ClientError) -> None:\n"
+        + "    _LOGGER.error('%s %s', err, companion)\n"
+    )
+    wide_offenders, _ = _scan_tree(wide, "Auth/alias_wide_union.py")
+    assert [leaf for _, _, leaf, _ in wide_offenders] == ["companion"]
+    widest = ast.parse(
+        head
+        + "def f(err: "
+        + " | ".join(["int"] * 1000)
+        + ") -> None:\n"
+        + "    _LOGGER.error('%s', err)\n"
+    )
+    widest_offenders, _ = _scan_tree(widest, "Auth/alias_widest_union.py")
+    assert [leaf for _, _, leaf, _ in widest_offenders] == ["err"]
+    # The fallback in `_message_params` (shape (G)) reads the names off the
+    # nodes: not only no crash, but the message type found at the far end of
+    # the same 1000-member union.
+    widest_message = ast.parse(
+        "def f(msg: " + " | ".join(["int"] * 999) + " | proto.Msg) -> None:\n    pass\n"
+    )
+    assert _message_params(widest_message.body[0], frozenset({"Msg"})) == {"msg"}
     # V7: the contract sentence has a mechanical reader. Auth/AGENTS.md is the
     # place the review bot quotes from (the finding behind this change carries
     # the anchor `Auth/AGENTS.md:L190-194`); a sentence answering that question
