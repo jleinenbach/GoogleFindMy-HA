@@ -76,6 +76,8 @@ pytest-cov = ">=5.0"
 pytest-socket = ">=0.7.0"
 pytest-xdist = ">=3.5.0"
 hypothesis = ">=6.100.0"
+# GitHub's Markdown parser, used by the DocToc pre-commit hook and its tests
+cmarkgfm = ">=2025.10.22"
 
 # Home Assistant testing - ALWAYS use latest version (no upper bound)
 # This ensures we test against the latest HA compatibility
@@ -342,6 +344,8 @@ follow_imports = "skip"
 [[tool.mypy.overrides]]
 module = [
     "bs4",
+    "cmarkgfm",
+    "cmarkgfm.*",
     "Cryptodome.*",
     "ecdsa",
     "google.protobuf.unknown_fields",

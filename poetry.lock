@@ -1358,6 +1358,69 @@ test = ["pytest"]
 test-cov = ["pytest", "pytest-cov"]
 
 [[package]]
+name = "cmarkgfm"
+version = "2025.10.22"
+description = "Minimal bindings to GitHub's fork of cmark"
+optional = false
+python-versions = ">=3.9"
+groups = ["test"]
+files = [
+    {file = "cmarkgfm-2025.10.22-cp310-cp310-macosx_11_0_arm64.whl", hash = "sha256:37e0b126a3868e1497f8e10c11a49b007f6f4b3104032d3a51bb84404c0f4486"},
+    {file = "cmarkgfm-2025.10.22-cp310-cp310-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:1214acf1ef779b129e13a1a51e446425feaed64fd11124f44f78c93021bba853"},
+    {file = "cmarkgfm-2025.10.22-cp310-cp310-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:df2e8e1140e811d952c9eabc9471517f9193438e5eb17a9530f9559cbf216492"},
+    {file = "cmarkgfm-2025.10.22-cp310-cp310-musllinux_1_2_aarch64.whl", hash = "sha256:30e8a48bc36e1e06e6938952e3d69e4c2a73cf2dcee1071942a7c036df1982ff"},
+    {file = "cmarkgfm-2025.10.22-cp310-cp310-musllinux_1_2_x86_64.whl", hash = "sha256:8d7ab8333f9cca9d4894d668ab06b19a97a30734d19c2e53ed83e33fe16d1891"},
+    {file = "cmarkgfm-2025.10.22-cp310-cp310-win32.whl", hash = "sha256:451da49653abcde96d4671824c37acc900f6d01f69687ebeb0bd59ebf99738e0"},
+    {file = "cmarkgfm-2025.10.22-cp310-cp310-win_amd64.whl", hash = "sha256:a815dab1d0f2e7af95613b26101143eb44dc92a3b44449096fa97ed54add822e"},
+    {file = "cmarkgfm-2025.10.22-cp311-cp311-macosx_11_0_arm64.whl", hash = "sha256:18aba514abb3eedc04c3df7dd5a7743a92d7f313a04a3f7e17a059befce6fd5f"},
+    {file = "cmarkgfm-2025.10.22-cp311-cp311-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:3da228e10238411fc6823e2d4db4d514ca41d93629a6f8be751325a5477288b9"},
+    {file = "cmarkgfm-2025.10.22-cp311-cp311-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:76e1cd82deb79d0d6c1a0a9822116c277c1f7c43496cd151c340999ac4721dec"},
+    {file = "cmarkgfm-2025.10.22-cp311-cp311-musllinux_1_2_aarch64.whl", hash = "sha256:87fd3616505159090b031a9601b2a24ebb2ee999abc562d924b99711fc6bb498"},
+    {file = "cmarkgfm-2025.10.22-cp311-cp311-musllinux_1_2_x86_64.whl", hash = "sha256:f848d9698023ac9e352d73d92ab58119cb1268b12c3100578cf2d1ca1aeab2bf"},
+    {file = "cmarkgfm-2025.10.22-cp311-cp311-win32.whl", hash = "sha256:93f34a753939b034a478a36687c6fef9010023e2cbe451b0ec83205e34252419"},
+    {file = "cmarkgfm-2025.10.22-cp311-cp311-win_amd64.whl", hash = "sha256:43cb1e912675dd91fba97db47f8de7c19c0b3cf6456d188ff584c120bcaa12b9"},
+    {file = "cmarkgfm-2025.10.22-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:74a22cf245b32a918325a2895a9a3f6e737f0b10368b39e9a99d9e76fda4a78a"},
+    {file = "cmarkgfm-2025.10.22-cp312-cp312-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:68368a18b90e2dd795182c6fc34cee3180b2c8b380cad50c7fbd5563abff01b1"},
+    {file = "cmarkgfm-2025.10.22-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:115fd0feaf93806b3a7c980615649b3c76a49c9dd89d5ea0c6240e10c6c71cee"},
+    {file = "cmarkgfm-2025.10.22-cp312-cp312-musllinux_1_2_aarch64.whl", hash = "sha256:69ccb4afa039f5b81d35de95fe935405577e115f367dda534309d66a455db5cb"},
+    {file = "cmarkgfm-2025.10.22-cp312-cp312-musllinux_1_2_x86_64.whl", hash = "sha256:9bed95895226cba280a96543f49d46b469b9e42528b119f280f9852cd4fc7749"},
+    {file = "cmarkgfm-2025.10.22-cp312-cp312-win32.whl", hash = "sha256:fdf0a4689fb6febcbcaf675f2011a8074b100a4fc323f5754f627183ce492694"},
+    {file = "cmarkgfm-2025.10.22-cp312-cp312-win_amd64.whl", hash = "sha256:fc14ae28769b501f61a7364a1188c827dfcf839213f02d0159801bb71c8ae989"},
+    {file = "cmarkgfm-2025.10.22-cp313-cp313-macosx_11_0_arm64.whl", hash = "sha256:d8030955c836827b95f46f8fc520a58ab2a03fb23d4b56e2d976618099273298"},
+    {file = "cmarkgfm-2025.10.22-cp313-cp313-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:862b7f15ecf040fe9cd82f3be208286daddc5af94e1a20091af8451a0fe5fe74"},
+    {file = "cmarkgfm-2025.10.22-cp313-cp313-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:77840ddd24152881c2d374eae5e1baca462d24c2d78a937b6f30a12c2685cc0c"},
+    {file = "cmarkgfm-2025.10.22-cp313-cp313-musllinux_1_2_aarch64.whl", hash = "sha256:ba7693b9a4c30b2ae2d07d10c4bd3fd01dfaaaaa67c93784923b792dd10bb037"},
+    {file = "cmarkgfm-2025.10.22-cp313-cp313-musllinux_1_2_x86_64.whl", hash = "sha256:03435c2f57ed49be0e83b2743af5dced98c1287fb9ae41a12b8055cff984bf58"},
+    {file = "cmarkgfm-2025.10.22-cp313-cp313-win32.whl", hash = "sha256:aee2bf397cdf133025a2e66c6281e4fb6bd70420e3734b6dcf787ea9c2aadd78"},
+    {file = "cmarkgfm-2025.10.22-cp313-cp313-win_amd64.whl", hash = "sha256:f41b76d274c8886d0a440d6577cc0d73d0ea631c3bb07758adce74ba6911d790"},
+    {file = "cmarkgfm-2025.10.22-cp314-cp314-macosx_11_0_arm64.whl", hash = "sha256:974eb8a69d6835eeaf11cb8f7ed0ad4cb4ddda9223693ad02aeb56cb0c036afb"},
+    {file = "cmarkgfm-2025.10.22-cp314-cp314-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:a591b213ab226232dee0b6ac8873560f01bd8cf423310bd8ce3f1c7cf913fd1f"},
+    {file = "cmarkgfm-2025.10.22-cp314-cp314-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:54070905b888d0d4590e03f60c5153dd456f2297ff5ff9fc43ba6d561f2eff72"},
+    {file = "cmarkgfm-2025.10.22-cp314-cp314-musllinux_1_2_aarch64.whl", hash = "sha256:37eef93238957bb238669810e1e3fe835706f9cbb25362b5ae8bbd51e39af45f"},
+    {file = "cmarkgfm-2025.10.22-cp314-cp314-musllinux_1_2_x86_64.whl", hash = "sha256:a6ee1d36735abaed7af1c8459bfabe664c3f5472bf65a390f52d5e12626304b9"},
+    {file = "cmarkgfm-2025.10.22-cp314-cp314-win32.whl", hash = "sha256:60e7745b429d5e3019380750b3cfaf10da4a5461ead3adf9c149251d8a6e1a3c"},
+    {file = "cmarkgfm-2025.10.22-cp314-cp314-win_amd64.whl", hash = "sha256:ee90cbccd9521aa51e8d619284bb7904c5b64387eef86cbad50717b8d943ce6d"},
+    {file = "cmarkgfm-2025.10.22-cp314-cp314t-macosx_11_0_arm64.whl", hash = "sha256:a8d39b0c2c1c58d81a1294ed99200cba1250ec217c079b36aff11ca6b2ca4881"},
+    {file = "cmarkgfm-2025.10.22-cp314-cp314t-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:481740a8ab020c4b8ee49746ea6ac45ec7b68b71740d12c696a64c30e26f6f49"},
+    {file = "cmarkgfm-2025.10.22-cp314-cp314t-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:367d1ab78f26af73b866a165358382c6e8e66d49da73621e832febeaeeb6400c"},
+    {file = "cmarkgfm-2025.10.22-cp314-cp314t-musllinux_1_2_aarch64.whl", hash = "sha256:2176dc0e5e4966ca4746dcbd26324adbe17be86f48756f28438d157ae1f26520"},
+    {file = "cmarkgfm-2025.10.22-cp314-cp314t-musllinux_1_2_x86_64.whl", hash = "sha256:c96d1238d91cf35e9c022af2e8c0be0a7ac227eb94497ffdf10584a684e38a3e"},
+    {file = "cmarkgfm-2025.10.22-cp314-cp314t-win32.whl", hash = "sha256:905a773bc866ccb4dc97a343057e2bfe07934522e1380831be413d3f93626f62"},
+    {file = "cmarkgfm-2025.10.22-cp314-cp314t-win_amd64.whl", hash = "sha256:f2a04d119d09f7f5c8b565b1e8c691596bfbc59d8cabac4d7fa542a069c2c70f"},
+    {file = "cmarkgfm-2025.10.22-cp39-cp39-macosx_11_0_arm64.whl", hash = "sha256:9e42a5fd9869d7d4e7511df4262e8509b46453acc0fa4fcfc8e3acc74d99e85b"},
+    {file = "cmarkgfm-2025.10.22-cp39-cp39-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:dd70cef08a675b83dbce79a50af102cd9d2b40d8093c97d3d39e02b3365ca026"},
+    {file = "cmarkgfm-2025.10.22-cp39-cp39-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:0651de7f1327cbaf29c6f257c29786c26a3f90a9506efb2a1fda70ab1cd99591"},
+    {file = "cmarkgfm-2025.10.22-cp39-cp39-musllinux_1_2_aarch64.whl", hash = "sha256:ec1184ef6c4aed1f526c37a52155f49bed2a65b59178cfee39556d01564c1643"},
+    {file = "cmarkgfm-2025.10.22-cp39-cp39-musllinux_1_2_x86_64.whl", hash = "sha256:dc11bdc6b9024df35a7043ebef95b581705e08c764fc900b50da96641ffbab06"},
+    {file = "cmarkgfm-2025.10.22-cp39-cp39-win32.whl", hash = "sha256:05423a8cd8489302825fef3cdfacb6762101c07599e210ade523667d5a0ec87a"},
+    {file = "cmarkgfm-2025.10.22-cp39-cp39-win_amd64.whl", hash = "sha256:35f7008547e629aaec44c063c674f393f53ab6202b2ebfa8d3273a68b093e710"},
+    {file = "cmarkgfm-2025.10.22.tar.gz", hash = "sha256:5bec61007b65b919488442c838c58a6c8bf4741f5103c593b2ef180d39818eda"},
+]
+
+[package.dependencies]
+cffi = ">=2.0.0"
+
+[[package]]
 name = "codespell"
 version = "2.4.3"
 description = "Fix common misspellings in text files"
@@ -1380,11 +1443,11 @@ description = "Cross-platform colored terminal text."
 optional = false
 python-versions = "!=3.0.*,!=3.1.*,!=3.2.*,!=3.3.*,!=3.4.*,!=3.5.*,!=3.6.*,>=2.7"
 groups = ["dev", "test"]
-markers = "sys_platform == \"win32\" or platform_system == \"Windows\""
 files = [
     {file = "colorama-0.4.6-py2.py3-none-any.whl", hash = "sha256:4f1d9991f5acc0ca119f9d443620b77f9d6b33703e51011c16baf57afb285fc6"},
     {file = "colorama-0.4.6.tar.gz", hash = "sha256:08695f5cb7ed6e0531a20572697297273c47b8cae5a63ffc6d6ed5c201be6e44"},
 ]
+markers = {dev = "platform_system == \"Windows\" or sys_platform == \"win32\"", test = "sys_platform == \"win32\" or platform_system == \"Windows\""}
 
 [[package]]
 name = "coverage"
@@ -7172,4 +7235,4 @@ ifaddr = ">=0.1.7"
 [metadata]
 lock-version = "2.1"
 python-versions = "^3.14.2"
-content-hash = "25cde33f3fc88f3ec763083b310e5424346c05a2e13b4f2c13581eedfaf72772"
+content-hash = "78d636b4870a98c95c39e3bc5fa828856b7b929e2c7f651ce3b5b02d34ee4ecf"
