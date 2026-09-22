@@ -202,7 +202,12 @@ built-in copy such as `list(errors)`, a container mutated by `append`; a
 tuple or starred unpacking by position, or as a whole from `err.args`; a
 `for` target whose iterable mentions the name, `for i, err in
 enumerate(errors)`; a `match` capture such as `case ClientError() as err`
-or `case ClientError(args=[first])`); inside a handler the same holds for
+or `case ClientError(args=[first])`). It makes no difference whether the
+annotation names the type outright or reaches it
+`through a local type alias defined in the same module`
+(`type X = ClientError`, `X: TypeAlias = ClientError`, or a plain
+`X = ClientError`): the alias name carries no information about the type, so
+the guard resolves it before it classifies. Inside a handler the same holds for
 the handler name (`except OSError as exc: text = str(exc)` binds `text`
 there). The guard's module docstring lists the forms it does not follow
 (a helper's return value, a lambda, a handler name aliased out of its
