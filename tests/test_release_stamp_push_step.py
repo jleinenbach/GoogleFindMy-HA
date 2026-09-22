@@ -26,7 +26,9 @@ push refusal and fast-forward checks are real. ``gh`` is a stub that logs its
 calls. The ``pre-receive`` hook only imitates the text of a GitHub ruleset
 rejection (``GH013``); a change of that text on GitHub's side is outside this
 test. The runner's evaluation of ``if: env.STAMP_COMMITTED == 'true'`` is
-outside it as well; the test pins the condition's text instead.
+outside it as well; the test pins the condition's text instead. The step
+reads no variable from ``GITHUB_ENV`` (``VERSION``, ``STAMP_COMMITTED``), so
+none is provided; a future read would fail loudly under ``set -u``.
 
 The checkout of ``actions/checkout`` is rebuilt as ``git init``, ``git fetch``
 of all branches and tags, and ``git checkout --detach <tag>``; this yields the
@@ -169,8 +171,11 @@ def _seed(tmp_path: Path, tag: str, layout: str) -> _World:
     and ``second_owner_branch`` (a second branch also contains the tag).
     """
 
-    assert shutil.which("git") is not None, "git is required for these tests"
     env = _base_env(tmp_path)
+    # Resolved against the PATH the git calls below use, not the caller's.
+    assert shutil.which("git", path=env["PATH"]) is not None, (
+        "git is required for these tests"
+    )
     remote = tmp_path / "remote.git"
     seed = tmp_path / "seed"
     work = tmp_path / "work"
