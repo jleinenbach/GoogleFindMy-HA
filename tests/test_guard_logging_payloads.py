@@ -97,9 +97,11 @@ annotated with a broad or foreign exception type (`err: BaseException`,
 `err: ClientError`, `err: ssl.SSLError | None`, `*errors: BaseException`, an import alias
 resolved to its suffix, a local type alias resolved to its value: the PEP 695
 statement, the conventional `X: TypeAlias = ...`, a plain assignment including a
-multiple and a tuple target, and a type parameter's bound or PEP 696 default,
-followed through chains, unions, carriers, subscript heads and string
-annotations, wherever in the module it is defined; the expansion is additive, so
+multiple, a tuple, a starred and a nested target and a string value, and a type
+parameter's bound or PEP 696 default, followed through chains, unions, carriers,
+subscript heads over every hop and string annotations, wherever in the module it
+is defined, except that a type parameter counts only inside its own function or
+alias; the expansion is additive, so
 the guard reports at least what it reported before, and it stops fail-closed at
 512 members or 64 alias hops) binds the name for the whole function, and so does a name
 assigned, annotated or not, from `task.exception()` (the done callback of
@@ -181,7 +183,9 @@ about its type, and an unbounded parameter names none. What *is* read is the
 bound and the PEP 696 default themselves (`def f[T: ClientError]`,
 `type Box[T = ClientError]`): both promise that the bound value has that type,
 which is what this shape looks for, and they are the only part of
-`type_params` this guard reads. A conditional alias value
+`type_params` this guard reads. They count inside the function that declares
+them (nested functions included) or for the alias that uses them, never for
+another `T` of the same module; a class's type parameters are not read. A conditional alias value
 (`X = A if c else B`) is not collected either, `traceback.format_exc()`,
 an own exception built from a foreign one, and every module outside `Auth/`
 (119 such sites counted on 2026-09-17). Reported although harmless, on purpose:
@@ -1033,8 +1037,10 @@ def _import_aliases(tree: ast.AST) -> dict[str, str]:
 
 
 # A local alias binds a name to an *expression*, so it needs a table of its own.
-# Two limits guard the expansion, both set rather than derived (the deepest chain
-# in this package is 1). Width, because additive expansion of a doubling chain
+# Two limits guard the expansion, both set rather than derived (the deepest
+# expansion any annotation in this package reaches is one alias hop, measured
+# over all 135 modules; chains of plain assignments between variables are
+# deeper in the table, but no annotation walks them). Width, because additive expansion of a doubling chain
 # (`type Ai = A(i-1) | A(i-1)`) grows as `3*2^n - 1`. Depth, because every hop
 # nests another frame: a linear chain adds one member per hop, so the width limit
 # alone would not cut it before 512 hops (measured: 511 hops stay silent at 513
@@ -1059,7 +1065,19 @@ _ALIAS_VALUE_NODES = (ast.Name, ast.Attribute, ast.Subscript)
 
 
 def _is_type_expression(value: ast.AST) -> bool:
-    """`ClientError`, `mod.Err`, `list[Err]` or `A | B`, but never a call."""
+    """`ClientError`, `mod.Err`, `list[Err]`, `A | B` or `"ClientError"`, never a call.
+
+    A string counts when its content parses as one of the others, the same
+    reading an annotation string gets (`A = "ClientError"` binds what
+    `A: TypeAlias = "ClientError"` binds).
+    """
+    if isinstance(value, ast.Constant) and isinstance(value.value, str):
+        try:
+            value = ast.parse(value.value, mode="eval").body
+        except (SyntaxError, ValueError):
+            return False
+        if isinstance(value, ast.Constant):
+            return False
     if isinstance(value, ast.BinOp):
         return isinstance(value.op, ast.BitOr)
     return isinstance(value, _ALIAS_VALUE_NODES)
@@ -1073,12 +1091,16 @@ def _local_type_aliases(
     The import-alias table maps a name to a name; a local alias binds a name to
     an expression, which that table cannot carry. Four sources, all of them in
     Home-Assistant code: the PEP 695 statement (`type X = ClientError`), the
-    type parameters of an alias or a function including a bound and a PEP 696
-    default (`type Box[T: ClientError]`, `def f[T: ClientError]`), the
+    bound or PEP 696 default of an alias's own type parameter where its value
+    uses it (`type Box[T: ClientError] = list[T]` binds `Box`), the
     conventional form (`X: TypeAlias = ClientError`, also through
     `typing.TypeAlias`, `"TypeAlias"` and `from typing import TypeAlias as TA`)
-    and a plain assignment whose value is a type expression (`X = ClientError`,
-    `A = B = ClientError`, `A, B = ClientError, OSError`). The plain form is not
+    and a plain assignment whose value is a type expression or a string that
+    parses as one (`X = ClientError`, `X = "ClientError"`, `A = B =
+    ClientError`, `A, B = ClientError, OSError`, `*A, B = str, ClientError`,
+    `(A, B), C = (ClientError, OSError), ValueError`). A function's type
+    parameters are not in this table: `_type_param_scopes` adds them to the
+    table of their own function only. The plain form is not
     an afterthought: of this package's seven PEP 695 aliases none points at an
     exception, and all six aliases that do are plain assignments (measured
     2026-09-20).
@@ -1112,22 +1134,46 @@ def _local_type_aliases(
         if name and value is not None:
             local.setdefault(name, []).append(value)
 
-    def _bind_type_params(node: ast.AST) -> None:
-        # A bound (`T: ClientError`) and a PEP 696 default (`T = ClientError`)
-        # both promise that the bound value is that type, which is exactly what
-        # shape (I) looks for.
-        for param in getattr(node, "type_params", ()):
-            name = getattr(param, "name", "")
-            _bind(name, getattr(param, "bound", None))
-            _bind(name, getattr(param, "default_value", None))
+    def _bind_target(target: ast.AST, value: ast.AST) -> None:
+        # Matched by position like `_unpacked_names`, nested targets included
+        # (`(A, B), C = (X, Y), Z`); the starred slot takes the remainder, which
+        # is a list at runtime and never a type, and the slots behind it count
+        # from the end (`*A, B = str, int, ClientError` binds `B`).
+        if isinstance(target, ast.Name):
+            if _is_type_expression(value):
+                _bind(target.id, value)
+            return
+        if not isinstance(target, (ast.Tuple, ast.List)):
+            return
+        if not isinstance(value, (ast.Tuple, ast.List)):
+            return
+        slots, values = list(target.elts), list(value.elts)
+        star = next(
+            (i for i, slot in enumerate(slots) if isinstance(slot, ast.Starred)), None
+        )
+        if star is None:
+            pairs = list(zip(slots, values))
+        else:
+            tail = len(slots) - star - 1
+            pairs = list(zip(slots[:star], values[:star]))
+            if tail and len(values) >= len(slots) - 1:
+                pairs += list(zip(slots[star + 1 :], values[len(values) - tail :]))
+        for slot, item in pairs:
+            _bind_target(slot, item)
 
     for node in ast.walk(tree):
         if isinstance(node, ast.TypeAlias):
             if isinstance(node.name, ast.Name):
                 _bind(node.name.id, node.value)
-            _bind_type_params(node)
-        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            _bind_type_params(node)
+                # A bound or a PEP 696 default of the alias's own parameter
+                # (`type Box[T: ClientError] = list[T]`) counts for the alias,
+                # and only where the value uses the parameter; a function's
+                # parameters are scoped by `_type_param_scopes`.
+                used = {n.id for n in ast.walk(node.value) if isinstance(n, ast.Name)}
+                for name, values in _type_param_bindings(node).items():
+                    if name in used:
+                        for value in values:
+                            _bind(node.name.id, value)
         elif isinstance(node, ast.AnnAssign):
             if isinstance(node.target, ast.Name) and node.value is not None:
                 members = _annotation_members(node.annotation, aliases)
@@ -1137,17 +1183,58 @@ def _local_type_aliases(
                     _bind(node.target.id, node.value)
         elif isinstance(node, ast.Assign):
             for target in node.targets:
-                if isinstance(target, ast.Name):
-                    if _is_type_expression(node.value):
-                        _bind(target.id, node.value)
-                elif isinstance(target, (ast.Tuple, ast.List)) and isinstance(
-                    node.value, (ast.Tuple, ast.List)
-                ):
-                    # Matched by position, like `_unpacked_names` does.
-                    for slot, value in zip(target.elts, node.value.elts):
-                        if isinstance(slot, ast.Name) and _is_type_expression(value):
-                            _bind(slot.id, value)
+                _bind_target(target, node.value)
     return {name: tuple(values) for name, values in local.items()}
+
+
+def _type_param_bindings(node: ast.AST) -> dict[str, tuple[ast.AST, ...]]:
+    """Type parameter -> its bound and PEP 696 default, `{}` when it has neither.
+
+    Both promise that the bound value is that type (`T: ClientError`,
+    `T = ClientError`), which is exactly what shape (I) looks for; an
+    unbounded parameter names none.
+    """
+    bindings: dict[str, tuple[ast.AST, ...]] = {}
+    for param in getattr(node, "type_params", ()):
+        name = getattr(param, "name", "")
+        values = tuple(
+            value
+            for value in (
+                getattr(param, "bound", None),
+                getattr(param, "default_value", None),
+            )
+            if value is not None
+        )
+        if name and values:
+            bindings[name] = bindings.get(name, ()) + values
+    return bindings
+
+
+def _type_param_scopes(
+    tree: ast.AST, local: dict[str, tuple[ast.AST, ...]]
+) -> dict[int, dict[str, tuple[ast.AST, ...]]]:
+    """`id(node)` -> `local` plus the type parameters of every enclosing function.
+
+    A type parameter is scoped to its function, nested functions included: the
+    module-wide table let the bound of `def a[T: ClientError]` reach the
+    unbounded `T` of `def b[T](err: T)` and reported `err`. Nodes outside any
+    function with a bounded parameter are absent and read `local` itself. A
+    class's type parameters are not collected (see the module docstring).
+    """
+    scopes: dict[int, dict[str, tuple[ast.AST, ...]]] = {}
+    stack: list[tuple[ast.AST, dict[str, tuple[ast.AST, ...]]]] = [(tree, local)]
+    while stack:
+        node, table = stack.pop()
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            params = _type_param_bindings(node)
+            if params:
+                table = dict(table)
+                for name, values in params.items():
+                    table[name] = table.get(name, ()) + values
+        if table is not local:
+            scopes[id(node)] = table
+        stack.extend((child, table) for child in ast.iter_child_nodes(node))
+    return scopes
 
 
 def _alias_values(
@@ -1393,12 +1480,11 @@ def _collect_annotation_members(
             deeper = seen | {head, head_name}
             for value in values:
                 _collect_annotation_members(value, aliases, local, deeper, members)
-                value_chain = _chain(value)
-                value_head = value_chain[0] if value_chain else ""
-                for item in (
-                    _subscript_slots(aliases.get(value_head, value_head), inner) or []
-                ):
-                    _collect_annotation_members(item, aliases, local, deeper, members)
+            # The slots belong to this annotation, not to the alias value, so
+            # they keep the caller's `seen`: `M[str, M[str, ClientError]]`
+            # repeats `M` without being a cycle.
+            for item in _alias_head_slots(values, inner, aliases, local, deeper):
+                _collect_annotation_members(item, aliases, local, seen, members)
         return
     members.append(annotation)
     # The outermost name of an attribute chain, so `err: Holder.InClass` reaches
@@ -1410,6 +1496,43 @@ def _collect_annotation_members(
         deeper = seen | {name, aliases.get(name, name)}
         for value in values:
             _collect_annotation_members(value, aliases, local, deeper, members)
+
+
+def _alias_head_slots(
+    values: tuple[ast.AST, ...],
+    inner: list[ast.AST],
+    aliases: dict[str, str],
+    local: dict[str, tuple[ast.AST, ...]],
+    seen: frozenset[str],
+) -> list[ast.AST]:
+    """The slots of `inner` that an alias head exposes, over every hop of its chain.
+
+    `type Hd0 = list`, `type Hd1 = Hd0`, `err: Hd1[ClientError]`: the value
+    head `Hd0` is itself an alias, and its value `list` decides. The heads are
+    walked with one visited set rather than a path, so the work is linear in
+    the number of alias names however often a name is defined, and without
+    recursion, so a long chain costs no frames.
+    """
+    slots: list[ast.AST] = []
+    visited = set(seen)
+    pending = list(values)
+    while pending:
+        value = pending.pop()
+        if isinstance(value, ast.Constant) and isinstance(value.value, str):
+            try:
+                value = ast.parse(value.value, mode="eval").body
+            except (SyntaxError, ValueError):
+                continue
+        value_chain = _chain(value)
+        value_head = value_chain[0] if value_chain else ""
+        slots.extend(_subscript_slots(aliases.get(value_head, value_head), inner) or [])
+        if not isinstance(value, (ast.Name, ast.Attribute)):
+            continue
+        for name in (value_head, aliases.get(value_head, value_head)):
+            if name and name not in visited:
+                visited.add(name)
+                pending.extend(local.get(name, ()))
+    return slots
 
 
 def _target_names(target: ast.AST) -> tuple[str, ...]:
@@ -1707,6 +1830,7 @@ def _exception_names_by_call(tree: ast.AST) -> dict[int, tuple[str, ...]]:
     # One pass per file, before any annotation is classified: an alias may be
     # defined after its use, or inside a function or a class body.
     local = _local_type_aliases(tree, aliases)
+    scopes = _type_param_scopes(tree, local)
     imported = _imported_exception_types(tree)
     modules = _module_bindings(tree)
     for function in ast.walk(tree):
@@ -1719,13 +1843,16 @@ def _exception_names_by_call(tree: ast.AST) -> dict[int, tuple[str, ...]]:
             *([function.args.vararg] if function.args.vararg else []),
             *([function.args.kwarg] if function.args.kwarg else []),
         ]
+        scoped = scopes.get(id(function), local)
         bound = tuple(
             p.arg
             for p in params
             if _is_foreign_exception_annotation(
-                p.annotation, own, aliases, imported, modules, local=local
+                p.annotation, own, aliases, imported, modules, local=scoped
             )
         )
+        # The data flow reads the table for `match` class patterns only, where
+        # a type parameter cannot stand (`case T():` raises at runtime).
         bound += _flow_bound_names(
             function, bound, own, aliases, imported, modules, local
         )
@@ -3041,6 +3168,79 @@ def _alias_defined_twice_harmless_last(err: AliasDupLast) -> None:
     _LOGGER.error("F-53 twice harmless last: %s", err)  # I:err
 
 
+type AliasHd0 = list
+type AliasHd1 = AliasHd0
+
+
+def _alias_head_two_hops(err: AliasHd1[ClientError]) -> None:
+    _LOGGER.error("F-54 head two hops: %s", err)  # I:err
+
+
+type AliasNestHead = dict
+
+
+def _alias_head_nested(err: AliasNestHead[str, AliasNestHead[str, ClientError]]) -> None:
+    _LOGGER.error("F-55 head nested: %s", err)  # I:err
+
+
+def _alias_unbounded_param[T](err: T, companion: ClientError) -> None:
+    _LOGGER.error("F-56 unbounded param: %s", err)  # S
+    _LOGGER.error("F-56 companion: %s", companion)  # C:companion
+
+
+AliasPlainString = "ClientError"
+
+
+def _alias_plain_string(err: AliasPlainString) -> None:
+    _LOGGER.error("F-57 plain string: %s", err)  # I:err
+
+
+*AliasStarRest, AliasStarLast = str, int, ClientError
+
+
+def _alias_starred_target(err: AliasStarLast) -> None:
+    _LOGGER.error("F-58 starred target: %s", err)  # I:err
+
+
+(AliasNestA, AliasNestB), AliasNestC = (ClientError, OSError), ValueError
+
+
+def _alias_nested_target(err: AliasNestA) -> None:
+    _LOGGER.error("F-59 nested target: %s", err)  # I:err
+
+
+type HarmW0 = str
+type HarmW1 = HarmW0 | HarmW0
+type HarmW2 = HarmW1 | HarmW1
+type HarmW3 = HarmW2 | HarmW2
+type HarmW4 = HarmW3 | HarmW3
+type HarmW5 = HarmW4 | HarmW4
+type HarmW6 = HarmW5 | HarmW5
+type HarmW7 = HarmW6 | HarmW6
+type HarmW8 = HarmW7 | HarmW7
+type HarmW9 = HarmW8 | HarmW8
+type HarmW10 = HarmW9 | HarmW9
+
+
+def _alias_doubling_chain_harmless(err: HarmW10) -> None:
+    _LOGGER.error("F-60 doubling chain harmless: %s", err)  # I:err
+
+
+type AliasUnusedBound[T: ClientError] = list[int]
+
+
+def _alias_unused_bound(err: AliasUnusedBound[int], companion: ClientError) -> None:
+    _LOGGER.error("F-61 unused bound: %s", err)  # S
+    _LOGGER.error("F-61 companion: %s", companion)  # C:companion
+
+
+def _alias_outer_bound[T: ClientError]() -> None:
+    def _inner(err: T) -> None:
+        _LOGGER.error("F-62 nested function: %s", err)  # I:err
+
+    _inner
+
+
 # This module binds the name `BaseException` itself. Without the identity check
 # in `_is_foreign_exception_annotation`, the `own` rule would swallow the
 # fail-closed member of a truncated expansion and F-50 and F-51 would go silent.
@@ -3055,10 +3255,9 @@ def test_shape_i_resolves_local_type_aliases() -> None:
 
     Codex on PR #1306 (`discussion_r4049621555`): `type TransportFailure =
     ClientError` used as `err: TransportFailure` was not seen, because the
-    alias name is neither imported nor suffixed. Fifty forms, each one a line
-    of the plan's form table, each one also in the standalone corpus
-    `tools/alias_formen_probe.py`, which runs them against this guard and
-    prints one line per form.
+    alias name is neither imported nor suffixed. Sixty-two forms, each one a line
+    of the form table this change was planned and reviewed against; every one
+    of them has a representative below.
 
     Reported, one marker `# I:` per line in the fixture: the plain statement
     (F-01), a union (F-02), a container (F-03), `Optional` (F-04), a chain of
@@ -3080,7 +3279,13 @@ def test_shape_i_resolves_local_type_aliases() -> None:
     alias head, a qualified access to a class alias (F-41), an alias on
     `Annotated` used as the resolved head (F-48), a doubling union chain
     (F-45, 20 levels, cut by the width limit and reported fail-closed) and a
-    linear chain of 70 hops (F-50, cut by the depth limit, which is 64).
+    linear chain of 70 hops (F-50, cut by the depth limit, which is 64), a
+    head chain of two hops (F-54), a head repeated inside its own expansion
+    (F-55, a repetition is not a cycle), a string value of a plain assignment
+    (F-57), a starred (F-58) and a nested (F-59) tuple target, and a doubling
+    chain on a *harmless* leaf (F-60, reported only because the width limit
+    closes fail-closed; without the limit it would go silent) and the bound
+    of an enclosing function's type parameter in a nested function (F-62).
 
     Reported *and unchanged*, which is the point of the additive expansion:
     an alias with a suffixed name on a harmless value (F-26), one that shadows
@@ -3101,7 +3306,10 @@ def test_shape_i_resolves_local_type_aliases() -> None:
     binding would report three sites in this package today), `type` (F-43) and
     `Callable` (F-44) as a resolved head, a value binding (F-46) and a
     resolved value without any type reference (F-47, the counter-test to
-    F-14). Without the companion, a silent case and a misspelled alias name
+    F-14) and an unbounded type parameter whose name another function bounds
+    (F-56: the bound of `def f[T: ClientError]` above stays in `f`), and an
+    alias parameter's bound that the alias value does not use (F-61). Without
+    the companion, a silent case and a misspelled alias name
     would be equally absent from the pin.
     """
     tree = ast.parse(_SHAPE_I_ALIAS_FIXTURE)
@@ -3162,6 +3370,15 @@ def test_shape_i_resolves_local_type_aliases() -> None:
         (558, "err"),
         (566, "companion"),
         (576, "err"),
+        (584, "err"),
+        (591, "err"),
+        (596, "companion"),
+        (603, "err"),
+        (610, "err"),
+        (617, "err"),
+        (634, "err"),
+        (642, "companion"),
+        (647, "err"),
     ]
     outside, _ = _scan_tree(tree, "coordinator/alias_fixture.py")
     assert outside == []
