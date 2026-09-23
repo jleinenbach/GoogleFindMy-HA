@@ -387,41 +387,57 @@ def _manual_pr_branch() -> str:
     return "\n".join(body) + "\n"
 
 
-@pytest.mark.parametrize(
-    "owner",
-    ["main", "x';id>pwned;'", "a$(id>pwned)&b;c"],
-    ids=["plain", "apostrophe", "substitution"],
-)
-def test_manual_pr_command_is_safe_to_paste(tmp_path: Path, owner: str) -> None:
-    """The printed manual command passes every branch name through unchanged.
+def _decode_workflow_command(message: str) -> str:
+    """Undo the escapes the runner decodes in a workflow command message.
 
-    git accepts ``'``, ``;``, ``$(...)``, ``&`` and ``>`` in branch names, and
-    the maintainer copies the printed line into a shell. The line is executed
-    here the way a paste would execute it, against a ``gh`` function that only
-    reports its arguments, so a name that breaks out of its quoting shows up as
-    a changed argument list or as the file ``pwned``.
+    Order as in the runner: ``%0D`` and ``%0A`` first, ``%25`` last, so an
+    escaped ``%250A`` stays the literal text ``%0A``.
+    """
+
+    return message.replace("%0D", "\r").replace("%0A", "\n").replace("%25", "%")
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["main", "x';id>pwned;'", "a$(id>pwned)&b;c", "a%25b", "x%0Aid>pwned"],
+    ids=["plain", "apostrophe", "substitution", "percent", "encoded-newline"],
+)
+def test_manual_pr_command_is_safe_to_paste(tmp_path: Path, name: str) -> None:
+    """The displayed manual command passes both branch names through unchanged.
+
+    git accepts ``'``, ``;``, ``$(...)``, ``&``, ``>`` and ``%`` in branch
+    names, and the maintainer copies the line from the log into a shell. The
+    runner shows an ``::error::`` message after decoding ``%25``, ``%0A`` and
+    ``%0D``, so the test decodes the same way and then executes the line the way
+    a paste would, against a ``gh`` function that only reports its arguments. A
+    name that breaks out of its quoting shows up as a changed argument list or
+    as the file ``pwned``. The hostile name goes into both ``--base`` and
+    ``--head``; in the workflow the head branch is derived from the validated
+    tag, the test does not rely on that.
     """
 
     bash = shutil.which("bash")
     git = shutil.which("git")
     assert bash is not None, "bash is required to execute the workflow step"
     assert git is not None, "git is required for these tests"
-    check = subprocess.run(
-        [git, "check-ref-format", "--branch", owner],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        timeout=60,
-        check=False,
-    )
-    assert check.returncode == 0, f"fixture is no valid branch name: {owner!r}"
+    head = f"release-stamp/{name}"
+    for branch_name in (name, head):
+        check = subprocess.run(
+            [git, "check-ref-format", "--branch", branch_name],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=60,
+            check=False,
+        )
+        assert check.returncode == 0, f"no valid branch name: {branch_name!r}"
 
     tag = "1.7.15.18"
     branch = tmp_path / "branch.sh"
     branch.write_text(_manual_pr_branch(), encoding="utf-8")
     env = {
         "PATH": "/usr/bin:/bin",
-        "STAMP_BRANCH": owner,
-        "FB_BRANCH": f"release-stamp/{tag}",
+        "STAMP_BRANCH": name,
+        "FB_BRANCH": head,
         "TAG_NAME": tag,
     }
     printed = subprocess.run(
@@ -437,7 +453,7 @@ def test_manual_pr_command_is_safe_to_paste(tmp_path: Path, owner: str) -> None:
     assert printed.returncode == 0, output
     marker = "open it by hand: "
     assert output.count(marker) == 1, output
-    command = output.split(marker, 1)[1].strip()
+    command = _decode_workflow_command(output.split(marker, 1)[1].rstrip("\n"))
 
     paste = tmp_path / "paste.sh"
     paste.write_text(
@@ -458,9 +474,9 @@ def test_manual_pr_command_is_safe_to_paste(tmp_path: Path, owner: str) -> None:
         "pr",
         "create",
         "--base",
-        owner,
+        name,
         "--head",
-        f"release-stamp/{tag}",
+        head,
         "--title",
         f"chore(release): {tag}",
     ], command
