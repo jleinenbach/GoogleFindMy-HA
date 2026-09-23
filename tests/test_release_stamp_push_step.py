@@ -9,6 +9,9 @@ tag and has four outcomes:
 * the direct push to that branch succeeds;
 * branch rules reject the direct push, so the step pushes the stamp to a new
   branch ``release-stamp/<tag>`` and opens a stamp PR against the owning branch;
+  if ``gh pr create`` fails after that push, the step stops with rc 1 and an
+  ``::error::`` line that names the ``gh pr create`` command to run by hand,
+  with both branch names quoted so the line is safe to paste;
 * the tag is behind the branch tip, so the branch stamp is skipped;
 * no single branch owns the tag, so the branch stamp is skipped.
 
@@ -360,6 +363,107 @@ def test_fallback_names_manual_pr_command_when_pr_creation_fails(
     assert "::notice::stamp PR opened" not in run.output
     assert _remote_ref(world, f"refs/heads/release-stamp/{tag}") == world.stamp_sha
     assert _remote_ref(world, "refs/heads/main") == world.seed_main
+
+
+def _manual_pr_branch() -> str:
+    """Return the commands of the ``gh pr create`` failure branch, comments dropped.
+
+    These are the lines between the ``|| {`` that follows ``gh pr create`` and
+    the ``exit 1`` that ends the branch.
+    """
+
+    lines = _push_run_block().splitlines()
+    starts = [i for i, line in enumerate(lines) if line.rstrip().endswith("|| {")]
+    assert len(starts) == 1, starts
+    body: list[str] = []
+    for line in lines[starts[0] + 1 :]:
+        if line.strip() == "exit 1":
+            break
+        if not line.strip().startswith("#"):
+            body.append(line.strip())
+    else:
+        raise AssertionError("the gh pr create failure branch has no exit 1")
+    assert body, "the gh pr create failure branch prints nothing"
+    return "\n".join(body) + "\n"
+
+
+@pytest.mark.parametrize(
+    "owner",
+    ["main", "x';id>pwned;'", "a$(id>pwned)&b;c"],
+    ids=["plain", "apostrophe", "substitution"],
+)
+def test_manual_pr_command_is_safe_to_paste(tmp_path: Path, owner: str) -> None:
+    """The printed manual command passes every branch name through unchanged.
+
+    git accepts ``'``, ``;``, ``$(...)``, ``&`` and ``>`` in branch names, and
+    the maintainer copies the printed line into a shell. The line is executed
+    here the way a paste would execute it, against a ``gh`` function that only
+    reports its arguments, so a name that breaks out of its quoting shows up as
+    a changed argument list or as the file ``pwned``.
+    """
+
+    bash = shutil.which("bash")
+    git = shutil.which("git")
+    assert bash is not None, "bash is required to execute the workflow step"
+    assert git is not None, "git is required for these tests"
+    check = subprocess.run(
+        [git, "check-ref-format", "--branch", owner],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=60,
+        check=False,
+    )
+    assert check.returncode == 0, f"fixture is no valid branch name: {owner!r}"
+
+    tag = "1.7.15.18"
+    branch = tmp_path / "branch.sh"
+    branch.write_text(_manual_pr_branch(), encoding="utf-8")
+    env = {
+        "PATH": "/usr/bin:/bin",
+        "STAMP_BRANCH": owner,
+        "FB_BRANCH": f"release-stamp/{tag}",
+        "TAG_NAME": tag,
+    }
+    printed = subprocess.run(
+        [bash, "-e", str(branch)],
+        cwd=tmp_path,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        timeout=60,
+        check=False,
+    )
+    output = printed.stdout.decode("utf-8", errors="replace")
+    assert printed.returncode == 0, output
+    marker = "open it by hand: "
+    assert output.count(marker) == 1, output
+    command = output.split(marker, 1)[1].strip()
+
+    paste = tmp_path / "paste.sh"
+    paste.write_text(
+        "gh() { printf '%s\\0' \"$@\"; }\n" + command + "\n", encoding="utf-8"
+    )
+    pasted = subprocess.run(
+        [bash, str(paste)],
+        cwd=tmp_path,
+        env={"PATH": "/usr/bin:/bin"},
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=60,
+        check=False,
+    )
+    assert not (tmp_path / "pwned").exists(), command
+    assert pasted.returncode == 0, pasted.stderr.decode("utf-8", errors="replace")
+    assert pasted.stdout.decode("utf-8").split("\0")[:-1] == [
+        "pr",
+        "create",
+        "--base",
+        owner,
+        "--head",
+        f"release-stamp/{tag}",
+        "--title",
+        f"chore(release): {tag}",
+    ], command
 
 
 def test_direct_push_updates_owning_branch(tmp_path: Path) -> None:

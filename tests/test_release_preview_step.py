@@ -5,14 +5,18 @@ The step ``Preview (dry run)`` calls ``semantic-release --noop version`` and
 ``semantic-release --noop changelog``. python-semantic-release logs one
 ``Couldn't parse tag`` WARNING per tag outside its ``tag_format`` (four-segment
 maintenance tags, old beta tags, foreign tags); in this repository that was
-1380 warnings in one preview (CI run 35692265353), most of the log. The step folds them into one
-count line per call and keeps everything else:
+1380 warnings in one preview (CI run 35692265353), most of the log. The step
+folds them into one count line per call and keeps everything else:
 
 * no line of a folded warning reaches the log, including the continuation
   lines of a record that rich wrapped;
 * every other stderr line and all of stdout stay visible;
 * a failing call stops the step with its exit code, an ``::error::`` line and
-  its complete, unfiltered stderr, and the second call does not run.
+  its complete, unfiltered stderr, and the second call does not run;
+* a failing count or filter stops the step with rc 1 and an ``::error::``
+  line that names the exit code of ``grep`` or ``awk``; a failing filter also
+  prints the complete, unfiltered stderr, so lines it printed before it
+  failed appear a second time.
 
 These tests execute the REAL ``run`` block, extracted with ``yaml.safe_load``
 and started as ``bash -e`` like the GitHub runner does for ``run`` steps without
