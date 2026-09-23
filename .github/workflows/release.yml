@@ -71,8 +71,46 @@ jobs:
           set -euo pipefail
           # Global --noop MUST precede the subcommand in python-semantic-release
           # v10 (`version --noop` / `changelog --noop` are not valid options).
-          poetry run semantic-release --noop version
-          poetry run semantic-release --noop changelog
+          # PSR logs one WARNING per tag it cannot parse (four-segment, beta and
+          # foreign tags) on stderr. They are folded into one count line per call;
+          # every other stderr line and all of stdout stay visible. Layer 1: a wide
+          # COLUMNS stops rich from wrapping a record. Layer 2: rich indents the
+          # continuation lines of a wrapped record by 20 columns; those that follow
+          # a folded record are dropped with it, so a console narrowed down to rich's
+          # 80-column default cannot leak them.
+          # Locked by tests/test_release_preview_step.py.
+          export COLUMNS=1000
+          PSR_ERR="$(mktemp "${RUNNER_TEMP:-/tmp}/psr-preview.XXXXXX")" || {
+            echo "::error::mktemp for the semantic-release stderr capture failed; nothing was previewed."
+            exit 1
+          }
+          PARSE_WARNING="Couldn't parse tag"
+          psr_preview() {
+            local rc=0 grep_rc=0 folded
+            poetry run semantic-release --noop "$1" 2>"$PSR_ERR" || rc=$?
+            if [ "$rc" -ne 0 ]; then
+              echo "::error::'poetry run semantic-release --noop $1' failed with exit code $rc. Its unfiltered stderr follows:"
+              cat "$PSR_ERR"
+              exit "$rc"
+            fi
+            folded="$(grep -cF -- "$PARSE_WARNING" "$PSR_ERR")" || grep_rc=$?
+            if [ "$grep_rc" -gt 1 ]; then
+              echo "::error::counting the folded tag warnings failed (grep exit $grep_rc); nothing was folded."
+              exit 1
+            fi
+            awk -v warning="$PARSE_WARNING" -v indent="$(printf '%20s' '')" '
+              index($0, warning) { folding = 1; next }
+              folding && index($0, indent) == 1 { next }
+              { folding = 0; print }
+            ' "$PSR_ERR" >&2 || {
+              echo "::error::filtering the semantic-release stderr failed (awk exit $?); its unfiltered stderr follows:"
+              cat "$PSR_ERR"
+              exit 1
+            }
+            echo "semantic-release --noop $1: ${folded} unparseable tag warning(s) folded"
+          }
+          psr_preview version
+          psr_preview changelog
 
       - name: Propose a version and open a draft release
         if: github.event.inputs.dry_run != 'true'

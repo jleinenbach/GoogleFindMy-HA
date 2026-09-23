@@ -991,6 +991,16 @@ Stubs on `PATH` log their calls to files, not to stdout: inside `$(...)` a
 stdout marker lands in the captured variable. A missing `bash` fails the test
 instead of skipping it.
 
+`tests/test_release_stamp_push_step.py` applies the same rule to the push step
+of `release-stamp.yml`, with two differences. That step reads its inputs from
+the job-level `env`, so the test pins the job's `env` keys (`_JOB_ENV_KEYS`) and
+refuses a step-level `env`. And it runs the real `git` against a local bare
+remote instead of a stub, so its environment isolates git explicitly: `HOME`
+points into `tmp_path`, `GIT_CONFIG_NOSYSTEM=1`, `GIT_CONFIG_GLOBAL` names an
+empty file, and the commit identity comes from `GIT_AUTHOR_*` and
+`GIT_COMMITTER_*`. A new test that drives a workflow step with real git should
+build its environment the same way.
+
 ## Device registry expectations
 
 The coordinator device-registry tests retain Home Assistant's 2025.10

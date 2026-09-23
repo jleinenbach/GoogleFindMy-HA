@@ -182,10 +182,19 @@ jobs:
             # approval-required state anyway (docs: github_token).
             echo "direct push to ${STAMP_BRANCH} rejected by branch rules; opening the stamp PR"
             FB_BRANCH="release-stamp/${TAG_NAME}"
-            git push origin "HEAD:${FB_BRANCH}"
+            # HEAD is the detached tag checkout, so git cannot infer that a new
+            # destination is meant to be a branch and stops with "not a full
+            # refname". Spell out the full ref (git-push, <refspec>).
+            git push origin "HEAD:refs/heads/${FB_BRANCH}"
             PR_URL="$(gh pr create --base "${STAMP_BRANCH}" --head "${FB_BRANCH}" \
               --title "chore(release): ${TAG_NAME}" \
-              --body "Automated version stamp for release ${TAG_NAME}. [skip ci]")"
+              --body "Automated version stamp for release ${TAG_NAME}. [skip ci]")" || {
+              # The stamp branch now exists, so a rerun finds two branches that
+              # contain the tag and skips the branch stamp with a notice. It does
+              # not retry the PR; name the one command that completes the stamp.
+              echo "::error::pushed ${FB_BRANCH}, but opening the stamp PR failed; open it by hand: gh pr create --base ${STAMP_BRANCH} --head ${FB_BRANCH} --title 'chore(release): ${TAG_NAME}'"
+              exit 1
+            }
             echo "::notice::stamp PR opened: ${PR_URL}; a maintainer merges it (admin bypass; the stamp commit carries [skip ci] and workflow runs for a GITHUB_TOKEN-created PR wait in an approval-required state, so CI Success is not reported)"
           elif grep -qiE 'non-fast-forward|fetch first|tip of your current branch is behind' push_err.log; then
             # The tag is behind the branch tip; the stamp would rewrite history.
