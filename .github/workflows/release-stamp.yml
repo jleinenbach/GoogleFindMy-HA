@@ -192,7 +192,14 @@ jobs:
               # The stamp branch now exists, so a rerun finds two branches that
               # contain the tag and skips the branch stamp with a notice. It does
               # not retry the PR; name the one command that completes the stamp.
-              echo "::error::pushed ${FB_BRANCH}, but opening the stamp PR failed; open it by hand: gh pr create --base ${STAMP_BRANCH} --head ${FB_BRANCH} --title 'chore(release): ${TAG_NAME}'"
+              # The line is meant to be pasted into a shell, and git allows ' ; $ & %
+              # in branch names, so both names are quoted with printf %q. The runner
+              # decodes %25, %0A and %0D in the message, so % is escaped as %25 on
+              # top. TAG_NAME is restricted by "Validate published tag" and fits in
+              # single quotes.
+              base_q="$(printf '%q' "${STAMP_BRANCH}")"
+              head_q="$(printf '%q' "${FB_BRANCH}")"
+              echo "::error::pushed ${FB_BRANCH}, but opening the stamp PR failed; open it by hand: gh pr create --base ${base_q//%/%25} --head ${head_q//%/%25} --title 'chore(release): ${TAG_NAME}'"
               exit 1
             }
             echo "::notice::stamp PR opened: ${PR_URL}; a maintainer merges it (admin bypass; the stamp commit carries [skip ci] and workflow runs for a GITHUB_TOKEN-created PR wait in an approval-required state, so CI Success is not reported)"

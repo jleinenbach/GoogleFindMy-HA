@@ -9,6 +9,9 @@ tag and has four outcomes:
 * the direct push to that branch succeeds;
 * branch rules reject the direct push, so the step pushes the stamp to a new
   branch ``release-stamp/<tag>`` and opens a stamp PR against the owning branch;
+  if ``gh pr create`` fails after that push, the step stops with rc 1 and an
+  ``::error::`` line that names the ``gh pr create`` command to run by hand,
+  with both branch names quoted so the line is safe to paste;
 * the tag is behind the branch tip, so the branch stamp is skipped;
 * no single branch owns the tag, so the branch stamp is skipped.
 
@@ -360,6 +363,123 @@ def test_fallback_names_manual_pr_command_when_pr_creation_fails(
     assert "::notice::stamp PR opened" not in run.output
     assert _remote_ref(world, f"refs/heads/release-stamp/{tag}") == world.stamp_sha
     assert _remote_ref(world, "refs/heads/main") == world.seed_main
+
+
+def _manual_pr_branch() -> str:
+    """Return the commands of the ``gh pr create`` failure branch, comments dropped.
+
+    These are the lines between the ``|| {`` that follows ``gh pr create`` and
+    the ``exit 1`` that ends the branch.
+    """
+
+    lines = _push_run_block().splitlines()
+    starts = [i for i, line in enumerate(lines) if line.rstrip().endswith("|| {")]
+    assert len(starts) == 1, starts
+    body: list[str] = []
+    for line in lines[starts[0] + 1 :]:
+        if line.strip() == "exit 1":
+            break
+        if not line.strip().startswith("#"):
+            body.append(line.strip())
+    else:
+        raise AssertionError("the gh pr create failure branch has no exit 1")
+    assert body, "the gh pr create failure branch prints nothing"
+    return "\n".join(body) + "\n"
+
+
+def _decode_workflow_command(message: str) -> str:
+    """Undo the escapes the runner decodes in a workflow command message.
+
+    Order as in the runner: ``%0D`` and ``%0A`` first, ``%25`` last, so an
+    escaped ``%250A`` stays the literal text ``%0A``.
+    """
+
+    return message.replace("%0D", "\r").replace("%0A", "\n").replace("%25", "%")
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["main", "x';id>pwned;'", "a$(id>pwned)&b;c", "a%25b", "x%0Aid>pwned"],
+    ids=["plain", "apostrophe", "substitution", "percent", "encoded-newline"],
+)
+def test_manual_pr_command_is_safe_to_paste(tmp_path: Path, name: str) -> None:
+    """The displayed manual command passes both branch names through unchanged.
+
+    git accepts ``'``, ``;``, ``$(...)``, ``&``, ``>`` and ``%`` in branch
+    names, and the maintainer copies the line from the log into a shell. The
+    runner shows an ``::error::`` message after decoding ``%25``, ``%0A`` and
+    ``%0D``, so the test decodes the same way and then executes the line the way
+    a paste would, against a ``gh`` function that only reports its arguments. A
+    name that breaks out of its quoting shows up as a changed argument list or
+    as the file ``pwned``. The hostile name goes into both ``--base`` and
+    ``--head``; in the workflow the head branch is derived from the validated
+    tag, the test does not rely on that.
+    """
+
+    bash = shutil.which("bash")
+    git = shutil.which("git")
+    assert bash is not None, "bash is required to execute the workflow step"
+    assert git is not None, "git is required for these tests"
+    head = f"release-stamp/{name}"
+    for branch_name in (name, head):
+        check = subprocess.run(
+            [git, "check-ref-format", "--branch", branch_name],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=60,
+            check=False,
+        )
+        assert check.returncode == 0, f"no valid branch name: {branch_name!r}"
+
+    tag = "1.7.15.18"
+    branch = tmp_path / "branch.sh"
+    branch.write_text(_manual_pr_branch(), encoding="utf-8")
+    env = {
+        "PATH": "/usr/bin:/bin",
+        "STAMP_BRANCH": name,
+        "FB_BRANCH": head,
+        "TAG_NAME": tag,
+    }
+    printed = subprocess.run(
+        [bash, "-e", str(branch)],
+        cwd=tmp_path,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        timeout=60,
+        check=False,
+    )
+    output = printed.stdout.decode("utf-8", errors="replace")
+    assert printed.returncode == 0, output
+    marker = "open it by hand: "
+    assert output.count(marker) == 1, output
+    command = _decode_workflow_command(output.split(marker, 1)[1].rstrip("\n"))
+
+    paste = tmp_path / "paste.sh"
+    paste.write_text(
+        "gh() { printf '%s\\0' \"$@\"; }\n" + command + "\n", encoding="utf-8"
+    )
+    pasted = subprocess.run(
+        [bash, str(paste)],
+        cwd=tmp_path,
+        env={"PATH": "/usr/bin:/bin"},
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=60,
+        check=False,
+    )
+    assert not (tmp_path / "pwned").exists(), command
+    assert pasted.returncode == 0, pasted.stderr.decode("utf-8", errors="replace")
+    assert pasted.stdout.decode("utf-8").split("\0")[:-1] == [
+        "pr",
+        "create",
+        "--base",
+        name,
+        "--head",
+        head,
+        "--title",
+        f"chore(release): {tag}",
+    ], command
 
 
 def test_direct_push_updates_owning_branch(tmp_path: Path) -> None:
