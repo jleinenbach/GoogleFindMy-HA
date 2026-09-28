@@ -3,8 +3,8 @@
 #  Copyright © 2024 Leon Böttger. All rights reserved.
 #
 """
-Crypto primitives used to encrypt/decrypt Find My Device payloads on the NIST
-SECP160r1 curve with AES-EAX for authenticated encryption.
+Crypto primitives used to encrypt/decrypt Find My Device payloads with ECDH on
+an FMDN curve and AES-EAX for authenticated encryption.
 
 Design goals (feature-neutral, HA-friendly):
 - Keep public function signatures unchanged.
@@ -13,9 +13,14 @@ Design goals (feature-neutral, HA-friendly):
 - Prefer explicitness and readability over micro-optimizations.
 
 Notes:
-- SECP160r1 has a 160-bit field; x/y coordinates are 20 bytes.
-- For primes p ≡ 3 (mod 4), modular square roots can be computed as
-  y = a^((p+1)/4) mod p (used by rx_to_ry).  See references in docs.
+- ``decrypt_foreign_report`` selects the curve from the length of ``Sx``
+  (``curve_profile.curve_for_coord_len``): 20 bytes SECP160R1, 32 bytes
+  SECP256R1. ``decrypt`` is a thin wrapper around it for one identity key.
+- A reading (``ForeignReading``) names one way to derive the owner-side
+  scalar and nonce. SECP160R1 has one reading; SECP256R1 has four
+  provisional readings, tried in the order of their evidence, until field
+  reports confirm which one real trackers use.
+- ``encrypt`` still covers SECP160R1 only (20-byte EIDs).
 """
 
 # custom_components/googlefindmy/FMDNCrypto/foreign_tracker_cryptor.py
@@ -24,10 +29,13 @@ from __future__ import annotations
 
 import asyncio
 import secrets
+from collections.abc import Iterable, Mapping
+from dataclasses import dataclass
+from types import MappingProxyType
+from typing import Any, Final
 
 from custom_components.googlefindmy.example_data_provider import get_example_data
 from custom_components.googlefindmy.FMDNCrypto._ecdsa_shim import (
-    CurveFpProtocol,
     CurveParametersProtocol,
     load_curve,
     load_curve_fp_class,
@@ -37,6 +45,14 @@ from custom_components.googlefindmy.FMDNCrypto._lazy_crypto import (
     get_aes_class,
     get_hashes_module,
     get_hkdf_class,
+)
+from custom_components.googlefindmy.FMDNCrypto.curve_profile import (
+    SECP160R1,
+    SECP256R1,
+    FmdnCurve,
+    ScalarRule,
+    curve_for_coord_len,
+    reduce_scalar,
 )
 from custom_components.googlefindmy.FMDNCrypto.curve_profile import (
     rx_to_ry as rx_to_ry,  # noqa: PLC0414 - re-exported for callers of the cryptor
@@ -49,6 +65,10 @@ from custom_components.googlefindmy.FMDNCrypto.eid_generator import (
     generate_eid_variant,
     prf_aes_256_ecb,
 )
+from custom_components.googlefindmy.FMDNCrypto.foreign_report_errors import (
+    ForeignReportAuthError,
+    ForeignReportStructureError,
+)
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -59,8 +79,111 @@ _AES_KEY_LEN: int = 32
 _AES_TAG_LEN: int = 16
 # SECP160r1 coordinate length in bytes (160 bits)
 _COORD_LEN: int = 20
-# Nonce is constructed as LRx(8) || LSx(8) = 16 bytes (see spec used here)
+# Nonce used by ``encrypt``: LRx(8) || LSx(8) = 16 bytes (SECP160R1 practice)
 _NONCE_LEN: int = 16
+
+# Single definition of the place where users post which reading decrypted
+# their P-256 reports (read by the log line and the diagnostics block).
+FOREIGN_READING_FEEDBACK_URL: Final[str] = (
+    "https://github.com/BSkando/GoogleFindMy-HA/issues/223"
+)
+
+# Sources of the readings below: a public URL or a commit of this repository.
+_SRC_SPEC: Final[str] = (
+    "https://developers.google.com/nearby/fast-pair/specifications/extensions/fmdn"
+)
+_SRC_FORK_PLUS1: Final[str] = "commit 6c95f0f5 (MODERN_P256_* EID variants)"
+
+
+@dataclass(frozen=True, slots=True)
+class ForeignReading:
+    """One way to derive the owner-side scalar and nonce for a foreign report.
+
+    Attributes:
+        curve: The curve the reading applies to.
+        scalar_rule: How the PRF output ``r'`` becomes the scalar ``r``.
+        nonce_half_len: Bytes taken from the low end of ``Rx`` and of ``Sx``;
+            the nonce is ``Rx[-h:] || Sx[-h:]``.
+        source: Public URL or commit of this repository that motivates it.
+        provisional: True while no field report has confirmed the reading.
+    """
+
+    curve: FmdnCurve
+    scalar_rule: ScalarRule
+    nonce_half_len: int
+    source: str
+    provisional: bool
+
+    def __post_init__(self) -> None:
+        """Reject a nonce half that does not fit into one coordinate."""
+        if not 0 < self.nonce_half_len <= self.curve.coord_len:
+            raise ValueError(
+                f"nonce_half_len must lie in [1, {self.curve.coord_len}] "
+                f"for {self.curve.name} (got {self.nonce_half_len})"
+            )
+
+    @property
+    def reading_id(self) -> str:
+        """Stable identifier, e.g. ``p256/mod_n/nonce8``; derived, never stored twice."""
+        return (
+            f"{self.curve.short_name}/{self.scalar_rule.value}/"
+            f"nonce{self.nonce_half_len}"
+        )
+
+
+SECP160R1_FOREIGN_READINGS: Final[tuple[ForeignReading, ...]] = (
+    ForeignReading(
+        curve=SECP160R1,
+        scalar_rule=ScalarRule.MOD_N,
+        nonce_half_len=8,
+        source=_SRC_SPEC,
+        provisional=False,
+    ),
+)
+
+# Ordered by evidence: (1) the specification's scalar with the 8+8 nonce used
+# in SECP160R1 practice, (2) the specification's scalar with the literal
+# "lower 80 bits" nonce, (3) and (4) the integration's existing ``+1``
+# projection with either nonce.
+# fmt: off
+P256_FOREIGN_READINGS: Final[tuple[ForeignReading, ...]] = (
+    ForeignReading(curve=SECP256R1, scalar_rule=ScalarRule.MOD_N, nonce_half_len=8, source=_SRC_SPEC, provisional=True),
+    ForeignReading(curve=SECP256R1, scalar_rule=ScalarRule.MOD_N, nonce_half_len=10, source=_SRC_SPEC, provisional=True),
+    ForeignReading(curve=SECP256R1, scalar_rule=ScalarRule.PLUS_ONE, nonce_half_len=8, source=_SRC_FORK_PLUS1, provisional=True),
+    ForeignReading(curve=SECP256R1, scalar_rule=ScalarRule.PLUS_ONE, nonce_half_len=10, source=_SRC_FORK_PLUS1, provisional=True),
+)
+# fmt: on
+
+# Keyed by ``FmdnCurve.name``; ``short_name`` only appears inside reading_id.
+READINGS_BY_CURVE: Final[Mapping[str, tuple[ForeignReading, ...]]] = MappingProxyType(
+    {
+        SECP160R1.name: SECP160R1_FOREIGN_READINGS,
+        SECP256R1.name: P256_FOREIGN_READINGS,
+    }
+)
+
+# Every nonce length a reading can produce (16 and 20 bytes).
+_NONCE_LENS: Final[frozenset[int]] = frozenset(
+    2 * reading.nonce_half_len
+    for readings in READINGS_BY_CURVE.values()
+    for reading in readings
+)
+
+
+@dataclass(frozen=True, slots=True)
+class ForeignDecryptResult:
+    """Outcome of a successful ``decrypt_foreign_report`` call.
+
+    Attributes:
+        plaintext: The authenticated plaintext.
+        key_index: Position of the identity key that decrypted the report.
+        reading: The reading whose tag verified.
+    """
+
+    plaintext: bytes
+    key_index: int
+    reading: ForeignReading
+
 
 # Use module-level caching for lazy-loaded curve instances
 # The getters always return valid objects after first load
@@ -120,15 +243,44 @@ def encrypt_aes_eax(data: bytes, nonce: bytes, key: bytes) -> tuple[bytes, bytes
     return m_dash, tag
 
 
-def decrypt_aes_eax(m_dash: bytes, tag: bytes, nonce: bytes, key: bytes) -> bytes:
-    """Decrypt and verify AES-EAX-256 payloads."""
-    _require_len("nonce", nonce, _NONCE_LEN)
+def _eax_cipher(nonce: bytes, key: bytes, tag: bytes) -> Any:
+    """Validate lengths and return an AES-EAX-256 cipher for decryption."""
+    if len(nonce) not in _NONCE_LENS:
+        raise ValueError(
+            f"nonce must be one of {sorted(_NONCE_LENS)} bytes (got {len(nonce)})"
+        )
     _require_len("key", key, _AES_KEY_LEN)
     _require_len("tag", tag, _AES_TAG_LEN)
-
     AES = get_aes_class()
-    cipher = AES.new(key, AES.MODE_EAX, nonce=nonce)
-    plaintext: bytes = cipher.decrypt_and_verify(m_dash, tag)
+    return AES.new(key, AES.MODE_EAX, nonce=nonce)
+
+
+def decrypt_aes_eax(m_dash: bytes, tag: bytes, nonce: bytes, key: bytes) -> bytes:
+    """Decrypt and verify AES-EAX-256 payloads.
+
+    Raises:
+        ValueError: On a nonce length no reading produces, on invalid key/tag
+            lengths, or when the tag does not verify.
+    """
+    plaintext: bytes = _eax_cipher(nonce, key, tag).decrypt_and_verify(m_dash, tag)
+    return plaintext
+
+
+def _try_decrypt_aes_eax(
+    m_dash: bytes, tag: bytes, nonce: bytes, key: bytes
+) -> bytes | None:
+    """Like ``decrypt_aes_eax``, but return None when the tag does not verify.
+
+    A failed tag is the expected outcome for every wrong reading or key, so
+    ``decrypt_foreign_report`` tests readings with this helper and raises one
+    aggregated ``ForeignReportAuthError`` after all attempts. Length errors
+    still raise.
+    """
+    cipher = _eax_cipher(nonce, key, tag)
+    try:
+        plaintext: bytes = cipher.decrypt_and_verify(m_dash, tag)
+    except ValueError:  # PyCryptodome signals a tag mismatch this way
+        return None
     return plaintext
 
 
@@ -143,10 +295,8 @@ def calculate_r(identity_key: bytes, time_counter_u32: int) -> int:
     prf_input = build_table10_prf_input(time_counter_u32, k=FHNA_K)
     prf_output = prf_aes_256_ecb(identity_key, prf_input)
     r_dash_int = int.from_bytes(prf_output, byteorder="big", signed=False)
-    order: int = int(_get_curve().order)
-    # Must match _derive_scalar(rule=ScalarRule.MOD_N) used by
-    # generate_eid_variant for LEGACY_SECP160R1_X20_BE.
-    return r_dash_int % order
+    # Same rule as generate_eid_variant for LEGACY_SECP160R1_X20_BE.
+    return reduce_scalar(r_dash_int, SECP160R1.order, ScalarRule.MOD_N)
 
 
 def encrypt(message: bytes, random: bytes, eid: bytes) -> tuple[bytes, bytes]:
@@ -204,75 +354,147 @@ def encrypt(message: bytes, random: bytes, eid: bytes) -> tuple[bytes, bytes]:
     return encrypted_with_tag, S.x().to_bytes(_COORD_LEN, "big")
 
 
+def _ordered_readings(
+    readings: tuple[ForeignReading, ...], preferred_reading_id: str | None
+) -> tuple[ForeignReading, ...]:
+    """Return ``readings`` with the preferred one first; unknown ids are ignored."""
+    preferred = [r for r in readings if r.reading_id == preferred_reading_id]
+    return (*preferred, *(r for r in readings if r.reading_id != preferred_reading_id))
+
+
+def _shared_material(
+    curve: FmdnCurve, r_dash_int: int, rule: ScalarRule, sx: bytes
+) -> tuple[bytes, bytes] | None:
+    """Return ``(Rx, AES key)`` for one scalar rule, or None for a zero scalar."""
+    r = reduce_scalar(r_dash_int, curve.order, rule)
+    if r == 0:
+        # 0 * G is the point at infinity: this reading cannot apply.
+        return None
+    rx = curve.point_x(r)
+    HKDF = get_hkdf_class()
+    hashes = get_hashes_module()
+    hkdf = HKDF(algorithm=hashes.SHA256(), length=32, salt=None, info=b"")
+    aes_key: bytes = hkdf.derive(curve.ecdh_x(r, sx))
+    return rx, aes_key
+
+
+def decrypt_foreign_report(
+    identity_keys: Iterable[bytes],
+    encrypted_and_tag: bytes,
+    sx: bytes,
+    beacon_time_counter: int,
+    *,
+    preferred_reading_id: str | None = None,
+) -> ForeignDecryptResult:
+    """Decrypt a crowdsourced location report with every key and reading.
+
+    Construction per key and reading (Find Hub Network Accessory
+    Specification, "EID computation"; Boettger et al., PoPETs 2025(4),
+    section 4.1.5):
+
+    1) Select the curve from ``len(sx)``; check the report structure once.
+    2) ``r'`` = AES-ECB-256(EIK, Table 10 input); ``r`` from the reading's
+       scalar rule; ``R = r * G``.
+    3) ``k`` = HKDF-SHA256((r * S).x), with ``S`` rebuilt from ``sx``.
+    4) ``nonce`` = ``Rx[-h:] || Sx[-h:]`` with ``h`` the reading's half length.
+    5) AES-EAX-256 decrypt and verify ``m' || tag``.
+
+    The PRF runs once per key and the ECDH once per key and scalar rule; each
+    reading adds one tag check. The preferred reading is tried first.
+
+    Args:
+        identity_keys: 32-byte identity key candidates, primary key first.
+        encrypted_and_tag: Ciphertext concatenated with the 16-byte tag.
+        sx: X coordinate of the finder's ephemeral point ``S``.
+        beacon_time_counter: Time counter the report was encrypted for.
+        preferred_reading_id: ``reading_id`` that decrypted earlier reports
+            of the same device, if known.
+
+    Returns:
+        The plaintext, the index of the matching key and the reading.
+
+    Raises:
+        ValueError: On an empty key list or a key that is not 32 bytes.
+        UnsupportedCurveError: If ``len(sx)`` maps to no supported curve.
+        ForeignReportStructureError: On a short payload or an ``sx`` that is
+            not on the selected curve; raised before any key is used.
+        ForeignReportAuthError: If no key and no reading verified the tag.
+    """
+    keys: tuple[bytes, ...] = tuple(identity_keys)
+    if not keys:
+        raise ValueError("identity_keys must contain at least one key")
+    for key in keys:
+        _require_len("identity_key", key, EIK_LENGTH)
+
+    # Structure checks: once, before any key candidate.
+    curve = curve_for_coord_len(len(sx))
+    if len(encrypted_and_tag) < _AES_TAG_LEN:
+        raise ForeignReportStructureError(
+            "encryptedAndTag must be at least 16 bytes (contains tag)."
+        )
+    curve.validate_peer_x(sx)
+
+    readings = _ordered_readings(READINGS_BY_CURVE[curve.name], preferred_reading_id)
+    m_dash: bytes = encrypted_and_tag[:-_AES_TAG_LEN]
+    tag: bytes = encrypted_and_tag[-_AES_TAG_LEN:]
+    prf_input = build_table10_prf_input(beacon_time_counter, k=FHNA_K)
+
+    for key_index, key in enumerate(keys):
+        r_dash_int = int.from_bytes(prf_aes_256_ecb(key, prf_input), "big")
+        material_by_rule: dict[ScalarRule, tuple[bytes, bytes] | None] = {}
+        for reading in readings:
+            rule = reading.scalar_rule
+            if rule not in material_by_rule:
+                material_by_rule[rule] = _shared_material(curve, r_dash_int, rule, sx)
+            material = material_by_rule[rule]
+            if material is None:
+                continue
+            rx, aes_key = material
+            half = reading.nonce_half_len
+            plaintext = _try_decrypt_aes_eax(
+                m_dash, tag, rx[-half:] + sx[-half:], aes_key
+            )
+            if plaintext is not None:
+                return ForeignDecryptResult(plaintext, key_index, reading)
+
+    # The text prefix keeps SECP160R1 failures counted as authentication
+    # failures by callers that still classify by message. P-256 reports were
+    # rejected as malformed before multi-reading decryption, so they do not
+    # get the prefix and cannot drive the all-failed EIK cache invalidation.
+    raise ForeignReportAuthError(
+        curve.name,
+        tuple(reading.reading_id for reading in readings),
+        len(keys),
+        mac_check_prefix=curve is SECP160R1,
+    )
+
+
 def decrypt(
     identity_key: bytes, encryptedAndTag: bytes, Sx: bytes, beacon_time_counter: int
 ) -> bytes:
-    """Decrypt a payload sent to a tracker identity on SECP160r1 with AES-EAX-256.
+    """Decrypt a foreign location report for one identity key.
 
-    Construction (mirrors `encrypt` above):
-    1) Compute r from (identity_key, beacon_time_counter); R = r·G.
-    2) Rebuild S from Sx (x-only); choose even y via rx_to_ry.
-    3) Derive k = HKDF-SHA256( (r·S).x ) → 32 bytes.
-    4) nonce = LRx(8) || LSx(8).
-    5) Split m' || tag and AES-EAX-256_DEC(k, nonce, m', tag).
+    Thin wrapper around ``decrypt_foreign_report``; the curve follows from the
+    length of ``Sx`` (20 bytes SECP160R1, 32 bytes SECP256R1).
 
     Args:
         identity_key: 32-byte Ephemeral Identity Key (EIK) used as AES-256
             key for the Table-10 PRF and EID derivation.
         encryptedAndTag: Ciphertext concatenated with 16-byte tag.
-        Sx: 20-byte X coordinate of ephemeral S.
+        Sx: X coordinate of ephemeral S (20 or 32 bytes).
         beacon_time_counter: Time counter used to derive r.
 
     Returns:
         Decrypted plaintext.
 
     Raises:
-        ValueError: On invalid input lengths or verification failure.
+        ValueError: On invalid input lengths or verification failure; the
+            ``ForeignReportError`` subclasses name the cause.
     """
-    # Basic validations
-    _require_len("identity_key", identity_key, EIK_LENGTH)
-    _require_len("Sx", Sx, _COORD_LEN)
-    if len(encryptedAndTag) < _AES_TAG_LEN:
-        raise ValueError("encryptedAndTag must be at least 16 bytes (contains tag).")
-
-    # Split ciphertext and tag
-    m_dash: bytes = encryptedAndTag[:-_AES_TAG_LEN]
-    tag: bytes = encryptedAndTag[-_AES_TAG_LEN:]
-
-    # Curve and scalar r
-    curve = _get_curve()
-    order: int = int(curve.order)
-    r = calculate_r(identity_key, beacon_time_counter) % order
-
-    # R and S points
-    Rx = generate_eid_variant(
-        identity_key,
-        beacon_time_counter,
-        EidVariant.LEGACY_SECP160R1_X20_BE,
+    result = decrypt_foreign_report(
+        (identity_key,), encryptedAndTag, Sx, beacon_time_counter
     )
-    R = int.from_bytes(Rx, byteorder="big")
-    _ = rx_to_ry(R, curve.curve)
-    Sx_int = int.from_bytes(Sx, byteorder="big")
-    Sy = rx_to_ry(Sx_int, curve.curve)
-
-    curve_fp: CurveFpProtocol = curve.curve
-    Point = _get_point()
-    S = Point(curve_fp, Sx_int, Sy)
-
-    # Derive AES-256 key via HKDF-SHA256 over (r·S).x (20 bytes)
-    HKDF = get_hkdf_class()
-    hashes = get_hashes_module()
-    hkdf = HKDF(algorithm=hashes.SHA256(), length=32, salt=None, info=b"")
-    k: bytes = hkdf.derive((r * S).x().to_bytes(_COORD_LEN, "big"))
-
-    # Nonce = LRx(8) || LSx(8)
-    LRx = R.to_bytes(_COORD_LEN, "big")[-8:]
-    LSx = Sx[-8:]
-    nonce: bytes = LRx + LSx  # 16 bytes
-
-    # Decrypt and verify (raises ValueError on failure)
-    plaintext: bytes = decrypt_aes_eax(m_dash, tag, nonce, k)
-    return plaintext
+    return result.plaintext
 
 
 # ---------------------------------------------------------------------------

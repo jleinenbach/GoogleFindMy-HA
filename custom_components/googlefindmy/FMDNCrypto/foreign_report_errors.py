@@ -58,6 +58,11 @@ class UnsupportedCurveError(ForeignReportStructureError):
 class ForeignReportAuthError(ForeignReportError):
     """No key candidate and no reading produced a verifying AES-EAX tag.
 
+    With ``mac_check_prefix`` the message starts with PyCryptodome's wording
+    ``MAC check failed``, so a caller that still classifies ``ValueError`` by
+    its text keeps counting the report as an authentication failure, not as
+    malformed data. Classify by type; the prefix only bridges that transition.
+
     Attributes:
         curve_name: Name of the curve selected from the ``Sx`` length.
         readings_tried: Identifiers of the readings that were tried, in order.
@@ -65,13 +70,19 @@ class ForeignReportAuthError(ForeignReportError):
     """
 
     def __init__(
-        self, curve_name: str, readings_tried: tuple[str, ...], keys_tried: int
+        self,
+        curve_name: str,
+        readings_tried: tuple[str, ...],
+        keys_tried: int,
+        *,
+        mac_check_prefix: bool = False,
     ) -> None:
         """Store the attempt summary and build a message without key material."""
         self.curve_name: str = curve_name
         self.readings_tried: tuple[str, ...] = readings_tried
         self.keys_tried: int = keys_tried
+        prefix = "MAC check failed: " if mac_check_prefix else ""
         super().__init__(
-            f"No reading authenticated the report on {curve_name} "
+            f"{prefix}No reading authenticated the report on {curve_name} "
             f"({len(readings_tried)} readings x {keys_tried} keys)"
         )
