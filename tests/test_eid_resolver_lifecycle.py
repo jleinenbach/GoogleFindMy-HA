@@ -191,3 +191,91 @@ def test_cancel_callback_helper_handles_coroutine() -> None:
 
     # Coroutine should be closed (calling close again is safe)
     coro.close()
+
+
+def _lock_with_variant(variant: str) -> EIDGenerationLock:
+    """Return a non-legacy lock (rotation timestamp set) with ``variant``."""
+
+    return EIDGenerationLock(
+        device_id="device-1",
+        canonical_id="canonical-1",
+        variant=variant,
+        advertisement_reversed=False,
+        eid_length=32,
+        rotation_timestamp=1_700_000_000,
+    )
+
+
+def _identity() -> SimpleNamespace:
+    """Return the identity fields read by ``_prepare_work_item``."""
+
+    return SimpleNamespace(
+        registry_id="device-1",
+        canonical_id="canonical-1",
+        identity_key=bytes(range(32)),
+        config_entry_id="entry-1",
+    )
+
+
+def test_prepare_work_item_discards_lock_with_unknown_variant() -> None:
+    """A persisted lock whose variant this version does not know is discarded.
+
+    Before AP5b the ``except ValueError`` branch mapped any unknown value to
+    ``MODERN_P256_X32_BE``, so a lock written by a newer release (for example a
+    reading that a later rollback removes) would silently pin the device to a
+    different derivation. The lock must be dropped from memory and from the
+    persisted set, and the work item must carry neither the lock nor a locked
+    variant, so ``_compute_variants`` tries every known variant again.
+    """
+
+    resolver = _build_resolver()
+    lock = _lock_with_variant("spec_p256_x20_trunc_be")
+    resolver._locks = {"device-1": lock}
+    resolver._persisted_locks = {"device-1": lock}
+
+    item = resolver._prepare_work_item(_identity(), now_unix=1_700_000_100)
+
+    assert item is not None
+    assert item.lock is None
+    assert item.locked_variant is None
+    assert "device-1" not in resolver._locks
+    assert "device-1" not in resolver._persisted_locks
+
+
+def test_prepare_work_item_unknown_variant_logs_discard(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The discard of an unknown-variant lock is logged at WARNING."""
+
+    resolver = _build_resolver()
+    lock = _lock_with_variant("spec_p256_x20_trunc_be")
+    resolver._locks = {"device-1": lock}
+    resolver._persisted_locks = {"device-1": lock}
+
+    with caplog.at_level(
+        "WARNING", logger="custom_components.googlefindmy.eid_resolver"
+    ):
+        resolver._prepare_work_item(_identity(), now_unix=1_700_000_100)
+
+    discards = [r for r in caplog.records if "Force re-discovery" in r.getMessage()]
+    assert len(discards) == 1
+    assert discards[0].levelname == "WARNING"
+    assert "unknown_variant=True" in discards[0].getMessage()
+
+
+@pytest.mark.parametrize("variant", [v.value for v in EidVariant])
+def test_prepare_work_item_keeps_lock_with_known_variant(variant: str) -> None:
+    """Every known variant value loads unchanged and keeps the lock."""
+
+    resolver = _build_resolver()
+    lock = _lock_with_variant(variant)
+    resolver._locks = {"device-1": lock}
+    resolver._persisted_locks = {"device-1": lock}
+
+    item = resolver._prepare_work_item(_identity(), now_unix=1_700_000_100)
+
+    assert item is not None
+    assert item.lock is lock
+    assert item.locked_variant == EidVariant(variant)
+    assert resolver._locks["device-1"] is lock
+    assert resolver._persisted_locks["device-1"] is lock

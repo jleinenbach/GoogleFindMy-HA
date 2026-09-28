@@ -1497,12 +1497,19 @@ class GoogleFindMyEIDResolver:
                 self._known_timebases[identity.registry_id] = lock_time_basis
 
             is_legacy = rotation_ts is None
+            unknown_variant = False
             try:
                 locked_variant = EidVariant(lock.variant)
             except ValueError:
-                locked_variant = EidVariant.MODERN_P256_X32_BE
+                # A variant value this version does not know (for example one
+                # written by a newer release before a rollback) must not be
+                # reinterpreted as another variant. Discard the lock and clear
+                # the locked variant so ``_compute_variants`` tries every known
+                # variant again.
+                unknown_variant = True
+                locked_variant = None
 
-            if is_legacy:
+            if is_legacy or unknown_variant:
                 valid_hint = (
                     lock_time_basis
                     if lock_time_basis
@@ -1514,9 +1521,10 @@ class GoogleFindMyEIDResolver:
                     else None
                 )
                 _LOGGER.warning(
-                    "Discarding invalid/legacy lock for %s (legacy=%s). Force re-discovery.",
+                    "Discarding invalid/legacy lock for %s (legacy=%s, unknown_variant=%s). Force re-discovery.",
                     identity.registry_id,
                     is_legacy,
+                    unknown_variant,
                 )
                 self._locks.pop(identity.registry_id, None)
                 self._persisted_locks.pop(identity.registry_id, None)
