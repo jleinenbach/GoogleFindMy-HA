@@ -57,6 +57,13 @@ from custom_components.googlefindmy.FMDNCrypto._lazy_crypto import (
     get_modes_module,
     get_p256_curve,
 )
+from custom_components.googlefindmy.FMDNCrypto.curve_profile import (
+    P256_ORDER as P256_ORDER,  # noqa: PLC0414 - re-exported for eid_resolver and tests
+)
+from custom_components.googlefindmy.FMDNCrypto.curve_profile import (
+    ScalarRule,
+    reduce_scalar,
+)
 
 FHNA_K: Final[int] = 10
 K: Final[int] = FHNA_K
@@ -72,9 +79,6 @@ FHNA_COUNTER_MASK: Final[int] = 0xFFFFFFFF
 
 # Heuristic rotation periods for phone discovery (ordered by likelihood)
 HEURISTIC_ROTATION_PERIODS: Final[tuple[int, ...]] = (900, 3600, 1024)
-P256_ORDER: Final[int] = (
-    0xFFFFFFFF00000000FFFFFFFFFFFFFFFFBCE6FAADA7179E84F3B9CAC2FC632551
-)
 
 # Lazy-loaded curve instances (deferred to first use for faster startup)
 _CURVE: CurveParametersProtocol | None = None
@@ -274,7 +278,7 @@ def compute_flags_xor_mask(
     r_dash_int: int = int.from_bytes(r_dash, byteorder="big", signed=False)
     if curve_order is None:
         curve_order = int(_get_curve().order)
-    r_scalar: int = r_dash_int % curve_order
+    r_scalar: int = reduce_scalar(r_dash_int, curve_order, ScalarRule.MOD_N)
     r_bytes: bytes = r_scalar.to_bytes(curve_byte_len, byteorder="big")
     sha256_r: bytes = hashlib.sha256(r_bytes).digest()
     return sha256_r[-1]
@@ -288,28 +292,27 @@ def _derive_scalar(  # noqa: PLR0913
     byteorder: Literal["big", "little"],
     curve_order: int,
     strict: bool,
-    include_zero_endpoint: bool = False,
+    rule: ScalarRule,
     _normalized: bool = False,
 ) -> int:
-    """Derive a scalar from the Table 10 PRF output.
+    """Derive a scalar from the Table 10 PRF output under ``rule``.
 
-    Modern P-256 trackers require an open interval ``[1, curve_order - 1]`` to
-    avoid the point at infinity, while legacy FHNA accessories project directly
-    into the closed interval ``[0, curve_order - 1]``. The `include_zero_endpoint`
-    toggle preserves the legacy modulo-n behavior (Table 10) instead of the
-    P-256-adjusted projection used by modern trackers.
+    Legacy SECP160R1 accessories use ``ScalarRule.MOD_N`` (``r' mod n`` as
+    named by the FHN Accessory Specification, section "EID computation"; the
+    PRF input ``r'`` follows Table 10). The existing ``MODERN_P256_*`` variants
+    use ``ScalarRule.PLUS_ONE`` (``(r' mod (n - 1)) + 1``). That projection is a
+    heuristic without a primary source: it dates from the first P-256 path
+    (commit ``21ae9126``), was reverted in ``2651b8d9`` and reintroduced in
+    ``6c95f0f5``. It is kept unchanged because resolver locks persist these
+    variants by name. The reduction itself lives in
+    ``curve_profile.reduce_scalar``.
     """
     r_dash: bytes = _prf_table10(
         identity_key, time_counter_u32, k, strict=strict, _normalized=_normalized
     )
     r_dash_int: int = int.from_bytes(r_dash, byteorder=byteorder, signed=False)
 
-    if include_zero_endpoint:
-        mod_n_scalar: int = r_dash_int % curve_order
-        return mod_n_scalar
-
-    projected_scalar: int = (r_dash_int % (curve_order - 1)) + 1
-    return projected_scalar
+    return reduce_scalar(r_dash_int, curve_order, rule)
 
 
 def _serialize_legacy_x(scalar_r: int) -> bytes:
@@ -357,7 +360,7 @@ def generate_eid_variant(
                 byteorder="big",
                 curve_order=curve_order,
                 strict=strict,
-                include_zero_endpoint=True,
+                rule=ScalarRule.MOD_N,
                 _normalized=True,
             )
             return _serialize_legacy_x(scalar)
@@ -370,6 +373,7 @@ def generate_eid_variant(
                 byteorder="big",
                 curve_order=P256_ORDER,
                 strict=strict,
+                rule=ScalarRule.PLUS_ONE,
                 _normalized=True,
             )
             return _serialize_p256_x(scalar)
@@ -392,6 +396,7 @@ def generate_eid_variant(
                 byteorder="little",
                 curve_order=P256_ORDER,
                 strict=strict,
+                rule=ScalarRule.PLUS_ONE,
                 _normalized=True,
             )
             return _serialize_p256_x(scalar)
@@ -589,12 +594,12 @@ def _generate_heuristic_eid_single(
         case EidVariant.LEGACY_SECP160R1_X20_BE:
             curve_order = int(_get_curve().order)
             r_dash_int = int.from_bytes(r_dash, byteorder="big", signed=False)
-            scalar = r_dash_int % curve_order
+            scalar = reduce_scalar(r_dash_int, curve_order, ScalarRule.MOD_N)
             return _serialize_legacy_x(scalar)
 
         case EidVariant.MODERN_P256_X32_BE:
             r_dash_int = int.from_bytes(r_dash, byteorder="big", signed=False)
-            scalar = (r_dash_int % (P256_ORDER - 1)) + 1
+            scalar = reduce_scalar(r_dash_int, P256_ORDER, ScalarRule.PLUS_ONE)
             return _serialize_p256_x(scalar)
 
         case EidVariant.MODERN_P256_X20_TRUNC_BE:
@@ -605,7 +610,7 @@ def _generate_heuristic_eid_single(
 
         case EidVariant.MODERN_P256_X32_LE_SCALAR:
             r_dash_int = int.from_bytes(r_dash, byteorder="little", signed=False)
-            scalar = (r_dash_int % (P256_ORDER - 1)) + 1
+            scalar = reduce_scalar(r_dash_int, P256_ORDER, ScalarRule.PLUS_ONE)
             return _serialize_p256_x(scalar)
 
         case EidVariant.MODERN_P256_X20_TRUNC_LE:

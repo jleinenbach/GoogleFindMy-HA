@@ -130,7 +130,7 @@ def reduce_scalar(r_dash_int: int, order: int, rule: ScalarRule) -> int:
     if rule is ScalarRule.PLUS_ONE:
         projected_scalar: int = (r_dash_int % (order - 1)) + 1
         return projected_scalar
-    assert_never(rule)
+    assert_never(rule)  # pragma: no cover - ScalarRule(rule) rejects other values
 
 
 def rx_to_ry(Rx: int, curve: CurveFpProtocol) -> int:

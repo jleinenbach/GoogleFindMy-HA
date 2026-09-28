@@ -4,10 +4,14 @@
 from __future__ import annotations
 
 import logging
+import sys
+from collections.abc import Callable
 
 import pytest
 
+from custom_components.googlefindmy.FMDNCrypto import curve_profile
 from custom_components.googlefindmy.FMDNCrypto._ecdsa_shim import load_curve
+from custom_components.googlefindmy.FMDNCrypto.curve_profile import ScalarRule
 from custom_components.googlefindmy.FMDNCrypto.eid_generator import (
     FHNA_COUNTER_MASK,
     FHNA_K,
@@ -543,3 +547,104 @@ def test_generate_heuristic_eid_swallows_derivation_errors(
         )
     assert results == []
     assert "Heuristic EID generation failed" in caplog.text
+
+
+_P256_VARIANTS: tuple[EidVariant, ...] = (
+    EidVariant.MODERN_P256_X32_BE,
+    EidVariant.MODERN_P256_X20_TRUNC_BE,
+    EidVariant.MODERN_P256_X32_LE_SCALAR,
+    EidVariant.MODERN_P256_X20_TRUNC_LE,
+)
+_EXPECTED_RULE: dict[EidVariant, ScalarRule] = {
+    EidVariant.LEGACY_SECP160R1_X20_BE: ScalarRule.MOD_N,
+    **dict.fromkeys(_P256_VARIANTS, ScalarRule.PLUS_ONE),
+}
+
+
+def _scalar_paths() -> list[tuple[str, Callable[[], object], ScalarRule]]:
+    """Return every public scalar-deriving path with the rule it must apply."""
+
+    paths: list[tuple[str, Callable[[], object], ScalarRule]] = []
+    for variant, rule in _EXPECTED_RULE.items():
+        paths.append(
+            (
+                f"generate_eid_variant[{variant.value}]",
+                lambda v=variant: generate_eid_variant(SAMPLE_EIK, SAMPLE_COUNTER, v),
+                rule,
+            )
+        )
+        paths.append(
+            (
+                f"generate_heuristic_eid[{variant.value}]",
+                lambda v=variant: generate_heuristic_eid(
+                    SAMPLE_EIK,
+                    100_000,
+                    rotation_period=900,
+                    basis=HeuristicBasis.ABSOLUTE,
+                    variant=v,
+                    drift_offsets=(0,),
+                ),
+                rule,
+            )
+        )
+    paths.append(
+        (
+            "compute_flags_xor_mask[secp160r1]",
+            lambda: compute_flags_xor_mask(SAMPLE_EIK, SAMPLE_COUNTER),
+            ScalarRule.MOD_N,
+        )
+    )
+    paths.append(
+        (
+            "compute_flags_xor_mask[p256]",
+            lambda: compute_flags_xor_mask(
+                SAMPLE_EIK,
+                SAMPLE_COUNTER,
+                curve_byte_len=MODERN_EID_LENGTH,
+                curve_order=P256_ORDER,
+            ),
+            ScalarRule.MOD_N,
+        )
+    )
+    return paths
+
+
+def test_scalar_sites_route_through_reduce_scalar(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every public scalar path reduces ``r'`` through ``reduce_scalar``.
+
+    The spy replaces ``reduce_scalar`` in the namespace of each loaded module
+    that imported it, so a caller that spells out its own formula again is
+    caught by behaviour, not by a text search. The recorded rule pins the
+    unchanged semantics: ``MOD_N`` for legacy EIDs and the flags mask,
+    ``PLUS_ONE`` for the persisted ``MODERN_P256_*`` variants.
+
+    Known limits: a caller that calls ``reduce_scalar`` but discards the result
+    still passes, and a caller that reaches the function through the module
+    attribute ``curve_profile.reduce_scalar`` is reported as a bypass.
+    """
+
+    original = curve_profile.reduce_scalar
+    calls: list[ScalarRule] = []
+
+    def spy(r_dash_int: int, order: int, rule: ScalarRule) -> int:
+        calls.append(ScalarRule(rule))
+        return original(r_dash_int, order, rule)
+
+    importers = [
+        name
+        for name, module in list(sys.modules.items())
+        if name.startswith("custom_components.googlefindmy")
+        and module is not curve_profile
+        and getattr(module, "reduce_scalar", None) is original
+    ]
+    assert "custom_components.googlefindmy.FMDNCrypto.eid_generator" in importers
+    for name in importers:
+        monkeypatch.setattr(sys.modules[name], "reduce_scalar", spy)
+
+    for label, call, expected_rule in _scalar_paths():
+        calls.clear()
+        call()
+        assert len(calls) >= 1, f"{label} bypassed reduce_scalar"
+        assert set(calls) == {expected_rule}, f"{label} used {calls}"
