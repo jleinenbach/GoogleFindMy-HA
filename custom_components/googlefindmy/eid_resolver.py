@@ -1534,6 +1534,11 @@ class GoogleFindMyEIDResolver:
                 else:
                     self._known_timebases.pop(identity.registry_id, None)
                 lock = None
+                if unknown_variant:
+                    # Persist the discard like the other lock-removal paths;
+                    # otherwise the unchanged on-disk lock is reloaded at
+                    # every start and the discard repeats.
+                    self._schedule_lock_save()
             elif lock.canonical_id != clean_canonical_id:
                 _LOGGER.debug(
                     "Updating canonical_id to UUID-only for %s: %s -> %s",

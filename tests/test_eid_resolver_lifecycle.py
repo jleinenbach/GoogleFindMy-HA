@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import asyncio
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -279,3 +279,58 @@ def test_prepare_work_item_keeps_lock_with_known_variant(variant: str) -> None:
     assert item.locked_variant == EidVariant(variant)
     assert resolver._locks["device-1"] is lock
     assert resolver._persisted_locks["device-1"] is lock
+
+
+def test_prepare_work_item_persists_unknown_variant_discard() -> None:
+    """Discarding an unknown-variant lock schedules persistence.
+
+    ``_async_save_locks`` writes ``_locks``; without a save the unchanged
+    on-disk lock is reloaded at every start, and an offline device would
+    re-enter the discard (and its WARNING) after each restart.
+    """
+
+    resolver = _build_resolver()
+    lock = _lock_with_variant("spec_p256_x20_trunc_be")
+    resolver._locks = {"device-1": lock}
+    resolver._persisted_locks = {"device-1": lock}
+
+    with patch.object(GoogleFindMyEIDResolver, "_schedule_lock_save") as save:
+        resolver._prepare_work_item(_identity(), now_unix=1_700_000_100)
+
+    save.assert_called_once_with()
+
+
+def test_prepare_work_item_known_variant_schedules_no_save() -> None:
+    """A lock with a known variant and unchanged canonical ID is not re-saved."""
+
+    resolver = _build_resolver()
+    lock = _lock_with_variant(EidVariant.MODERN_P256_X32_BE.value)
+    resolver._locks = {"device-1": lock}
+    resolver._persisted_locks = {"device-1": lock}
+
+    with patch.object(GoogleFindMyEIDResolver, "_schedule_lock_save") as save:
+        resolver._prepare_work_item(_identity(), now_unix=1_700_000_100)
+
+    save.assert_not_called()
+
+
+def test_prepare_work_item_legacy_discard_schedules_no_save() -> None:
+    """Characterize the legacy discard as found: it does not schedule a save.
+
+    Only the unknown-variant discard persists. Changing the legacy branch is a
+    separate follow-up (it also keeps ``locked_variant`` set).
+    """
+
+    resolver = _build_resolver()
+    lock = _lock_with_variant(EidVariant.MODERN_P256_X32_BE.value)
+    lock.rotation_timestamp = None
+    resolver._locks = {"device-1": lock}
+    resolver._persisted_locks = {"device-1": lock}
+
+    with patch.object(GoogleFindMyEIDResolver, "_schedule_lock_save") as save:
+        item = resolver._prepare_work_item(_identity(), now_unix=1_700_000_100)
+
+    assert item is not None
+    assert item.lock is None
+    assert "device-1" not in resolver._locks
+    save.assert_not_called()
