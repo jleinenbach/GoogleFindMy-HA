@@ -22,6 +22,7 @@ from custom_components.googlefindmy.FMDNCrypto.eid_generator import (
     ROTATION_PERIOD,
     ROTATION_PERIOD_900,
     ROTATION_PERIOD_3600,
+    VARIANT_DERIVATIONS,
     EidVariant,
     HeuristicBasis,
     HeuristicEidResult,
@@ -260,6 +261,13 @@ def test_generate_variant_rejects_wrong_key_length() -> None:
         generate_eid_variant(
             SAMPLE_EIK[:8], SAMPLE_COUNTER, EidVariant.MODERN_P256_X32_BE
         )
+
+
+def test_generate_variant_reports_unknown_variant_before_the_prf() -> None:
+    """An unknown variant is named even when ``k`` would also be rejected."""
+
+    with pytest.raises(ValueError, match="Unsupported EID variant"):
+        generate_eid_variant(SAMPLE_EIK, 0, "bogus_variant", k=9)  # type: ignore[arg-type]
 
 
 def test_generate_variant_rejects_unknown_variant() -> None:
@@ -547,6 +555,57 @@ def test_generate_heuristic_eid_swallows_derivation_errors(
         )
     assert results == []
     assert "Heuristic EID generation failed" in caplog.text
+
+
+# Heuristic EIDs pinned per variant (characterization taken on commit
+# 6f6243bc, before the derivation table replaced the per-variant formulas).
+# The heuristic PRF input differs from Table 10, so these differ from
+# GOLDEN_VECTORS. One entry per variant; new variants add their own entry.
+HEURISTIC_NOW_UNIX = 1_700_000_000
+HEURISTIC_GOLDEN_VECTORS: dict[EidVariant, str] = {
+    EidVariant.LEGACY_SECP160R1_X20_BE: "97754e8f9b5cfa37bd2a120a252a754db1c21650",
+    EidVariant.MODERN_P256_X32_BE: "a7d711fc0f8760abf4ae3444d5c56122fc74a4f76e0bd033af186102d627a839",
+    EidVariant.MODERN_P256_X20_TRUNC_BE: "a7d711fc0f8760abf4ae3444d5c56122fc74a4f7",
+    EidVariant.MODERN_P256_X32_LE_SCALAR: "383cec434412038ca6c92ed44d377c8481c10136d5c09edf27c546d1ebb65d5e",
+    EidVariant.MODERN_P256_X20_TRUNC_LE: "383cec434412038ca6c92ed44d377c8481c10136",
+}
+
+
+@pytest.mark.parametrize(
+    ("variant", "expected_hex"), list(HEURISTIC_GOLDEN_VECTORS.items())
+)
+def test_heuristic_golden_vectors(variant: EidVariant, expected_hex: str) -> None:
+    """The heuristic path emits the pinned EID bytes for every variant."""
+
+    results = [
+        result
+        for result in generate_heuristic_eid(
+            SAMPLE_EIK,
+            HEURISTIC_NOW_UNIX,
+            rotation_period=ROTATION_PERIOD_900,
+            basis=HeuristicBasis.ABSOLUTE,
+            variant=variant,
+            drift_offsets=(0,),
+        )
+        if not result.is_reversed
+    ]
+    assert len(results) == 1
+    assert results[0].eid_bytes.hex() == expected_hex
+
+
+def test_variant_derivations_cover_every_variant() -> None:
+    """Every variant, including ones a resolver lock may name, has one entry."""
+
+    assert set(VARIANT_DERIVATIONS) == set(EidVariant)
+
+
+def test_variant_derivations_are_read_only() -> None:
+    """The table cannot be changed at runtime."""
+
+    with pytest.raises(TypeError):
+        VARIANT_DERIVATIONS[EidVariant.MODERN_P256_X32_BE] = (  # type: ignore[index]
+            VARIANT_DERIVATIONS[EidVariant.LEGACY_SECP160R1_X20_BE]
+        )
 
 
 _P256_VARIANTS: tuple[EidVariant, ...] = (

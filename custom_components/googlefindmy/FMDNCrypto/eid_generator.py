@@ -10,6 +10,8 @@ split so resolver heuristics remain out-of-tree:
 * ``prf_aes_256_ecb`` applies the AES-256-ECB PRF to that buffer.
 * ``generate_eid_variant`` derives explicit EID variants given an Ephemeral
   Identity Key (EIK), a 32-bit time counter, and a declared ``EidVariant``.
+* ``VARIANT_DERIVATIONS`` is the single place that states, per ``EidVariant``,
+  the curve and the ``ScalarDerivation`` (byte order of ``r'`` and rule).
 * ``generate_eid`` is a thin, deprecated wrapper that forces callers to pass an
   explicit ``EidVariant`` to avoid silent semantic changes.
 """
@@ -19,9 +21,11 @@ from __future__ import annotations
 import hashlib
 import logging
 import warnings
+from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Final, Literal
+from types import MappingProxyType
+from typing import Final
 
 __all__ = [
     "EidVariant",
@@ -36,6 +40,7 @@ __all__ = [
     "ROTATION_PERIOD",
     "ROTATION_PERIOD_900",
     "ROTATION_PERIOD_3600",
+    "VARIANT_DERIVATIONS",
     "build_heuristic_prf_input",
     "build_table10_prf_input",
     "compute_flags_xor_mask",
@@ -58,11 +63,18 @@ from custom_components.googlefindmy.FMDNCrypto._lazy_crypto import (
     get_p256_curve,
 )
 from custom_components.googlefindmy.FMDNCrypto.curve_profile import (
-    P256_ORDER as P256_ORDER,  # noqa: PLC0414 - re-exported for eid_resolver and tests
-)
-from custom_components.googlefindmy.FMDNCrypto.curve_profile import (
+    BE_MOD_N,
+    BE_PLUS_ONE,
+    LE_PLUS_ONE,
+    SECP160R1,
+    SECP256R1,
+    FmdnCurve,
+    ScalarDerivation,
     ScalarRule,
     reduce_scalar,
+)
+from custom_components.googlefindmy.FMDNCrypto.curve_profile import (
+    P256_ORDER as P256_ORDER,  # noqa: PLC0414 - re-exported for eid_resolver and tests
 )
 
 FHNA_K: Final[int] = 10
@@ -111,6 +123,29 @@ class EidVariant(StrEnum):
     MODERN_P256_X20_TRUNC_BE = "modern_p256_x20_trunc_be"
     MODERN_P256_X32_LE_SCALAR = "modern_p256_x32_le_scalar"
     MODERN_P256_X20_TRUNC_LE = "modern_p256_x20_trunc_le"
+
+
+# Curve and scalar derivation per variant; the only place that states them.
+# ``LEGACY_SECP160R1_X20_BE`` follows the specification ("EID computation",
+# ``r = r' mod n``, ``r'`` from Table 10 read big-endian). The ``MODERN_P256_*``
+# variants use the ``(r' mod (n - 1)) + 1`` projection, a heuristic without a
+# primary source: it dates from the first P-256 path (commit ``21ae9126``), was
+# reverted in ``2651b8d9`` and reintroduced in ``6c95f0f5``. Reading ``r'``
+# little-endian comes from ``f9bd9ece``, also without a source. Entries are
+# kept unchanged because resolver locks persist these variants by name; the
+# ``*_X20_TRUNC_*`` variants share the derivation of their 32-byte variant and
+# keep the first 20 bytes of the x-coordinate.
+VARIANT_DERIVATIONS: Final[Mapping[EidVariant, tuple[FmdnCurve, ScalarDerivation]]] = (
+    MappingProxyType(
+        {
+            EidVariant.LEGACY_SECP160R1_X20_BE: (SECP160R1, BE_MOD_N),
+            EidVariant.MODERN_P256_X32_BE: (SECP256R1, BE_PLUS_ONE),
+            EidVariant.MODERN_P256_X20_TRUNC_BE: (SECP256R1, BE_PLUS_ONE),
+            EidVariant.MODERN_P256_X32_LE_SCALAR: (SECP256R1, LE_PLUS_ONE),
+            EidVariant.MODERN_P256_X20_TRUNC_LE: (SECP256R1, LE_PLUS_ONE),
+        }
+    )
+)
 
 
 class HeuristicBasis(StrEnum):
@@ -284,35 +319,16 @@ def compute_flags_xor_mask(
     return sha256_r[-1]
 
 
-def _derive_scalar(  # noqa: PLR0913
-    identity_key: bytes,
-    time_counter_u32: int,
-    *,
-    k: int,
-    byteorder: Literal["big", "little"],
-    curve_order: int,
-    strict: bool,
-    rule: ScalarRule,
-    _normalized: bool = False,
-) -> int:
-    """Derive a scalar from the Table 10 PRF output under ``rule``.
+def _variant_scalar(r_dash: bytes, variant: EidVariant) -> int:
+    """Reduce the PRF output ``r'`` to the scalar of ``variant``.
 
-    Legacy SECP160R1 accessories use ``ScalarRule.MOD_N`` (``r' mod n`` as
-    named by the FHN Accessory Specification, section "EID computation"; the
-    PRF input ``r'`` follows Table 10). The existing ``MODERN_P256_*`` variants
-    use ``ScalarRule.PLUS_ONE`` (``(r' mod (n - 1)) + 1``). That projection is a
-    heuristic without a primary source: it dates from the first P-256 path
-    (commit ``21ae9126``), was reverted in ``2651b8d9`` and reintroduced in
-    ``6c95f0f5``. It is kept unchanged because resolver locks persist these
-    variants by name. The reduction itself lives in
-    ``curve_profile.reduce_scalar``.
+    Byte order and rule come from ``VARIANT_DERIVATIONS``; the reduction
+    itself lives in ``curve_profile.reduce_scalar``.
     """
-    r_dash: bytes = _prf_table10(
-        identity_key, time_counter_u32, k, strict=strict, _normalized=_normalized
+    curve, derivation = VARIANT_DERIVATIONS[variant]
+    return reduce_scalar(
+        derivation.read_prf_output(r_dash), curve.order, derivation.rule
     )
-    r_dash_int: int = int.from_bytes(r_dash, byteorder=byteorder, signed=False)
-
-    return reduce_scalar(r_dash_int, curve_order, rule)
 
 
 def _serialize_legacy_x(scalar_r: int) -> bytes:
@@ -349,66 +365,25 @@ def generate_eid_variant(
     if len(eik) != EIK_LENGTH:
         raise ValueError(f"Ephemeral Identity Key must be {EIK_LENGTH} bytes")
     counter_u32 = _normalize_time_counter(time_counter_u32, strict=strict)
+    if variant not in VARIANT_DERIVATIONS:
+        # Checked before the PRF so an unknown variant is reported as such.
+        raise ValueError(f"Unsupported EID variant: {variant}")
 
+    r_dash: bytes = _prf_table10(eik, counter_u32, k, strict=strict, _normalized=True)
+    return _serialize_variant(r_dash, variant)
+
+
+def _serialize_variant(r_dash: bytes, variant: EidVariant) -> bytes:
+    """Return the EID bytes of ``variant`` for the PRF output ``r_dash``."""
     match variant:
         case EidVariant.LEGACY_SECP160R1_X20_BE:
-            curve_order: int = int(_get_curve().order)
-            scalar = _derive_scalar(
-                eik,
-                counter_u32,
-                k=k,
-                byteorder="big",
-                curve_order=curve_order,
-                strict=strict,
-                rule=ScalarRule.MOD_N,
-                _normalized=True,
-            )
-            return _serialize_legacy_x(scalar)
+            return _serialize_legacy_x(_variant_scalar(r_dash, variant))
 
-        case EidVariant.MODERN_P256_X32_BE:
-            scalar = _derive_scalar(
-                eik,
-                counter_u32,
-                k=k,
-                byteorder="big",
-                curve_order=P256_ORDER,
-                strict=strict,
-                rule=ScalarRule.PLUS_ONE,
-                _normalized=True,
-            )
-            return _serialize_p256_x(scalar)
+        case EidVariant.MODERN_P256_X32_BE | EidVariant.MODERN_P256_X32_LE_SCALAR:
+            return _serialize_p256_x(_variant_scalar(r_dash, variant))
 
-        case EidVariant.MODERN_P256_X20_TRUNC_BE:
-            full = generate_eid_variant(
-                eik,
-                counter_u32,
-                EidVariant.MODERN_P256_X32_BE,
-                k=k,
-                strict=strict,
-            )
-            return full[:LEGACY_EID_LENGTH]
-
-        case EidVariant.MODERN_P256_X32_LE_SCALAR:
-            scalar = _derive_scalar(
-                eik,
-                counter_u32,
-                k=k,
-                byteorder="little",
-                curve_order=P256_ORDER,
-                strict=strict,
-                rule=ScalarRule.PLUS_ONE,
-                _normalized=True,
-            )
-            return _serialize_p256_x(scalar)
-
-        case EidVariant.MODERN_P256_X20_TRUNC_LE:
-            full = generate_eid_variant(
-                eik,
-                counter_u32,
-                EidVariant.MODERN_P256_X32_LE_SCALAR,
-                k=k,
-                strict=strict,
-            )
+        case EidVariant.MODERN_P256_X20_TRUNC_BE | EidVariant.MODERN_P256_X20_TRUNC_LE:
+            full = _serialize_p256_x(_variant_scalar(r_dash, variant))
             return full[:LEGACY_EID_LENGTH]
 
         case _:
@@ -589,38 +564,7 @@ def _generate_heuristic_eid_single(
     # For heuristic mode, we use the counter directly as the time value
     prf_input = build_heuristic_prf_input(counter, rotation_period=ROTATION_PERIOD)
     r_dash = prf_aes_256_ecb(eik, prf_input)
-
-    match variant:
-        case EidVariant.LEGACY_SECP160R1_X20_BE:
-            curve_order = int(_get_curve().order)
-            r_dash_int = int.from_bytes(r_dash, byteorder="big", signed=False)
-            scalar = reduce_scalar(r_dash_int, curve_order, ScalarRule.MOD_N)
-            return _serialize_legacy_x(scalar)
-
-        case EidVariant.MODERN_P256_X32_BE:
-            r_dash_int = int.from_bytes(r_dash, byteorder="big", signed=False)
-            scalar = reduce_scalar(r_dash_int, P256_ORDER, ScalarRule.PLUS_ONE)
-            return _serialize_p256_x(scalar)
-
-        case EidVariant.MODERN_P256_X20_TRUNC_BE:
-            full = _generate_heuristic_eid_single(
-                eik, counter, EidVariant.MODERN_P256_X32_BE
-            )
-            return full[:LEGACY_EID_LENGTH]
-
-        case EidVariant.MODERN_P256_X32_LE_SCALAR:
-            r_dash_int = int.from_bytes(r_dash, byteorder="little", signed=False)
-            scalar = reduce_scalar(r_dash_int, P256_ORDER, ScalarRule.PLUS_ONE)
-            return _serialize_p256_x(scalar)
-
-        case EidVariant.MODERN_P256_X20_TRUNC_LE:
-            full = _generate_heuristic_eid_single(
-                eik, counter, EidVariant.MODERN_P256_X32_LE_SCALAR
-            )
-            return full[:LEGACY_EID_LENGTH]
-
-        case _:
-            raise ValueError(f"Unsupported EID variant: {variant}")
+    return _serialize_variant(r_dash, variant)
 
 
 def generate_heuristic_eid(  # noqa: PLR0913

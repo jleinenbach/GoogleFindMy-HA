@@ -31,6 +31,7 @@ from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 __all__ = [
     "P256_N",
     "OracleReport",
+    "PrfByteOrderName",
     "ScalarRuleName",
     "build_p256_report",
     "ephemeral_scalar_with_y_parity",
@@ -45,6 +46,7 @@ P256_N = 0xFFFFFFFF00000000FFFFFFFFFFFFFFFFBCE6FAADA7179E84F3B9CAC2FC632551
 ROTATION_EXPONENT_K = 10
 
 ScalarRuleName = Literal["mod_n", "plus1"]
+PrfByteOrderName = Literal["big", "little"]
 
 
 def table10_prf_input(counter: int) -> bytes:
@@ -64,13 +66,21 @@ def _prf(eik: bytes, block: bytes) -> bytes:
     return encryptor.update(block) + encryptor.finalize()
 
 
-def owner_scalar(eik: bytes, counter: int, rule: ScalarRuleName) -> int:
+def owner_scalar(
+    eik: bytes,
+    counter: int,
+    rule: ScalarRuleName,
+    *,
+    r_dash_byteorder: PrfByteOrderName = "big",
+) -> int:
     """Return the owner scalar ``r`` under the named rule.
 
     ``mod_n`` is the specification's ``r' mod n``; ``plus1`` is the
-    ``(r' mod (n - 1)) + 1`` projection the tests also have to cover.
+    ``(r' mod (n - 1)) + 1`` projection the tests also have to cover. The
+    specification reads ``r'`` big-endian; ``r_dash_byteorder="little"``
+    covers the integration's little-endian EID variant.
     """
-    r_dash = int.from_bytes(_prf(eik, table10_prf_input(counter)), "big")
+    r_dash = int.from_bytes(_prf(eik, table10_prf_input(counter)), r_dash_byteorder)
     if rule == "mod_n":
         return r_dash % P256_N
     return (r_dash % (P256_N - 1)) + 1
@@ -114,15 +124,17 @@ def build_p256_report(  # noqa: PLR0913 - mirrors the report parameters one to o
     rule: ScalarRuleName,
     nonce_half_len: int,
     ephemeral_scalar: int,
+    r_dash_byteorder: PrfByteOrderName = "big",
 ) -> OracleReport:
     """Encrypt ``plaintext`` the way a finder does for a P-256 tracker.
 
-    The tracker's public point is ``R = r * G`` with ``r`` from ``rule``; the
+    The tracker's public point is ``R = r * G`` with ``r`` from ``rule`` and
+    ``r'`` read in ``r_dash_byteorder``; the
     finder uses ``S = ephemeral_scalar * G``. The nonce is
     ``Rx[-h:] || Sx[-h:]`` with ``h = nonce_half_len``.
     """
     curve = ec.SECP256R1()
-    rx = p256_x(owner_scalar(eik, counter, rule))
+    rx = p256_x(owner_scalar(eik, counter, rule, r_dash_byteorder=r_dash_byteorder))
     finder_key = ec.derive_private_key(ephemeral_scalar, curve)
     numbers = finder_key.public_key().public_numbers()
     sx = numbers.x.to_bytes(32, "big")

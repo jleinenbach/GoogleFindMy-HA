@@ -21,7 +21,9 @@ This module is the single place that knows those facts:
   project into ``[1, n - 1]`` instead. Both are named by ``ScalarRule``; EID
   generation, the hashed-flags mask and report decryption are meant to call
   this function rather than spell a formula out, so they cannot disagree
-  unnoticed.
+  unnoticed. ``ScalarDerivation`` pairs a rule with the byte order in which
+  ``r'`` is read; ``BE_MOD_N``, ``BE_PLUS_ONE`` and ``LE_PLUS_ONE`` are the
+  three derivations in use.
 * ``rx_to_ry`` recovers the even Y coordinate for curves whose prime satisfies
   ``p = 3 (mod 4)``; both supported curves do.
 
@@ -43,7 +45,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
 from types import MappingProxyType
-from typing import Any, Final, Protocol, assert_never
+from typing import Any, Final, Literal, Protocol, assert_never
 
 from custom_components.googlefindmy.FMDNCrypto._ecdsa_shim import (
     CurveFpProtocol,
@@ -60,12 +62,16 @@ from custom_components.googlefindmy.FMDNCrypto.foreign_report_errors import (
 )
 
 __all__ = [
+    "BE_MOD_N",
+    "BE_PLUS_ONE",
     "CURVES_BY_COORD_LEN",
+    "LE_PLUS_ONE",
     "P256_ORDER",
     "SECP160R1",
     "SECP160R1_ORDER",
     "SECP256R1",
     "FmdnCurve",
+    "ScalarDerivation",
     "ScalarRule",
     "curve_for_coord_len",
     "reduce_scalar",
@@ -131,6 +137,51 @@ def reduce_scalar(r_dash_int: int, order: int, rule: ScalarRule) -> int:
         projected_scalar: int = (r_dash_int % (order - 1)) + 1
         return projected_scalar
     assert_never(rule)  # pragma: no cover - ScalarRule(rule) rejects other values
+
+
+PrfByteOrder = Literal["big", "little"]
+
+
+@dataclass(frozen=True, slots=True)
+class ScalarDerivation:
+    """How ``r'`` is read (byte order) and reduced (rule) to the scalar ``r``.
+
+    The specification reads the PRF output big-endian. ``"little"`` exists
+    because the integration's ``MODERN_P256_X32_LE_SCALAR`` EID variant reads
+    ``r'`` that way; no public source documents it for FMDN.
+
+    Attributes:
+        byteorder: Byte order in which the 32-byte PRF output is read.
+        rule: The reduction applied to the resulting integer.
+    """
+
+    byteorder: PrfByteOrder
+    rule: ScalarRule
+
+    def __post_init__(self) -> None:
+        """Reject a byte order other than ``"big"`` or ``"little"``."""
+        if self.byteorder not in ("big", "little"):
+            raise ValueError(
+                f"byteorder must be 'big' or 'little' (got {self.byteorder!r})"
+            )
+
+    @property
+    def id_token(self) -> str:
+        """Token used inside reading identifiers: ``rule.value`` plus ``_le``."""
+        suffix = "_le" if self.byteorder == "little" else ""
+        return f"{self.rule.value}{suffix}"
+
+    def read_prf_output(self, r_dash: bytes) -> int:
+        """Return the PRF output ``r'`` as an unsigned integer in this byte order.
+
+        Callers pass the result to ``reduce_scalar`` together with ``rule``.
+        """
+        return int.from_bytes(r_dash, byteorder=self.byteorder, signed=False)
+
+
+BE_MOD_N: Final[ScalarDerivation] = ScalarDerivation("big", ScalarRule.MOD_N)
+BE_PLUS_ONE: Final[ScalarDerivation] = ScalarDerivation("big", ScalarRule.PLUS_ONE)
+LE_PLUS_ONE: Final[ScalarDerivation] = ScalarDerivation("little", ScalarRule.PLUS_ONE)
 
 
 def rx_to_ry(Rx: int, curve: CurveFpProtocol) -> int:

@@ -23,12 +23,16 @@ from custom_components.googlefindmy.FMDNCrypto import (
     foreign_tracker_cryptor,
 )
 from custom_components.googlefindmy.FMDNCrypto.curve_profile import (
+    BE_MOD_N,
+    BE_PLUS_ONE,
+    LE_PLUS_ONE,
     SECP160R1,
     SECP256R1,
     ScalarRule,
 )
 from custom_components.googlefindmy.FMDNCrypto.eid_generator import (
     FHNA_K,
+    VARIANT_DERIVATIONS,
     EidVariant,
     build_table10_prf_input,
     generate_eid_variant,
@@ -46,12 +50,14 @@ from custom_components.googlefindmy.FMDNCrypto.foreign_tracker_cryptor import (
     SECP160R1_FOREIGN_READINGS,
     ForeignReading,
     calculate_r,
+    decrypt,
     decrypt_aes_eax,
     decrypt_foreign_report,
     encrypt,
 )
 from tests.helpers.fmdn_report_oracle import (
     OracleReport,
+    PrfByteOrderName,
     ScalarRuleName,
     build_p256_report,
     ephemeral_scalar_with_y_parity,
@@ -70,6 +76,16 @@ _EXPECTED_P256_IDS = (
     "p256/mod_n/nonce10",
     "p256/plus1/nonce8",
     "p256/plus1/nonce10",
+    "p256/plus1_le/nonce8",
+    "p256/plus1_le/nonce10",
+)
+_READING_NUMBERS = [1, 2, 3, 4, 5, 6]
+
+# Variants whose EID is a truncated P-256 x-coordinate: a finder cannot run a
+# P-256 ECDH from 20 of 32 bytes, so their reports are not decryptable
+# (see test_truncated_p256_variant_reports_are_undecryptable).
+_TRUNCATED_VARIANTS = frozenset(
+    {EidVariant.MODERN_P256_X20_TRUNC_BE, EidVariant.MODERN_P256_X20_TRUNC_LE}
 )
 
 # Sixteen fixed (EIK, counter) pairs, including unaligned and boundary counters.
@@ -100,8 +116,10 @@ _INVARIANCE_PAIRS = [
 
 def _report_for(k: int, eik: bytes = _EIK) -> OracleReport:
     reading = P256_FOREIGN_READINGS[k - 1]
-    rule: ScalarRuleName = (
-        "mod_n" if reading.scalar_rule is ScalarRule.MOD_N else "plus1"
+    derivation = reading.derivation
+    rule: ScalarRuleName = "mod_n" if derivation.rule is ScalarRule.MOD_N else "plus1"
+    byteorder: PrfByteOrderName = (
+        "little" if derivation.byteorder == "little" else "big"
     )
     return build_p256_report(
         eik,
@@ -110,6 +128,7 @@ def _report_for(k: int, eik: bytes = _EIK) -> OracleReport:
         rule=rule,
         nonce_half_len=reading.nonce_half_len,
         ephemeral_scalar=_EPHEMERAL,
+        r_dash_byteorder=byteorder,
     )
 
 
@@ -169,7 +188,7 @@ class TestReadingRegistry:
         with pytest.raises(ValueError, match="nonce_half_len must lie in"):
             ForeignReading(
                 curve=SECP256R1,
-                scalar_rule=ScalarRule.MOD_N,
+                derivation=BE_MOD_N,
                 nonce_half_len=half,
                 source="https://example.invalid",
                 provisional=True,
@@ -179,7 +198,7 @@ class TestReadingRegistry:
 class TestP256Decryption:
     """Every reading decrypts a report built under it, and only that one wins."""
 
-    @pytest.mark.parametrize("k", [1, 2, 3, 4])
+    @pytest.mark.parametrize("k", _READING_NUMBERS)
     def test_winner_is_reading_k(self, k: int) -> None:
         report = _report_for(k)
         result = decrypt_foreign_report(
@@ -229,9 +248,9 @@ class TestP256Decryption:
 
 
 class TestAttemptCounts:
-    """Work per report: PRF per key, ECDH per scalar rule, tag check per reading."""
+    """Work per report: PRF per key, ECDH per derivation, tag check per reading."""
 
-    @pytest.mark.parametrize("k", [1, 2, 3, 4])
+    @pytest.mark.parametrize("k", _READING_NUMBERS)
     def test_first_report_needs_k_checks_then_one(
         self, monkeypatch: pytest.MonkeyPatch, k: int
     ) -> None:
@@ -270,12 +289,13 @@ class TestAttemptCounts:
         )
         assert len(checks) == 3
 
-    def test_one_ecdh_per_scalar_rule(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_one_ecdh_per_derivation(self, monkeypatch: pytest.MonkeyPatch) -> None:
         derivations: list[int] = []
         _counting(monkeypatch, foreign_tracker_cryptor, "_shared_material", derivations)
-        report = _report_for(4)
+        report = _report_for(6)
         decrypt_foreign_report([_EIK], report.encrypted_and_tag, report.sx, _COUNTER)
-        assert len(derivations) == 2
+        # Six readings share three derivations: BE mod n, BE +1, LE +1.
+        assert len(derivations) == 3
 
     def test_prf_once_per_key(self, monkeypatch: pytest.MonkeyPatch) -> None:
         prf_calls: list[int] = []
@@ -412,12 +432,12 @@ class TestSecp160r1Unchanged:
 
 
 class TestScalarInvariance:
-    """Readings reproduce the stored EID variants; the rule is the only difference."""
+    """Readings reproduce the stored EID variants; the derivation is the only difference."""
 
     @staticmethod
-    def _r_dash(eik: bytes, counter: int) -> int:
+    def _r_dash(eik: bytes, counter: int) -> bytes:
         block = build_table10_prf_input(counter, k=FHNA_K)
-        return int.from_bytes(prf_aes_256_ecb(eik, block), "big")
+        return prf_aes_256_ecb(eik, block)
 
     @pytest.mark.parametrize(("eik", "counter"), _INVARIANCE_PAIRS)
     def test_secp160r1_reading_matches_legacy_variant(
@@ -426,7 +446,7 @@ class TestScalarInvariance:
         material = foreign_tracker_cryptor._shared_material(
             SECP160R1,
             self._r_dash(eik, counter),
-            ScalarRule.MOD_N,
+            BE_MOD_N,
             SECP160R1.point_x(2),
         )
         assert material is not None
@@ -437,7 +457,7 @@ class TestScalarInvariance:
     @pytest.mark.parametrize(("eik", "counter"), _INVARIANCE_PAIRS)
     def test_p256_plus1_matches_modern_variant(self, eik: bytes, counter: int) -> None:
         material = foreign_tracker_cryptor._shared_material(
-            SECP256R1, self._r_dash(eik, counter), ScalarRule.PLUS_ONE, p256_x(2)
+            SECP256R1, self._r_dash(eik, counter), BE_PLUS_ONE, p256_x(2)
         )
         assert material is not None
         assert material[0] == generate_eid_variant(
@@ -447,7 +467,72 @@ class TestScalarInvariance:
     @pytest.mark.parametrize(("eik", "counter"), _INVARIANCE_PAIRS)
     def test_p256_mod_n_matches_oracle(self, eik: bytes, counter: int) -> None:
         material = foreign_tracker_cryptor._shared_material(
-            SECP256R1, self._r_dash(eik, counter), ScalarRule.MOD_N, p256_x(2)
+            SECP256R1, self._r_dash(eik, counter), BE_MOD_N, p256_x(2)
         )
         assert material is not None
         assert material[0] == p256_x(owner_scalar(eik, counter, "mod_n"))
+
+    @pytest.mark.parametrize(("eik", "counter"), _INVARIANCE_PAIRS)
+    def test_p256_plus1_le_matches_le_variant(self, eik: bytes, counter: int) -> None:
+        material = foreign_tracker_cryptor._shared_material(
+            SECP256R1, self._r_dash(eik, counter), LE_PLUS_ONE, p256_x(2)
+        )
+        assert material is not None
+        assert material[0] == generate_eid_variant(
+            eik, counter, EidVariant.MODERN_P256_X32_LE_SCALAR
+        )
+        assert material[0] == p256_x(
+            owner_scalar(eik, counter, "plus1", r_dash_byteorder="little")
+        )
+
+
+class TestReadingsBoundToVariants:
+    """Every scalar derivation an EID variant uses can decrypt its reports."""
+
+    def test_every_full_variant_derivation_has_a_reading(self) -> None:
+        """A tracker the resolver can lock to a variant must have a reading.
+
+        Full variants (EID length equal to the curve's coordinate length) are
+        checked; the truncated P-256 variants are the named exclusions.
+        """
+        checked: set[EidVariant] = set()
+        for variant, (curve, derivation) in VARIANT_DERIVATIONS.items():
+            eid_len = len(generate_eid_variant(_EIK, 0, variant))
+            if eid_len != curve.coord_len:
+                assert variant in _TRUNCATED_VARIANTS, variant
+                continue
+            reading_derivations = {
+                reading.derivation for reading in READINGS_BY_CURVE[curve.name]
+            }
+            assert derivation in reading_derivations, (
+                f"{variant.value}: no reading for {derivation}"
+            )
+            checked.add(variant)
+        assert checked == set(VARIANT_DERIVATIONS) - _TRUNCATED_VARIANTS
+        assert checked
+
+    @pytest.mark.parametrize("variant", sorted(_TRUNCATED_VARIANTS))
+    def test_truncated_p256_variant_reports_are_undecryptable(
+        self, variant: EidVariant
+    ) -> None:
+        """A report built for a truncated P-256 EID never decrypts.
+
+        The 20-byte EID is used as a SECP160R1 x-coordinate by the finder;
+        about half of the counters give no curve point at all. Every report
+        that can be built lands on SECP160R1 and fails authentication.
+        """
+        eik = bytes(range(32))
+        built = 0
+        for counter in range(0, 40 * 1024, 1024):
+            eid = generate_eid_variant(eik, counter, variant)
+            assert len(eid) == SECP160R1.coord_len
+            try:
+                encrypted_and_tag, sx = encrypt(b"x" * 20, bytes(range(20)), eid)
+            except ValueError:
+                continue  # truncated x is not a SECP160R1 point
+            built += 1
+            with pytest.raises(ForeignReportAuthError):
+                decrypt_foreign_report([eik], encrypted_and_tag, sx, counter)
+            with pytest.raises(ForeignReportAuthError):
+                decrypt(eik, encrypted_and_tag, sx, counter)
+        assert built >= 1

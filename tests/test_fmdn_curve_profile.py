@@ -17,12 +17,16 @@ from cryptography.hazmat.primitives.asymmetric import ec
 
 from custom_components.googlefindmy.FMDNCrypto import foreign_tracker_cryptor
 from custom_components.googlefindmy.FMDNCrypto.curve_profile import (
+    BE_MOD_N,
+    BE_PLUS_ONE,
     CURVES_BY_COORD_LEN,
+    LE_PLUS_ONE,
     P256_ORDER,
     SECP160R1,
     SECP160R1_ORDER,
     SECP256R1,
     FmdnCurve,
+    ScalarDerivation,
     ScalarRule,
     curve_for_coord_len,
     reduce_scalar,
@@ -183,6 +187,34 @@ class TestReduceScalar:
     def test_invalid_inputs_raise(self, r_dash: int, order: int) -> None:
         with pytest.raises(ValueError):
             reduce_scalar(r_dash, order, ScalarRule.MOD_N)
+
+
+class TestScalarDerivation:
+    """Byte order plus rule, with the identifier token derived from both."""
+
+    def test_named_derivations(self) -> None:
+        assert BE_MOD_N == ScalarDerivation("big", ScalarRule.MOD_N)
+        assert BE_PLUS_ONE == ScalarDerivation("big", ScalarRule.PLUS_ONE)
+        assert LE_PLUS_ONE == ScalarDerivation("little", ScalarRule.PLUS_ONE)
+
+    def test_id_tokens(self) -> None:
+        tokens = [d.id_token for d in (BE_MOD_N, BE_PLUS_ONE, LE_PLUS_ONE)]
+        assert tokens == ["mod_n", "plus1", "plus1_le"]
+
+    def test_read_prf_output_uses_the_byte_order(self) -> None:
+        r_dash = bytes(range(1, 33))
+        assert BE_MOD_N.read_prf_output(r_dash) == int.from_bytes(r_dash, "big")
+        assert LE_PLUS_ONE.read_prf_output(r_dash) == int.from_bytes(r_dash, "little")
+        assert BE_MOD_N.read_prf_output(r_dash) != LE_PLUS_ONE.read_prf_output(r_dash)
+
+    def test_is_hashable_and_frozen(self) -> None:
+        assert len({BE_MOD_N, BE_PLUS_ONE, LE_PLUS_ONE, BE_MOD_N}) == 3
+        with pytest.raises(AttributeError):
+            BE_MOD_N.rule = ScalarRule.PLUS_ONE  # type: ignore[misc]
+
+    def test_unknown_byte_order_rejected(self) -> None:
+        with pytest.raises(ValueError, match="byteorder"):
+            ScalarDerivation("middle", ScalarRule.MOD_N)  # type: ignore[arg-type]
 
 
 class TestPointX:

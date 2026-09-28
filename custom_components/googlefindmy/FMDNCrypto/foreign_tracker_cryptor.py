@@ -17,9 +17,13 @@ Notes:
   (``curve_profile.curve_for_coord_len``): 20 bytes SECP160R1, 32 bytes
   SECP256R1. ``decrypt`` is a thin wrapper around it for one identity key.
 - A reading (``ForeignReading``) names one way to derive the owner-side
-  scalar and nonce. SECP160R1 has one reading; SECP256R1 has four
+  scalar and nonce. SECP160R1 has one reading; SECP256R1 has six
   provisional readings, tried in the order of their evidence, until field
-  reports confirm which one real trackers use.
+  reports confirm which one real trackers use. Every scalar derivation that
+  a full-length ``EidVariant`` uses (``eid_generator.VARIANT_DERIVATIONS``)
+  appears among the readings of its curve; the test suite pins that binding.
+  Truncated P-256 variants (20 of 32 bytes) are excluded: a finder cannot run
+  a P-256 ECDH from them, so their reports are not decryptable.
 - ``encrypt`` still covers SECP160R1 only (20-byte EIDs).
 """
 
@@ -47,10 +51,13 @@ from custom_components.googlefindmy.FMDNCrypto._lazy_crypto import (
     get_hkdf_class,
 )
 from custom_components.googlefindmy.FMDNCrypto.curve_profile import (
+    BE_MOD_N,
+    BE_PLUS_ONE,
+    LE_PLUS_ONE,
     SECP160R1,
     SECP256R1,
     FmdnCurve,
-    ScalarRule,
+    ScalarDerivation,
     curve_for_coord_len,
     reduce_scalar,
 )
@@ -60,6 +67,7 @@ from custom_components.googlefindmy.FMDNCrypto.curve_profile import (
 from custom_components.googlefindmy.FMDNCrypto.eid_generator import (
     EIK_LENGTH,
     FHNA_K,
+    VARIANT_DERIVATIONS,
     EidVariant,
     build_table10_prf_input,
     generate_eid_variant,
@@ -93,6 +101,7 @@ _SRC_SPEC: Final[str] = (
     "https://developers.google.com/nearby/fast-pair/specifications/extensions/fmdn"
 )
 _SRC_FORK_PLUS1: Final[str] = "commit 6c95f0f5 (MODERN_P256_* EID variants)"
+_SRC_FORK_LE: Final[str] = "commit f9bd9ece (little-endian r' of MODERN_P256_*_LE)"
 
 
 @dataclass(frozen=True, slots=True)
@@ -101,7 +110,7 @@ class ForeignReading:
 
     Attributes:
         curve: The curve the reading applies to.
-        scalar_rule: How the PRF output ``r'`` becomes the scalar ``r``.
+        derivation: How the PRF output ``r'`` is read and reduced to ``r``.
         nonce_half_len: Bytes taken from the low end of ``Rx`` and of ``Sx``;
             the nonce is ``Rx[-h:] || Sx[-h:]``.
         source: Public URL or commit of this repository that motivates it.
@@ -109,7 +118,7 @@ class ForeignReading:
     """
 
     curve: FmdnCurve
-    scalar_rule: ScalarRule
+    derivation: ScalarDerivation
     nonce_half_len: int
     source: str
     provisional: bool
@@ -124,9 +133,13 @@ class ForeignReading:
 
     @property
     def reading_id(self) -> str:
-        """Stable identifier, e.g. ``p256/mod_n/nonce8``; derived, never stored twice."""
+        """Stable identifier ``{curve}/{rule}[_le]/nonce{h}``, e.g. ``p256/mod_n/nonce8``.
+
+        Derived from the fields, never stored twice. The middle segment is
+        ``ScalarDerivation.id_token`` and is never split at ``_``.
+        """
         return (
-            f"{self.curve.short_name}/{self.scalar_rule.value}/"
+            f"{self.curve.short_name}/{self.derivation.id_token}/"
             f"nonce{self.nonce_half_len}"
         )
 
@@ -134,7 +147,7 @@ class ForeignReading:
 SECP160R1_FOREIGN_READINGS: Final[tuple[ForeignReading, ...]] = (
     ForeignReading(
         curve=SECP160R1,
-        scalar_rule=ScalarRule.MOD_N,
+        derivation=BE_MOD_N,
         nonce_half_len=8,
         source=_SRC_SPEC,
         provisional=False,
@@ -144,13 +157,22 @@ SECP160R1_FOREIGN_READINGS: Final[tuple[ForeignReading, ...]] = (
 # Ordered by evidence: (1) the specification's scalar with the 8+8 nonce used
 # in SECP160R1 practice, (2) the specification's scalar with the literal
 # "lower 80 bits" nonce, (3) and (4) the integration's existing ``+1``
-# projection with either nonce.
+# projection with either nonce, (5) and (6) the same projection with ``r'``
+# read little-endian. No measured source reads ``r'`` little-endian: the
+# specification, Nordic's fp_crypto and Atmosic's gfp_crypto (which reverses
+# the bytes before reducing) all read it big-endian. The claims in f9bd9ece
+# ("Some tracker firmware ...") and 104542e8 (Moto Tag) cite no source.
+# Readings 5 and 6 exist because the resolver recognises trackers through
+# ``MODERN_P256_X32_LE_SCALAR``; without them such a tracker would be matched
+# but its reports would never decrypt.
 # fmt: off
 P256_FOREIGN_READINGS: Final[tuple[ForeignReading, ...]] = (
-    ForeignReading(curve=SECP256R1, scalar_rule=ScalarRule.MOD_N, nonce_half_len=8, source=_SRC_SPEC, provisional=True),
-    ForeignReading(curve=SECP256R1, scalar_rule=ScalarRule.MOD_N, nonce_half_len=10, source=_SRC_SPEC, provisional=True),
-    ForeignReading(curve=SECP256R1, scalar_rule=ScalarRule.PLUS_ONE, nonce_half_len=8, source=_SRC_FORK_PLUS1, provisional=True),
-    ForeignReading(curve=SECP256R1, scalar_rule=ScalarRule.PLUS_ONE, nonce_half_len=10, source=_SRC_FORK_PLUS1, provisional=True),
+    ForeignReading(curve=SECP256R1, derivation=BE_MOD_N, nonce_half_len=8, source=_SRC_SPEC, provisional=True),
+    ForeignReading(curve=SECP256R1, derivation=BE_MOD_N, nonce_half_len=10, source=_SRC_SPEC, provisional=True),
+    ForeignReading(curve=SECP256R1, derivation=BE_PLUS_ONE, nonce_half_len=8, source=_SRC_FORK_PLUS1, provisional=True),
+    ForeignReading(curve=SECP256R1, derivation=BE_PLUS_ONE, nonce_half_len=10, source=_SRC_FORK_PLUS1, provisional=True),
+    ForeignReading(curve=SECP256R1, derivation=LE_PLUS_ONE, nonce_half_len=8, source=_SRC_FORK_LE, provisional=True),
+    ForeignReading(curve=SECP256R1, derivation=LE_PLUS_ONE, nonce_half_len=10, source=_SRC_FORK_LE, provisional=True),
 )
 # fmt: on
 
@@ -294,9 +316,11 @@ def calculate_r(identity_key: bytes, time_counter_u32: int) -> int:
 
     prf_input = build_table10_prf_input(time_counter_u32, k=FHNA_K)
     prf_output = prf_aes_256_ecb(identity_key, prf_input)
-    r_dash_int = int.from_bytes(prf_output, byteorder="big", signed=False)
-    # Same rule as generate_eid_variant for LEGACY_SECP160R1_X20_BE.
-    return reduce_scalar(r_dash_int, SECP160R1.order, ScalarRule.MOD_N)
+    # The derivation of LEGACY_SECP160R1_X20_BE, read from the variant table.
+    curve, derivation = VARIANT_DERIVATIONS[EidVariant.LEGACY_SECP160R1_X20_BE]
+    return reduce_scalar(
+        derivation.read_prf_output(prf_output), curve.order, derivation.rule
+    )
 
 
 def encrypt(message: bytes, random: bytes, eid: bytes) -> tuple[bytes, bytes]:
@@ -363,10 +387,10 @@ def _ordered_readings(
 
 
 def _shared_material(
-    curve: FmdnCurve, r_dash_int: int, rule: ScalarRule, sx: bytes
+    curve: FmdnCurve, r_dash: bytes, derivation: ScalarDerivation, sx: bytes
 ) -> tuple[bytes, bytes] | None:
-    """Return ``(Rx, AES key)`` for one scalar rule, or None for a zero scalar."""
-    r = reduce_scalar(r_dash_int, curve.order, rule)
+    """Return ``(Rx, AES key)`` for one derivation, or None for a zero scalar."""
+    r = reduce_scalar(derivation.read_prf_output(r_dash), curve.order, derivation.rule)
     if r == 0:
         # 0 * G is the point at infinity: this reading cannot apply.
         return None
@@ -394,13 +418,14 @@ def decrypt_foreign_report(
 
     1) Select the curve from ``len(sx)``; check the report structure once.
     2) ``r'`` = AES-ECB-256(EIK, Table 10 input); ``r`` from the reading's
-       scalar rule; ``R = r * G``.
+       scalar derivation (byte order and rule); ``R = r * G``.
     3) ``k`` = HKDF-SHA256((r * S).x), with ``S`` rebuilt from ``sx``.
     4) ``nonce`` = ``Rx[-h:] || Sx[-h:]`` with ``h`` the reading's half length.
     5) AES-EAX-256 decrypt and verify ``m' || tag``.
 
-    The PRF runs once per key and the ECDH once per key and scalar rule; each
-    reading adds one tag check. The preferred reading is tried first.
+    The PRF runs once per key; the scalar, ``R`` and the ECDH run once per key
+    and distinct derivation (three for P-256); each reading adds one tag
+    check. The preferred reading is tried first.
 
     Args:
         identity_keys: 32-byte identity key candidates, primary key first.
@@ -440,13 +465,15 @@ def decrypt_foreign_report(
     prf_input = build_table10_prf_input(beacon_time_counter, k=FHNA_K)
 
     for key_index, key in enumerate(keys):
-        r_dash_int = int.from_bytes(prf_aes_256_ecb(key, prf_input), "big")
-        material_by_rule: dict[ScalarRule, tuple[bytes, bytes] | None] = {}
+        r_dash = prf_aes_256_ecb(key, prf_input)
+        material_by_derivation: dict[ScalarDerivation, tuple[bytes, bytes] | None] = {}
         for reading in readings:
-            rule = reading.scalar_rule
-            if rule not in material_by_rule:
-                material_by_rule[rule] = _shared_material(curve, r_dash_int, rule, sx)
-            material = material_by_rule[rule]
+            derivation = reading.derivation
+            if derivation not in material_by_derivation:
+                material_by_derivation[derivation] = _shared_material(
+                    curve, r_dash, derivation, sx
+                )
+            material = material_by_derivation[derivation]
             if material is None:
                 continue
             rx, aes_key = material
