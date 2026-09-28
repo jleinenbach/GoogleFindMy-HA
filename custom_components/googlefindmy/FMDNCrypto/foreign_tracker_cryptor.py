@@ -484,15 +484,10 @@ def decrypt_foreign_report(
             if plaintext is not None:
                 return ForeignDecryptResult(plaintext, key_index, reading)
 
-    # The text prefix keeps SECP160R1 failures counted as authentication
-    # failures by callers that still classify by message. P-256 reports were
-    # rejected as malformed before multi-reading decryption, so they do not
-    # get the prefix and cannot drive the all-failed EIK cache invalidation.
     raise ForeignReportAuthError(
         curve.name,
         tuple(reading.reading_id for reading in readings),
         len(keys),
-        mac_check_prefix=curve is SECP160R1,
     )
 
 

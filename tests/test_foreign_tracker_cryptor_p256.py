@@ -242,8 +242,8 @@ class TestP256Decryption:
         assert err.readings_tried == _EXPECTED_P256_IDS
         assert err.keys_tried == 2
         assert isinstance(err, ValueError)
-        # P-256 reports were "malformed" before; no text bridge, so a P-256
-        # total failure cannot drive the all-failed EIK cache invalidation.
+        # Callers classify by type (decrypt_locations counts P-256 failures
+        # apart, Z11); the message carries no text a caller could match on.
         assert "mac" not in str(err).lower()
 
 
@@ -414,13 +414,13 @@ class TestAesEaxWrapper:
 class TestSecp160r1Unchanged:
     """SECP160R1 keeps one reading and today's mathematics."""
 
-    def test_auth_failure_keeps_mac_text_bridge(self) -> None:
+    def test_auth_failure_message_carries_no_mac_text(self) -> None:
         eid = generate_eid_variant(_EIK, _COUNTER, EidVariant.LEGACY_SECP160R1_X20_BE)
         encrypted, sx = encrypt(_PLAINTEXT, bytes(range(20)), eid)
         with pytest.raises(ForeignReportAuthError) as exc_info:
             decrypt_foreign_report([_OTHER_EIK], encrypted, sx, _COUNTER)
-        # Bridge for callers that still classify by text until they migrate.
-        assert str(exc_info.value).startswith("MAC check failed")
+        # Callers classify by type; no text a caller could still match on.
+        assert "mac" not in str(exc_info.value).lower()
         assert exc_info.value.readings_tried == ("secp160r1/mod_n/nonce8",)
 
     def test_roundtrip_through_decrypt_foreign_report(self) -> None:
