@@ -15,6 +15,7 @@ from collections.abc import Callable
 from typing import Any
 
 import pytest
+from Cryptodome.Cipher import AES
 from cryptography.hazmat.primitives.asymmetric import ec
 
 from custom_components.googlefindmy.FMDNCrypto import (
@@ -367,6 +368,14 @@ class TestAesEaxWrapper:
     def test_rejects_nonce_length_of_no_reading(self) -> None:
         with pytest.raises(ValueError, match=r"nonce must be one of \[16, 20\] bytes"):
             decrypt_aes_eax(b"", bytes(16), bytes(12), bytes(32))
+
+    @pytest.mark.parametrize("nonce_len", [16, 20])
+    def test_public_wrapper_roundtrip(self, nonce_len: int) -> None:
+        key = bytes(range(32))
+        nonce = bytes(range(nonce_len))
+        cipher = AES.new(key, AES.MODE_EAX, nonce=nonce)
+        ciphertext, tag = cipher.encrypt_and_digest(_PLAINTEXT)
+        assert decrypt_aes_eax(ciphertext, tag, nonce, key) == _PLAINTEXT
 
     def test_public_wrapper_raises_on_wrong_tag(self) -> None:
         with pytest.raises(ValueError, match="MAC check failed"):
