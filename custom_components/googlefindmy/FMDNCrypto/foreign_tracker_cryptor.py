@@ -38,6 +38,9 @@ from custom_components.googlefindmy.FMDNCrypto._lazy_crypto import (
     get_hashes_module,
     get_hkdf_class,
 )
+from custom_components.googlefindmy.FMDNCrypto.curve_profile import (
+    rx_to_ry as rx_to_ry,  # noqa: PLC0414 - re-exported for callers of the cryptor
+)
 from custom_components.googlefindmy.FMDNCrypto.eid_generator import (
     EIK_LENGTH,
     FHNA_K,
@@ -81,113 +84,6 @@ def _get_point() -> type:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-
-def rx_to_ry(Rx: int, curve: CurveFpProtocol) -> int:
-    """Recover the even Y coordinate from X on an elliptic curve (point decompression).
-
-    Mathematical Background
-    -----------------------
-    Elliptic curves in short Weierstrass form satisfy the equation:
-
-        y² = x³ + ax + b  (mod p)
-
-    Given only the X coordinate, we solve for Y using modular arithmetic.
-    This is the inverse of "point compression" where we store only X plus
-    one bit indicating the sign of Y.
-
-    Algorithm (Tonelli-Shanks for p ≡ 3 mod 4)
-    ------------------------------------------
-    1. Compute y² = x³ + ax + b (mod p)
-    2. For curves where p ≡ 3 (mod 4), the modular square root is:
-
-           y = (y²)^((p+1)/4) mod p
-
-    Why This Formula Works
-    ----------------------
-    For p ≡ 3 (mod 4), we can verify:
-
-        (y²)^((p+1)/4) mod p
-      = y^((p+1)/2) mod p
-      = y^((p-1)/2) × y mod p
-
-    By Fermat's Little Theorem, y^(p-1) ≡ 1 (mod p) for non-zero y, so:
-
-        y^((p-1)/2) ≡ ±1 (mod p)
-
-    For quadratic residues (values that have a square root), Euler's criterion
-    guarantees y^((p-1)/2) ≡ 1 (mod p). Therefore:
-
-        y^((p-1)/2) × y = 1 × y = y (mod p)
-
-    SECP160r1 Parameters (Reference)
-    --------------------------------
-    - Field: GF(2^160 - 2^31 - 1)
-    - p = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF7FFFFFFF
-    - p mod 4 = 3 ✓ (algorithm applicable)
-    - Coordinate length: 20 bytes (160 bits)
-
-    Point Compression Standard (ANSI X9.62)
-    ----------------------------------------
-    - Compressed format: 0x02/0x03 || X (prefix + x-coordinate)
-    - 0x02 = even Y, 0x03 = odd Y
-    - This function recovers the EVEN Y (canonical form used by FMDN)
-
-    The ±Y Ambiguity
-    ----------------
-    If y is a valid square root, then -y (which equals p - y in modular
-    arithmetic) is also a valid root. By convention, FMDN uses the EVEN
-    root (y mod 2 = 0) as the canonical form.
-
-    Args:
-        Rx: X coordinate as integer (160-bit for SECP160r1, 256-bit for P-256).
-        curve: The elliptic curve object providing p, a, b parameters.
-
-    Returns:
-        The even Y coordinate as integer.
-
-    Raises:
-        ValueError: If X is not on the curve (y² is not a quadratic residue,
-            meaning no valid Y exists for this X on the curve).
-
-    References:
-        - RFC 5480: ECC SubjectPublicKeyInfo Format
-        - ANSI X9.62: Public Key Cryptography for the Financial Services Industry
-        - NIST FIPS 186-4: Digital Signature Standard (DSS)
-        - Tonelli-Shanks: https://en.wikipedia.org/wiki/Tonelli-Shanks_algorithm
-
-    Example:
-        >>> from ecdsa import SECP160r1
-        >>> Rx = 0x4A96B5688EF573284664698968C38BB913CBFC82
-        >>> Ry = rx_to_ry(Rx, SECP160r1.curve)
-        >>> # Verify point is on curve:
-        >>> curve = SECP160r1.curve
-        >>> lhs = (Ry * Ry) % curve.p()
-        >>> rhs = (Rx**3 + curve.a() * Rx + curve.b()) % curve.p()
-        >>> assert lhs == rhs, "Point not on curve"
-    """
-    p: int = int(curve.p())
-    a: int = int(curve.a())
-    b: int = int(curve.b())
-
-    Rx_mod: int = Rx % p
-
-    # Compute y^2 = x^3 + a·x + b (mod p)
-    Ryy: int = (pow(Rx_mod, 3, p) + (a * Rx_mod) + b) % p
-
-    # For p ≡ 3 (mod 4): y = (y^2)^((p+1)//4) mod p is a square root
-    sqrt_candidate: int = pow(Ryy, (p + 1) // 4, p)
-
-    # Verify root
-    if (sqrt_candidate * sqrt_candidate) % p != Ryy:
-        raise ValueError("The provided X coordinate is not on the curve.")
-
-    # Ensure even y (standardized choice)
-    if sqrt_candidate % 2 != 0:
-        sqrt_candidate = p - sqrt_candidate
-
-    Ry: int = int(sqrt_candidate)
-    return Ry
 
 
 def _require_len(name: str, b: bytes, expected: int) -> None:
