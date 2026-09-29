@@ -16,7 +16,7 @@ from custom_components.googlefindmy.coordinator import (
     FcmStatus,
     GoogleFindMyCoordinator,
 )
-from tests.helpers import drain_loop
+from tests.helpers import drain_loop, run_loop_until
 from tests.test_coordinator_status import (
     _DummyAPI,
     _DummyCache,
@@ -129,8 +129,9 @@ def test_fcm_owner_index_fallback_routes_entry(
             None,
         )
 
-        # P0 fix: allow async handler to execute
-        loop.run_until_complete(asyncio.sleep(0.01))
+        # The handler awaits an executor job; wait for its result instead of
+        # a fixed sleep, which a loaded runner can outlast.
+        run_loop_until(loop, lambda: bool(seen), description="owner-index routing")
 
         assert seen == [{"entry-target"}]
     finally:

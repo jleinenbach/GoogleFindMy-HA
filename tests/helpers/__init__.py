@@ -7,12 +7,13 @@ from importlib import import_module
 from typing import Any
 
 from .ast_extract import compile_class_method_from_module
-from .asyncio import drain_loop
+from .asyncio import drain_loop, run_loop_until
 from .cache import DummyCache
 
 __all__ = [
     "compile_class_method_from_module",
     "drain_loop",
+    "run_loop_until",
     "DummyCache",
     "ConfigEntriesFlowManagerStub",
     "attach_config_entries_flow_manager",
