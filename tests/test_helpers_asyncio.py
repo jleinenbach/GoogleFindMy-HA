@@ -40,7 +40,11 @@ def test_drain_loop_joins_default_executor_workers() -> None:
         started.set()
         release.wait()
 
-    loop = asyncio.new_event_loop()
+    # Build a plain loop on purpose: older releases of the Home Assistant test
+    # plugin install ``HassEventLoopPolicy``, whose loops refuse
+    # ``set_default_executor`` outside a running ``hass``
+    # ("Frame helper not set up").
+    loop = asyncio.SelectorEventLoop()
     executor = _ReleasingExecutor(max_workers=1)
     loop.set_default_executor(executor)
     try:
