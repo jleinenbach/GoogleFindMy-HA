@@ -662,6 +662,7 @@ When a change is a bug fix (**commit type** `fix:` or **branch** `fix/...`) and 
 ### 3.4 Definition of Done for tests
 
 * **Deterministic:** no sleeps/time-races; use time freezing/monkeypatching.
+  * Private event loops: close them with `tests.helpers.drain_loop`, which joins the default executor (a leftover `asyncio_*` thread fails Home Assistant's `verify_cleanup`), and wait for work that crosses an executor thread with `tests.helpers.run_loop_until` instead of a fixed `loop.run_until_complete(asyncio.sleep(...))`.
 * **Isolated:** no live network; inject HA web sessions; mock external I/O at the boundary.
 * **Readable:** clear arrange/act/assert, meaningful names, minimal fixture magic.
 * **Value-dense:** each test protects a distinct behavior; avoid near-duplicates.
