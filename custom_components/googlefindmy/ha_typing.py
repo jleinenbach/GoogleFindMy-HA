@@ -33,7 +33,8 @@ class CloudDiscoveryRuntime:
 
 if TYPE_CHECKING:
     from aiohttp import web
-    from homeassistant.core import HomeAssistant
+    from homeassistant.core import Context, HomeAssistant
+    from homeassistant.helpers.entity import StateInfo
 
     from .discovery import _CloudDiscoveryResults
 
@@ -57,12 +58,19 @@ if TYPE_CHECKING:
 
         hass: HomeAssistant
         entity_id: str | None
+        _context: Context | None
+        _state_info: StateInfo | None
 
         async def async_added_to_hass(self) -> None: ...
+
+        def _async_calculate_state(self) -> Any: ...
 
         async def async_will_remove_from_hass(self) -> None: ...
 
         def async_write_ha_state(self) -> None: ...
+
+        @property
+        def available(self) -> bool: ...
 
     class CoordinatorEntity(_EntityBase, Generic[_CoordinatorT]):
         """Structural type for coordinator-backed entities."""
