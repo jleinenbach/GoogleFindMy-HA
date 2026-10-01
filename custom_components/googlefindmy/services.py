@@ -29,9 +29,11 @@ from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.network import NoURLAvailableError, get_url
 
 from .const import (
+    DEFAULT_MAP_VIEW_ENABLED,
     DEFAULT_MAP_VIEW_TOKEN_EXPIRATION,
     DOMAIN,
     LEGACY_SERVICE_IDENTIFIER,
+    OPT_MAP_VIEW_ENABLED,  # ctx provides the key but we keep a local fallback constant
     OPT_MAP_VIEW_TOKEN_EXPIRATION,  # ctx provides the key but we keep a local fallback constant
     SERVICE_DEVICE_IDENTIFIER_PREFIX,
     SERVICE_LOCATE_DEVICE,
@@ -1119,42 +1121,11 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
         Security:
             The token is a short-lived (weekly) or static gate derived from the HA UUID.
             All tokens are redacted in logs; the view must validate tokens server-side.
+
+        Clearing a disabled entry's stale ``configuration_url`` needs no base
+        URL, so that pass runs before the base-URL lookup below, mirroring
+        ``_async_refresh_device_urls`` in ``__init__.py``.
         """
-        try:
-            base_url = get_url(
-                hass,
-                prefer_external=True,
-                allow_cloud=True,
-                allow_internal=True,
-            )
-        except (HomeAssistantError, NoURLAvailableError) as err:
-            _LOGGER.warning(
-                "Skipping configuration URL refresh; no reachable URL available: %s",
-                err,
-            )
-            return
-
-        if not base_url:
-            _LOGGER.warning(
-                "Skipping configuration URL refresh; no reachable URL available",
-            )
-            return
-
-        try:
-            internal_url = get_url(
-                hass,
-                allow_external=False,
-                allow_cloud=False,
-                allow_internal=True,
-            )
-        except (HomeAssistantError, NoURLAvailableError):
-            internal_url = None
-        if base_url.rstrip("/") == (internal_url or "").rstrip("/"):
-            _LOGGER.info(
-                "Using internal URL for map view links; "
-                "set an external URL in Home Assistant settings for remote access",
-            )
-
         entries = hass.config_entries.async_entries(DOMAIN)
         entries_by_id = {entry.entry_id: entry for entry in entries}
 
@@ -1168,41 +1139,62 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
         opt_key = ctx.get(
             "opt_map_view_token_expiration_key", OPT_MAP_VIEW_TOKEN_EXPIRATION
         )
+        default_map_view_enabled = bool(
+            ctx.get("default_map_view_enabled", DEFAULT_MAP_VIEW_ENABLED)
+        )
+        map_view_enabled_key = ctx.get(
+            "opt_map_view_enabled_key", OPT_MAP_VIEW_ENABLED
+        )
 
         expiration_cache: dict[str, bool] = {}
+        map_view_enabled_cache: dict[str, bool] = {}
         token_cache: dict[str, str] = {}
         ha_uuid = str(hass.data.get("core.uuid", "ha"))
         now = int(time.time())
 
-        def _expiration_enabled(entry_id: str | None) -> bool:
+        def _read_bool_option(
+            entry_id: str | None,
+            key: str,
+            default: bool,
+            cache: dict[str, bool],
+        ) -> bool:
+            """Read one bool option for ``entry_id``, via the shared ``opt`` reader.
+
+            Shared by every per-entry bool option this refresh needs (map view
+            enabled, token expiration), each with its own cache so an entry's
+            option is read once per refresh regardless of device count.
+            """
             cache_key = entry_id or ""
-            if cache_key in expiration_cache:
-                return expiration_cache[cache_key]
+            if cache_key in cache:
+                return cache[cache_key]
 
             entry = entries_by_id.get(entry_id) if entry_id else None
-            enabled = default_expiration
+            enabled = default
 
             if entry:
                 if callable(opt_reader):
                     try:
-                        enabled = bool(opt_reader(entry, opt_key, default_expiration))
+                        enabled = bool(opt_reader(entry, key, default))
                     except Exception:
-                        enabled = bool(
-                            entry.options.get(
-                                opt_key,
-                                entry.data.get(opt_key, default_expiration),
-                            )
-                        )
+                        enabled = bool(entry.options.get(key, entry.data.get(key, default)))
                 else:
-                    enabled = bool(
-                        entry.options.get(
-                            opt_key,
-                            entry.data.get(opt_key, default_expiration),
-                        )
-                    )
+                    enabled = bool(entry.options.get(key, entry.data.get(key, default)))
 
-            expiration_cache[cache_key] = bool(enabled)
-            return expiration_cache[cache_key]
+            cache[cache_key] = bool(enabled)
+            return cache[cache_key]
+
+        def _map_view_enabled(entry_id: str | None) -> bool:
+            return _read_bool_option(
+                entry_id,
+                map_view_enabled_key,
+                default_map_view_enabled,
+                map_view_enabled_cache,
+            )
+
+        def _expiration_enabled(entry_id: str | None) -> bool:
+            return _read_bool_option(
+                entry_id, opt_key, default_expiration, expiration_cache
+            )
 
         def _token_for_entry(entry_id: str | None) -> str:
             cache_key = entry_id or ""
@@ -1271,6 +1263,11 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
         dev_reg = dr.async_get(hass)
         updated_count = 0
         seen_device_ids: set[str] = set()
+        resolved_count = 0
+        # (device, owner_entry_id, canonical_id) for every resolved device whose
+        # entry has Map View enabled. Populated by the first pass below and
+        # consumed by the second, after the base-URL lookup.
+        enabled_items: list[tuple[Any, str, str]] = []
         # Ask per entry instead of scanning the whole registry. Two things
         # change with that, both deliberate. The owning entry is now read from
         # the query rather than guessed from the device: the previous loop took
@@ -1282,6 +1279,11 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
         # residue, not one of our devices. ``async_entries_for_config_entry``
         # exists unchanged at tag ``2025.9.1`` and at ``2026.9.0``, so this
         # needs no capability switch.
+        #
+        # This pass also clears disabled entries' stale links before the
+        # base-URL lookup (mirrors ``_async_refresh_device_urls``); enabled
+        # entries' devices are only collected here, their URL built below
+        # once ``base_url`` is known.
         for owner_entry_id in entries_by_id:
             for device in dr.async_entries_for_config_entry(dev_reg, owner_entry_id):
                 # Below 2026.8 a device can hang on two of our entries at once.
@@ -1306,21 +1308,76 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
                 if not canonical_id:
                     continue
 
-                auth_token = _token_for_entry(owner_entry_id)
-                new_config_url = (
-                    f"{base_url}/api/googlefindmy/map/{canonical_id}?token={auth_token}"
-                )
-                dev_reg.async_update_device(
-                    device_id=device.id,
-                    configuration_url=new_config_url,
-                )
-                updated_count += 1
-                if ctx.get("redact_url_token"):
-                    _LOGGER.debug(
-                        "Updated URL for device %s: %s",
-                        device.name_by_user or device.name,
-                        ctx["redact_url_token"](new_config_url),
+                resolved_count += 1
+
+                if not _map_view_enabled(owner_entry_id):
+                    # Disabled: clear any stale link rather than refresh one
+                    # that just refuses every request.
+                    dev_reg.async_update_device(
+                        device_id=device.id, configuration_url=None
                     )
+                    updated_count += 1
+                    continue
+
+                enabled_items.append((device, owner_entry_id, canonical_id))
+
+        if resolved_count and not enabled_items:
+            # Every resolved device is on a disabled entry, so skip the
+            # base-URL lookup entirely.
+            _LOGGER.info("Refreshed URLs for %d Google Find My devices", updated_count)
+            return
+
+        try:
+            base_url = get_url(
+                hass,
+                prefer_external=True,
+                allow_cloud=True,
+                allow_internal=True,
+            )
+        except (HomeAssistantError, NoURLAvailableError) as err:
+            _LOGGER.warning(
+                "Skipping configuration URL refresh; no reachable URL available: %s",
+                err,
+            )
+            return
+
+        if not base_url:
+            _LOGGER.warning(
+                "Skipping configuration URL refresh; no reachable URL available",
+            )
+            return
+
+        try:
+            internal_url = get_url(
+                hass,
+                allow_external=False,
+                allow_cloud=False,
+                allow_internal=True,
+            )
+        except (HomeAssistantError, NoURLAvailableError):
+            internal_url = None
+        if base_url.rstrip("/") == (internal_url or "").rstrip("/"):
+            _LOGGER.info(
+                "Using internal URL for map view links; "
+                "set an external URL in Home Assistant settings for remote access",
+            )
+
+        for device, owner_entry_id, canonical_id in enabled_items:
+            auth_token = _token_for_entry(owner_entry_id)
+            new_config_url = (
+                f"{base_url}/api/googlefindmy/map/{canonical_id}?token={auth_token}"
+            )
+            dev_reg.async_update_device(
+                device_id=device.id,
+                configuration_url=new_config_url,
+            )
+            updated_count += 1
+            if ctx.get("redact_url_token"):
+                _LOGGER.debug(
+                    "Updated URL for device %s: %s",
+                    device.name_by_user or device.name,
+                    ctx["redact_url_token"](new_config_url),
+                )
 
         _LOGGER.info("Refreshed URLs for %d Google Find My devices", updated_count)
 
