@@ -26,6 +26,7 @@ if getattr(map_view, "__file__", None) is None:
     )
 from custom_components.googlefindmy.const import (
     DOMAIN,
+    OPT_MAP_VIEW_ENABLED,
     map_token_hex_digest,
     map_token_secret_seed,
 )
@@ -186,6 +187,47 @@ async def test_get_invalid_token_returns_unauthorized(
     )
 
     assert response.status == 401
+
+
+@pytest.mark.asyncio
+async def test_get_refuses_identically_to_invalid_token_when_map_view_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A valid token for an entry that disabled Map View is refused exactly
+    like an invalid/unrecognized token -- same status, body and headers.
+
+    Defense in depth: the view may still be process-wide registered because
+    another entry wants Map View (HA core has no unregister_view API), but a
+    resolved entry that has since turned the feature off must not be served.
+    The refusal must also not be distinguishable from an invalid token, or
+    anyone holding a disabled-but-valid token could confirm its validity just
+    by seeing a different response than an invalid token gets.
+    """
+
+    device_id = "device123"
+    entry = make_config_entry(
+        entry_id="entry-id",
+        runtime_data=None,
+        options={OPT_MAP_VIEW_ENABLED: False},
+    )
+    hass = _StubHass([entry])
+
+    ha_uuid = hass.data["core.uuid"]
+    secret = map_token_secret_seed(ha_uuid, entry.entry_id, False)
+    token = map_token_hex_digest(secret)
+
+    disabled_response = await map_view.GoogleFindMyMapView(hass).get(
+        SimpleNamespace(query={"token": token}),
+        device_id=device_id,
+    )
+    invalid_response = await map_view.GoogleFindMyMapView(hass).get(
+        SimpleNamespace(query={"token": "invalid"}),
+        device_id=device_id,
+    )
+
+    assert disabled_response.status == invalid_response.status == 401
+    assert disabled_response.body == invalid_response.body
+    assert dict(disabled_response.headers) == dict(invalid_response.headers)
 
 
 @pytest.mark.asyncio
@@ -432,6 +474,52 @@ async def test_redirect_uses_relative_location(monkeypatch: pytest.MonkeyPatch) 
         ctx.value.location
         == "/api/googlefindmy/map/device123?token=abc&start=2024-01-01T00%3A00%3A00Z"
     )
+
+
+@pytest.mark.asyncio
+async def test_redirect_forwards_to_a_disabled_entrys_map_view_which_refuses_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The redirect view itself does no entry/token lookup; enforcement is
+    entirely the target map view's job, and it must still refuse there.
+
+    ``GoogleFindMyMapRedirectView`` only checks that *a* token is present and
+    blindly forwards every query parameter, including the token, to
+    ``/api/googlefindmy/map/...``; it never resolves a config entry, so it
+    cannot itself leak whether a token is for a disabled entry. This confirms
+    that chain end to end: the redirect succeeds (302) regardless, but
+    following it reaches a map view that refuses a disabled entry's token
+    exactly like it refuses an invalid one.
+    """
+
+    device_id = "device123"
+    entry = make_config_entry(
+        entry_id="entry-id",
+        runtime_data=None,
+        options={OPT_MAP_VIEW_ENABLED: False},
+    )
+    hass = _StubHass([entry])
+
+    ha_uuid = hass.data["core.uuid"]
+    secret = map_token_secret_seed(ha_uuid, entry.entry_id, False)
+    token = map_token_hex_digest(secret)
+
+    redirect_view = map_view.GoogleFindMyMapRedirectView(hass)
+    with pytest.raises(map_view.web.HTTPFound) as ctx:
+        await redirect_view.get(
+            SimpleNamespace(query={"token": token}), device_id=device_id
+        )
+    assert ctx.value.location == f"/api/googlefindmy/map/{device_id}?token={token}"
+
+    map_response = await map_view.GoogleFindMyMapView(hass).get(
+        SimpleNamespace(query={"token": token}), device_id=device_id
+    )
+    invalid_response = await map_view.GoogleFindMyMapView(hass).get(
+        SimpleNamespace(query={"token": "invalid"}), device_id=device_id
+    )
+
+    assert map_response.status == invalid_response.status == 401
+    assert map_response.body == invalid_response.body
 
 
 def _install_multi_history_stub(

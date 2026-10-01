@@ -172,6 +172,7 @@ from .const import (
     DEFAULT_DELETE_CACHES_ON_REMOVE,
     DEFAULT_DEVICE_POLL_DELAY,
     DEFAULT_LOCATION_POLL_INTERVAL,
+    DEFAULT_MAP_VIEW_ENABLED,
     DEFAULT_MAP_VIEW_TOKEN_EXPIRATION,
     DEFAULT_MIN_POLL_INTERVAL,
     DEFAULT_OPTIONS,
@@ -190,6 +191,7 @@ from .const import (
     OPT_DEVICE_POLL_DELAY,
     OPT_IGNORED_DEVICES,
     OPT_LOCATION_POLL_INTERVAL,
+    OPT_MAP_VIEW_ENABLED,
     OPT_MAP_VIEW_TOKEN_EXPIRATION,
     OPT_MIN_POLL_INTERVAL,
     OPT_OPTIONS_SCHEMA_VERSION,
@@ -5598,6 +5600,33 @@ def _effective_config(entry: ConfigEntry) -> dict[str, Any]:
     return {k: _opt(entry, k, None) for k in OPTION_KEYS}
 
 
+def _async_ensure_map_views_registered(
+    hass: HomeAssistant, bucket: GoogleFindMyDomainData
+) -> None:
+    """Register the map HTTP views once, if not already done.
+
+    Registration is domain-wide (``bucket`` is the shared domain data): HA core
+    has no ``unregister_view`` API, so per-entry access is gated at request
+    time instead (see ``map_view.py``'s ``OPT_MAP_VIEW_ENABLED`` check).
+    """
+    views_registered = bucket.get("views_registered")
+    if not isinstance(views_registered, bool):
+        views_registered = False
+    if views_registered:
+        return
+
+    map_view_instance = GoogleFindMyMapView(hass)
+    hass.http.register_view(map_view_instance)
+
+    map_redirect_view_instance = GoogleFindMyMapRedirectView(hass)
+    hass.http.register_view(map_redirect_view_instance)
+
+    map_tiles_token_view_instance = GoogleFindMyMapTilesTokenView(hass)
+    hass.http.register_view(map_tiles_token_view_instance)
+    bucket["views_registered"] = True
+    _LOGGER.debug("Registered map views")
+
+
 def _normalize_contributor_mode(value: Any) -> str:
     """Return a sanitized contributor mode string."""
 
@@ -7295,6 +7324,8 @@ async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
                 "opt": _opt,
                 "default_map_view_token_expiration": DEFAULT_MAP_VIEW_TOKEN_EXPIRATION,
                 "opt_map_view_token_expiration_key": OPT_MAP_VIEW_TOKEN_EXPIRATION,
+                "default_map_view_enabled": DEFAULT_MAP_VIEW_ENABLED,
+                "opt_map_view_enabled_key": OPT_MAP_VIEW_ENABLED,
                 "redact_url_token": _redact_url_token,
                 "soft_migrate_entry": _async_soft_migrate_data_to_options,
                 "migrate_unique_ids": _async_migrate_unique_ids,
@@ -8252,6 +8283,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
         if isinstance(listeners, list) and _async_refresh_watch_paths not in listeners:
             return
 
+        # The map-view toggle is not handled here, like every other setup-time
+        # option: ``OptionsFlowHandler.async_step_settings`` already schedules a
+        # reload on change, which re-runs ``async_setup_entry`` end to end.
+
         updated_fingerprint = _credential_fingerprint(updated_entry.data)
         if updated_fingerprint == credential_fingerprint:
             # Options, subentry maintenance, coalescing: everything that leaves
@@ -8875,21 +8910,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
             "Coordinator setup failed early; will recover on next refresh: %s", err
         )
 
-    # Register map views (idempotent across multi-entry)
-    views_registered = bucket.get("views_registered")
-    if not isinstance(views_registered, bool):
-        views_registered = False
-    if not views_registered:
-        map_view_instance = GoogleFindMyMapView(hass)
-        hass.http.register_view(map_view_instance)
-
-        map_redirect_view_instance = GoogleFindMyMapRedirectView(hass)
-        hass.http.register_view(map_redirect_view_instance)
-
-        map_tiles_token_view_instance = GoogleFindMyMapTilesTokenView(hass)
-        hass.http.register_view(map_tiles_token_view_instance)
-        bucket["views_registered"] = True
-        _LOGGER.debug("Registered map views")
+    # Register map views (idempotent across multi-entry), gated per-entry: an
+    # entry that opts out skips registration, but another entry still wanting
+    # the feature registers it regardless of order. Once up, views stay up for
+    # the process lifetime (no unregister_view API); map_view.py's own
+    # OPT_MAP_VIEW_ENABLED check turns away a since-disabled entry per-request.
+    map_view_enabled_for_entry = _opt(entry, OPT_MAP_VIEW_ENABLED, DEFAULT_MAP_VIEW_ENABLED)
+    if map_view_enabled_for_entry:
+        _async_ensure_map_views_registered(hass, bucket)
 
     # Run duplicate self-healing asynchronously so it also executes on reloads.
     hass.async_create_task(
@@ -9191,52 +9219,6 @@ async def _async_refresh_device_urls(
         changed = _url_state_changed(hass, state)
         return not periodic or changed
 
-    try:
-        base_url = cast(
-            str,
-            get_url(
-                hass,
-                prefer_external=True,
-                allow_cloud=True,
-                allow_internal=True,
-            ),
-        )
-    except (HomeAssistantError, NoURLAvailableError) as err:
-        _LOGGER.log(
-            logging.WARNING if _report_once("no-url") else logging.DEBUG,
-            "Skipping configuration URL refresh; no reachable URL available: %s",
-            err,
-        )
-        return
-
-    if not base_url or "://" not in base_url:
-        _LOGGER.log(
-            logging.WARNING if _report_once("no-url") else logging.DEBUG,
-            "Skipping configuration URL refresh; no reachable URL available",
-        )
-        return
-
-    try:
-        internal_url = get_url(
-            hass,
-            allow_external=False,
-            allow_cloud=False,
-            allow_internal=True,
-        )
-    except (HomeAssistantError, NoURLAvailableError):
-        internal_url = None
-    if base_url.rstrip("/") == (internal_url or "").rstrip("/"):
-        _LOGGER.log(
-            logging.INFO if _report_once("internal-only") else logging.DEBUG,
-            "Using internal URL for map view links; "
-            "set an external URL in Home Assistant settings for remote access",
-        )
-    else:
-        _report_once("external")
-
-    base_url = base_url.rstrip("/")
-
-    ha_uuid = str(hass.data.get("core.uuid", "ha"))
     domain_entries = {
         entry.entry_id: entry for entry in hass.config_entries.async_entries(DOMAIN)
     }
@@ -9249,7 +9231,11 @@ async def _async_refresh_device_urls(
 
     dev_reg = dr.async_get(hass)
     updated_count = 0
-    # Whole registry on purpose: this pass refreshes the map URL of every
+
+    # Resolved once so both passes below (clear disabled, then build enabled)
+    # share the same device -> owning-entry lookup.
+    resolved: list[tuple[dr.DeviceEntry, MyConfigEntry, str]] = []
+    # Whole registry on purpose: this pass covers the map URL of every
     # GoogleFindMy device across all entries of the domain, and picks the owning
     # entry per device below.
     for device in iter_all_devices(dev_reg):
@@ -9302,11 +9288,95 @@ async def _async_refresh_device_urls(
             if ":" in dev_id:
                 dev_id = dev_id.split(":", 1)[1]
 
-            entry = domain_entries[entry_id]
+            resolved.append((device, domain_entries[entry_id], dev_id))
+        except (TypeError, ValueError, IndexError):
+            continue
+
+    # Clearing a disabled entry's stale configuration_url needs no base URL,
+    # so it runs before that lookup -- otherwise an install with no reachable
+    # HA URL would never get the link cleared.
+    enabled_items: list[tuple[dr.DeviceEntry, MyConfigEntry, str]] = []
+    for device, entry, dev_id in resolved:
+        try:
+            map_view_enabled = _opt(
+                entry, OPT_MAP_VIEW_ENABLED, DEFAULT_MAP_VIEW_ENABLED
+            )
+            if not map_view_enabled:
+                # Disabled: clear any stale link rather than refresh one that
+                # just refuses every request.
+                dev_reg.async_update_device(
+                    device_id=device.id, configuration_url=None
+                )
+                updated_count += 1
+                continue
+
+            enabled_items.append((device, entry, dev_id))
+        except (TypeError, ValueError, IndexError):
+            continue
+
+    if resolved and not enabled_items:
+        # Every resolved device is on a disabled entry, so skip the base-URL
+        # lookup entirely. With no devices at all, fall through so "no
+        # reachable URL" is still reported as before.
+        if updated_count:
+            _LOGGER.debug(
+                "Refreshed URLs for %d Google Find My device(s)", updated_count
+            )
+        return
+
+    try:
+        base_url = cast(
+            str,
+            get_url(
+                hass,
+                prefer_external=True,
+                allow_cloud=True,
+                allow_internal=True,
+            ),
+        )
+    except (HomeAssistantError, NoURLAvailableError) as err:
+        _LOGGER.log(
+            logging.WARNING if _report_once("no-url") else logging.DEBUG,
+            "Skipping configuration URL refresh; no reachable URL available: %s",
+            err,
+        )
+        return
+
+    if not base_url or "://" not in base_url:
+        _LOGGER.log(
+            logging.WARNING if _report_once("no-url") else logging.DEBUG,
+            "Skipping configuration URL refresh; no reachable URL available",
+        )
+        return
+
+    try:
+        internal_url = get_url(
+            hass,
+            allow_external=False,
+            allow_cloud=False,
+            allow_internal=True,
+        )
+    except (HomeAssistantError, NoURLAvailableError):
+        internal_url = None
+    if base_url.rstrip("/") == (internal_url or "").rstrip("/"):
+        _LOGGER.log(
+            logging.INFO if _report_once("internal-only") else logging.DEBUG,
+            "Using internal URL for map view links; "
+            "set an external URL in Home Assistant settings for remote access",
+        )
+    else:
+        _report_once("external")
+
+    base_url = base_url.rstrip("/")
+
+    ha_uuid = str(hass.data.get("core.uuid", "ha"))
+
+    for device, entry, dev_id in enabled_items:
+        try:
             token_exp = _opt(
                 entry, OPT_MAP_VIEW_TOKEN_EXPIRATION, DEFAULT_MAP_VIEW_TOKEN_EXPIRATION
             )
-            secret = map_token_secret_seed(ha_uuid, entry_id, bool(token_exp))
+            secret = map_token_secret_seed(ha_uuid, entry.entry_id, bool(token_exp))
             auth_token = map_token_hex_digest(secret)
 
             map_path = f"/api/googlefindmy/map/{dev_id}?token={auth_token}"

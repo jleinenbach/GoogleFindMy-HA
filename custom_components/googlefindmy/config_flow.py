@@ -130,6 +130,7 @@ from .const import (
     DEFAULT_ENABLE_STATS_ENTITIES,
     # Defaults
     DEFAULT_LOCATION_POLL_INTERVAL,
+    DEFAULT_MAP_VIEW_ENABLED,
     DEFAULT_MAP_VIEW_TOKEN_EXPIRATION,
     DEFAULT_OPTIONS,
     DEFAULT_ROUNDTRIP_CONFIRM,
@@ -150,6 +151,7 @@ from .const import (
     OPT_IGNORED_DEVICES,
     # Options (non-secret runtime settings)
     OPT_LOCATION_POLL_INTERVAL,
+    OPT_MAP_VIEW_ENABLED,
     OPT_MAP_VIEW_TOKEN_EXPIRATION,
     OPT_OPTIONS_SCHEMA_VERSION,
     OPT_ROUNDTRIP_CONFIRM,
@@ -1575,6 +1577,11 @@ def _derive_feature_settings(
     if OPT_MAP_VIEW_TOKEN_EXPIRATION in options_payload:
         feature_flags[OPT_MAP_VIEW_TOKEN_EXPIRATION] = bool(
             options_payload[OPT_MAP_VIEW_TOKEN_EXPIRATION]
+        )
+
+    if OPT_MAP_VIEW_ENABLED in options_payload:
+        feature_flags[OPT_MAP_VIEW_ENABLED] = bool(
+            options_payload[OPT_MAP_VIEW_ENABLED]
         )
 
     if OPT_GOOGLE_HOME_FILTER_ENABLED is not None:
@@ -5824,6 +5831,7 @@ class ConfigFlow(
                 vol.Coerce(int), vol.Range(min=1, max=60)
             ),
             vol.Optional(OPT_MAP_VIEW_TOKEN_EXPIRATION): bool,
+            vol.Optional(OPT_MAP_VIEW_ENABLED): bool,
         }
         if OPT_GOOGLE_HOME_FILTER_ENABLED is not None:
             schema_fields[vol.Optional(OPT_GOOGLE_HOME_FILTER_ENABLED)] = bool
@@ -5839,6 +5847,7 @@ class ConfigFlow(
             OPT_LOCATION_POLL_INTERVAL: DEFAULT_LOCATION_POLL_INTERVAL,
             OPT_DEVICE_POLL_DELAY: DEFAULT_DEVICE_POLL_DELAY,
             OPT_MAP_VIEW_TOKEN_EXPIRATION: DEFAULT_MAP_VIEW_TOKEN_EXPIRATION,
+            OPT_MAP_VIEW_ENABLED: DEFAULT_MAP_VIEW_ENABLED,
             OPT_DELETE_CACHES_ON_REMOVE: DEFAULT_DELETE_CACHES_ON_REMOVE,
         }
         if (
@@ -6449,6 +6458,7 @@ class ConfigFlow(
             OPT_LOCATION_POLL_INTERVAL,
             OPT_DEVICE_POLL_DELAY,
             OPT_MAP_VIEW_TOKEN_EXPIRATION,
+            OPT_MAP_VIEW_ENABLED,
             OPT_CONTRIBUTOR_MODE,
             OPT_GOOGLE_HOME_FILTER_ENABLED,
             OPT_GOOGLE_HOME_FILTER_KEYWORDS,
@@ -7880,6 +7890,7 @@ class _BaseSubentryFlow(ConfigSubentryFlow, _ConfigSubentryFlowMixin):  # type: 
         payload = dict(getattr(self.config_entry, "options", {}))
         for key in (
             OPT_MAP_VIEW_TOKEN_EXPIRATION,
+            OPT_MAP_VIEW_ENABLED,
             OPT_GOOGLE_HOME_FILTER_ENABLED,
             OPT_ENABLE_STATS_ENTITIES,
             OPT_CONTRIBUTOR_MODE,
@@ -7892,6 +7903,7 @@ class _BaseSubentryFlow(ConfigSubentryFlow, _ConfigSubentryFlowMixin):  # type: 
         defaults = dict(DEFAULT_OPTIONS)
         for key in (
             OPT_MAP_VIEW_TOKEN_EXPIRATION,
+            OPT_MAP_VIEW_ENABLED,
             OPT_GOOGLE_HOME_FILTER_ENABLED,
             OPT_ENABLE_STATS_ENTITIES,
             OPT_CONTRIBUTOR_MODE,
@@ -8455,6 +8467,10 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin, _ContainerLoginMixi
         if OPT_MAP_VIEW_TOKEN_EXPIRATION in options_payload:
             feature_flags[OPT_MAP_VIEW_TOKEN_EXPIRATION] = bool(
                 options_payload[OPT_MAP_VIEW_TOKEN_EXPIRATION]
+            )
+        if OPT_MAP_VIEW_ENABLED in options_payload:
+            feature_flags[OPT_MAP_VIEW_ENABLED] = bool(
+                options_payload[OPT_MAP_VIEW_ENABLED]
             )
         if OPT_GOOGLE_HOME_FILTER_ENABLED is not None and (
             OPT_GOOGLE_HOME_FILTER_ENABLED in options_payload
@@ -9070,6 +9086,9 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin, _ContainerLoginMixi
             OPT_MAP_VIEW_TOKEN_EXPIRATION: _get(
                 OPT_MAP_VIEW_TOKEN_EXPIRATION, DEFAULT_MAP_VIEW_TOKEN_EXPIRATION
             ),
+            OPT_MAP_VIEW_ENABLED: _get(
+                OPT_MAP_VIEW_ENABLED, DEFAULT_MAP_VIEW_ENABLED
+            ),
             OPT_DELETE_CACHES_ON_REMOVE: _get(
                 OPT_DELETE_CACHES_ON_REMOVE, DEFAULT_DELETE_CACHES_ON_REMOVE
             ),
@@ -9185,6 +9204,7 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin, _ContainerLoginMixi
             vol.All(vol.Coerce(int), vol.Range(min=1, max=60)),
         )
         _register(vol.Optional(OPT_MAP_VIEW_TOKEN_EXPIRATION), bool)
+        _register(vol.Optional(OPT_MAP_VIEW_ENABLED), bool)
         _register(vol.Optional(OPT_DELETE_CACHES_ON_REMOVE), bool)
         if OPT_GOOGLE_HOME_FILTER_ENABLED is not None:
             _register(vol.Optional(OPT_GOOGLE_HOME_FILTER_ENABLED), bool)
