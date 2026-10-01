@@ -45,6 +45,7 @@ import pytest
 from custom_components.googlefindmy import map_view
 from custom_components.googlefindmy.const import (
     DOMAIN,
+    OPT_MAP_VIEW_ENABLED,
     map_token_hex_digest,
     map_token_secret_seed,
 )
@@ -400,6 +401,34 @@ async def test_token_endpoint_is_404_without_core_proxy() -> None:
     response = await _call_endpoint(hass, {_HEADER: _share_token(hass, entry)})
 
     assert response.status == 404
+    assert response.body is None
+    assert response.headers["Cache-Control"] == "no-store"
+
+
+@pytest.mark.asyncio
+async def test_token_endpoint_refuses_identically_to_unknown_token_when_map_view_disabled() -> (
+    None
+):
+    """A valid share token for an entry that disabled Map View is refused
+    exactly like an unrecognized token -- same status, body and headers.
+
+    Mirrors the main map view's defense-in-depth check: the resolved entry's
+    ``map_view_enabled`` option must be honored here too, or a disabled entry
+    would still hand out live Core map-tile tokens through this endpoint. The
+    refusal must also be indistinguishable from an unknown token (401, not a
+    distinct 404), or a leaked-but-disabled token could still be confirmed
+    valid by its different response.
+    """
+
+    entry = make_config_entry(
+        entry_id="entry-id", options={OPT_MAP_VIEW_ENABLED: False}
+    )
+    hass = _endpoint_hass(entries=[entry], map_tiles_tokens=[_NEW_TOKEN])
+
+    response = await _call_endpoint(hass, {_HEADER: _share_token(hass, entry)})
+    unknown_token_response = await _call_endpoint(hass, {_HEADER: "f" * 64})
+
+    assert response.status == unknown_token_response.status == 401
     assert response.body is None
     assert response.headers["Cache-Control"] == "no-store"
 
