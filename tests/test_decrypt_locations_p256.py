@@ -170,6 +170,35 @@ async def test_second_call_tries_remembered_reading_first(
     assert _READING.reading_id in infos[0]
 
 
+async def test_canonic_id_casing_keys_one_device(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """CX-7: the server may change the hex casing of one canonical ID.
+
+    The second response spells the ID in upper case; the remembered reading
+    must still apply and the device must appear once in diagnostics.
+    """
+    tag_checks: list[int] = []
+    real_try = foreign_tracker_cryptor._try_decrypt_aes_eax
+
+    def counting_try(*args: object) -> bytes | None:
+        tag_checks[-1] += 1
+        return real_try(*args)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(foreign_tracker_cryptor, "_try_decrypt_aes_eax", counting_try)
+    caplog.set_level(logging.INFO)
+
+    for canonic_id in (_CANONIC_ID, _CANONIC_ID.upper()):
+        tag_checks.append(0)
+        result = await _decrypt(_update([_p256_report()], canonic_id=canonic_id))
+        assert any(decrypt_locations.is_real_location_record(r) for r in result)
+
+    assert tag_checks == [3, 1]
+    assert len(FOREIGN_READING_TRACKER.diagnostics_snapshot(_ENTRY_ID)["devices"]) == 1
+    infos = [m for m in _messages(caplog, logging.INFO) if m.startswith(_MARKER)]
+    assert len(infos) == 1
+
+
 async def test_p256_auth_failure_is_debug_only_and_keeps_eik_cache(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:

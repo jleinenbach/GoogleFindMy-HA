@@ -54,6 +54,7 @@ from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker.decrypte
 from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker.foreign_reading_tracker import (
     FOREIGN_READING_TRACKER,
     DeviceKey,
+    foreign_device_key,
 )
 from custom_components.googlefindmy.ProtoDecoders.decoder import (
     parse_device_update_protobuf,
@@ -1245,9 +1246,9 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
     # the foreign-reading feedback threshold (three reports in two polls).
     poll_id = object()
     # Per config entry, so two entries never share foreign-reading state; no
-    # tracking without a canonical ID.
-    foreign_device_key: DeviceKey | None = (
-        (getattr(cache, "entry_id", None), canonic_id)
+    # tracking without a canonical ID. The key is case-normalized (CX-7).
+    device_key: DeviceKey | None = (
+        foreign_device_key(getattr(cache, "entry_id", None), canonic_id)
         if canonic_id is not None
         else None
     )
@@ -1714,8 +1715,8 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
                         encrypted_location,
                         public_key_random,
                         time_offset,
-                        FOREIGN_READING_TRACKER.preferred(foreign_device_key)
-                        if foreign_device_key is not None
+                        FOREIGN_READING_TRACKER.preferred(device_key)
+                        if device_key is not None
                         else None,
                     )
                     decrypted_location_raw = foreign_result.plaintext
@@ -1745,9 +1746,9 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
                             "identity key candidate (index=%d)",
                             foreign_result.key_index,
                         )
-                    if foreign_device_key is not None:
+                    if device_key is not None:
                         FOREIGN_READING_TRACKER.note_success(
-                            foreign_device_key,
+                            device_key,
                             foreign_result.reading,
                             len(public_key_random),
                         )
@@ -1779,9 +1780,9 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
             # The Sx length maps to no curve; no key can change that. The
             # tracker WARNING needs a canonical ID; without one: DEBUG only.
             _key_neutral_report_count += 1
-            if foreign_device_key is not None:
+            if device_key is not None:
                 FOREIGN_READING_TRACKER.note_unsupported(
-                    foreign_device_key, unsupported_exc.sx_len
+                    device_key, unsupported_exc.sx_len
                 )
             _LOGGER.debug(
                 "Skipping one foreign report: %s (time_offset=%s)",
@@ -1804,9 +1805,9 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
             else:
                 _p256_auth_failures += 1  # Z11: not counted in _auth_failures
                 _key_neutral_report_count += 1
-                if foreign_device_key is not None:
+                if device_key is not None:
                     FOREIGN_READING_TRACKER.note_all_failed(
-                        foreign_device_key,
+                        device_key,
                         foreign_auth_exc.curve_name,
                         len(public_key_random),
                         foreign_auth_exc.readings_tried,

@@ -26,6 +26,7 @@ from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker import (
 from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker.foreign_reading_tracker import (
     FOREIGN_READING_TRACKER,
     ForeignReadingTracker,
+    foreign_device_key,
     get_foreign_reading_diagnostics,
 )
 
@@ -235,6 +236,28 @@ class TestForget:
         assert tracker.diagnostics_snapshot("entry-1")["devices"] == []
         assert tracker.preferred(other_entry) == _READING_1.reading_id
         assert len(tracker.diagnostics_snapshot("entry-2")["devices"]) == 1
+
+    def test_forget_device_ignores_canonic_id_casing(
+        self, tracker: ForeignReadingTracker
+    ) -> None:
+        """CX-7: the registry may hold another hex casing than the decoder saw."""
+        device = foreign_device_key("entry-1", _CANONIC_A)
+        self._fill(tracker, device)
+
+        tracker.forget_device("entry-1", _CANONIC_A.upper())
+
+        assert tracker.preferred(device) is None
+        assert tracker.diagnostics_snapshot("entry-1")["devices"] == []
+
+
+class TestDeviceKey:
+    """One key per physical device, whatever casing the server sends (CX-7)."""
+
+    def test_lowercases_the_canonic_id(self) -> None:
+        assert foreign_device_key("entry-1", "AbCdEf-01") == ("entry-1", "abcdef-01")
+
+    def test_keeps_a_missing_entry_id(self) -> None:
+        assert foreign_device_key(None, "ABC") == (None, "abc")
 
 
 class TestAllFailedWarning:

@@ -48,6 +48,7 @@ __all__ = [
     "ForeignReadingDevice",
     "ForeignReadingDiagnostics",
     "ForeignReadingTracker",
+    "foreign_device_key",
     "get_foreign_reading_diagnostics",
 ]
 
@@ -55,6 +56,26 @@ _LOGGER = logging.getLogger(__name__)
 
 #: ``(entry_id, canonic_id)``; ``entry_id`` is ``None`` for caches without one.
 type DeviceKey = tuple[str | None, str]
+
+
+def foreign_device_key(entry_id: str | None, canonic_id: str) -> DeviceKey:
+    """Return the tracker key of one device.
+
+    The canonical ID is lowercased, as everywhere else in the integration: the
+    server may change the hex casing of the same ID between responses
+    (``custom_components/googlefindmy/AGENTS.md``), and the device registry
+    keeps whatever casing it saw first. Every key goes through here so the
+    decoder and the removal paths always agree.
+
+    Args:
+        entry_id: Config entry of the token cache, or ``None``.
+        canonic_id: Canonical ID in any casing.
+
+    Returns:
+        The key used for all per-device state.
+    """
+    return (entry_id, canonic_id.lower())
+
 
 #: A failed-report WARNING needs this many failed reports ...
 _FAIL_REPORTS_BEFORE_WARNING: Final[int] = 3
@@ -139,9 +160,9 @@ class ForeignReadingTracker:
 
         Args:
             entry_id: Config entry the device belonged to.
-            canonic_id: Canonical ID of the removed device.
+            canonic_id: Canonical ID of the removed device, in any casing.
         """
-        device_key: DeviceKey = (entry_id, canonic_id)
+        device_key = foreign_device_key(entry_id, canonic_id)
         with self._lock:
             self._forget_where(lambda key: key == device_key)
 
