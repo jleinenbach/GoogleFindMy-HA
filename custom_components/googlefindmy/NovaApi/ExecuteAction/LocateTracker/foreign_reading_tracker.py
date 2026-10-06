@@ -20,15 +20,16 @@ to be posted publicly. Devices are keyed internally by
 ``(entry_id, canonic_id)`` so two config entries never share state.
 
 State is module-global on purpose: the decryption path has no ``hass`` object
-to hang it on (same precedent as the EIK cache). It lives for the process, so
-after a restart each line appears once more if the situation persists.
+to hang it on (same precedent as the EIK cache). It survives reloads and lives
+for the process, so after a restart each line appears once more if the
+situation persists. Removing a config entry or a device drops its state.
 """
 
 from __future__ import annotations
 
 import logging
 import threading
-from collections.abc import Hashable
+from collections.abc import Callable, Hashable
 from dataclasses import dataclass
 from typing import Final, TypedDict
 
@@ -120,6 +121,46 @@ class ForeignReadingTracker:
             self._warned_fail.clear()
             self._warned_len.clear()
             self._findings.clear()
+
+    def forget_entry(self, entry_id: str | None) -> None:
+        """Forget every device of a removed config entry.
+
+        Called when the entry is removed, not when it unloads: the remembered
+        reading and the once-per-device lines are meant to survive a reload.
+
+        Args:
+            entry_id: Config entry whose devices are dropped.
+        """
+        with self._lock:
+            self._forget_where(lambda key: key[0] == entry_id)
+
+    def forget_device(self, entry_id: str | None, canonic_id: str) -> None:
+        """Forget one device removed from its config entry.
+
+        Args:
+            entry_id: Config entry the device belonged to.
+            canonic_id: Canonical ID of the removed device.
+        """
+        device_key: DeviceKey = (entry_id, canonic_id)
+        with self._lock:
+            self._forget_where(lambda key: key == device_key)
+
+    def _forget_where(self, matches: Callable[[DeviceKey], bool]) -> None:
+        """Drop the state of every device key ``matches`` accepts (lock held)."""
+        _drop_keys(self._preferred, matches)
+        _drop_keys(self._fail_reports, matches)
+        _drop_keys(self._fail_polls, matches)
+        _drop_keys(self._findings, matches)
+        self._success.difference_update({key for key in self._success if matches(key)})
+        self._warned_fail.difference_update(
+            {key for key in self._warned_fail if matches(key)}
+        )
+        self._logged.difference_update(
+            {gate for gate in self._logged if matches(gate[0])}
+        )
+        self._warned_len.difference_update(
+            {gate for gate in self._warned_len if matches(gate[0])}
+        )
 
     def preferred(self, device_key: DeviceKey) -> str | None:
         """Return the ``reading_id`` that decrypted this device's last report.
@@ -302,6 +343,14 @@ class ForeignReadingTracker:
                 for index, (_canonic_id, finding) in enumerate(listed)
             ],
         }
+
+
+def _drop_keys[V](
+    mapping: dict[DeviceKey, V], matches: Callable[[DeviceKey], bool]
+) -> None:
+    """Delete every key of ``mapping`` that ``matches`` accepts."""
+    for key in [key for key in mapping if matches(key)]:
+        del mapping[key]
 
 
 #: Process-wide tracker used by the decryption path and the diagnostics.

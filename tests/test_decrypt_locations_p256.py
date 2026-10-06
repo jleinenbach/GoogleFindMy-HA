@@ -316,3 +316,130 @@ async def test_no_tracking_without_canonic_id(
     assert preferred_seen == [None, None]
     assert not [m for m in _messages(caplog, logging.INFO) if m.startswith(_MARKER)]
     assert FOREIGN_READING_TRACKER.diagnostics_snapshot(_ENTRY_ID)["devices"] == []
+
+
+def _secp160r1_miss() -> tuple[bytes, bytes]:
+    """A SECP160R1 report keyed to another EIK: an authentication failure."""
+    eid = generate_eid_variant(_OTHER_EIK, _COUNTER, EidVariant.LEGACY_SECP160R1_X20_BE)
+    return encrypt(_location_bytes(), bytes(range(20)), eid)
+
+
+@pytest.mark.parametrize(
+    "neutral_report",
+    [
+        pytest.param(lambda: _p256_report(_OTHER_EIK), id="p256_all_failed"),
+        pytest.param(lambda: (b"\x00" * 32, b"\x01" * 24), id="unsupported_length"),
+        pytest.param(lambda: (b"\x00" * 8, b"\x01" * 32), id="structure_error"),
+    ],
+)
+async def test_key_neutral_reports_do_not_block_invalidation(
+    monkeypatch: pytest.MonkeyPatch,
+    neutral_report: object,
+) -> None:
+    """CX-5: a key-neutral report beside an auth failure still invalidates.
+
+    The neutral report says nothing about the cached identity key (Z11), so
+    it leaves the denominator; the one report that could speak about the key
+    failed authentication.
+    """
+    encrypted_key = b"\x79" * 60
+    invalidations: list[object] = []
+
+    def spy_invalidate(*args: object) -> int:
+        invalidations.append(args)
+        return 0
+
+    monkeypatch.setattr(
+        decrypt_locations, "invalidate_eik_cache_for_key", spy_invalidate
+    )
+    make_neutral = neutral_report
+    assert callable(make_neutral)
+
+    await _decrypt(
+        _update(
+            [_secp160r1_miss(), make_neutral()],
+            encrypted_identity_key=encrypted_key,
+        )
+    )
+
+    assert len(invalidations) == 1
+
+
+async def test_decrypted_report_blocks_invalidation_beside_neutral_ones(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CX-5 bound: a report that decrypted still vetoes the invalidation.
+
+    Neutral reports shrink the denominator by exactly their own count; one
+    success and one miss beside them is not "every key-relevant report failed".
+    """
+    invalidations: list[object] = []
+    monkeypatch.setattr(
+        decrypt_locations,
+        "invalidate_eik_cache_for_key",
+        lambda *args: invalidations.append(args) or 0,
+    )
+    eid = generate_eid_variant(_EIK, _COUNTER, EidVariant.LEGACY_SECP160R1_X20_BE)
+    decrypted = encrypt(_location_bytes(), bytes(range(20)), eid)
+
+    await _decrypt(
+        _update(
+            [decrypted, _secp160r1_miss(), (b"\x00" * 32, b"\x01" * 24)],
+            encrypted_identity_key=b"\x7b" * 60,
+        )
+    )
+
+    assert invalidations == []
+
+
+async def test_key_neutral_reports_alone_do_not_invalidate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Counterpart to CX-5: without any auth failure nothing is invalidated."""
+    invalidations: list[object] = []
+    monkeypatch.setattr(
+        decrypt_locations,
+        "invalidate_eik_cache_for_key",
+        lambda *args: invalidations.append(args) or 0,
+    )
+
+    await _decrypt(
+        _update(
+            [_p256_report(_OTHER_EIK), (b"\x00" * 32, b"\x01" * 24)],
+            encrypted_identity_key=b"\x7a" * 60,
+        )
+    )
+
+    assert invalidations == []
+
+
+@pytest.mark.parametrize(
+    ("report", "debug_text"),
+    [
+        pytest.param(
+            (b"\x00" * 32, b"\x01" * 24),
+            "Skipping one foreign report",
+            id="unsupported_length",
+        ),
+        pytest.param(
+            None,
+            "No provisional reading authenticated one foreign report",
+            id="p256_all_failed",
+        ),
+    ],
+)
+async def test_failures_without_canonic_id_stay_untracked(
+    caplog: pytest.LogCaptureFixture,
+    report: tuple[bytes, bytes] | None,
+    debug_text: str,
+) -> None:
+    """CC-5 (E7): without a canonical ID a failure is DEBUG only, never tracked."""
+    caplog.set_level(logging.DEBUG)
+
+    for _ in range(3):
+        await _decrypt(_update([report or _p256_report(_OTHER_EIK)], canonic_id=None))
+
+    assert _messages(caplog, logging.WARNING) == []
+    assert any(debug_text in m for m in _messages(caplog, logging.DEBUG))
+    assert FOREIGN_READING_TRACKER.diagnostics_snapshot(_ENTRY_ID)["devices"] == []
+    assert FOREIGN_READING_TRACKER.diagnostics_snapshot(None)["devices"] == []

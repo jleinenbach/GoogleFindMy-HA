@@ -168,8 +168,8 @@ def invalidate_eik_cache_for_key(
 ) -> int:
     """Invalidate all cached EIK entries for a specific encrypted identity key.
 
-    Called when every encrypted report in a poll cycle fails MAC/InvalidTag
-    authentication, which suggests the cached decrypted EIK is stale (e.g., after
+    Called when every key-relevant encrypted report in a poll cycle fails
+    MAC/InvalidTag authentication (key-neutral foreign reports do not count), which suggests the cached decrypted EIK is stale (e.g., after
     key rotation, re-pairing, or E2EE reset). Whether the failure is actually
     persistent is decided by the stateful callers (coordinator poll verdict / FCM
     callback), not here: this helper only drops the cache so the next poll
@@ -1611,6 +1611,11 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
     # apart from _auth_failures: the readings are provisional, so a miss says
     # nothing about the cached EIK and must not invalidate it (Z11).
     _p256_auth_failures = 0
+    # Foreign reports whose outcome says nothing about the cached EIK: P-256
+    # misses, an Sx length without a curve, a malformed payload. They leave the
+    # denominator of the invalidation below, so an auth failure beside them
+    # still counts as "every key-relevant report failed" (CX-5).
+    _key_neutral_report_count = 0
 
     # FIX #155: Prepare all identity key candidates for multi-candidate retry.
     # async_retrieve_identity_key can return multiple candidates (MCU bit-flip
@@ -1773,6 +1778,7 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
         except UnsupportedCurveError as unsupported_exc:
             # The Sx length maps to no curve; no key can change that. The
             # tracker WARNING needs a canonical ID; without one: DEBUG only.
+            _key_neutral_report_count += 1
             if foreign_device_key is not None:
                 FOREIGN_READING_TRACKER.note_unsupported(
                     foreign_device_key, unsupported_exc.sx_len
@@ -1797,6 +1803,7 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
                 )
             else:
                 _p256_auth_failures += 1  # Z11: not counted in _auth_failures
+                _key_neutral_report_count += 1
                 if foreign_device_key is not None:
                     FOREIGN_READING_TRACKER.note_all_failed(
                         foreign_device_key,
@@ -1818,6 +1825,7 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
         except ForeignReportStructureError as structure_exc:
             # Short payload or an Sx that is not on the curve: unusable
             # independently of the key, so it is no authentication signal.
+            _key_neutral_report_count += 1
             _LOGGER.debug(
                 "Skipping one malformed foreign report: %s (time_offset=%s)",
                 structure_exc,
@@ -1876,10 +1884,11 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
     # FIX: When ALL encrypted reports fail authentication, the cached EIK is
     # likely stale (e.g., after key rotation, re-pairing, or E2EE reset).
     # Invalidate the cache so the next attempt forces a fresh key derivation.
+    # Key-neutral foreign reports are left out of the denominator (CX-5).
     if (
         _auth_failures > 0
         and _encrypted_report_count > 0
-        and _auth_failures >= _encrypted_report_count
+        and _auth_failures >= _encrypted_report_count - _key_neutral_report_count
         and raw_encrypted_identity_key
     ):
         owner_ver = getattr(encrypted_user_secrets, "ownerKeyVersion", 0)
@@ -1895,7 +1904,7 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
         # untouched.
         if removed:
             _LOGGER.debug(
-                "All %d encrypted location reports failed authentication; "
+                "All %d key-relevant encrypted location reports failed authentication; "
                 "invalidated %d cached identity key(s) to force re-derivation "
                 "on the next poll.",
                 _auth_failures,
@@ -1903,7 +1912,7 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
             )
         else:
             _LOGGER.debug(
-                "All %d encrypted location reports failed authentication "
+                "All %d key-relevant encrypted location reports failed authentication "
                 "but no cached keys were found to invalidate.",
                 _auth_failures,
             )

@@ -580,6 +580,36 @@ async def test_async_remove_entry_clears_the_registry_selfheal_latch() -> None:
 
 
 @pytest.mark.asyncio
+async def test_async_remove_entry_forgets_foreign_readings() -> None:
+    """CX-6: removing an entry drops its foreign-reading state, only its.
+
+    The tracker survives reloads by design, so removal is the one place that
+    can clear it.
+    """
+    from custom_components.googlefindmy.FMDNCrypto.foreign_tracker_cryptor import (
+        P256_FOREIGN_READINGS,
+    )
+    from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker.foreign_reading_tracker import (
+        FOREIGN_READING_TRACKER,
+    )
+
+    entry = make_config_entry(entry_id="entry-readings", unique_id="user@example.com")
+    entry.options[OPT_DELETE_CACHES_ON_REMOVE] = False
+    _coordinator, _token_cache, _filter, runtime_data = _setup_runtime(entry)
+    hass = _HassStub(entry, runtime_data)
+    reading = P256_FOREIGN_READINGS[0]
+    removed_device = ("entry-readings", "canonic-1")
+    kept_device = ("entry-other", "canonic-1")
+    for device in (removed_device, kept_device):
+        FOREIGN_READING_TRACKER.note_success(device, reading, 32)
+
+    await integration.async_remove_entry(hass, entry)
+
+    assert FOREIGN_READING_TRACKER.preferred(removed_device) is None
+    assert FOREIGN_READING_TRACKER.preferred(kept_device) == reading.reading_id
+
+
+@pytest.mark.asyncio
 async def test_async_remove_entry_discards_the_ticket_it_cannot_name() -> None:
     """Removal must also drop the create-path ticket that names no entry.
 

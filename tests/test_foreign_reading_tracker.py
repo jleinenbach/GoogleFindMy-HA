@@ -147,6 +147,96 @@ class TestPreferred:
         assert len(_lines(info_caplog, logging.INFO)) == 2
 
 
+class TestForget:
+    """Removing an entry or a device drops its state, and only its state (CX-6)."""
+
+    @staticmethod
+    def _fill(tracker: ForeignReadingTracker, device: tuple[str, str]) -> None:
+        tracker.note_success(device, _READING_1, 32)
+        tracker.note_unsupported(device, 24)
+
+    def test_forget_device_drops_only_that_device(
+        self, tracker: ForeignReadingTracker, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        caplog.set_level(logging.INFO, logger=_LOGGER_NAME)
+        other_entry = ("entry-2", _CANONIC_A)
+        for device in (_DEVICE_A, _DEVICE_B, other_entry):
+            self._fill(tracker, device)
+        caplog.clear()
+
+        tracker.forget_device("entry-1", _CANONIC_A)
+
+        assert tracker.preferred(_DEVICE_A) is None
+        assert tracker.preferred(_DEVICE_B) == _READING_1.reading_id
+        assert tracker.preferred(other_entry) == _READING_1.reading_id
+        assert len(tracker.diagnostics_snapshot("entry-1")["devices"]) == 1
+        assert len(tracker.diagnostics_snapshot("entry-2")["devices"]) == 1
+        # The once-per-device lines are re-armed for the forgotten device only.
+        for device in (_DEVICE_A, _DEVICE_B):
+            self._fill(tracker, device)
+        assert len(_lines(caplog, logging.INFO)) == 1
+        assert len(_lines(caplog, logging.WARNING)) == 1
+
+    @pytest.mark.parametrize(
+        "polls_after",
+        [
+            pytest.param(("poll-3", "poll-4"), id="report_count"),
+            pytest.param(("poll-3", "poll-3", "poll-3"), id="poll_set"),
+        ],
+    )
+    def test_forget_device_resets_failure_counters(
+        self,
+        tracker: ForeignReadingTracker,
+        caplog: pytest.LogCaptureFixture,
+        polls_after: tuple[str, ...],
+    ) -> None:
+        """Each counter alone would reach the threshold if it survived.
+
+        ``report_count``: a kept report count makes it four reports in two
+        polls. ``poll_set``: a kept poll set makes it three reports in two polls.
+        """
+        _fail(tracker, _DEVICE_A, "poll-1")
+        _fail(tracker, _DEVICE_A, "poll-2")
+
+        tracker.forget_device("entry-1", _CANONIC_A)
+        for poll in polls_after:
+            _fail(tracker, _DEVICE_A, poll)
+
+        assert _lines(caplog, logging.WARNING) == []
+
+    def test_forget_device_rearms_the_failure_warning(
+        self, tracker: ForeignReadingTracker, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        tracker.note_success(_DEVICE_B, _READING_1, 32)
+        for poll in ("poll-1", "poll-1", "poll-2"):
+            _fail(tracker, _DEVICE_A, poll)
+        assert len(_lines(caplog, logging.WARNING)) == 1
+
+        tracker.forget_device("entry-1", _CANONIC_A)
+        tracker.forget_device("entry-1", _CANONIC_B)
+        for device in (_DEVICE_A, _DEVICE_B):
+            for poll in ("poll-3", "poll-3", "poll-4"):
+                _fail(tracker, device, poll)
+
+        # A warns again (warn-once gate cleared), B warns at all (success cleared).
+        assert len(_lines(caplog, logging.WARNING)) == 3
+
+    def test_forget_entry_drops_only_that_entry(
+        self, tracker: ForeignReadingTracker
+    ) -> None:
+        other_entry = ("entry-2", _CANONIC_A)
+        for device in (_DEVICE_A, _DEVICE_B, other_entry):
+            self._fill(tracker, device)
+
+        tracker.forget_entry("entry-1")
+
+        assert tracker.preferred(_DEVICE_A) is None
+        assert tracker.preferred(_DEVICE_B) is None
+        assert tracker.diagnostics_snapshot("entry-1")["devices"] == []
+        assert tracker.preferred(other_entry) == _READING_1.reading_id
+        assert len(tracker.diagnostics_snapshot("entry-2")["devices"]) == 1
+
+
 class TestAllFailedWarning:
     """WARNING for failed reports: three reports in two polls, no success."""
 
