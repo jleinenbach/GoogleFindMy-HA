@@ -3,12 +3,15 @@
 
 from __future__ import annotations
 
+import importlib.metadata
 import json
 import re
 from pathlib import Path
 
 import pytest
 import yaml
+from packaging.requirements import Requirement
+from packaging.utils import canonicalize_name
 
 from custom_components.googlefindmy.const import INTEGRATION_VERSION
 
@@ -253,3 +256,29 @@ def test_ci_tolerates_transient_hacs_regression() -> None:
     assert "exit 1" in verdict["run"], (
         "classifier must exit non-zero when the failure is not the transient one"
     )
+
+
+def test_manifest_lists_no_home_assistant_core_dependency(
+    manifest: dict[str, object],
+) -> None:
+    """manifest.json must not list a package Home Assistant itself depends on.
+
+    hassfest rejects such entries for custom integrations ("is a dependency of
+    Home Assistant itself and must not be listed in the manifest"); Home
+    Assistant pins them already. They stay in ``requirements.txt`` and
+    ``pyproject.toml`` for the standalone tooling (see ``AGENTS.md``).
+
+    This is a local early warning, not a replacement for hassfest: it reads only
+    the installed ``homeassistant`` distribution's own requirements, while
+    hassfest also reads core's ``requirements.txt``, ``requirements_all.txt`` and
+    ``package_constraints.txt``. hassfest in CI stays authoritative.
+    """
+    try:
+        core_requires = importlib.metadata.requires("homeassistant") or []
+    except importlib.metadata.PackageNotFoundError:
+        pytest.skip("homeassistant is not installed; hassfest covers this in CI")
+    core = {canonicalize_name(Requirement(entry).name) for entry in core_requires}
+    requirements = manifest.get("requirements")
+    assert isinstance(requirements, list)
+    listed = {canonicalize_name(Requirement(str(entry)).name) for entry in requirements}
+    assert sorted(listed & core) == []
