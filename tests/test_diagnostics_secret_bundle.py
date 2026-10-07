@@ -435,6 +435,21 @@ def test_a_lone_quote_in_the_local_part_leaves_no_piece() -> None:
         assert fragment not in str(redacted), fragment
 
 
+def test_an_escaped_quote_inside_a_quoted_local_part_ends_nothing() -> None:
+    """`"first\\" last"@example.com`: the `\\"` is a quoted pair, not the end."""
+
+    payload = {
+        'adm_token_"first\\" last"@example.com': _SECRET,
+        'seen_"first\\" last"@example.com': 1,
+    }
+
+    redacted = _redact(payload)
+
+    assert "adm_token_<account-1>" in redacted
+    for fragment in ("first", "last", "example"):
+        assert fragment not in str(redacted), fragment
+
+
 def test_a_backslash_does_not_stop_the_replacement() -> None:
     """A quoted pair in the local part, and a backslash in the domain."""
 

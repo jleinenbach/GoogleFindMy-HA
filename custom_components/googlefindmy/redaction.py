@@ -56,10 +56,11 @@ REDACTED = "**REDACTED**"
 #    addresses or an address the patterns above do not read.
 #
 # A local part is a run of quoted segments, plain characters, and a lone
-# ``"`` that has no partner further right. The three alternatives cannot
-# match the same text, which keeps the pattern free of exponential
-# backtracking.
-_LOCAL_PART = r'(?:"[^"]*"|"(?![^"]*")|[^\s@\\"])+'
+# ``"`` that has no partner further right. Inside a quoted segment a
+# backslash and the character after it form one pair (RFC 5322 quoted-pair),
+# so ``"first\" last"`` is one segment. The alternatives cannot match the same
+# text, which keeps the pattern free of exponential backtracking.
+_LOCAL_PART = r'(?:"(?:[^"\\]|\\.)*"|"(?![^"]*")|[^\s@\\"])+'
 _EMAIL_VALUE = re.compile(r"^" + _LOCAL_PART + r"@[^\s@/\\]+\.[^\s@/\\]+$")
 _EMAIL_IN_KEY = re.compile(_LOCAL_PART + r"@[^\s@/\\]+\.[^\s@/\\]+")
 _AT_WORD = re.compile(r"[^\s@]*@[^\s@]*")
