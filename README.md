@@ -697,7 +697,11 @@ choice this integration could make would help.
 Diagnostics downloads are redacted before they leave Home Assistant
 (`diagnostics.py`, `TO_REDACT` and `TO_REDACT_PREFIXES`), including the pasted
 bundle and the key names the token cache builds at run time, so an attached
-diagnostics file does not contain your tokens. It does contain the entry id in
+diagnostics file does not contain the token fields the integration knows
+about. In key names, every word that contains an `@` is replaced by
+`<account-N>`, so an e-mail address does not survive there either.
+Redaction of values works by field name: a value stored under a name neither
+list covers is passed through as it is. The file does contain the entry id in
 clear.
 
 ### What is *not* part of the Home Assistant runtime
