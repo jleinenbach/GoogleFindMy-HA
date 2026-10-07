@@ -54,7 +54,7 @@ jobs:
 
     steps:
       - name: Check out the published tag
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # Pin the exact published commit. target_commitish is unreliable once
           # the tag already exists (see header); the tag ref always points at the
@@ -64,7 +64,7 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Set up Python
-        uses: actions/setup-python@v7
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.14"
 

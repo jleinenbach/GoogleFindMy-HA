@@ -26,7 +26,7 @@ jobs:
       checks: read
     steps:
       - name: Check out repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name || github.repository }}
           ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.ref || github.ref }}
@@ -85,7 +85,7 @@ jobs:
 
       - name: Wait for hassfest auto-fix workflow to finish
         if: steps.hassfest_autofix.outputs.found == 'true'
-        uses: lewagon/wait-on-check-action@v1.9.1
+        uses: lewagon/wait-on-check-action@369769072fe522a3a8a85c03c96af1e5242a1994 # v1.9.1
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           check-regexp: '^[Hh]assfest( \(auto-fix\)( / hassfest.*)?)?$'
@@ -95,6 +95,7 @@ jobs:
 
       - name: Run hassfest
         id: hassfest
+        # Tracks the upstream branch on purpose (no maintained release tag); see AGENTS.md, Action pinning.
         uses: home-assistant/actions/hassfest@master
 
       - name: Write hassfest summary
@@ -120,14 +121,14 @@ jobs:
     needs: hassfest
     steps:
       - name: Check out repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name || github.repository }}
           ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.ref || github.ref }}
 
 
       - name: Set up Python
-        uses: actions/setup-python@v7
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.14"
 
@@ -146,6 +147,7 @@ jobs:
         if: steps.brands_probe.outputs.available == 'true'
         id: hacs
         continue-on-error: true
+        # Tracks the upstream branch on purpose (no maintained release tag); see AGENTS.md, Action pinning.
         uses: hacs/action@main
         with:
           category: integration
@@ -167,6 +169,7 @@ jobs:
         if: steps.brands_probe.outputs.available == 'true' && steps.hacs.outcome == 'failure'
         id: hacs_surgical
         continue-on-error: true
+        # Tracks the upstream branch on purpose (no maintained release tag); see AGENTS.md, Action pinning.
         uses: hacs/action@main
         with:
           category: integration
@@ -220,13 +223,13 @@ jobs:
     needs: hassfest
     steps:
       - name: Check out repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name || github.repository }}
           ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.ref || github.ref }}
 
       - name: Set up Python
-        uses: actions/setup-python@v7
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.14"
 
@@ -275,13 +278,13 @@ jobs:
     needs: hassfest
     steps:
       - name: Check out repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name || github.repository }}
           ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.ref || github.ref }}
 
       - name: Set up Python
-        uses: actions/setup-python@v7
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.14"
 
@@ -319,18 +322,18 @@ jobs:
         check: [ruff, mypy, codespell, bandit]
     steps:
       - name: Check out repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name || github.repository }}
           ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.ref || github.ref }}
 
       - name: Set up Python
-        uses: actions/setup-python@v7
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.14"
 
       - name: Install Poetry
-        uses: snok/install-poetry@v1
+        uses: snok/install-poetry@a783c322200f0519c7926aa6faa857c4e23e9263 # v1.4.2
         with:
           version: latest
           virtualenvs-create: true
@@ -343,7 +346,7 @@ jobs:
       # environment and `poetry install` refuses it, taking all four lint jobs
       # down before they run. The `test` job already keys this way.
       - name: Cache Poetry dependencies
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .venv
           key: ${{ runner.os }}-py3.14-poetry-${{ hashFiles('poetry.lock') }}
@@ -480,25 +483,25 @@ jobs:
         python-version: ["3.14"]
     steps:
       - name: Check out repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name || github.repository }}
           ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.ref || github.ref }}
 
       - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v7
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: ${{ matrix.python-version }}
 
       - name: Install Poetry
-        uses: snok/install-poetry@v1
+        uses: snok/install-poetry@a783c322200f0519c7926aa6faa857c4e23e9263 # v1.4.2
         with:
           version: latest
           virtualenvs-create: true
           virtualenvs-in-project: true
 
       - name: Cache Poetry dependencies
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .venv
           key: ${{ runner.os }}-py${{ matrix.python-version }}-poetry-${{ hashFiles('poetry.lock') }}
@@ -506,7 +509,7 @@ jobs:
             ${{ runner.os }}-py${{ matrix.python-version }}-poetry-
 
       - name: Cache pre-commit environments
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/pre-commit
           key: ${{ runner.os }}-pre-commit-${{ hashFiles('.pre-commit-config.yaml') }}
@@ -527,7 +530,7 @@ jobs:
           poetry run pytest -q --cov --cov-report=xml --cov-report=term --cov-fail-under=80 2>&1 | tee pytest_output.log
 
       - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v7.1.1
+        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: ./coverage.xml
@@ -575,13 +578,13 @@ jobs:
             plugin_pin: ""
     steps:
       - name: Check out repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name || github.repository }}
           ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.ref || github.ref }}
 
       - name: Set up Python 3.13
-        uses: actions/setup-python@v7
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.13"
 
