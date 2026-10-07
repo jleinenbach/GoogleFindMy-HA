@@ -226,7 +226,38 @@ async def test_p256_auth_failure_is_debug_only_and_keeps_eik_cache(
     assert invalidations == []
     assert decrypt_locations._eik_cache.get(cache_key) == _EIK
     assert any(
-        "1 crowdsourced P-256 report(s) failed" in m
+        "1 crowdsourced P-256 report(s) failed" in m and "0 of them counted" in m
+        for m in _messages(caplog, logging.DEBUG)
+    )
+
+
+async def test_p256_miss_counts_once_a_reading_has_decrypted_the_device(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Z11 (AM-10): after a success, a miss with every reading is a stale-key signal.
+
+    Without this, a P-256 tracker whose key rotated would keep its stale cached
+    EIK, because every later report would count as key-neutral.
+    """
+    encrypted_key = b"\x7a" * 60
+    invalidations: list[object] = []
+    monkeypatch.setattr(
+        decrypt_locations,
+        "invalidate_eik_cache_for_key",
+        lambda *args: invalidations.append(args) or 0,
+    )
+    caplog.set_level(logging.DEBUG)
+
+    await _decrypt(_update([_p256_report()], encrypted_identity_key=encrypted_key))
+    assert invalidations == []
+
+    await _decrypt(
+        _update([_p256_report(_OTHER_EIK)], encrypted_identity_key=encrypted_key)
+    )
+
+    assert len(invalidations) == 1
+    assert any(
+        "1 crowdsourced P-256 report(s) failed" in m and "1 of them counted" in m
         for m in _messages(caplog, logging.DEBUG)
     )
 

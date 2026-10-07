@@ -1612,6 +1612,9 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
     # apart from _auth_failures: the readings are provisional, so a miss says
     # nothing about the cached EIK and must not invalidate it (Z11).
     _p256_auth_failures = 0
+    # The part of them counted in _auth_failures: misses on a device for which
+    # a reading has already decrypted a report.
+    _p256_counted_failures = 0
     # Foreign reports whose outcome says nothing about the cached EIK: P-256
     # misses, an Sx length without a curve, a malformed payload. They leave the
     # denominator of the invalidation below, so an auth failure beside them
@@ -1803,8 +1806,20 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
                     foreign_auth_exc,
                 )
             else:
-                _p256_auth_failures += 1  # Z11: not counted in _auth_failures
-                _key_neutral_report_count += 1
+                _p256_auth_failures += 1
+                if (
+                    device_key is not None
+                    and FOREIGN_READING_TRACKER.preferred(device_key) is not None
+                ):
+                    # A reading has decrypted this device before, so a miss
+                    # with every key and reading is the stale-key signal a
+                    # SECP160R1 failure gives.
+                    _auth_failures += 1
+                    _p256_counted_failures += 1
+                else:
+                    # Z11: while no reading has worked for the device, a miss
+                    # says nothing about the cached key.
+                    _key_neutral_report_count += 1
                 if device_key is not None:
                     FOREIGN_READING_TRACKER.note_all_failed(
                         device_key,
@@ -1878,8 +1893,10 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
     if _p256_auth_failures:
         _LOGGER.debug(
             "%d crowdsourced P-256 report(s) failed with every provisional "
-            "reading; not counted toward identity key cache invalidation.",
+            "reading; %d of them counted toward identity key cache "
+            "invalidation (a reading had decrypted the device before).",
             _p256_auth_failures,
+            _p256_counted_failures,
         )
 
     # FIX: When ALL encrypted reports fail authentication, the cached EIK is
