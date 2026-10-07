@@ -616,8 +616,11 @@ async def async_get_config_entry_diagnostics(
     elif OPT_GOOGLE_HOME_FILTER_KEYWORDS in effective_config_for_diag:
         effective_config_for_diag[OPT_GOOGLE_HOME_FILTER_KEYWORDS] = []
 
+    # One numbering for both redaction passes below, so that `<account-1>` in
+    # `effective_config` and in the rest of the payload is the same account.
+    accounts: dict[str, str] = {}
     redacted_effective_config = async_redact_data(
-        effective_config_for_diag, TO_REDACT, TO_REDACT_PREFIXES
+        effective_config_for_diag, TO_REDACT, TO_REDACT_PREFIXES, accounts=accounts
     )
 
     config_summary = {
@@ -840,4 +843,4 @@ async def async_get_config_entry_diagnostics(
 
     # --- Final safety net: redact known secret-like keys anywhere in the payload ---
     # (We already avoided including secrets, but this keeps us safe against future extensions.)
-    return async_redact_data(payload, TO_REDACT, TO_REDACT_PREFIXES)
+    return async_redact_data(payload, TO_REDACT, TO_REDACT_PREFIXES, accounts=accounts)

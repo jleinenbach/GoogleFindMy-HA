@@ -106,10 +106,11 @@ class _StubHass:
         }
 
 
-def _redact(data, keys, prefixes=()):  # pragma: no cover - deterministic helper
+def _redact(data, keys, prefixes=(), accounts=None):  # pragma: no cover - test stub
     # Takes the production signature, including the prefix rule for key names
     # the token cache builds at run time (adm_token_<e-mail> and friends), but
-    # drops matching keys instead of replacing their values.
+    # drops matching keys instead of replacing their values. `accounts` (the
+    # shared numbering of addresses in key names) is accepted and not used.
     if isinstance(data, dict):
         return {
             key: _redact(value, keys, prefixes)

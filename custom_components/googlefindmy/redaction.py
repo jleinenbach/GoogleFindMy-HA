@@ -33,25 +33,69 @@ REDACTED = "**REDACTED**"
 # leaves the address standing in the property name, in a file people attach to
 # public issues. The address is replaced in the name as well; the rest of the
 # name is kept, because ``issued_at`` is what makes the entry readable.
-# Two passes, because guessing where a name ends and an address begins cannot
-# be done safely. First the addresses actually present in the payload are
-# removed from key names verbatim, which keeps the readable part of the name
-# (``aas_token_issued_at_...``) intact even for a local part containing an
-# underscore. Whatever still looks like an address afterwards is removed
-# greedily: correctness of the redaction outranks readability of the key.
 #
-# The two patterns are deliberately not the same. The first anchors on the
-# whole string, so it can accept every character a local part may carry,
-# `/` among them (`first/last@example.com` is a valid address and does occur
-# on hosted domains). The second has to find an address *inside* a longer
-# name and stops at `/` and a backslash on purpose, so a path-shaped key name
-# cannot be swallowed whole.
-_EMAIL_VALUE = re.compile(r"^[^\s@]+@[^\s@/\\]+\.[^\s@/\\]+$")
-_EMAIL_IN_KEY = re.compile(r"[^\s@/\\]+@[^\s@/\\]+\.[^\s@/\\]+")
+# Four rules, tried in this order, because guessing where a name ends and an
+# address begins cannot be done safely in general:
+#
+# 1. The token cache's own shape, ``[<namespace>:]<stem><address>``. Here the
+#    boundary is known, so the whole rest after the stem is the address,
+#    whatever characters it carries (``first/last@example.com`` included).
+#    Whatever stands before the stem goes through all four rules itself.
+# 2. Addresses that occur as *values* in the payload, replaced verbatim, but
+#    only where they cannot be the tail of a longer address: at the start of
+#    the name, after ``:`` or after white space. ``_`` and ``/`` are not
+#    boundaries here, because both may belong to a local part
+#    (``seen_a_b@`` may be the address ``a_b@``); such names go to rule 3.
+#    On the right only what the domain pattern itself excludes may follow
+#    (end, white space, ``@``, ``/``, backslash), so ``example.co`` is not
+#    matched inside ``example.com`` nor ``example.com`` inside
+#    ``example.com_extra``.
+# 3. Whatever still looks like an address is removed greedily, ``/`` and quoted
+#    local parts included: correctness of the redaction outranks readability
+#    of the key, so a name without a stem may be replaced whole.
+# 4. Any word with an ``@`` left after that is replaced as well, backslashes
+#    included, so that no domain or local part survives a name that held two
+#    addresses or an address the patterns above do not read.
+#
+# A local part is a run of quoted segments, plain characters, and a lone
+# ``"`` that has no partner further right. Inside a quoted segment a
+# backslash and the character after it form one pair (RFC 5322 quoted-pair),
+# so ``"first\" last"`` is one segment. The alternatives cannot match the same
+# text, which keeps the pattern free of exponential backtracking.
+_LOCAL_PART = r'(?:"(?:[^"\\]|\\.)*"|"(?![^"]*")|[^\s@\\"])+'
+_EMAIL_VALUE = re.compile(r"^" + _LOCAL_PART + r"@[^\s@/\\]+\.[^\s@/\\]+$")
+_EMAIL_IN_KEY = re.compile(_LOCAL_PART + r"@[^\s@/\\]+\.[^\s@/\\]+")
+_AT_WORD = re.compile(r"[^\s@]*@[^\s@]*")
+
+# Stems the token cache puts in front of the account address when it builds a
+# key name at run time (`f"adm_token_{user}"` and friends, spread over the
+# `Auth`, `NovaApi` and top-level modules). A guard test walks the package and
+# fails when such a stem appears there without being listed here. Longest
+# first, so that `adm_token_issued_at_` is tried before `adm_token_`.
+RUNTIME_KEY_STEMS: tuple[str, ...] = tuple(
+    sorted(
+        (
+            "aas_best_ttl_sec_",
+            "aas_token_issued_at_",
+            "adm_best_ttl_sec_",
+            "adm_probe_armed_",
+            "adm_probe_next_at_",
+            "adm_probe_startup_left_",
+            "adm_token_",
+            "adm_token_issued_at_",
+            "android_id_",
+            "owner_key_",
+            "shared_key_",
+            "spot_token_",
+        ),
+        key=len,
+        reverse=True,
+    )
+)
 
 
-def _name_candidates(key: Any) -> list[Any]:
-    """Return the key and every remainder after a ``:`` in it.
+def _name_starts(key: str) -> list[int]:
+    """Return 0 and every position right after a ``:`` in the key.
 
     The token cache may namespace its keys (``<namespace>:adm_token_<e-mail>``),
     and a quoted local part may itself contain ``:``. Splitting at one fixed
@@ -59,21 +103,22 @@ def _name_candidates(key: Any) -> list[Any]:
     rules can only redact more, never less, than with the key alone.
     """
 
+    return [0] + [index + 1 for index, char in enumerate(key) if char == ":"]
+
+
+def _name_candidates(key: Any) -> list[Any]:
+    """Return the key and every remainder after a ``:`` in it."""
+
     if not isinstance(key, str):
         return [key]
-    names: list[Any] = [key]
-    rest = key
-    while ":" in rest:
-        rest = rest.partition(":")[2]
-        names.append(rest)
-    return names
+    return [key[start:] for start in _name_starts(key)]
 
 
 def async_redact_data[T](
     data: T,
     to_redact: Iterable[Any],
     to_redact_prefixes: Iterable[str] = (),
-    _accounts: dict[str, str] | None = None,
+    accounts: dict[str, str] | None = None,
 ) -> T:
     """Redact sensitive keys from mappings or lists without importing HA's HTTP stack.
 
@@ -82,25 +127,40 @@ def async_redact_data[T](
     fixed list: the token cache stores entries such as ``adm_token_<e-mail>`` and
     ``android_id_<e-mail>``. Without a prefix rule those names pass an exact-match
     filter untouched.
+
+    ``accounts`` shares the account numbering between calls. A caller that
+    redacts one part of a document first and the whole document afterwards
+    passes the same mapping to both, so that ``<account-1>`` means the same
+    account everywhere in the result.
     """
 
-    if not isinstance(data, (Mapping, list)):
+    if not isinstance(data, (Mapping, list, tuple)):
         return data
 
-    accounts = {} if _accounts is None else _accounts
-    if _accounts is None:
-        _register_addresses(data, accounts)
+    shared: dict[str, str] = {} if accounts is None else accounts
+    _register_addresses(data, shared)
+    return cast(T, _redact(data, to_redact, tuple(to_redact_prefixes), shared))
+
+
+def _redact(
+    data: Any,
+    to_redact: Iterable[Any],
+    prefixes: tuple[str, ...],
+    accounts: dict[str, str],
+) -> Any:
+    """Walk one level of ``data``; the addresses are already registered."""
 
     if isinstance(data, list):
-        return cast(
-            T,
-            [
-                async_redact_data(item, to_redact, to_redact_prefixes, accounts)
-                for item in data
-            ],
-        )
+        return [_redact(item, to_redact, prefixes, accounts) for item in data]
+    if isinstance(data, tuple):
+        items = [_redact(item, to_redact, prefixes, accounts) for item in data]
+        # A named tuple keeps its type; its constructor takes the fields.
+        if hasattr(data, "_fields"):
+            return type(data)(*items)
+        return tuple(items)
+    if not isinstance(data, Mapping):
+        return data
 
-    prefixes = tuple(to_redact_prefixes)
     redacted: dict[Any, Any] = {}
 
     for key, value in dict(data).items():
@@ -122,64 +182,126 @@ def async_redact_data[T](
             )
         ):
             redacted[out_key] = REDACTED
-        elif isinstance(value, Mapping):
-            redacted[out_key] = async_redact_data(value, to_redact, prefixes, accounts)
-        elif isinstance(value, list):
-            redacted[out_key] = [
-                async_redact_data(item, to_redact, prefixes, accounts) for item in value
-            ]
         else:
-            redacted[out_key] = value
+            redacted[out_key] = _redact(value, to_redact, prefixes, accounts)
 
-    return cast(T, redacted)
+    return redacted
 
 
 def _register_addresses(data: Any, accounts: dict[str, str]) -> None:
     """Collect the e-mail addresses that appear as *values*, before redaction.
 
     The key names are built from the account address, so knowing the address
-    lets the name be cleaned exactly instead of by pattern guessing. Run once,
-    on the whole payload, before any value has been replaced.
+    lets the name be cleaned exactly instead of by pattern guessing. Run on the
+    whole payload before any value has been replaced. Addresses are compared
+    without regard to case: the token cache lower-cases some of the names it
+    builds, and the address in the config entry keeps the case it was typed in.
     """
 
     if isinstance(data, Mapping):
         for value in data.values():
             _register_addresses(value, accounts)
         return
-    if isinstance(data, list):
+    if isinstance(data, (list, tuple)):
         for item in data:
             _register_addresses(item, accounts)
         return
-    if isinstance(data, str) and _EMAIL_VALUE.match(data) and data not in accounts:
-        accounts[data] = f"<account-{len(accounts) + 1}>"
+    if isinstance(data, str) and _EMAIL_VALUE.match(data):
+        _placeholder(data, accounts)
 
 
-def _anonymise_key(key: Any, accounts: dict[str, str]) -> Any:
-    """Replace an account address inside a key *name* with a stable placeholder.
+def _placeholder(address: str, accounts: dict[str, str]) -> str:
+    """Return the stable placeholder of ``address``, numbering it on first sight.
 
     Numbered rather than hashed: a hash of an e-mail address is reversible with
     a word list, and the only thing a reader needs from the name is whether two
     entries belong to the same account.
     """
 
+    folded = address.lower()
+    if folded not in accounts:
+        accounts[folded] = f"<account-{len(accounts) + 1}>"
+    return accounts[folded]
+
+
+def _standalone(address: str) -> re.Pattern[str]:
+    """Match ``address`` only where it is not part of a longer address.
+
+    On the left it must start the name or follow ``:`` or white space; on the
+    right it must end the name or meet a character the domain pattern does
+    not accept. Not cached here: ``re`` keeps its own cache of compiled
+    patterns.
+    """
+
+    return re.compile(
+        r"(?<![^:\s])" + re.escape(address) + r"(?![^\s@/\\])",
+        re.IGNORECASE,
+    )
+
+
+# The token cache builds names of the form `<ns>:<stem><address>`, far below
+# this length. Rule 1 checks every `:` position against the rest of the name,
+# which grows with the square of the length; longer names go straight to the
+# pattern rules, which still replace every word with an `@`.
+_MAX_STRUCTURED_KEY = 512
+
+
+def _stem_cut(key: str) -> tuple[int, str] | None:
+    """Return the leftmost ``(start, stem)`` where rule 1 applies, if any."""
+
+    for start in _name_starts(key):
+        name = key[start:]
+        for stem in RUNTIME_KEY_STEMS:
+            if name.startswith(stem) and _EMAIL_VALUE.match(name[len(stem) :]):
+                return start, stem
+    return None
+
+
+def _anonymise_key(key: Any, accounts: dict[str, str]) -> Any:
+    """Replace an account address inside a key *name* with a stable placeholder."""
+
     if not isinstance(key, str) or "@" not in key:
         return key
 
-    # Longest first, so a shorter address that is a suffix of a longer one
-    # cannot claim the match.
-    for address in sorted(accounts, key=len, reverse=True):
-        if address in key:
-            key = key.replace(address, accounts[address])
-            if "@" not in key:
-                return key
+    # Rule 1: the token cache's own shape, where the boundary is known. The
+    # part before the stem is cut off and handled again, in a loop rather
+    # than by recursion, so that a long chain of `:` cannot exhaust the stack.
+    segments: list[tuple[bool, str, str]] = []
+    while (
+        "@" in key
+        and len(key) <= _MAX_STRUCTURED_KEY
+        and (cut := _stem_cut(key)) is not None
+    ):
+        start, stem = cut
+        segments.append((start > 0, stem, key[start + len(stem) :]))
+        key = key[: start - 1] if start else ""
+    # Left to right, so that the numbering follows the name.
+    result = _pattern_rules(key, accounts)
+    for after_colon, stem, address in reversed(segments):
+        result += (":" if after_colon else "") + stem + _placeholder(address, accounts)
+    return result
 
-    def _replace(match: re.Match[str]) -> str:
-        address = match.group(0)
-        if address not in accounts:
-            accounts[address] = f"<account-{len(accounts) + 1}>"
-        return accounts[address]
 
-    return _EMAIL_IN_KEY.sub(_replace, key)
+def _pattern_rules(key: str, accounts: dict[str, str]) -> str:
+    """Rules 2 to 4, for a name or the part of it before a stem."""
+
+    if "@" not in key:
+        return key
+
+    # Rule 2: known addresses, longest first, only where they stand alone.
+    for folded in sorted(accounts, key=len, reverse=True):
+        placeholder = accounts[folded]
+        key = _standalone(folded).sub(lambda _match: placeholder, key)
+        if "@" not in key:
+            return key
+
+    # Rule 3: anything still address-shaped.
+    key = _EMAIL_IN_KEY.sub(lambda match: _placeholder(match.group(0), accounts), key)
+    if "@" not in key:
+        return key
+
+    # Rule 4: the rest of a name that held more than one address.
+    return _AT_WORD.sub(lambda match: _placeholder(match.group(0), accounts), key)
 
 
 def describe_keys(value: Any) -> str:
