@@ -138,6 +138,9 @@ class ForeignReadingTracker:
         self._fail_polls: dict[DeviceKey, set[Hashable]] = {}
         self._warned_fail: set[DeviceKey] = set()
         self._warned_len: set[tuple[DeviceKey, int]] = set()
+        # Lookup of the curve a device's EID is locked to, registered by the
+        # EID resolver (see set_curve_provider).
+        self._curve_provider: Callable[[str], str | None] | None = None
         self._findings: dict[DeviceKey, _Finding] = {}
 
     def reset(self) -> None:
@@ -151,6 +154,55 @@ class ForeignReadingTracker:
             self._warned_fail.clear()
             self._warned_len.clear()
             self._findings.clear()
+            self._curve_provider = None
+
+    def set_curve_provider(self, provider: Callable[[str], str | None]) -> None:
+        """Register the lookup that names the curve a device's EID is locked to.
+
+        The EID resolver registers its ``locked_curve_name`` when it starts. The
+        decryption path has no public route to ``hass`` (it receives only the
+        token cache), so it asks through this tracker, in the same way the Nova
+        decryptor reaches its cache through ``nova_request.register_cache_provider``.
+
+        Args:
+            provider: Callable mapping a canonical ID to a curve name or ``None``.
+        """
+        with self._lock:
+            self._curve_provider = provider
+
+    def clear_curve_provider(self, provider: Callable[[str], str | None]) -> None:
+        """Remove ``provider`` if it is still the registered lookup.
+
+        Bound methods are compared with ``==``: every attribute access creates a
+        new bound-method object, so an identity check would never match.
+
+        Args:
+            provider: The lookup passed to :meth:`set_curve_provider`.
+        """
+        with self._lock:
+            if self._curve_provider == provider:
+                self._curve_provider = None
+
+    def locked_curve(self, canonic_id: str) -> str | None:
+        """Return the curve name of the EID variant ``canonic_id`` is locked to.
+
+        Args:
+            canonic_id: Canonical ID in any casing.
+
+        Returns:
+            The curve name, or ``None`` without a registered lookup, without a
+            lock, or when the lookup raises; callers then keep the behaviour
+            they had before a lock was known.
+        """
+        with self._lock:
+            provider = self._curve_provider
+        if provider is None:
+            return None
+        try:
+            return provider(canonic_id)
+        except Exception as err:  # noqa: BLE001 - a lookup must never break decryption
+            _LOGGER.debug("Curve lookup for a locked EID failed: %s", err)
+            return None
 
     def forget_entry(self, entry_id: str | None) -> None:
         """Forget every device of a removed config entry.
