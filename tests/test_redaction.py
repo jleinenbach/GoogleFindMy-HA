@@ -81,7 +81,10 @@ def test_module_stays_free_of_home_assistant_imports() -> None:
             imported.add(node.module.split(".")[0])
 
     assert "homeassistant" not in imported
-    assert imported <= {"__future__", "collections", "typing"}
+    # Standard library only. `re` is on the list because the key-name
+    # anonymiser needs it; the property under test is the absence of Home
+    # Assistant, not the absence of imports.
+    assert imported <= {"__future__", "collections", "re", "typing"}
 
 
 def test_describe_keys_reports_names_without_values() -> None:
