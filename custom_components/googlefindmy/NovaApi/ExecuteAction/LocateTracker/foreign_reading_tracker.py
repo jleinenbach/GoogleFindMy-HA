@@ -77,6 +77,15 @@ def foreign_device_key(entry_id: str | None, canonic_id: str) -> DeviceKey:
     return (entry_id, canonic_id.lower())
 
 
+def _normalized(device_key: DeviceKey) -> DeviceKey:
+    """Return ``device_key`` with its canonical ID lowercased.
+
+    The tracker methods apply this themselves, so a caller that builds the
+    tuple by hand cannot split one device into two entries.
+    """
+    return foreign_device_key(*device_key)
+
+
 #: A failed-report WARNING needs this many failed reports ...
 _FAIL_REPORTS_BEFORE_WARNING: Final[int] = 3
 #: ... spread over at least this many polls (legitimate failures happen, e.g.
@@ -187,11 +196,13 @@ class ForeignReadingTracker:
         """Return the ``reading_id`` that decrypted this device's last report.
 
         Args:
-            device_key: ``(entry_id, canonic_id)`` of the device.
+            device_key: ``(entry_id, canonic_id)`` of the device; the
+                canonical ID may come in any casing.
 
         Returns:
             The reading to try first, or ``None`` if none decrypted yet.
         """
+        device_key = _normalized(device_key)
         with self._lock:
             return self._preferred.get(device_key)
 
@@ -206,10 +217,12 @@ class ForeignReadingTracker:
         replaces an earlier failure finding in the diagnostics.
 
         Args:
-            device_key: ``(entry_id, canonic_id)`` of the device.
+            device_key: ``(entry_id, canonic_id)`` of the device; the
+                canonical ID may come in any casing.
             reading: The reading whose tag verified.
             sx_len: Length of the report's ``Sx`` coordinate in bytes.
         """
+        device_key = _normalized(device_key)
         reading_id = reading.reading_id
         with self._lock:
             self._preferred[device_key] = reading_id
@@ -250,14 +263,17 @@ class ForeignReadingTracker:
 
         Warns at most once per device, and only after three failed reports in
         at least two polls while no report of the device has decrypted. The
-        diagnostics finding already shows the latest failure after one report;
-        it describes the last report, the log line is the thresholded verdict.
+        diagnostics finding already shows the latest failure after one report,
+        until a report of the device decrypts; from then on it keeps the
+        success, because the block answers which reading works. The log line
+        is the thresholded verdict.
         SECP160R1 failures are ignored here; the caller accounts for them.
         Counting stops once the device has decrypted or warned, and at most
         two poll IDs are kept per device, so the state stays bounded.
 
         Args:
-            device_key: ``(entry_id, canonic_id)`` of the device.
+            device_key: ``(entry_id, canonic_id)`` of the device; the
+                canonical ID may come in any casing.
             curve_name: ``FmdnCurve.name`` selected from the ``Sx`` length.
             sx_len: Length of the report's ``Sx`` coordinate in bytes.
             readings_tried: Identifiers of the readings that were tried.
@@ -265,6 +281,7 @@ class ForeignReadingTracker:
         """
         if curve_name == SECP160R1.name:
             return
+        device_key = _normalized(device_key)
         with self._lock:
             if device_key not in self._success:
                 self._findings[device_key] = _Finding(
@@ -303,9 +320,11 @@ class ForeignReadingTracker:
         """Record an ``Sx`` length that matches no curve; warn once per length.
 
         Args:
-            device_key: ``(entry_id, canonic_id)`` of the device.
+            device_key: ``(entry_id, canonic_id)`` of the device; the
+                canonical ID may come in any casing.
             sx_len: The unsupported ``Sx`` length in bytes.
         """
+        device_key = _normalized(device_key)
         with self._lock:
             if device_key not in self._success:
                 self._findings[device_key] = _Finding(

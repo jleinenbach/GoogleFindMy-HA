@@ -781,6 +781,17 @@ async def async_get_config_entry_diagnostics(
 
     eik_cache_stats = get_eik_cache_stats()
 
+    # Provisional P-256 readings of crowdsourced reports, per device of this
+    # entry. The block carries no ID value (positional index only) and is meant
+    # to be posted to the feedback issue on its own.
+    # Imported locally like the EIK block above, for symmetry only: unlike
+    # decrypt_locations, the tracker module has no import cycle with this one.
+    from .NovaApi.ExecuteAction.LocateTracker.foreign_reading_tracker import (
+        get_foreign_reading_diagnostics,
+    )
+
+    foreign_report_readings = get_foreign_reading_diagnostics(entry.entry_id)
+
     # --- Assemble payload (without secrets) ---
     payload: dict[str, Any] = {
         "integration": integration_meta,
@@ -798,6 +809,7 @@ async def async_get_config_entry_diagnostics(
         },
         "concurrency": concurrency,
         "eik_cache": eik_cache_stats,
+        "foreign_report_readings": foreign_report_readings,
     }
     if crypto_info:
         payload["crypto"] = _crypto_block(crypto_info)

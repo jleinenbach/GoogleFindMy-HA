@@ -259,6 +259,25 @@ class TestDeviceKey:
     def test_keeps_a_missing_entry_id(self) -> None:
         assert foreign_device_key(None, "ABC") == (None, "abc")
 
+    def test_methods_normalize_a_raw_key_themselves(
+        self, tracker: ForeignReadingTracker
+    ) -> None:
+        """A caller that skips ``foreign_device_key`` still hits one entry."""
+        upper = ("entry-1", _CANONIC_A.upper())
+        lower = ("entry-1", _CANONIC_A)
+
+        tracker.note_success(upper, _READING_1, 32)
+        assert tracker.preferred(lower) == _READING_1.reading_id
+        tracker.note_success(lower, _READING_2, 32)
+        assert tracker.preferred(upper) == _READING_2.reading_id
+
+        tracker.note_unsupported(upper, 24)
+        _fail(tracker, upper, "poll-1")
+        assert len(tracker.diagnostics_snapshot("entry-1")["devices"]) == 1
+
+        tracker.forget_device("entry-1", _CANONIC_A)
+        assert tracker.preferred(upper) is None
+
 
 class TestAllFailedWarning:
     """WARNING for failed reports: three reports in two polls, no success."""
