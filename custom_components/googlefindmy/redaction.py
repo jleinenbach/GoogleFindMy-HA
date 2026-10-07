@@ -95,8 +95,14 @@ def async_redact_data[T](
         if value is None or (isinstance(value, str) and not value):
             redacted[out_key] = value
             continue
-        if key in to_redact or (
-            prefixes and isinstance(key, str) and key.startswith(prefixes)
+        # The token cache may namespace its keys per config entry
+        # (`<entry_id>:adm_token_<e-mail>`), so both rules also look at the name
+        # after the last namespace separator.
+        bare = key.rpartition(":")[2] if isinstance(key, str) else key
+        if (
+            key in to_redact
+            or bare in to_redact
+            or (prefixes and isinstance(bare, str) and bare.startswith(prefixes))
         ):
             redacted[out_key] = REDACTED
         elif isinstance(value, Mapping):

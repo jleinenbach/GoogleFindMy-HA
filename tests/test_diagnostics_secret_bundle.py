@@ -10,13 +10,20 @@ the bundle is still there, and `async_get_config_entry_diagnostics` copies
 
 from __future__ import annotations
 
-from custom_components.googlefindmy.const import DATA_SECRET_BUNDLE
+from types import SimpleNamespace
+from typing import Any
+
+import pytest
+
+from custom_components.googlefindmy import diagnostics
+from custom_components.googlefindmy.const import DATA_SECRET_BUNDLE, DOMAIN
 from custom_components.googlefindmy.diagnostics import (
     TO_REDACT,
     TO_REDACT_PREFIXES,
     async_redact_data,
 )
 from custom_components.googlefindmy.redaction import REDACTED
+from tests.helpers.config_entries_stub import make_config_entry
 
 _SECRET = "0123456789abcdef" * 4
 
@@ -168,6 +175,62 @@ def test_run_time_key_names_are_redacted_by_prefix() -> None:
 
     assert _SECRET not in str(redacted)
     assert all(value == REDACTED for value in redacted.values())
+
+
+def test_namespaced_run_time_key_names_are_redacted() -> None:
+    """The token cache prefixes its keys with the entry id and a colon."""
+
+    payload = {
+        "entry-1:adm_token_user@example.com": _SECRET,
+        "entry-1:android_id_user@example.com": _SECRET,
+        "entry-1:aas_token": _SECRET,
+        "entry-1:oauth_token": _SECRET,
+        # Matched only by the exact rule on the bare name, no prefix covers it.
+        "entry-1:username": _SECRET,
+    }
+
+    redacted = _redact(payload)
+
+    assert _SECRET not in str(redacted)
+    assert "user@example.com" not in str(redacted)
+    assert all(value == REDACTED for value in redacted.values())
+
+
+@pytest.mark.asyncio
+async def test_the_diagnostics_dump_applies_both_rules(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """End to end: the dump itself must pass the prefix rule, not only the helper.
+
+    A setup that failed before the migration leaves the bundle and run-time
+    keys in ``entry.data``; that is exactly when diagnostics get downloaded.
+    """
+
+    async def _fake_get_integration(_hass: Any, _domain: str) -> SimpleNamespace:
+        return SimpleNamespace(name="Test Integration", version="1.2.3")
+
+    monkeypatch.setattr(diagnostics, "async_get_integration", _fake_get_integration)
+    monkeypatch.setattr(
+        diagnostics.dr, "async_get", lambda _hass: SimpleNamespace(devices={})
+    )
+    monkeypatch.setattr(
+        diagnostics.er, "async_get", lambda _hass: SimpleNamespace(entities={})
+    )
+    entry = make_config_entry(
+        domain=DOMAIN,
+        data={
+            DATA_SECRET_BUNDLE: {"aas_token": _SECRET, "shared_key": _SECRET},
+            "adm_token_user@example.com": _SECRET,
+            "entry-1:spot_token_user@example.com": _SECRET,
+        },
+        runtime_data=SimpleNamespace(coordinator=None),
+    )
+    hass = SimpleNamespace(data={DOMAIN: {}})
+
+    payload = await diagnostics.async_get_config_entry_diagnostics(hass, entry)
+
+    assert _SECRET not in str(payload)
+    assert "user@example.com" not in str(payload)
 
 
 def test_harmless_keys_survive() -> None:
