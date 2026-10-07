@@ -21,12 +21,9 @@
   ],
   "quality_scale": "bronze",
   "requirements": [
-    "aiohttp>=3.11.8",
     "beautifulsoup4>=4.12.3",
-    "cryptography>=43.0.3",
     "ecdsa>=0.19.2",
     "gpsoauth>=2.0.0",
-    "httpx>=0.28.0",
     "http-ece>=1.2.1",
     "grpclib>=0.4.7",
     "protobuf>=6.31.1",
