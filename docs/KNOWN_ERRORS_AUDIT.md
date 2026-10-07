@@ -18,7 +18,8 @@ hard to detect and what safeguards would have prevented it.
   P-256 scalars where `r = 0` produces the point at infinity.
 - However, the EID generator (`eid_generator.py:_derive_scalar`) uses
   `include_zero_endpoint=True` for legacy SECP160r1, meaning `r % n` (allowing
-  zero). The two functions must agree because they participate in the same ECDH
+  zero; today this is `reduce_scalar(..., rule=ScalarRule.MOD_N)` in
+  `FMDNCrypto/curve_profile.py`). The two functions must agree because they participate in the same ECDH
   key agreement: one derives the EID (`R = r * G`), the other derives the
   decryption scalar (`r` for `r * S`).
 - The mismatch only manifests on **crowdsourced/foreign** location reports
@@ -30,6 +31,17 @@ hard to detect and what safeguards would have prevented it.
 **Prevention:**
 - Add a round-trip test: `decrypt(eik, encrypt(msg, rand, generate_eid(eik, t)), Sx, t) == msg`
 - Add a unit test asserting `calculate_r(eik, t) == _derive_scalar(eik, t, include_zero_endpoint=True, ...)`
+  (today: `calculate_r` reads the derivation of `LEGACY_SECP160R1_X20_BE` from
+  `VARIANT_DERIVATIONS` and reduces with `rule=ScalarRule.MOD_N`, so both sides
+  share one implementation).
+
+**Follow-up (P-256 foreign reports, #223):** SECP160r1 stays on `r' mod n`. In
+decryption, the `(r' mod (n-1)) + 1` projection appears only as provisional
+P-256 readings 3 to 6 in `P256_FOREIGN_READINGS` (`foreign_tracker_cryptor.py`), readings 5 and 6
+with `r'` read little-endian; each reading is tried until the AES-EAX tag
+verifies, and the docstring of `P256_FOREIGN_READINGS` states when unused
+readings may be removed. See "Foreign-report readings" in
+[`docs/CRYPTOGRAPHY.md`](CRYPTOGRAPHY.md#foreign-report-readings).
 
 ---
 

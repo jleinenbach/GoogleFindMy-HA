@@ -786,6 +786,13 @@ class TestMainDecision:
         rc_false, out_false = run("python_version < '3.0'")
         assert rc_false == 1
         assert "BLOCKING (1)" in out_false
+        # Blocking as a direct manifest entry, not for the transitive reason:
+        # otherwise the test would stay green if the manifest lost aiohttp.
+        assert (
+            "aiohttp 3.13.3: CVE-MARKER-1 (fix: 3.14.1; bump the manifest floor)"
+            in out_false
+        )
+        assert "bump the direct parent dependency" not in out_false
 
     def test_fixable_transitive_finding_blocks(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]

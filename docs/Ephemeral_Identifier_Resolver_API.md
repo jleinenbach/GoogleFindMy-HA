@@ -236,6 +236,35 @@ The resolver iterates all supported formats unless a per-device lock is present:
 * `MODERN_P256_X32_LE_SCALAR` — 32-byte EID with little-endian scalar input on P-256.
 * `MODERN_P256_X20_TRUNC_LE` — 20-byte truncated x-coordinate derived from P-256 with little-endian scalar input.
 
+The scalar derivation of each variant is listed in `VARIANT_DERIVATIONS`
+(`FMDNCrypto/eid_generator.py`); see "Scalar Derivation" in
+[`docs/CRYPTOGRAPHY.md`](CRYPTOGRAPHY.md#scalar-derivation).
+
+**Evidence for the little-endian variants.** No measured source reads the PRF
+output `r'` little-endian: the specification, Nordic's `fp_crypto` and
+Atmosic's `gfp_crypto` (which reverses the bytes before reducing) all read it
+big-endian. The little-endian derivation came in with `f9bd9ece` ("Some tracker
+firmware interprets the PRF output as a little-endian integer") without a
+source. The variants stay because removing them would stop matching any tracker
+that does advertise this way; a stored lock naming an unknown variant is
+discarded, not reinterpreted.
+
+**Binding to foreign-report readings.** A 32-byte variant is only useful if its
+trackers' crowdsourced reports can also be decrypted, so each derivation used
+by `MODERN_P256_X32_BE` and `MODERN_P256_X32_LE_SCALAR` is also a reading in
+`P256_FOREIGN_READINGS` (`MODERN_P256_X32_LE_SCALAR` matches readings 5 and 6,
+`p256/plus1_le/nonce8` and `p256/plus1_le/nonce10`).
+`TestReadingsBoundToVariants` in `tests/test_foreign_tracker_cryptor_p256.py`
+enforces this.
+
+**Truncated variants do not enable P-256 foreign reports.** A finder cannot run
+P-256 ECDH from 20 of the 32 x-coordinate bytes; a report for a
+`MODERN_P256_X20_TRUNC_*` match carries a 20-byte `Sx`, is routed to SECP160r1
+by `curve_for_coord_len(20)` and cannot be decrypted. The binding test names
+these variants as its exclusions, and
+`test_truncated_p256_variant_reports_are_undecryptable` pins that such a
+report never decrypts.
+
 The resolver also records both forward and reversed advertisements so scanners do not need to normalize byte order.
 
 #### 4. EID Derivation Algorithm
