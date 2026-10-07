@@ -132,7 +132,8 @@ def reduce_scalar(r_dash_int: int, order: int, rule: ScalarRule) -> int:
     if order < _MIN_ORDER:
         raise ValueError("curve order must be at least 2")
     if rule is ScalarRule.MOD_N:
-        return r_dash_int % order  # MOD_N
+        reduced_scalar: int = r_dash_int % order
+        return reduced_scalar
     if rule is ScalarRule.PLUS_ONE:
         projected_scalar: int = (r_dash_int % (order - 1)) + 1
         return projected_scalar

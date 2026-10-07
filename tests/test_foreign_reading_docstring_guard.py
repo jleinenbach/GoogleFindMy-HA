@@ -13,12 +13,17 @@ from __future__ import annotations
 
 import ast
 import re
+from collections.abc import Mapping
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
+from custom_components.googlefindmy.FMDNCrypto.curve_profile import SECP256R1
 from custom_components.googlefindmy.FMDNCrypto.foreign_tracker_cryptor import (
     P256_FOREIGN_READINGS,
+    READINGS_BY_CURVE,
+    ForeignReading,
 )
 
 _ROOT = Path(__file__).resolve().parents[1]
@@ -59,6 +64,21 @@ def _attribute_docstring(path: Path, name: str) -> str:
             return following.value.value
         return ""
     raise AssertionError(f"{name} is not assigned at module level in {path}")
+
+
+def _provisional_p256_left(
+    readings_by_curve: Mapping[str, tuple[ForeignReading, ...]],
+) -> bool:
+    """Return True while any P-256 reading in any table is still provisional.
+
+    Reads every table rather than ``P256_FOREIGN_READINGS`` alone, so a
+    provisional reading moved into a second tuple still keeps the open item.
+    """
+    return any(
+        reading.provisional and reading.curve is SECP256R1
+        for readings in readings_by_curve.values()
+        for reading in readings
+    )
 
 
 def _normalized(text: str) -> str:
@@ -111,7 +131,16 @@ class TestRemovalCriterionStaysDocumented:
 
     def test_open_item_section_exists_while_a_reading_is_provisional(self) -> None:
         """The open item may only disappear together with the last provisional reading."""
-        if not any(reading.provisional for reading in P256_FOREIGN_READINGS):
+        if not _provisional_p256_left(READINGS_BY_CURVE):
             pytest.skip("no provisional reading left; see the retirement note")
         lines = _CRYPTOGRAPHY_DOC.read_text(encoding="utf-8").splitlines()
         assert _OPEN_ITEM_HEADING in lines
+
+
+def test_the_skip_condition_reads_every_reading_table() -> None:
+    """A provisional reading outside ``P256_FOREIGN_READINGS`` still counts."""
+    settled = tuple(replace(r, provisional=False) for r in P256_FOREIGN_READINGS)
+    assert not _provisional_p256_left({SECP256R1.name: settled})
+    moved = (P256_FOREIGN_READINGS[0],)
+    assert _provisional_p256_left({SECP256R1.name: settled, "extra": moved})
+    assert _provisional_p256_left(READINGS_BY_CURVE)

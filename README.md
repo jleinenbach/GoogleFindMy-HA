@@ -344,8 +344,8 @@ The integration provides a couple of Home Assistant Actions for use with automat
 
 ### Optional: faster legacy-tracker EID computation (advanced)
 
-Only **older** FMDN trackers exercise a pure-Python elliptic-curve path
-(SECP160r1) when computing rotating EIDs. Trackers that use P-256 (observed as
+FMDN trackers on SECP160r1, the common case, exercise a pure-Python
+elliptic-curve path when computing rotating EIDs. Trackers that use P-256 (observed as
 rare, see [`docs/FMDN.md`](docs/FMDN.md)) run on a path that is already C-backed (`cryptography`), so they are unaffected. For the legacy path,
 `python-ecdsa` automatically uses `gmpy2` (preferred) or `gmpy` for its modular
 arithmetic **if either is importable**, with no configuration. If neither is
