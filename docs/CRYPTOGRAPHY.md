@@ -109,6 +109,9 @@ Coord Len: 32 bytes (256 bits)
 - NIST standard curve, widely implemented
 - 128-bit security level
 - Used for ECDH key agreement in cloud key backup
+- Also used for P-256 tracker EIDs (`MODERN_P256_*` variants) and for
+  decrypting crowdsourced reports from P-256 trackers (see
+  [Foreign-report readings](#foreign-report-readings))
 
 ---
 
@@ -199,21 +202,46 @@ prf_output = AES-256-ECB(identity_key, prf_input)
 
 ### Scalar Derivation
 
-The reduction formula depends on the curve variant:
+The Find Hub Network Accessory Specification (section "EID computation")
+defines one reduction for both curves:
 
 ```
-r' = int(prf_output)  (big-endian for SECP160r1, endianness varies for P-256)
+r' = int(prf_output)  (big-endian per the specification)
 
-Legacy SECP160r1:   r = r' mod order            (range [0, order-1])
-Modern P-256:       r = (r' mod (order - 1)) + 1  (range [1, order-1])
+Specification (SECP160r1 and P-256):   r = r' mod order   (ScalarRule.MOD_N, range [0, order-1])
 ```
+
+The integration implements the reduction once, in
+`FMDNCrypto/curve_profile.py` (`reduce_scalar`, `ScalarRule`,
+`ScalarDerivation`); every caller derives `r` through it. Which derivation an
+EID variant uses is listed in `VARIANT_DERIVATIONS` in
+`FMDNCrypto/eid_generator.py`:
+
+```
+LEGACY_SECP160R1_X20_BE:          big-endian r', r = r' mod order               (BE_MOD_N)
+MODERN_P256_X32_BE / _X20_TRUNC_BE:   big-endian r', r = (r' mod (order - 1)) + 1  (BE_PLUS_ONE)
+MODERN_P256_X32_LE_SCALAR / _X20_TRUNC_LE: little-endian r', same +1 projection  (LE_PLUS_ONE)
+```
+
+The `+1` projection (`ScalarRule.PLUS_ONE`, range `[1, order-1]`) is a
+heuristic of this repository, not taken from a primary source: it was
+introduced in `21ae9126` ("Add modern P-256 EID path and hybrid resolver
+coverage"), replaced by `% n` in
+`2651b8d9`, and reintroduced in `6c95f0f5` (all 2025-12-12) without a cited
+reference. The little-endian reading of `r'` (`f9bd9ece`) cites no source
+either; the specification, Nordic's `fp_crypto` and Atmosic's `gfp_crypto`
+all read `r'` big-endian. Both stay because the resolver matches trackers
+through these variants; foreign reports from such trackers are decrypted
+through the provisional readings described in
+[Foreign-report readings](#foreign-report-readings).
 
 **CRITICAL**: The `calculate_r` function used for *decryption* must use the
 same reduction as the EID generator. For SECP160r1, this is `r' mod order`
-(with `include_zero_endpoint=True` in `_derive_scalar`). Using the P-256
-formula `(r' mod (order-1)) + 1` for SECP160r1 produces a different scalar,
-breaking ECDH key agreement and causing MAC verification failures on all
-crowdsourced location reports.
+(`rule=ScalarRule.MOD_N`; `calculate_r` reads the derivation of
+`LEGACY_SECP160R1_X20_BE` from `VARIANT_DERIVATIONS`, so the two cannot
+diverge). Using the `+1` formula `(r' mod (order-1)) + 1` for SECP160r1
+produces a different scalar, breaking ECDH key agreement and causing MAC
+verification failures on all crowdsourced location reports.
 
 ### EID Computation
 
@@ -247,12 +275,49 @@ output = ciphertext || tag  (16-byte tag)
 nonce = LRx(8) || LSx(8)  (16 bytes total)
 ```
 Where LRx/LSx are the last 8 bytes of the x-coordinates of points R and S.
+This is the construction used for SECP160r1 (Böttger et al., PoPETs 2025(4),
+section 4.1.5, step 6). The specification's literal "lower 80 bits" gives a
+10-byte half instead:
+
+```
+nonce = LRx(8)  || LSx(8)   (16 bytes, 8‖8)
+nonce = LRx(10) || LSx(10)  (20 bytes, 10‖10)
+```
+
+Both forms are tried for P-256 foreign reports; see
+[Foreign-report readings](#foreign-report-readings).
 
 **Key Derivation**:
 ```
 shared_point = s × R  (ECDH)
 key = HKDF-SHA256(shared_point.x, salt=None, info="", length=32)
 ```
+
+### Foreign-report readings
+
+A foreign (crowdsourced) report carries `m' || tag` and the finder's `Sx`; the
+curve follows from `len(Sx)` (`curve_for_coord_len` in
+`FMDNCrypto/curve_profile.py`: 20 bytes SECP160r1, 32 bytes P-256). The report
+does not say how the owner-side scalar `r` and the nonce were derived, so
+`decrypt_foreign_report` in `FMDNCrypto/foreign_tracker_cryptor.py` tries every
+**reading** of the curve (a `ForeignReading`: one `ScalarDerivation` plus one
+nonce half length) with every identity key until the AES-EAX tag verifies.
+
+The candidate list is the single source of truth: `READINGS_BY_CURVE`, with
+`SECP160R1_FOREIGN_READINGS` (one confirmed reading, big-endian `r' mod n`,
+8‖8) and `P256_FOREIGN_READINGS` (six provisional readings: the
+specification's `r' mod n` and the repository's `+1` projection, the latter
+also with `r'` little-endian, each with an 8‖8 and a 10‖10 nonce). Their
+order, sources, identifiers (`reading_id`, e.g. `p256/mod_n/nonce8`) and the
+criterion for removing provisional readings are documented there and are not
+copied here; see also
+[Open item: provisional P-256 readings](#open-item-provisional-p-256-readings).
+
+A reading that decrypted a report is remembered per device and tried first on
+the next report. A provisional reading is also reported once on a log line
+starting with `FMDN_FOREIGN_READING` and in the `foreign_report_readings` block of the
+diagnostics download (`foreign_reading_tracker.py`). `decrypt()` keeps its
+signature as a thin wrapper around `decrypt_foreign_report`.
 
 ### AES-GCM (Key Backup)
 
@@ -314,10 +379,24 @@ plaintext = AES-EAX-decrypt(key, ciphertext)
 
 | Function | Purpose |
 |----------|---------|
-| `rx_to_ry(Rx, curve)` | Point decompression (recover Y from X) |
+| `rx_to_ry(Rx, curve)` | Point decompression (recover Y from X); re-exported from `curve_profile.py` |
 | `encrypt(message, random, eid)` | ECDH + AES-EAX-256 encryption |
-| `decrypt(identity_key, data, Sx, time)` | ECDH + AES-EAX-256 decryption |
-| `calculate_r(identity_key, time)` | Derive scalar r for EID |
+| `decrypt(identity_key, data, Sx, time)` | ECDH + AES-EAX-256 decryption; thin wrapper around `decrypt_foreign_report` |
+| `decrypt_foreign_report(identity_keys, encrypted_and_tag, sx, beacon_time_counter, *, preferred_reading_id=None)` | Try every identity key and every reading of the curve selected by `len(sx)`; returns the plaintext, the index of the identity key and the reading that verified (see [Foreign-report readings](#foreign-report-readings)) |
+| `calculate_r(identity_key, time)` | Derive scalar r for EID (SECP160r1, via `reduce_scalar`) |
+
+### FMDNCrypto/curve_profile.py
+
+Group orders, coordinate lengths and the reduction of the PRF output `r'` to
+the scalar `r` live only in this module.
+
+| Name | Purpose |
+|------|---------|
+| `FmdnCurve`, `SECP160R1`, `SECP256R1` | Curve name, coordinate length, group order and point arithmetic |
+| `curve_for_coord_len(length)` | Select the curve from an x-coordinate length (raises `UnsupportedCurveError`) |
+| `ScalarRule`, `reduce_scalar(r_dash_int, order, rule)` | `MOD_N` (specification) or `PLUS_ONE` (repository heuristic) |
+| `ScalarDerivation`, `BE_MOD_N`, `BE_PLUS_ONE`, `LE_PLUS_ONE` | Byte order of `r'` plus reduction rule |
+| `rx_to_ry(Rx, curve)` | Point decompression with even-Y selection |
 
 ### FMDNCrypto/eid_generator.py
 
