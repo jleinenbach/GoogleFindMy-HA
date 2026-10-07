@@ -503,3 +503,111 @@ async def test_failures_without_canonic_id_stay_untracked(
     assert any(debug_text in m for m in _messages(caplog, logging.DEBUG))
     assert FOREIGN_READING_TRACKER.diagnostics_snapshot(_ENTRY_ID)["devices"] == []
     assert FOREIGN_READING_TRACKER.diagnostics_snapshot(None)["devices"] == []
+
+
+def _spy_invalidations(monkeypatch: pytest.MonkeyPatch) -> list[object]:
+    calls: list[object] = []
+    monkeypatch.setattr(
+        decrypt_locations,
+        "invalidate_eik_cache_for_key",
+        lambda *args: calls.append(args) or 0,
+    )
+    return calls
+
+
+def _lock_to(curve: str | None) -> list[str]:
+    """Register a resolver stand-in that reports ``curve`` for every device."""
+    asked: list[str] = []
+    FOREIGN_READING_TRACKER.set_curve_provider(lambda cid: asked.append(cid) or curve)
+    return asked
+
+
+async def test_secp160r1_miss_of_a_p256_locked_device_keeps_eik_cache(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A 20-byte Sx cannot authenticate for a device locked to a P-256 EID.
+
+    The resolver matches such a device through ``MODERN_P256_X*`` variants; a
+    report a finder built from a truncated EID says nothing about the cached
+    key, so a poll with only such reports must not invalidate it.
+    """
+    invalidations = _spy_invalidations(monkeypatch)
+    asked = _lock_to("secp256r1")
+    caplog.set_level(logging.DEBUG)
+
+    await _decrypt(
+        _update(
+            [_secp160r1_miss(), _secp160r1_miss()],
+            encrypted_identity_key=b"\x79" * 60,
+        )
+    )
+
+    assert invalidations == []
+    assert asked == [_CANONIC_ID, _CANONIC_ID]
+    assert any("locked to a P-256 EID" in m for m in _messages(caplog, logging.DEBUG))
+
+
+@pytest.mark.parametrize("curve", ["secp160r1", None], ids=["legacy_lock", "no_lock"])
+async def test_secp160r1_miss_still_invalidates_without_a_p256_lock(
+    monkeypatch: pytest.MonkeyPatch, curve: str | None
+) -> None:
+    invalidations = _spy_invalidations(monkeypatch)
+    _lock_to(curve)
+
+    await _decrypt(_update([_secp160r1_miss()], encrypted_identity_key=b"\x79" * 60))
+
+    assert len(invalidations) == 1
+
+
+async def test_secp160r1_miss_still_invalidates_when_the_lookup_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    invalidations = _spy_invalidations(monkeypatch)
+
+    def broken(_cid: str) -> str | None:
+        raise RuntimeError("resolver gone")
+
+    FOREIGN_READING_TRACKER.set_curve_provider(broken)
+
+    await _decrypt(_update([_secp160r1_miss()], encrypted_identity_key=b"\x79" * 60))
+
+    assert len(invalidations) == 1
+
+
+async def test_secp160r1_miss_without_canonic_id_ignores_any_lock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    invalidations = _spy_invalidations(monkeypatch)
+    asked = _lock_to("secp256r1")
+
+    await _decrypt(
+        _update(
+            [_secp160r1_miss()],
+            canonic_id=None,
+            encrypted_identity_key=b"\x79" * 60,
+        )
+    )
+
+    assert asked == []
+    assert len(invalidations) == 1
+
+
+async def test_neutral_legacy_report_does_not_hide_a_p256_stale_key_signal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CX-5 for the new neutral case: it leaves the denominator, nothing more."""
+    invalidations = _spy_invalidations(monkeypatch)
+    _lock_to("secp256r1")
+    encrypted_key = b"\x79" * 60
+
+    await _decrypt(_update([_p256_report()], encrypted_identity_key=encrypted_key))
+    assert invalidations == []
+
+    await _decrypt(
+        _update(
+            [_p256_report(_OTHER_EIK), _secp160r1_miss()],
+            encrypted_identity_key=encrypted_key,
+        )
+    )
+
+    assert len(invalidations) == 1

@@ -263,7 +263,14 @@ P-256 ECDH from 20 of the 32 x-coordinate bytes; a report for a
 by `curve_for_coord_len(20)` and cannot be decrypted. The binding test names
 these variants as its exclusions, and
 `test_truncated_p256_variant_reports_are_undecryptable` pins that such a
-report never decrypts.
+report never decrypts. Because no key can authenticate it, the decryption path
+counts a 20-byte `Sx` report of a device the resolver has locked to any P-256
+variant as key-neutral, not as an authentication failure, so it cannot
+invalidate the cached identity key on its own. The path asks
+`GoogleFindMyEIDResolver.locked_curve_name` through
+`FOREIGN_READING_TRACKER.locked_curve`; the resolver registers that lookup when
+it starts and removes it in `stop()`. Without a lock, or when the lookup fails,
+such a report still counts as an authentication failure.
 
 The resolver also records both forward and reversed advertisements so scanners do not need to normalize byte order.
 

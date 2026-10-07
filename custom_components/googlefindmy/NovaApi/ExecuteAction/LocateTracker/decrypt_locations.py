@@ -25,7 +25,7 @@ from custom_components.googlefindmy.Auth.adm_token_retrieval import (
 from custom_components.googlefindmy.Auth.username_provider import username_string
 from custom_components.googlefindmy.const import MAX_ACCEPTED_LOCATION_FUTURE_DRIFT_S
 from custom_components.googlefindmy.FMDNCrypto._lazy_crypto import get_aesgcm_class
-from custom_components.googlefindmy.FMDNCrypto.curve_profile import SECP160R1
+from custom_components.googlefindmy.FMDNCrypto.curve_profile import SECP160R1, SECP256R1
 from custom_components.googlefindmy.FMDNCrypto.foreign_report_errors import (
     ForeignReportAuthError,
     ForeignReportStructureError,
@@ -1793,7 +1793,22 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
                 time_offset,
             )
         except ForeignReportAuthError as foreign_auth_exc:
-            if foreign_auth_exc.curve_name == SECP160R1.name:
+            if foreign_auth_exc.curve_name == SECP160R1.name and (
+                canonic_id is not None
+                and FOREIGN_READING_TRACKER.locked_curve(canonic_id) == SECP256R1.name
+            ):
+                # The resolver locked this device to a P-256 EID. A 20-byte Sx
+                # then comes from a finder that read only part of it
+                # (MODERN_P256_X20_TRUNC_*); no key can authenticate such a
+                # report, so it says nothing about the cached EIK.
+                _key_neutral_report_count += 1
+                _LOGGER.debug(
+                    "Skipping one secp160r1 foreign report of a device locked "
+                    "to a P-256 EID (time_offset=%s): %s",
+                    time_offset,
+                    foreign_auth_exc,
+                )
+            elif foreign_auth_exc.curve_name == SECP160R1.name:
                 # Same meaning as InvalidTag: the report did not authenticate
                 # with the cached key candidates.
                 _auth_failures += 1

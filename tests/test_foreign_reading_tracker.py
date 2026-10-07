@@ -462,3 +462,63 @@ class TestDiagnostics:
         (device,) = get_foreign_reading_diagnostics("entry-9")["devices"]
         assert device["reading"] == _READING_1.reading_id
         assert get_foreign_reading_diagnostics("entry-other")["devices"] == []
+
+
+class TestCurveProvider:
+    """The lookup through which the decryption path learns a locked curve."""
+
+    def test_no_curve_without_a_provider(self, tracker: ForeignReadingTracker) -> None:
+        assert tracker.locked_curve(_CANONIC_A) is None
+
+    def test_the_provider_answers_with_the_raw_id(
+        self, tracker: ForeignReadingTracker
+    ) -> None:
+        asked: list[str] = []
+        tracker.set_curve_provider(lambda cid: asked.append(cid) or "secp256r1")
+        assert tracker.locked_curve("Canonic-A") == "secp256r1"
+        assert asked == ["Canonic-A"]
+
+    def test_a_failing_provider_gives_none_and_a_debug_line(
+        self, tracker: ForeignReadingTracker, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        def broken(_cid: str) -> str | None:
+            raise RuntimeError("boom")
+
+        tracker.set_curve_provider(broken)
+        with caplog.at_level(logging.DEBUG, logger=_LOGGER_NAME):
+            assert tracker.locked_curve(_CANONIC_A) is None
+        assert any("Curve lookup" in r.getMessage() for r in caplog.records)
+
+    def test_clear_removes_only_the_registered_provider(
+        self, tracker: ForeignReadingTracker
+    ) -> None:
+        def first(_cid: str) -> str | None:
+            return "secp160r1"
+
+        def second(_cid: str) -> str | None:
+            return "secp256r1"
+
+        tracker.set_curve_provider(second)
+        tracker.clear_curve_provider(first)
+        assert tracker.locked_curve(_CANONIC_A) == "secp256r1"
+        tracker.clear_curve_provider(second)
+        assert tracker.locked_curve(_CANONIC_A) is None
+
+    def test_clear_matches_a_fresh_bound_method(
+        self, tracker: ForeignReadingTracker
+    ) -> None:
+        """Each attribute access builds a new bound method; equality must hold."""
+
+        class Owner:
+            def lookup(self, _cid: str) -> str | None:
+                return "secp256r1"
+
+        owner = Owner()
+        tracker.set_curve_provider(owner.lookup)
+        tracker.clear_curve_provider(owner.lookup)
+        assert tracker.locked_curve(_CANONIC_A) is None
+
+    def test_reset_removes_the_provider(self, tracker: ForeignReadingTracker) -> None:
+        tracker.set_curve_provider(lambda _cid: "secp256r1")
+        tracker.reset()
+        assert tracker.locked_curve(_CANONIC_A) is None
