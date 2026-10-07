@@ -46,8 +46,10 @@ REDACTED = "**REDACTED**"
 #    the name, after ``:`` or after white space. ``_`` and ``/`` are not
 #    boundaries here, because both may belong to a local part
 #    (``seen_a_b@`` may be the address ``a_b@``); such names go to rule 3.
-#    On the right, no further address character may follow, so ``example.co``
-#    is not matched inside ``example.com``.
+#    On the right only what the domain pattern itself excludes may follow
+#    (end, white space, ``@``, ``/``, backslash), so ``example.co`` is not
+#    matched inside ``example.com`` nor ``example.com`` inside
+#    ``example.com_extra``.
 # 3. Whatever still looks like an address is removed greedily, ``/`` and quoted
 #    local parts included: correctness of the redaction outranks readability
 #    of the key, so a name without a stem may be replaced whole.
@@ -226,12 +228,13 @@ def _standalone(address: str) -> re.Pattern[str]:
     """Match ``address`` only where it is not part of a longer address.
 
     On the left it must start the name or follow ``:`` or white space; on the
-    right no further address character may follow. Not cached here: ``re``
-    keeps its own cache of compiled patterns.
+    right it must end the name or meet a character the domain pattern does
+    not accept. Not cached here: ``re`` keeps its own cache of compiled
+    patterns.
     """
 
     return re.compile(
-        r"(?<![^:\s])" + re.escape(address) + r"(?![A-Za-z0-9.\-])",
+        r"(?<![^:\s])" + re.escape(address) + r"(?![^\s@/\\])",
         re.IGNORECASE,
     )
 

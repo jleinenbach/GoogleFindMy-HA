@@ -374,6 +374,26 @@ def test_no_word_with_an_at_sign_survives_in_a_name() -> None:
         assert fragment not in text, fragment
 
 
+def test_a_known_address_is_not_cut_out_of_a_longer_domain_part() -> None:
+    """Every character the domain pattern accepts continues the address."""
+
+    payload = {
+        "username": "user@example.com",
+        "user@example.com_extra": 1,
+        "user@example.com+x": 2,
+        "user@example.com\u00e9": 3,
+        "user@example.com:ns": 4,
+        # `/` is no domain character, so the address ends here.
+        "user@example.com/path": 5,
+    }
+
+    redacted = _redact(payload)
+
+    for fragment in ("extra", "+x", "\u00e9", ":ns", "example"):
+        assert fragment not in str(redacted), fragment
+    assert "<account-1>/path" in redacted
+
+
 def test_case_does_not_split_one_account() -> None:
     """The entry keeps the address as typed, some names are built lower-cased."""
 
