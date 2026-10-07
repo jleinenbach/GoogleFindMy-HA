@@ -169,6 +169,21 @@ class TestReadingRegistry:
             for reading in readings:
                 assert reading.source.startswith(("https://", "commit "))
 
+    def test_specification_is_cited_only_for_its_literal_nonce(self) -> None:
+        """The spec text says "lower 80 bits"; 8-byte halves cite the paper."""
+        spec = "https://developers.google.com/nearby/fast-pair/specifications/extensions/fmdn"
+        paper = "https://petsymposium.org/popets/2025/popets-2025-0147.pdf"
+        for readings in READINGS_BY_CURVE.values():
+            for reading in readings:
+                if reading.source == spec:
+                    assert reading.nonce_half_len == 10, reading.reading_id
+        by_id = {
+            r.reading_id: r.source for rs in READINGS_BY_CURVE.values() for r in rs
+        }
+        assert by_id["p256/mod_n/nonce8"] == paper
+        assert by_id["secp160r1/mod_n/nonce8"] == paper
+        assert by_id["p256/mod_n/nonce10"] == spec
+
     def test_secp160r1_has_exactly_one_reading(self) -> None:
         ids = tuple(r.reading_id for r in READINGS_BY_CURVE["secp160r1"])
         assert ids == ("secp160r1/mod_n/nonce8",)

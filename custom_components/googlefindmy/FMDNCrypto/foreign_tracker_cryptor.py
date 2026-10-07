@@ -100,6 +100,11 @@ FOREIGN_READING_FEEDBACK_URL: Final[str] = (
 _SRC_SPEC: Final[str] = (
     "https://developers.google.com/nearby/fast-pair/specifications/extensions/fmdn"
 )
+# The specification calls LRx and LSx the "lower 80 bits" (10-byte halves);
+# the 8-byte halves that SECP160R1 reports have always decrypted with are
+# described by Boettger et al., PoPETs 2025(4), section 4.1.5, step 6, not by the
+# specification text.
+_SRC_PAPER: Final[str] = "https://petsymposium.org/popets/2025/popets-2025-0147.pdf"
 _SRC_FORK_PLUS1: Final[str] = "commit 6c95f0f5 (MODERN_P256_* EID variants)"
 _SRC_FORK_LE: Final[str] = "commit f9bd9ece (little-endian r' of MODERN_P256_*_LE)"
 
@@ -149,7 +154,7 @@ SECP160R1_FOREIGN_READINGS: Final[tuple[ForeignReading, ...]] = (
         curve=SECP160R1,
         derivation=BE_MOD_N,
         nonce_half_len=8,
-        source=_SRC_SPEC,
+        source=_SRC_PAPER,
         provisional=False,
     ),
 )
@@ -167,7 +172,7 @@ SECP160R1_FOREIGN_READINGS: Final[tuple[ForeignReading, ...]] = (
 # but its reports would never decrypt.
 # fmt: off
 P256_FOREIGN_READINGS: Final[tuple[ForeignReading, ...]] = (
-    ForeignReading(curve=SECP256R1, derivation=BE_MOD_N, nonce_half_len=8, source=_SRC_SPEC, provisional=True),
+    ForeignReading(curve=SECP256R1, derivation=BE_MOD_N, nonce_half_len=8, source=_SRC_PAPER, provisional=True),
     ForeignReading(curve=SECP256R1, derivation=BE_MOD_N, nonce_half_len=10, source=_SRC_SPEC, provisional=True),
     ForeignReading(curve=SECP256R1, derivation=BE_PLUS_ONE, nonce_half_len=8, source=_SRC_FORK_PLUS1, provisional=True),
     ForeignReading(curve=SECP256R1, derivation=BE_PLUS_ONE, nonce_half_len=10, source=_SRC_FORK_PLUS1, provisional=True),
