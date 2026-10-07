@@ -196,6 +196,20 @@ def test_namespaced_run_time_key_names_are_redacted() -> None:
     assert all(value == REDACTED for value in redacted.values())
 
 
+def test_a_colon_in_the_local_part_does_not_defeat_either_rule() -> None:
+    """A quoted local part may contain ``:``; that is no namespace separator."""
+
+    payload = {
+        'adm_token_"first:tag"@example.com': _SECRET,
+        'entry-1:adm_token_"first:tag"@example.com': _SECRET,
+    }
+
+    redacted = _redact(payload)
+
+    assert _SECRET not in str(redacted)
+    assert all(value == REDACTED for value in redacted.values())
+
+
 @pytest.mark.asyncio
 async def test_the_diagnostics_dump_applies_both_rules(
     monkeypatch: pytest.MonkeyPatch,

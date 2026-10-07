@@ -50,6 +50,25 @@ _EMAIL_VALUE = re.compile(r"^[^\s@]+@[^\s@/\\]+\.[^\s@/\\]+$")
 _EMAIL_IN_KEY = re.compile(r"[^\s@/\\]+@[^\s@/\\]+\.[^\s@/\\]+")
 
 
+def _name_candidates(key: Any) -> list[Any]:
+    """Return the key and every remainder after a ``:`` in it.
+
+    The token cache may namespace its keys (``<namespace>:adm_token_<e-mail>``),
+    and a quoted local part may itself contain ``:``. Splitting at one fixed
+    colon gets one of the two wrong, so every remainder is a candidate; the
+    rules can only redact more, never less, than with the key alone.
+    """
+
+    if not isinstance(key, str):
+        return [key]
+    names: list[Any] = [key]
+    rest = key
+    while ":" in rest:
+        rest = rest.partition(":")[2]
+        names.append(rest)
+    return names
+
+
 def async_redact_data[T](
     data: T,
     to_redact: Iterable[Any],
@@ -95,14 +114,12 @@ def async_redact_data[T](
         if value is None or (isinstance(value, str) and not value):
             redacted[out_key] = value
             continue
-        # The token cache may namespace its keys per config entry
-        # (`<entry_id>:adm_token_<e-mail>`), so both rules also look at the name
-        # after the last namespace separator.
-        bare = key.rpartition(":")[2] if isinstance(key, str) else key
-        if (
-            key in to_redact
-            or bare in to_redact
-            or (prefixes and isinstance(bare, str) and bare.startswith(prefixes))
+        names = _name_candidates(key)
+        if any(name in to_redact for name in names) or (
+            prefixes
+            and any(
+                isinstance(name, str) and name.startswith(prefixes) for name in names
+            )
         ):
             redacted[out_key] = REDACTED
         elif isinstance(value, Mapping):
