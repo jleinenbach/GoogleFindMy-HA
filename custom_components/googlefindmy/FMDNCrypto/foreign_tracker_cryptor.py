@@ -175,6 +175,26 @@ P256_FOREIGN_READINGS: Final[tuple[ForeignReading, ...]] = (
     ForeignReading(curve=SECP256R1, derivation=LE_PLUS_ONE, nonce_half_len=10, source=_SRC_FORK_LE, provisional=True),
 )
 # fmt: on
+"""Candidate readings for P-256 foreign reports, all provisional.
+
+Every reading is tried until the AES-EAX tag verifies; the winner is
+remembered per device and reported once on the INFO line and in the
+diagnostics block, both pointing users to ``FOREIGN_READING_FEEDBACK_URL``.
+
+Removal criterion: once a field report posted to the feedback URL (the INFO
+line or the diagnostics block) confirms one P-256 reading for a real tracker,
+and no report contradicts it (only an INFO line naming a different P-256
+reading contradicts a confirmation; a WARNING does not),
+the other P-256 readings become removal candidates for the next release.
+A reading whose derivation an ``EidVariant`` still uses is removed only
+together with that variant (``TestReadingsBoundToVariants`` in
+``tests/test_foreign_tracker_cryptor_p256.py`` enforces this); removing a
+variant requires that stored locks naming it are discarded, not
+reinterpreted (``eid_resolver.py`` discards a stored lock whose variant is
+unknown). Until then they stay, tracked in the section
+"Open item: provisional P-256 readings" of ``docs/CRYPTOGRAPHY.md``; they are
+not kept silently.
+"""
 
 # Keyed by ``FmdnCurve.name``; ``short_name`` only appears inside reading_id.
 READINGS_BY_CURVE: Final[Mapping[str, tuple[ForeignReading, ...]]] = MappingProxyType(

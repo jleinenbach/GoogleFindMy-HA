@@ -454,6 +454,32 @@ browser flow is the only way to obtain the correct shared key.
 
 ---
 
+## Open item: provisional P-256 readings
+
+- **Status:** open (since 2026-10-07)
+- **Code:** `P256_FOREIGN_READINGS` in `custom_components/googlefindmy/FMDNCrypto/foreign_tracker_cryptor.py`
+- **Feedback:** <https://github.com/BSkando/GoogleFindMy-HA/issues/223> (`FOREIGN_READING_FEEDBACK_URL`)
+
+A foreign (crowdsourced) report from a P-256 tracker carries no field that says
+how the owner-side scalar and the AES-EAX nonce were derived. The integration
+therefore tries several readings, all marked `provisional=True`, and keeps the
+one whose tag verifies. It reports the winner once per device and reading on a
+log line starting with `FMDN_FOREIGN_READING decrypted` and in the
+`foreign_report_readings` block of the diagnostics download.
+
+The removal criterion is stated once, in the docstring of
+`P256_FOREIGN_READINGS`; it is not repeated here so the two cannot drift. This
+section exists for as long as any reading is provisional:
+`tests/test_foreign_reading_docstring_guard.py` fails if it is removed while a
+reading still carries `provisional=True`.
+
+### Received field reports
+
+| Date | Tracker | Reading | Source (link) |
+|------|---------|---------|---------------|
+
+---
+
 ## Security Considerations
 
 1. **Key Storage**: Identity keys and derived keys must be stored securely.
