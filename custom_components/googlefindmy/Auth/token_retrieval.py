@@ -174,7 +174,7 @@ async def _resolve_android_id(*, cache: TokenCache, username: str) -> int:
         fcm_creds = await cache.get("fcm_credentials")
     except Exception as err:  # noqa: BLE001
         _LOGGER.debug(
-            "Failed to read FCM credentials from cache (%s at %s)",
+            "Failed to read the FCM registration from cache (%s at %s)",
             describe_exception(err),
             exception_origin(err),
         )
@@ -186,7 +186,7 @@ async def _resolve_android_id(*, cache: TokenCache, username: str) -> int:
             await cache.set(cache_key, android_id)
         except Exception as err:  # noqa: BLE001
             _LOGGER.debug(
-                "Failed to persist android_id from FCM credentials (%s at %s)",
+                "Failed to persist android_id from the FCM registration (%s at %s)",
                 describe_exception(err),
                 exception_origin(err),
             )
