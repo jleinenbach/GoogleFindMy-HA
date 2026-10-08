@@ -1907,15 +1907,43 @@ def test_login_sh_never_reassigns_ifs() -> None:
     is allowed.
     """
 
-    script = _read("login.sh")
-    offending = [
-        f"{number}: {line.strip()}"
-        for number, line in enumerate(script.splitlines(), 1)
-        if not line.lstrip().startswith("#")
-        and re.search(r"(?<![A-Za-z0-9_])IFS=", line)
-        and not re.search(r"(?<![A-Za-z0-9_])IFS= read\b", line)
-    ]
-    assert not offending, f"login.sh reassigns IFS: {offending}"
+    assert _ifs_reassignments(_read("login.sh")) == [], "login.sh reassigns IFS"
+
+
+def _ifs_reassignments(script: str) -> list[str]:
+    """Return the lines of ``script`` that assign or append to ``IFS``.
+
+    The allowed ``IFS= read`` prefix is removed first, per occurrence, so a
+    second assignment on the same line is still reported.
+    """
+
+    found = []
+    for number, line in enumerate(script.splitlines(), 1):
+        if line.lstrip().startswith("#"):
+            continue
+        rest = re.sub(r"(?<![A-Za-z0-9_])IFS= read\b", "", line)
+        if re.search(r"(?<![A-Za-z0-9_])IFS\+?=", rest):
+            found.append(f"{number}: {line.strip()}")
+    return found
+
+
+@pytest.mark.parametrize(
+    ("line", "flagged"),
+    [
+        ("while IFS= read -r a; do", False),
+        ("  # IFS=: in a comment", False),
+        ("IFS=:", True),
+        ("  local IFS=.", True),
+        ("export IFS=$'\\n'", True),
+        ("IFS+=:", True),
+        ("while IFS= read -r a; do IFS=:; done", True),
+        ("saved_ifs=$IFS", False),
+    ],
+)
+def test_ifs_reassignment_check_sees_every_form(line: str, flagged: bool) -> None:
+    """Pin the text check used above, including two forms on one line."""
+
+    assert bool(_ifs_reassignments(line)) is flagged
 
 
 def test_login_cmd_validates_ipv6_structure_not_just_a_colon() -> None:
