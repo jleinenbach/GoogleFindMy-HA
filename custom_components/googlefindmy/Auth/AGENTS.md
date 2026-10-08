@@ -155,7 +155,6 @@ _LOGGER.debug(
     extra={
         "token_source": source,
         "error_key": key,
-        "email": _mask_email_for_logs(email),
     },
 )
 ```
@@ -177,6 +176,13 @@ _LOGGER.info(
 Keep sensitive strings (tokens, response bodies, raw exception text) out of the
 message itself and prefer short context keys in `extra` so log processing stays
 consistent and Semgrep does not flag credential leaks.
+
+The first template carries no account address on purpose: in the token probe of
+`config_flow.py` the address can be read from the secrets bundle, so CodeQL reported
+it even masked, and Home Assistant's log format does not print `extra` fields,
+so the address never reached `home-assistant.log` or a downloaded debug log.
+Add an account to `extra` only where a reader needs it, and never from a value
+read through the bundle (root `AGENTS.md`, "Log hygiene for scanners").
 
 Inside an `except` handler whose types are not all defined in this package
 (`except Exception as exc`, `except (OSError, ssl.SSLError) as err`, ...), pass

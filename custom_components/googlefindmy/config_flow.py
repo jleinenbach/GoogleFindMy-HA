@@ -2925,7 +2925,6 @@ async def async_pick_working_token(
                 "Token probe succeeded.",
                 extra={
                     "token_source": _probe_source_label(source),
-                    "email": _mask_email_for_logs(email),
                 },
             )
             return token
@@ -2940,7 +2939,6 @@ async def async_pick_working_token(
                     ),
                     extra={
                         "token_source": _probe_source_label(source),
-                        "email": _mask_email_for_logs(email),
                     },
                 )
                 return token
@@ -2950,7 +2948,6 @@ async def async_pick_working_token(
                 extra={
                     "token_source": _probe_source_label(source),
                     "error_key": key,
-                    "email": _mask_email_for_logs(email),
                 },
                 exc_info=err,
             )
@@ -3007,15 +3004,12 @@ def _cand_labels(candidates: list[tuple[str, str]]) -> str:
     return ", ".join(sorted(sources))
 
 
-def _log_token_validation_failure(
-    *, email: str, candidates: list[tuple[str, str]]
-) -> None:
+def _log_token_validation_failure(*, candidates: list[tuple[str, str]]) -> None:
     """Log a sanitized token validation failure with candidate metadata."""
 
     _LOGGER.warning(
         "Token validation failed; no working tokens among candidates. Please re-enter your credentials to refresh expired tokens.",
         extra={
-            "email": _mask_email_for_logs(email),
             "candidate_sources": _cand_labels(candidates),
         },
     )
@@ -5627,7 +5621,7 @@ class ConfigFlow(
             return None
 
         if not chosen:
-            _log_token_validation_failure(email=email, candidates=cands)
+            _log_token_validation_failure(candidates=cands)
             errors["base"] = "cannot_connect"
             return None
 
@@ -5730,7 +5724,7 @@ class ConfigFlow(
                     return self.async_abort(reason="dependency_not_ready")
                 else:
                     if not chosen:
-                        _log_token_validation_failure(email=email, candidates=cands)
+                        _log_token_validation_failure(candidates=cands)
                         errors["base"] = "cannot_connect"
                     else:
                         # Persist validated token; prefer non-JWT candidate when possible
@@ -5789,7 +5783,7 @@ class ConfigFlow(
                     return self.async_abort(reason="dependency_not_ready")
                 else:
                     if not chosen:
-                        _log_token_validation_failure(email=email, candidates=cands)
+                        _log_token_validation_failure(candidates=cands)
                         errors["base"] = "cannot_connect"
                     else:
                         auth_method = _AUTH_METHOD_INDIVIDUAL
@@ -6618,9 +6612,7 @@ class ConfigFlow(
                                     _register_dependency_error(errors, exc)
                                 else:
                                     if not chosen:
-                                        _log_token_validation_failure(
-                                            email=fixed_email, candidates=cands
-                                        )
+                                        _log_token_validation_failure(candidates=cands)
                                         errors["base"] = "cannot_connect"
                                     else:
                                         # Prefer non-JWT if available
@@ -9881,7 +9873,6 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin, _ContainerLoginMixi
                             else:
                                 if not chosen:
                                     _log_token_validation_failure(
-                                        email=email,
                                         candidates=[("manual", new_token)],
                                     )
                                     errors["base"] = "cannot_connect"
@@ -9940,7 +9931,7 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin, _ContainerLoginMixi
                                     else:
                                         if not chosen:
                                             _log_token_validation_failure(
-                                                email=email, candidates=cands
+                                                candidates=cands
                                             )
                                             errors["base"] = "cannot_connect"
                                         else:
