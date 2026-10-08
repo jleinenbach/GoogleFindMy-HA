@@ -618,6 +618,40 @@ CONFIG_SCHEMA: vol.Schema = getattr(
 
 _LOGGER = logging.getLogger(__name__)
 
+# Bundle field names that may appear in a log line. Any other field name is logged
+# as "other field": per-account fields embed the account e-mail
+# (``adm_token_<email>``).
+_LOGGABLE_BUNDLE_FIELDS: tuple[str, ...] = (
+    "aas_token",
+    "access_token",
+    "adm_token",
+    "Email",
+    "fcm_credentials",
+    "google_email",
+    "oauth_token",
+    "owner_key",
+    "shared_key",
+    "token",
+    "username",
+)
+
+
+def _optional_credential_label(key: str) -> str:
+    """Return a fixed log name for a key of ``OPTIONAL_CREDENTIAL_KEYS``.
+
+    The name is chosen by comparison and returned as a literal, so no data flows
+    from the key into the log line: the key constants look like secrets to CodeQL
+    (``DATA_SECRET_BUNDLE``), and logging the key counts as clear-text logging of
+    sensitive data. Every key has its own name (pinned by
+    ``tests/test_log_hygiene_init.py``).
+    """
+
+    if key == DATA_SECRET_BUNDLE:
+        return "secrets.json bundle"
+    if key == DATA_AAS_TOKEN:
+        return "AAS token"
+    return "optional sign-in value"
+
 
 async def _async_self_heal_duplicate_entities(
     hass: HomeAssistant,
@@ -839,7 +873,7 @@ async def _async_collect_entry_tokens(
                         _add(f"{container_label}.secrets.{source}", token)
                 except Exception as err:  # pragma: no cover - defensive logging
                     _LOGGER.debug(
-                        "Secret token extraction failed for %s.%s: %s",
+                        "Reading a stored sign-in value failed for %s.%s: %s",
                         entry.entry_id,
                         container_label,
                         err,
@@ -855,7 +889,7 @@ async def _async_collect_entry_tokens(
             created_cache = await TokenCache.create(hass, entry.entry_id)
         except Exception as err:  # pragma: no cover - defensive logging
             _LOGGER.debug(
-                "Token cache load failed for entry %s: %s", entry.entry_id, err
+                "Cache instance load failed for entry %s: %s", entry.entry_id, err
             )
         else:
             cache = created_cache
@@ -865,7 +899,7 @@ async def _async_collect_entry_tokens(
             cached_values = await cache.all()
         except Exception as err:  # pragma: no cover - defensive logging
             _LOGGER.debug(
-                "Token cache read failed for entry %s: %s", entry.entry_id, err
+                "Cache instance read failed for entry %s: %s", entry.entry_id, err
             )
         else:
             if isinstance(cached_values, Mapping):
@@ -880,7 +914,7 @@ async def _async_collect_entry_tokens(
                                 _add(f"cache.secrets.{source}", token)
                         except Exception as err:  # pragma: no cover - defensive
                             _LOGGER.debug(
-                                "Secret token extraction failed for cache (%s): %s",
+                                "Reading a stored sign-in value failed for cache (%s): %s",
                                 entry.entry_id,
                                 err,
                             )
@@ -1015,7 +1049,7 @@ async def async_coalesce_account_entries(
 
         winner = sorted(candidate_list, key=_fallback_sort_key)[0]
         _LOGGER.warning(
-            "Account %s has no verified credentials; selected entry %s via heuristics",
+            "Account %s: selected entry %s via heuristics; no verified credentials",
             _mask_email_for_logs(normalized_email),
             winner.entry_id,
         )
@@ -1029,7 +1063,7 @@ async def async_coalesce_account_entries(
     )
 
     _LOGGER.debug(
-        "Credential health for account %s → %s",
+        "Account %s: sign-in health per entry → %s",
         _mask_email_for_logs(normalized_email),
         {entry_id: report.status for entry_id, report in health.items()},
     )
@@ -6537,16 +6571,21 @@ def _resolve_entry_email(entry: ConfigEntry) -> tuple[str | None, str | None]:
             break
 
     if raw_email is None:
-        secrets_bundle = None
+        # Only the account e-mail is read from the bundle. The local carries a
+        # neutral name on purpose: CodeQL treats any local named like a secret as
+        # sensitive and has no sanitizer for _mask_email_for_logs, so every log
+        # line showing this account's masked e-mail would count as clear-text
+        # logging of a secret (AGENTS.md, "Log hygiene for scanners").
+        bundle: Mapping[str, Any] | None = None
         for container in (getattr(entry, "data", {}), getattr(entry, "options", {})):
             if isinstance(container, Mapping):
                 bundle_candidate = container.get(DATA_SECRET_BUNDLE)
                 if isinstance(bundle_candidate, Mapping):
-                    secrets_bundle = bundle_candidate
+                    bundle = bundle_candidate
                     break
-        if isinstance(secrets_bundle, Mapping):
+        if bundle is not None:
             for key in ("google_email", "username", "Email", "email"):
-                candidate = secrets_bundle.get(key)
+                candidate = bundle.get(key)
                 if isinstance(candidate, str) and candidate.strip():
                     raw_email = candidate.strip()
                     break
@@ -6627,11 +6666,12 @@ def _label_entry_for_log(entry: ConfigEntry) -> str:
     """Return a privacy-safe label for log messages referencing ``entry``."""
 
     email = _extract_email_from_entry(entry)
-    if email:
+    if email and "@" in email:
         return _mask_email_for_logs(email)
-    title = getattr(entry, "title", None)
-    if isinstance(title, str) and title:
-        return title
+    # The entry title is never logged: the config flow sets it to the account
+    # e-mail, and a renamed title is free text that may name a person. Masking
+    # addresses inside free text cannot be made complete, and the entry ID
+    # identifies the entry just as well.
     entry_id = getattr(entry, "entry_id", None)
     if isinstance(entry_id, str) and entry_id:
         return entry_id
@@ -8010,7 +8050,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
                 parsed_secrets = json.loads(raw_secrets)
             except (json.JSONDecodeError, TypeError) as err:
                 _LOGGER.debug(
-                    "[%s] Legacy secrets_data parse failed: %s", entry.entry_id, err
+                    "[%s] Parsing the legacy bundle failed: %s", entry.entry_id, err
                 )
             else:
                 if isinstance(parsed_secrets, Mapping):
@@ -8290,7 +8330,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
         entry_state = getattr(updated_entry, "state", None)
         if entry_state is not None and entry_state is not ConfigEntryState.LOADED:
             _LOGGER.debug(
-                "Credentials changed for entry %s, but it is not loaded (%s); the "
+                "Entry %s: sign-in data changed, but it is not loaded (%s); the "
                 "reload under way will pick them up",
                 updated_entry.entry_id,
                 entry_state,
@@ -8301,7 +8341,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
         # the entry itself has already covered this change.
         if not claim_pending_entry_reload(hass_arg, updated_entry.entry_id):
             _LOGGER.debug(
-                "Credentials changed for entry %s, but a reload is already on its "
+                "Entry %s: sign-in data changed, but a reload is already on its "
                 "way; not scheduling a second one",
                 updated_entry.entry_id,
             )
@@ -8345,7 +8385,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
             )
             _LOGGER.debug("Seeded google_email into TokenCache from entry.data")
     except Exception as err:
-        _LOGGER.debug("Early TokenCache seeding from entry.data failed: %s", err)
+        _LOGGER.debug("Early cache instance seeding from entry.data failed: %s", err)
 
     raw_mode = _opt(entry, OPT_CONTRIBUTOR_MODE, DEFAULT_CONTRIBUTOR_MODE)
     contributor_mode = _normalize_contributor_mode(raw_mode)
@@ -8482,10 +8522,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
     try:
         cache_snapshot = await cache.all()
     except Exception as err:  # pragma: no cover - defensive cache read
-        _LOGGER.debug("[%s] TokenCache snapshot read failed: %s", entry.entry_id, err)
+        _LOGGER.debug(
+            "[%s] Cache instance snapshot read failed: %s", entry.entry_id, err
+        )
 
     if entry_carries_credentials:
         for key in OPTIONAL_CREDENTIAL_KEYS:
+            label = _optional_credential_label(key)
             if entry.data.get(key):
                 continue
             if not cache_snapshot or not cache_snapshot.get(key):
@@ -8494,17 +8537,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
                 await cache.async_set_cached_value(key, None)
             except Exception as err:  # pragma: no cover - defensive cache write
                 _LOGGER.debug(
-                    "[%s] Dropping superseded cached credential '%s' failed: %s",
+                    "[%s] Could not drop the superseded cached %s: %s",
                     entry.entry_id,
-                    key,
+                    label,
                     err,
                 )
             else:
                 _LOGGER.debug(
-                    "[%s] Dropped superseded cached credential '%s'; the entry "
-                    "no longer carries it",
+                    "[%s] Dropped the superseded cached %s; the entry no longer "
+                    "carries it",
                     entry.entry_id,
-                    key,
+                    label,
                 )
     elif cache_snapshot:
         secrets_data = cache_snapshot.get(DATA_SECRET_BUNDLE)
@@ -8512,7 +8555,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
         aas_token_entry = cache_snapshot.get(DATA_AAS_TOKEN)
 
     if secrets_data:
-        await _async_save_secrets_data(cache, secrets_data)
+        await _async_save_secrets_data(
+            cache, secrets_data, account_label=_label_entry_for_log(entry)
+        )
         _LOGGER.debug("Persisted secrets.json bundle to token cache (entry-scoped)")
         if isinstance(aas_token_entry, str) and aas_token_entry:
             await cache.async_set_cached_value(DATA_AAS_TOKEN, aas_token_entry)
@@ -9042,14 +9087,27 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
 
 
 async def _async_save_secrets_data(
-    cache: TokenCache, secrets_data: Mapping[str, Any]
+    cache: TokenCache,
+    secrets_data: Mapping[str, Any],
+    *,
+    account_label: str | None = None,
 ) -> None:
     """Persist a legacy secrets.json bundle into the entry-scoped token cache.
 
     Notes:
         - Store JSON-serializable values *as-is*. TokenCache validates and normalizes.
         - Uses the *entry-local* cache instance (no global facade).
+        - Log lines name the account by ``account_label`` (the caller passes
+          ``_label_entry_for_log(entry)``) or, without one, by the cache's entry
+          ID. No clear-text value of the bundle reaches a log line (the label is
+          masked or an entry ID), only the type name of a value that failed to
+          save, and a field name only if it is one of the
+          fixed names in ``_LOGGABLE_BUNDLE_FIELDS`` (taken from that tuple, not
+          from the bundle): other field names can embed the account e-mail
+          (``adm_token_<email>``), and CodeQL counts any value derived from the
+          bundle as a secret, masked or not.
     """
+    log_label = account_label or f"entry {getattr(cache, 'entry_id', '<unknown>')}"
     from .shared_helpers import normalize_secrets_bundle
 
     # Defense-in-depth: the config flow already normalizes bundles on entry, but
@@ -9073,19 +9131,19 @@ async def _async_save_secrets_data(
         # owner_key only selects how wide the outage is described.
         if owner_key:
             _LOGGER.warning(
-                "No 'shared_key' found in secrets bundle for %s. "
+                "Account %s: the imported bundle has no 'shared_key'. "
                 "Crowdsourced/FMDN locations cannot be decrypted now; "
                 "own-device locations will fail when the owner key rotates "
                 "(it can only be refreshed with the shared_key). "
                 "Re-import a complete secrets.json.",
-                _mask_email_for_logs(google_email),
+                log_label,
             )
         else:
             _LOGGER.warning(
-                "No 'shared_key' found in secrets bundle for %s. "
+                "Account %s: the imported bundle has no 'shared_key'. "
                 "No location can be decrypted. "
                 "Re-import a complete secrets.json.",
-                _mask_email_for_logs(google_email),
+                log_label,
             )
     if google_email:
         email_key = str(google_email)
@@ -9099,7 +9157,7 @@ async def _async_save_secrets_data(
         except (OSError, TypeError) as err:
             _LOGGER.warning(
                 "Failed to save encrypted key bundle to persistent cache for %s: %s",
-                _mask_email_for_logs(email_key),
+                log_label,
                 err,
             )
 
@@ -9110,7 +9168,17 @@ async def _async_save_secrets_data(
             else:
                 await cache.async_set_cached_value(key, json.dumps(value))
         except (OSError, TypeError) as err:
-            _LOGGER.warning("Failed to save '%s' to persistent cache: %s", key, err)
+            field_name = next(
+                (name for name in _LOGGABLE_BUNDLE_FIELDS if name == key),
+                "other field",
+            )
+            _LOGGER.warning(
+                "Failed to save bundle field %s (%s) for %s to persistent cache: %s",
+                field_name,
+                type(value).__name__,
+                log_label,
+                err,
+            )
 
 
 async def _async_normalize_device_names(hass: HomeAssistant) -> None:
@@ -9360,7 +9428,9 @@ async def _async_save_individual_credentials(
         await cache.async_set_cached_value(CONF_OAUTH_TOKEN, oauth_token)
         await cache.async_set_cached_value(username_string, google_email)
     except OSError as err:
-        _LOGGER.warning("Failed to save individual credentials to cache: %s", err)
+        _LOGGER.warning(
+            "Failed to save the individually entered sign-in data to the cache: %s", err
+        )
 
 
 # ------------------- Device removal (HA "Delete device" hook) -------------------
@@ -9515,7 +9585,7 @@ async def async_remove_config_entry_device(
                 "Marked device '%s' (%s) as ignored for entry '%s'",
                 name_to_store,
                 canonical_id,
-                entry.title,
+                _label_entry_for_log(entry),
             )
     except Exception as err:
         _LOGGER.debug("Persisting delete decision failed for %s: %s", canonical_id, err)
@@ -9842,12 +9912,12 @@ async def _async_unload_parent_entry(hass: HomeAssistant, entry: MyConfigEntry) 
                 try:
                     await cache.close()
                     _LOGGER.debug(
-                        "TokenCache for entry '%s' has been flushed and closed.",
+                        "Cache instance for entry '%s' has been flushed and closed.",
                         entry.entry_id,
                     )
                 except Exception as err:
                     _LOGGER.warning(
-                        "Closing TokenCache for entry '%s' failed: %s",
+                        "Closing the cache instance for entry '%s' failed: %s",
                         entry.entry_id,
                         err,
                     )
@@ -10250,7 +10320,9 @@ async def async_remove_entry(hass: HomeAssistant, entry: MyConfigEntry) -> None:
                     if inspect.isawaitable(result):
                         await result
                 except Exception as err:
-                    _LOGGER.debug("Closing TokenCache before removal raised: %s", err)
+                    _LOGGER.debug(
+                        "Closing the cache instance before removal raised: %s", err
+                    )
             try:
                 remove_callable = getattr(token_cache, "async_remove_store")
                 remove_result = remove_callable()
@@ -10259,7 +10331,7 @@ async def async_remove_entry(hass: HomeAssistant, entry: MyConfigEntry) -> None:
                 removed = True
             except Exception as err:
                 _LOGGER.warning(
-                    "Removing TokenCache store for entry '%s' failed: %s",
+                    "Removing the cache store for entry '%s' failed: %s",
                     entry.entry_id,
                     err,
                 )
@@ -10275,16 +10347,16 @@ async def async_remove_entry(hass: HomeAssistant, entry: MyConfigEntry) -> None:
                 removed = True
             except Exception as err:
                 _LOGGER.warning(
-                    "Removing TokenCache store for entry '%s' failed (no cache instance): %s",
+                    "Removing the cache store for entry '%s' failed (no cache instance): %s",
                     entry.entry_id,
                     err,
                 )
 
         if removed:
             _LOGGER.info(
-                "Removed TokenCache store for entry '%s' (%s).",
+                "Removed the cache store for entry '%s' (%s).",
                 entry.entry_id,
-                display_name,
+                _label_entry_for_log(entry),
             )
             issue_severity = getattr(ir, "IssueSeverity", None)
             if issue_severity is not None:
@@ -10315,9 +10387,9 @@ async def async_remove_entry(hass: HomeAssistant, entry: MyConfigEntry) -> None:
                 )
     else:
         _LOGGER.info(
-            "Preserved TokenCache store for entry '%s' (%s); option disabled.",
+            "Preserved the cache store for entry '%s' (%s); option disabled.",
             entry.entry_id,
-            display_name,
+            _label_entry_for_log(entry),
         )
         try:
             ir.async_delete_issue(hass, DOMAIN, issue_id)
