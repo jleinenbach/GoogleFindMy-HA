@@ -1389,7 +1389,7 @@ async def test_delete_swallows_file_not_found_race_at_unlink(
     # silence is what stops ``except FileNotFoundError`` from collapsing into the
     # ``except OSError`` handler (FileNotFoundError is an OSError subclass).
     assert not any(
-        "Failed to remove watched secrets file after import" in rec.getMessage()
+        "Failed to remove watched bundle file after import" in rec.getMessage()
         for rec in caplog.records
     )
 
@@ -1432,7 +1432,7 @@ async def test_delete_warns_and_completes_on_unremovable_file(
     # warning instead of raising.
     assert watched.exists()
     assert any(
-        "Failed to remove watched secrets file after import" in rec.getMessage()
+        "Failed to remove watched bundle file after import" in rec.getMessage()
         for rec in caplog.records
     )
 

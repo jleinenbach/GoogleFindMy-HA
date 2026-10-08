@@ -777,6 +777,7 @@ async def test_permanent_failure_stops_after_retry_budget(
         if "gave up on the current bundle" in record.getMessage()
     ]
     assert len(gave_up) == 1
+    assert f"after {expected_attempts} failed attempts" in gave_up[0].getMessage()
 
     # Negative path exit: a changed bundle buys a *full* new budget, not just a
     # single extra attempt.
