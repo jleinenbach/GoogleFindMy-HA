@@ -7,17 +7,22 @@ Static checks walk every logger call in both modules:
   first source line of the literal (mirror of the Semgrep rule
   ``python-logger-credential-disclosure``, as in ``test_log_hygiene_auth.py``).
 * No logger call passes an upper-case constant with a credential word in its
-  name (``_MAX_SECRETS_RETRY_ATTEMPTS``, ``SECRETS_DISCOVERY_NAMESPACE``).
-* Every ``token_source`` value is built by ``_probe_source_label``: the source
-  name travels in the same tuple as the token, and discovery payloads can
-  bring their own names.
-* ``discovery.py`` passes the namespace ``ns`` to a logger only through
-  ``_namespace_label``.
+  name, as a bare name or as an attribute (``_MAX_SECRETS_RETRY_ATTEMPTS``,
+  ``discovery_module.SECRETS_DISCOVERY_NAMESPACE``).
+* Every ``token_source`` value is built by ``_probe_source_label`` and every
+  ``candidate_sources`` value by ``_cand_labels``, in a dict literal or a
+  ``dict(...)`` call: the source name travels in the same tuple as the token,
+  and discovery payloads can bring their own names.
+* ``discovery.py`` passes a namespace (``ns``, ``self._namespace``) to a
+  logger only through ``_namespace_label``.
 
-Behavioural checks pin that the token probe, the candidate list and the
-account label for discovery logs carry no part of a token or an address.
+Behavioural checks pin that the token probe and the candidate list carry no
+part of a token or an address, and that the account label for discovery logs
+carries none either when no e-mail argument is given (with one, it is the
+masked address).
 Not covered: logger calls that receive the values through a helper other than
-the ones named here.
+the ones named here, a namespace held under another name, and ``extra`` built
+in a variable before the call.
 """
 
 from __future__ import annotations
@@ -37,7 +42,17 @@ _MODULES = (Path(config_flow.__file__), Path(discovery.__file__))
 _SEMGREP_FORMAT = re.compile(r"(?i).*(api.key|secret|credential|token|password).*%s.*")
 _LOGGER_OBJECT = re.compile(r"(?i)(_logger|logger|self.logger|log)")
 _LOG_METHODS = frozenset(
-    {"debug", "info", "warn", "warning", "error", "exception", "critical"}
+    {
+        "debug",
+        "info",
+        "warn",
+        "warning",
+        "error",
+        "exception",
+        "critical",
+        "fatal",
+        "log",
+    }
 )
 _CREDENTIAL_CONSTANTS = re.compile(r"(?i)(token|secret|password|credential)")
 # Token-shaped test value, assembled at runtime so no secret scanner sees a
@@ -61,8 +76,40 @@ def _logger_calls() -> list[tuple[Path, str, ast.Call]]:
     return calls
 
 
+def _format_index(call: ast.Call) -> int:
+    # ``logger.log(level, msg, *args)`` carries the level first.
+    return 1 if isinstance(call.func, ast.Attribute) and call.func.attr == "log" else 0
+
+
 def _call_values(call: ast.Call) -> list[ast.expr]:
-    return [*call.args[1:], *(kw.value for kw in call.keywords)]
+    start = _format_index(call) + 1
+    return [*call.args[start:], *(kw.value for kw in call.keywords)]
+
+
+def _extra_items(node: ast.AST) -> list[tuple[str, ast.expr]]:
+    """Return the string-keyed items of a dict literal or a ``dict(...)`` call."""
+
+    if isinstance(node, ast.Dict):
+        return [
+            (key.value, value)
+            for key, value in zip(node.keys, node.values, strict=True)
+            if isinstance(key, ast.Constant) and isinstance(key.value, str)
+        ]
+    if (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "dict"
+    ):
+        return [(kw.arg, kw.value) for kw in node.keywords if kw.arg is not None]
+    return []
+
+
+def _is_call_to(node: ast.expr, name: str) -> bool:
+    return (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == name
+    )
 
 
 def test_both_modules_have_logger_calls() -> None:
@@ -74,9 +121,10 @@ def test_both_modules_have_logger_calls() -> None:
 def test_no_credential_wording_before_placeholder() -> None:
     offenders = []
     for path, source, call in _logger_calls():
-        if not call.args:
+        index = _format_index(call)
+        if len(call.args) <= index:
             continue
-        segment = ast.get_source_segment(source, call.args[0])
+        segment = ast.get_source_segment(source, call.args[index])
         if segment is None:
             continue
         if _SEMGREP_FORMAT.match(segment.splitlines()[0]):
@@ -85,48 +133,47 @@ def test_no_credential_wording_before_placeholder() -> None:
 
 
 def test_no_credential_named_constant_passed_to_logger() -> None:
-    offenders = [
-        f"{path.name}:{call.lineno}:{node.id}"
-        for path, _source, call in _logger_calls()
-        for arg in _call_values(call)
-        for node in ast.walk(arg)
-        if isinstance(node, ast.Name)
-        and node.id.isupper()
-        and _CREDENTIAL_CONSTANTS.search(node.id)
-    ]
-    assert offenders == []
-
-
-def test_token_source_is_always_a_fixed_label() -> None:
-    seen = 0
     offenders = []
     for path, _source, call in _logger_calls():
         for arg in _call_values(call):
             for node in ast.walk(arg):
-                if not isinstance(node, ast.Dict):
+                if isinstance(node, ast.Name):
+                    name = node.id
+                elif isinstance(node, ast.Attribute):
+                    name = node.attr
+                else:
                     continue
-                for key, value in zip(node.keys, node.values, strict=True):
-                    if not (
-                        isinstance(key, ast.Constant) and key.value == "token_source"
-                    ):
-                        continue
-                    seen += 1
-                    if not (
-                        isinstance(value, ast.Call)
-                        and isinstance(value.func, ast.Name)
-                        and value.func.id == "_probe_source_label"
-                    ):
-                        offenders.append(f"{path.name}:{call.lineno}")
-    assert seen == 3
+                if name.isupper() and _CREDENTIAL_CONSTANTS.search(name):
+                    offenders.append(f"{path.name}:{call.lineno}:{name}")
     assert offenders == []
 
 
-def _is_namespace_label(node: ast.expr) -> bool:
-    return (
-        isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Name)
-        and node.func.id == "_namespace_label"
-    )
+_FIXED_EXTRA = {
+    "token_source": "_probe_source_label",
+    "candidate_sources": "_cand_labels",
+}
+
+
+def test_candidate_sources_are_always_fixed_labels() -> None:
+    seen = dict.fromkeys(_FIXED_EXTRA, 0)
+    offenders = []
+    for path, _source, call in _logger_calls():
+        for arg in _call_values(call):
+            for node in ast.walk(arg):
+                for key, value in _extra_items(node):
+                    if key not in _FIXED_EXTRA:
+                        continue
+                    seen[key] += 1
+                    if not _is_call_to(value, _FIXED_EXTRA[key]):
+                        offenders.append(f"{path.name}:{call.lineno}:{key}")
+    assert seen == {"token_source": 3, "candidate_sources": 1}
+    assert offenders == []
+
+
+def _is_namespace(node: ast.AST) -> bool:
+    if isinstance(node, ast.Name):
+        return node.id == "ns"
+    return isinstance(node, ast.Attribute) and node.attr == "_namespace"
 
 
 def test_discovery_never_logs_raw_namespace() -> None:
@@ -135,9 +182,9 @@ def test_discovery_never_logs_raw_namespace() -> None:
         for path, _source, call in _logger_calls()
         if path.name == "discovery.py"
         for arg in _call_values(call)
-        if not _is_namespace_label(arg)
+        if not _is_call_to(arg, "_namespace_label")
         for node in ast.walk(arg)
-        if isinstance(node, ast.Name) and node.id == "ns"
+        if _is_namespace(node)
     ]
     assert offenders == []
 

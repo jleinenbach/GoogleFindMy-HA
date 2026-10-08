@@ -719,7 +719,7 @@ deleted once Home Assistant is observed to hold the imported credentials
 flow, or if the import fails — the file stays on the Home Assistant machine in
 clear. Deletion is also best-effort: a path Home Assistant cannot write to
 keeps its copy. That one case does announce itself, in the Home Assistant log:
-`Failed to remove watched secrets file after import: <path>`
+`Failed to remove watched bundle file after import: <path>`
 (`config_flow.py` → `_remove_if_digest_matches`); search for it if you used a
 watched path, and remove the named file yourself. The other case is silent by
 construction: a flow you never confirmed never reaches the deletion at all, so

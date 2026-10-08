@@ -6787,7 +6787,7 @@ class ConfigFlow(
         # Check if cache is closed (unusable) - return None to allow self-healing
         if cache is not None and getattr(cache, "_closed", False):
             _LOGGER.debug(
-                "Cache for entry '%s' is closed (TokenCache); returning None to allow "
+                "Cache instance for entry '%s' is closed; returning None to allow "
                 "self-healing",
                 getattr(entry, "entry_id", "unknown"),
             )
