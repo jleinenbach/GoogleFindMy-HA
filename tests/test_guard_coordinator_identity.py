@@ -24,7 +24,7 @@ The file also pins the *fix* statically: the consumer list must still match the
 modules that actually bind the symbol, ``tests.conftest.import_coordinator_consumers``
 must import exactly that list with literal ``import`` statements, and each
 harness that patches the symbol must call the helper before its first
-``monkeypatch.setattr``.  Both are
+``monkeypatch.setattr``.  All three are
 read out of the source with ``ast`` rather than reproduced at runtime.  An
 earlier draft did reproduce it, by dropping seven modules from ``sys.modules``
 and re-importing them inside a patch window; that test spread a second symbol
@@ -111,6 +111,41 @@ def _module_level_consumers() -> set[str]:
     return consumers
 
 
+_HELPER = "import_coordinator_consumers"
+
+
+def _bindings_of(tree: ast.AST, name: str) -> list[ast.AST]:
+    """Every node anywhere in ``tree`` that binds, deletes or rebinds ``name``.
+
+    Counts definitions, assignments (also under ``if``/``try``/loops), ``del``,
+    ``global``/``nonlocal`` declarations, import aliases and the string form
+    ``globals()["name"]``. Walking the whole tree instead of the module body
+    is what catches a rebinding hidden in a branch or a function.
+    """
+
+    found: list[ast.AST] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
+            if node.name == name:
+                found.append(node)
+        elif isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store | ast.Del):
+            if node.id == name:
+                found.append(node)
+        elif isinstance(node, ast.Global | ast.Nonlocal):
+            if name in node.names:
+                found.append(node)
+        elif isinstance(node, ast.Import | ast.ImportFrom):
+            if any(
+                (alias.asname or alias.name.split(".")[0]) == name
+                for alias in node.names
+            ):
+                found.append(node)
+        elif isinstance(node, ast.Subscript) and isinstance(node.slice, ast.Constant):
+            if node.slice.value == name:
+                found.append(node)
+    return found
+
+
 def _helper_imports() -> list[str]:
     """Module names the shared import helper imports, in source order.
 
@@ -120,30 +155,16 @@ def _helper_imports() -> list[str]:
     """
 
     tree = ast.parse((_REPO_ROOT / "tests" / "conftest.py").read_text(encoding="utf-8"))
-    bindings = [
-        node
-        for node in tree.body
-        if (
-            isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef)
-            and node.name == "import_coordinator_consumers"
-        )
-        or (
-            isinstance(node, ast.Assign | ast.AnnAssign | ast.Import | ast.ImportFrom)
-            and "import_coordinator_consumers"
-            in {
-                name.id
-                for name in ast.walk(node)
-                if isinstance(name, ast.Name) and isinstance(name.ctx, ast.Store)
-            }
-            | {alias.asname or alias.name for alias in getattr(node, "names", [])}
-        )
-    ]
+    bindings = _bindings_of(tree, _HELPER)
     assert len(bindings) == 1, (
-        "tests/conftest.py must bind import_coordinator_consumers exactly once at "
-        f"module level; found {len(bindings)} binding(s)"
+        f"tests/conftest.py must bind {_HELPER} exactly once; found "
+        f"{len(bindings)} binding(s) at line(s) "
+        f"{[getattr(node, 'lineno', '?') for node in bindings]}"
     )
     helper = bindings[0]
-    assert isinstance(helper, ast.FunctionDef), "the helper must be a plain function"
+    assert isinstance(helper, ast.FunctionDef) and helper in tree.body, (
+        "the helper must be a plain module-level function"
+    )
     # A decorator (e.g. a cache) or a parameter could turn later calls into
     # no-ops or make the imports depend on the caller.
     assert not helper.decorator_list, (
@@ -230,6 +251,23 @@ def test_harness_imports_consumers_before_the_first_patch(
         None,
     )
     assert harness is not None, f"{function} no longer exists in {relative_path}"
+
+    # The call below only means something if the name is the conftest helper:
+    # a local function, lambda or reassignment of the same name would satisfy
+    # the call check while importing nothing.
+    bindings = _bindings_of(tree, _HELPER)
+    assert len(bindings) == 1, (
+        f"{relative_path} must bind {_HELPER} exactly once (the import from "
+        f"tests.conftest); found {len(bindings)} binding(s)"
+    )
+    binding = bindings[0]
+    assert (
+        isinstance(binding, ast.ImportFrom)
+        and binding.module == "tests.conftest"
+        and any(
+            alias.name == _HELPER and alias.asname is None for alias in binding.names
+        )
+    ), f"{relative_path} must import {_HELPER} from tests.conftest without an alias"
 
     # Only a call that is itself a statement of the harness body counts: one
     # under `if`, `try`, a loop or a nested function may never run.
