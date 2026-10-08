@@ -6663,7 +6663,9 @@ def _mask_email_for_logs(email: str | None) -> str:
     return f"{masked_local}@{domain}"
 
 
-_EMAIL_IN_TEXT = re.compile(r"[^\s@]+@[^\s@]+")
+# One address per match: the domain stops at the first character that cannot be
+# part of a host name, so "a@x.com,b@y.org" yields two matches.
+_EMAIL_IN_TEXT = re.compile(r"[^\s@,;:<>()\[\]\"]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*")
 
 
 def _label_entry_for_log(entry: ConfigEntry) -> str:

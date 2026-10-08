@@ -259,6 +259,8 @@ def test_label_entry_for_log_masks_the_bundle_email() -> None:
         ("Family account", "Family account"),
         (f"a@{_DOMAIN}, bob@{_DOMAIN}", f"*@{_DOMAIN}, b***@{_DOMAIN}"),
         ("Home @ Berlin", "Home @ Berlin"),
+        (f"alice@{_DOMAIN},bob@{_DOMAIN}", f"a***@{_DOMAIN},b***@{_DOMAIN}"),
+        (f"Family ({_EMAIL})", f"Family (p***@{_DOMAIN})"),
     ],
 )
 def test_label_entry_for_log_masks_an_e_mail_title(title: str, expected: str) -> None:
