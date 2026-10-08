@@ -20,10 +20,11 @@ properties it must have:
 * it *restores* the production class, so the blame stays with one test instead
   of spreading over every test that follows.
 
-The file also pins the *fix* statically: the consumer list the harnesses import
-up front must still match the modules that actually bind the symbol, and those
-imports must still happen before the first ``monkeypatch.setattr`` in **each**
-harness that patches the symbol.  Both are
+The file also pins the *fix* statically: the consumer list must still match the
+modules that actually bind the symbol, ``tests.conftest.import_coordinator_consumers``
+must import exactly that list with literal ``import`` statements, and each
+harness that patches the symbol must call the helper before its first
+``monkeypatch.setattr``.  Both are
 read out of the source with ``ast`` rather than reproduced at runtime.  An
 earlier draft did reproduce it, by dropping seven modules from ``sys.modules``
 and re-importing them inside a patch window; that test spread a second symbol
@@ -119,16 +120,42 @@ def _helper_imports() -> list[str]:
     """
 
     tree = ast.parse((_REPO_ROOT / "tests" / "conftest.py").read_text(encoding="utf-8"))
-    helper = next(
-        (
-            node
-            for node in tree.body
-            if isinstance(node, ast.FunctionDef)
+    bindings = [
+        node
+        for node in tree.body
+        if (
+            isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef)
             and node.name == "import_coordinator_consumers"
-        ),
-        None,
+        )
+        or (
+            isinstance(node, ast.Assign | ast.AnnAssign | ast.Import | ast.ImportFrom)
+            and "import_coordinator_consumers"
+            in {
+                name.id
+                for name in ast.walk(node)
+                if isinstance(name, ast.Name) and isinstance(name.ctx, ast.Store)
+            }
+            | {alias.asname or alias.name for alias in getattr(node, "names", [])}
+        )
+    ]
+    assert len(bindings) == 1, (
+        "tests/conftest.py must bind import_coordinator_consumers exactly once at "
+        f"module level; found {len(bindings)} binding(s)"
     )
-    assert helper is not None, "tests/conftest.py lost import_coordinator_consumers"
+    helper = bindings[0]
+    assert isinstance(helper, ast.FunctionDef), "the helper must be a plain function"
+    # A decorator (e.g. a cache) or a parameter could turn later calls into
+    # no-ops or make the imports depend on the caller.
+    assert not helper.decorator_list, (
+        "import_coordinator_consumers must not be decorated"
+    )
+    assert not (
+        helper.args.args
+        or helper.args.posonlyargs
+        or helper.args.kwonlyargs
+        or helper.args.vararg
+        or helper.args.kwarg
+    ), "import_coordinator_consumers must not take parameters"
     body = helper.body
     if (
         body
@@ -204,20 +231,26 @@ def test_harness_imports_consumers_before_the_first_patch(
     )
     assert harness is not None, f"{function} no longer exists in {relative_path}"
 
+    # Only a call that is itself a statement of the harness body counts: one
+    # under `if`, `try`, a loop or a nested function may never run.
     import_line = min(
         (
-            call.lineno
-            for call in ast.walk(harness)
-            if isinstance(call, ast.Call)
-            and isinstance(call.func, ast.Name)
-            and call.func.id == "import_coordinator_consumers"
+            statement.lineno
+            for statement in harness.body
+            if isinstance(statement, ast.Expr)
+            and isinstance(statement.value, ast.Call)
+            and isinstance(statement.value.func, ast.Name)
+            and statement.value.func.id == "import_coordinator_consumers"
+            and not statement.value.args
+            and not statement.value.keywords
         ),
         default=None,
     )
     assert import_line is not None, (
         f"{relative_path}::{function} no longer imports the consumer modules; "
-        "without a call to import_coordinator_consumers() before the first "
-        "patch, a lazy first import inside the patch window keeps the stub"
+        "without a direct call to import_coordinator_consumers() in the harness "
+        "body before the first patch, a lazy first import inside the patch "
+        "window keeps the stub"
     )
 
     first_patch_line = min(

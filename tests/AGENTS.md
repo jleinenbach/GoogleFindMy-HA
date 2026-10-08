@@ -469,7 +469,7 @@ Whenever you patch a symbol that other modules bind at module level:
 * **Or patch the consumers too**, if a test genuinely needs them to see the
   stub (this is why the harness pops and re-imports `map_view`).
 
-Three harnesses patch the symbol and therefore consume the tuple:
+Three harnesses patch the symbol and therefore call the helper:
 `_prepare_async_setup_entry_harness` (`tests/test_hass_data_layout.py`),
 `_patch_integration_runtime` (`tests/test_device_entity_registration.py`) and
 `test_integration_device_info_uses_service_device`
@@ -490,8 +490,9 @@ when one of them actually bites.
 
 `tests/test_guard_coordinator_identity.py` covers the detection logic and pins
 the fix statically: the tuple must still equal the AST-derived set of
-module-level binders, and in **each** of the three harnesses a loop that really
-calls `importlib.import_module` over it must precede the first
+module-level binders, `import_coordinator_consumers()` must import exactly its
+modules with plain, unconditional `import` statements, and in **each** of the
+three harnesses a direct call to that helper must precede the first
 `monkeypatch.setattr`. The teardown *wiring* is verified by mutation rather
 than by a test: remove the early imports from
 `_prepare_async_setup_entry_harness` and
