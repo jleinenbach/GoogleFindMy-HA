@@ -69,6 +69,29 @@ def _clamp(value: float, min_val: float, max_val: float) -> float:
     return max(min_val, min(max_val, value))
 
 
+def _coordinate_in_range(value: float, bound: float) -> bool:
+    """Return True when ``value`` is finite and within ``[-bound, bound]``."""
+    return math.isfinite(value) and -bound <= value <= bound
+
+
+def _coordinate_kind(value: object) -> str:
+    """Describe a rejected coordinate without echoing it.
+
+    AGENTS.md forbids precise coordinates in logs, and a rejected value can
+    still carry one (for example ``"48.137,"``). Only a fixed label is
+    returned, so the log line names the defect, never the value.
+    """
+    if isinstance(value, str):
+        return "text"
+    if isinstance(value, (bytes, bytearray)):
+        return "bytes"
+    if isinstance(value, Mapping):
+        return "a mapping"
+    if isinstance(value, (list, tuple)):
+        return "a sequence"
+    return "another type"
+
+
 class LocateOperations(_MixinBase):
     """Locate operations mixin for GoogleFindMyCoordinator.
 
@@ -113,26 +136,23 @@ class LocateOperations(_MixinBase):
             self.increment_stat("invalid_coords")
             if warn_on_invalid:
                 _LOGGER.warning(
-                    "Ignoring invalid (non-numeric) coordinates%s: lat=%r, lon=%r",
+                    "Ignoring invalid (non-numeric) coordinates%s: lat is %s, lon is %s",
                     f" for {device_label}" if device_label else "",
-                    lat,
-                    lon,
+                    _coordinate_kind(lat),
+                    _coordinate_kind(lon),
                 )
             return False
 
         if not (
-            math.isfinite(lat_f)
-            and math.isfinite(lon_f)
-            and -90.0 <= lat_f <= 90.0
-            and -180.0 <= lon_f <= 180.0
+            _coordinate_in_range(lat_f, 90.0) and _coordinate_in_range(lon_f, 180.0)
         ):
             self.increment_stat("invalid_coords")
             if warn_on_invalid:
                 _LOGGER.warning(
-                    "Ignoring out-of-range/invalid coordinates%s: lat=%s, lon=%s",
+                    "Ignoring out-of-range/invalid coordinates%s: lat %s, lon %s",
                     f" for {device_label}" if device_label else "",
-                    lat,
-                    lon,
+                    "ok" if _coordinate_in_range(lat_f, 90.0) else "invalid",
+                    "ok" if _coordinate_in_range(lon_f, 180.0) else "invalid",
                 )
             return False
 
