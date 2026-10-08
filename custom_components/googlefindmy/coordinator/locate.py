@@ -69,6 +69,51 @@ def _clamp(value: float, min_val: float, max_val: float) -> float:
     return max(min_val, min(max_val, value))
 
 
+def _coordinate_in_range(value: float, bound: float) -> bool:
+    """Return True when ``value`` is finite and within ``[-bound, bound]``."""
+    return math.isfinite(value) and -bound <= value <= bound
+
+
+def _as_float(value: object) -> float | None:
+    """Return ``float(value)``, or None when it cannot be converted.
+
+    ``OverflowError`` (an integer beyond the float range) counts as not
+    convertible, so such a fix is rejected like any other bad value.
+    """
+    try:
+        return float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def _log_rejected_device(device_label: str | None) -> None:
+    """Name the device of a rejected fix at DEBUG only.
+
+    Polling repeats unattended, and the label can be a user-provided device
+    name, which AGENTS.md keeps out of records above DEBUG.
+    """
+    if device_label:
+        _LOGGER.debug("Rejected coordinates belong to %s", device_label)
+
+
+def _coordinate_kind(value: object) -> str:
+    """Describe a rejected coordinate without echoing it.
+
+    AGENTS.md forbids precise coordinates in logs, and a rejected value can
+    still carry one (for example ``"48.137,"``). Only a fixed label is
+    returned, so the log line names the defect, never the value.
+    """
+    if isinstance(value, str):
+        return "text"
+    if isinstance(value, (bytes, bytearray)):
+        return "bytes"
+    if isinstance(value, Mapping):
+        return "a mapping"
+    if isinstance(value, (list, tuple)):
+        return "a sequence"
+    return "another type"
+
+
 class LocateOperations(_MixinBase):
     """Locate operations mixin for GoogleFindMyCoordinator.
 
@@ -107,33 +152,32 @@ class LocateOperations(_MixinBase):
             # Missing coordinates is not an error per se (semantic-only is valid).
             return False
 
-        try:
-            lat_f, lon_f = float(lat), float(lon)
-        except (TypeError, ValueError):
+        lat_f = _as_float(lat)
+        lon_f = _as_float(lon)
+        if lat_f is None or lon_f is None:
             self.increment_stat("invalid_coords")
             if warn_on_invalid:
+                lat_state = "ok" if lat_f is not None else f"is {_coordinate_kind(lat)}"
+                lon_state = "ok" if lon_f is not None else f"is {_coordinate_kind(lon)}"
                 _LOGGER.warning(
-                    "Ignoring invalid (non-numeric) coordinates%s: lat=%r, lon=%r",
-                    f" for {device_label}" if device_label else "",
-                    lat,
-                    lon,
+                    "Ignoring invalid (non-numeric) coordinates: lat %s, lon %s",
+                    lat_state,
+                    lon_state,
                 )
+                _log_rejected_device(device_label)
             return False
 
         if not (
-            math.isfinite(lat_f)
-            and math.isfinite(lon_f)
-            and -90.0 <= lat_f <= 90.0
-            and -180.0 <= lon_f <= 180.0
+            _coordinate_in_range(lat_f, 90.0) and _coordinate_in_range(lon_f, 180.0)
         ):
             self.increment_stat("invalid_coords")
             if warn_on_invalid:
                 _LOGGER.warning(
-                    "Ignoring out-of-range/invalid coordinates%s: lat=%s, lon=%s",
-                    f" for {device_label}" if device_label else "",
-                    lat,
-                    lon,
+                    "Ignoring out-of-range/invalid coordinates: lat %s, lon %s",
+                    "ok" if _coordinate_in_range(lat_f, 90.0) else "invalid",
+                    "ok" if _coordinate_in_range(lon_f, 180.0) else "invalid",
                 )
+                _log_rejected_device(device_label)
             return False
 
         # Write back normalized floats

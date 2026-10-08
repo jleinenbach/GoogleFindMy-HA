@@ -106,7 +106,7 @@ _EIK_LEN: int = 32
 # Heuristic threshold suggesting encryptedUserSecrets holds structured data rather than a raw key blob.
 # Moto Tag payloads can legitimately exceed the smaller legacy cutoff, so tolerate larger blobs before
 # raising a diagnostic warning.
-_SECRETS_STRUCT_LEN_THRESHOLD: int = 256
+_STRUCTURED_PAYLOAD_LEN_THRESHOLD: int = 256
 
 # -------------------------------------------------------------------------
 # EIK Cache (Performance Optimization)
@@ -1267,7 +1267,7 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
             serialized_length = len(secrets_blob)
         except Exception as serialize_exc:  # pragma: no cover - diagnostics only
             _LOGGER.debug(
-                "Failed to serialize encryptedUserSecrets for length check: %s",
+                "Failed to serialize the encrypted key container for length check: %s",
                 serialize_exc,
             )
 
@@ -1302,13 +1302,13 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
 
         if (
             serialized_length is not None
-            and serialized_length > _SECRETS_STRUCT_LEN_THRESHOLD
+            and serialized_length > _STRUCTURED_PAYLOAD_LEN_THRESHOLD
         ):
             _LOGGER.warning(
                 "[DIAG-ALERT] encryptedUserSecrets serialized length is %d bytes (> %d)."
                 " This suggests a wrapped/structured payload instead of a raw key.",
                 serialized_length,
-                _SECRETS_STRUCT_LEN_THRESHOLD,
+                _STRUCTURED_PAYLOAD_LEN_THRESHOLD,
             )
 
         if (
@@ -1357,7 +1357,9 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
                     " This suggests the blob holds a distinct container or wrapped value."
                 )
     except Exception as exc:  # pragma: no cover - diagnostics only
-        _LOGGER.warning("[DIAG-ERROR] Failed to inspect secrets: %s", exc)
+        _LOGGER.warning(
+            "[DIAG-ERROR] Failed to inspect the encrypted key container: %s", exc
+        )
         raw_encrypted_identity_key = b""
 
     raw_encrypted_identity_key = bytes(raw_encrypted_identity_key)

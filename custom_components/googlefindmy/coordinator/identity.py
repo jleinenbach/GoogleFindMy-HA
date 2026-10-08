@@ -36,7 +36,7 @@ from .helpers.identity import (
     extract_pair_date as _extract_pair_date_impl,
 )
 from .helpers.identity import (
-    extract_secrets_creation_date as _extract_secrets_creation_date_impl,
+    extract_secrets_creation_date as _extract_anchor_date_impl,
 )
 from .helpers.identity import (
     extract_time_anchors_debug as _extract_time_anchors_debug_impl,
@@ -313,7 +313,7 @@ class IdentityOperations(_MixinBase):
         _lookup_prio_with_source = _lookup_prio_with_source_impl
         _store_if_value = _store_if_value_impl
         _extract_pair_date = _extract_pair_date_impl
-        _extract_secrets_creation_date = _extract_secrets_creation_date_impl
+        _extract_anchor_date = _extract_anchor_date_impl
         _extract_time_anchors_debug = _extract_time_anchors_debug_impl
 
         _expected_identity_key_length = 32
@@ -483,7 +483,7 @@ class IdentityOperations(_MixinBase):
         # These dicts were intended for DeviceRegistry persistence but custom_fields
         # does not exist in HA's API. They remain empty for backward compatibility.
         registry_pair_dates: dict[str, int] = {}
-        registry_secrets_creation_dates: dict[str, int] = {}
+        registry_anchor_dates: dict[str, int] = {}
         registry_time_anchors_debug: dict[str, Any] = {}
 
         if entry is not None:
@@ -539,7 +539,7 @@ class IdentityOperations(_MixinBase):
         last_raw_keys: dict[str, list[str]] = {}
         last_identity_candidates: dict[str, list[bytes]] = {}
         last_pair_dates: dict[str, int] = {}
-        last_secrets_creation_dates: dict[str, int] = {}
+        last_anchor_dates: dict[str, int] = {}
         last_time_anchors_debug: dict[str, Any] = {}
         last_payloads: dict[str, Mapping[str, Any]] = {}
         if isinstance(last_device_list, Iterable):
@@ -591,10 +591,8 @@ class IdentityOperations(_MixinBase):
                 pair_date = _extract_pair_date(raw)
                 _store_if_value(last_pair_dates, dev_id, pair_date)
 
-                secrets_creation_date = _extract_secrets_creation_date(raw)
-                _store_if_value(
-                    last_secrets_creation_dates, dev_id, secrets_creation_date
-                )
+                anchor_date = _extract_anchor_date(raw)
+                _store_if_value(last_anchor_dates, dev_id, anchor_date)
 
                 anchors_debug = _extract_time_anchors_debug(raw)
                 if anchors_debug is not None:
@@ -607,7 +605,7 @@ class IdentityOperations(_MixinBase):
         raw_data_keys: dict[str, list[str]] = {}
         data_identity_candidates: dict[str, list[bytes]] = {}
         data_pair_dates: dict[str, int] = {}
-        data_secrets_creation_dates: dict[str, int] = {}
+        data_anchor_dates: dict[str, int] = {}
         data_time_anchors_debug: dict[str, Any] = {}
         data_payloads: dict[str, Mapping[str, Any]] = {}
         device_data = getattr(self, "data", None)
@@ -659,10 +657,8 @@ class IdentityOperations(_MixinBase):
                 pair_date = _extract_pair_date(raw)
                 _store_if_value(data_pair_dates, dev_id, pair_date)
 
-                secrets_creation_date = _extract_secrets_creation_date(raw)
-                _store_if_value(
-                    data_secrets_creation_dates, dev_id, secrets_creation_date
-                )
+                anchor_date = _extract_anchor_date(raw)
+                _store_if_value(data_anchor_dates, dev_id, anchor_date)
 
                 anchors_debug = _extract_time_anchors_debug(raw)
                 if anchors_debug is not None:
@@ -677,7 +673,7 @@ class IdentityOperations(_MixinBase):
         cache_data_keys: dict[str, list[str]] = {}
         cache_identity_candidates: dict[str, list[bytes]] = {}
         cache_pair_dates: dict[str, int] = {}
-        cache_secrets_creation_dates: dict[str, int] = {}
+        cache_anchor_dates: dict[str, int] = {}
         cache_time_anchors_debug: dict[str, Any] = {}
         if internal_cache:
             allowed_cache_keys = set(device_ids) | allowed_raw_ids | registry_ids
@@ -727,10 +723,8 @@ class IdentityOperations(_MixinBase):
                 pair_date = _extract_pair_date(payload)
                 _store_if_value(cache_pair_dates, dev_id, pair_date)
 
-                secrets_creation_date = _extract_secrets_creation_date(payload)
-                _store_if_value(
-                    cache_secrets_creation_dates, dev_id, secrets_creation_date
-                )
+                anchor_date = _extract_anchor_date(payload)
+                _store_if_value(cache_anchor_dates, dev_id, anchor_date)
 
                 anchors_debug = _extract_time_anchors_debug(payload)
                 if anchors_debug is not None:
@@ -777,7 +771,7 @@ class IdentityOperations(_MixinBase):
                 )
 
             direct_pair_date = _extract_pair_date(merged_device_data)
-            direct_secrets_date = _extract_secrets_creation_date(merged_device_data)
+            direct_anchor_date = _extract_anchor_date(merged_device_data)
 
             lookup_keys = (canonical_id, lookup_id, registry_id)
 
@@ -836,45 +830,43 @@ class IdentityOperations(_MixinBase):
             if pair_date is None:
                 pair_date_source = None
 
-            secrets_creation_source: str | None = None
-            secrets_creation_raw, secrets_creation_source = _lookup_prio_with_source(
+            anchor_source: str | None = None
+            anchor_raw, anchor_source = _lookup_prio_with_source(
                 lookup_keys,
-                (cache_secrets_creation_dates, "cache"),
-                (data_secrets_creation_dates, "live"),
-                (last_secrets_creation_dates, "last"),
+                (cache_anchor_dates, "cache"),
+                (data_anchor_dates, "live"),
+                (last_anchor_dates, "last"),
             )
-            if secrets_creation_raw is None:
-                registry_secrets_date, registry_secrets_source = (
-                    _lookup_prio_with_source(
-                        lookup_keys, (registry_secrets_creation_dates, "registry")
-                    )
+            if anchor_raw is None:
+                registry_anchor_date, registry_anchor_source = _lookup_prio_with_source(
+                    lookup_keys, (registry_anchor_dates, "registry")
                 )
-                if registry_secrets_date is not None:
-                    secrets_creation_raw = registry_secrets_date
-                    secrets_creation_source = registry_secrets_source
-            if secrets_creation_raw is None:
-                secrets_creation_raw = direct_secrets_date
-                if secrets_creation_raw is not None:
-                    secrets_creation_source = "merged"
-            secrets_creation_date = normalize_epoch_seconds(secrets_creation_raw)
-            if secrets_creation_date is None:
-                secrets_creation_source = None
+                if registry_anchor_date is not None:
+                    anchor_raw = registry_anchor_date
+                    anchor_source = registry_anchor_source
+            if anchor_raw is None:
+                anchor_raw = direct_anchor_date
+                if anchor_raw is not None:
+                    anchor_source = "merged"
+            anchor_date = normalize_epoch_seconds(anchor_raw)
+            if anchor_date is None:
+                anchor_source = None
 
-            # Anchor fallback: use secrets_creation_date as pair_date when pair_date
+            # Anchor fallback: use anchor_date as pair_date when pair_date
             # is missing or invalid (0). This is common for Android phones that lack
             # deviceRegistration data but have valid encrypted_user_secrets bundles.
             if (pair_date is None or pair_date <= 0) and (
-                secrets_creation_date is not None and secrets_creation_date > 0
+                anchor_date is not None and anchor_date > 0
             ):
                 _LOGGER.debug(
                     "Anchor fallback for %s: pair_date=%s invalid, "
-                    "using secrets_creation_date=%s as pair_date",
+                    "using the anchor date %s as pair_date",
                     canonical_id,
                     pair_date,
-                    secrets_creation_date,
+                    anchor_date,
                 )
-                pair_date = secrets_creation_date
-                pair_date_source = f"fallback:{secrets_creation_source or 'secrets'}"
+                pair_date = anchor_date
+                pair_date_source = f"fallback:{anchor_source or 'secrets'}"
 
             anchors_debug = _lookup_prio(
                 lookup_keys,
@@ -945,16 +937,14 @@ class IdentityOperations(_MixinBase):
                     if not identity_candidates:
                         identity_candidates = [identity_key]
 
-            effective_identity_for_log = identity_key
-            if effective_identity_for_log is None and normalized_candidates:
-                effective_identity_for_log = normalized_candidates[0]
             has_key = bool(normalized_candidates) or identity_key is not None
             has_key = has_key or encrypted_identity_key is not None
             if not has_key:
+                # No key material exists in this branch, so there is no key to
+                # describe. Never pass key bytes to a log call (AGENTS.md "Never log").
                 _LOGGER.debug(
-                    "Missing crypto material for %s: key=%s (pair=%s). Skipping resolution.",
+                    "Missing crypto material for %s (pair=%s). Skipping resolution.",
                     canonical_id,
-                    effective_identity_for_log,
                     pair_date,
                 )
                 continue
@@ -973,8 +963,8 @@ class IdentityOperations(_MixinBase):
             _LOGGER.debug(
                 "Resolving Identity for %s: Anchor=%s (source=%s), PairDate=%s (source=%s)",
                 canonical_id,
-                secrets_creation_date,
-                (secrets_creation_source or "unknown").upper(),
+                anchor_date,
+                (anchor_source or "unknown").upper(),
                 pair_date,
                 (pair_date_source or "unknown").upper(),
             )
@@ -994,7 +984,7 @@ class IdentityOperations(_MixinBase):
                             manufacturer=manufacturer,
                             model=model,
                             pair_date=pair_date,
-                            secrets_creation_date=secrets_creation_date,
+                            secrets_creation_date=anchor_date,
                             encrypted_account_key=encrypted_account_key,
                             public_key_address=public_key_address,
                             time_anchors_debug=anchors_debug,
@@ -1014,7 +1004,7 @@ class IdentityOperations(_MixinBase):
                         manufacturer=manufacturer,
                         model=model,
                         pair_date=pair_date,
-                        secrets_creation_date=secrets_creation_date,
+                        secrets_creation_date=anchor_date,
                         encrypted_account_key=encrypted_account_key,
                         public_key_address=public_key_address,
                         time_anchors_debug=anchors_debug,
