@@ -418,9 +418,11 @@ class TokenCache:
                     self._per_key_locks.pop(name, None)
             else:
                 if not self._is_jsonable(normalized):
+                    # Log the value type, not the key: key names can embed the
+                    # account e-mail (per-account cache keys), so they are PII.
                     _LOGGER.error(
-                        "Value for key '%s' is not JSON-serializable; skipping save.",
-                        name,
+                        "Cache value of type %s is not JSON-serializable; skipping save.",
+                        type(normalized).__name__,
                     )
                     return
                 self._data[name] = normalized
@@ -506,10 +508,12 @@ class TokenCache:
             return False
 
     def _is_valid_snapshot(self) -> bool:
-        for key, val in self._data.items():
+        for val in self._data.values():
             if not self._is_jsonable(val):
+                # Value type only: key names can embed the account e-mail.
                 _LOGGER.error(
-                    "Snapshot contains non-JSON-serializable value for key '%s'", key
+                    "Snapshot contains a non-JSON-serializable value of type %s",
+                    type(val).__name__,
                 )
                 return False
         return True
@@ -603,7 +607,7 @@ def _register_instance(entry_id: str, instance: TokenCache) -> None:
                 setattr(instance, "entry_id", entry_id)
             except Exception as err:  # noqa: BLE001 - defensive logging only
                 _LOGGER.debug(
-                    "Failed to correct TokenCache entry_id to registry key (%s at %s)",
+                    "Failed to correct cache entry_id to registry key (%s at %s)",
                     describe_exception(err),
                     exception_origin(err),
                 )
@@ -612,7 +616,7 @@ def _register_instance(entry_id: str, instance: TokenCache) -> None:
                 setattr(instance, "entry_id", entry_id)
             except Exception as err:  # noqa: BLE001 - defensive logging only
                 _LOGGER.debug(
-                    "Failed to assign registry entry_id to TokenCache instance (%s at %s)",
+                    "Failed to assign registry entry_id to cache instance (%s at %s)",
                     describe_exception(err),
                     exception_origin(err),
                 )
@@ -621,7 +625,7 @@ def _register_instance(entry_id: str, instance: TokenCache) -> None:
             setattr(instance, "entry_id", entry_id)
         except Exception as err:  # noqa: BLE001 - defensive logging only
             _LOGGER.debug(
-                "Failed to assign registry entry_id to TokenCache instance (%s at %s)",
+                "Failed to assign registry entry_id to cache instance (%s at %s)",
                 describe_exception(err),
                 exception_origin(err),
             )
