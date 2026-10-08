@@ -11,6 +11,7 @@ from collections.abc import Sequence
 from datetime import datetime
 from types import ModuleType, SimpleNamespace
 from typing import Any
+from urllib.parse import urlsplit
 
 import pytest
 from homeassistant.util.dt import UTC
@@ -1202,8 +1203,15 @@ async def test_rendered_page_loads_nothing_from_a_cdn(
     # the library really is in the page, not merely absent from it
     assert "Leaflet" in page
     assert "L.circleMarker" in page
-    # tiles remain external and remain the only external request
-    assert "tile.openstreetmap.org" in page
+    # tiles remain external and remain the only external request: the page
+    # declares exactly one tile layer, and its URL template points at the OSM
+    # tile host (compared as a parsed hostname, not as a substring of the page)
+    tile_urls = [
+        match.group(2)
+        for match in re.finditer(r"L\.tileLayer\(\s*(['\"])(.+?)\1", page)
+    ]
+    assert len(tile_urls) == 1
+    assert urlsplit(tile_urls[0]).hostname == "tile.openstreetmap.org"
 
 
 @pytest.mark.asyncio
