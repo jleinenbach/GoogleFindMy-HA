@@ -110,7 +110,7 @@ async def test_exchange_oauth_for_aas_missing_token_logs_warning(
         record
         for record in caplog.records
         if record.levelno >= logging.WARNING
-        and "gpsoauth response missing token" in record.message
+        and "gpsoauth response missing the AAS result field" in record.message
     ]
     assert warnings, "Expected warning about missing Token key"
     warning = warnings[0]
@@ -145,7 +145,9 @@ async def test_exchange_oauth_for_aas_undocumented_error_is_sized_not_copied(
     assert f"kind=UNRECOGNIZED ({len(echoed)} chars)" in str(exc_info.value)
     assert "4/0AfB_" not in str(exc_info.value)
     warning = next(
-        r for r in caplog.records if "gpsoauth response missing token" in r.message
+        r
+        for r in caplog.records
+        if "gpsoauth response missing the AAS result field" in r.message
     )
     assert getattr(warning, "error_kind") == f"UNRECOGNIZED ({len(echoed)} chars)"
     everything = "\n".join(
@@ -985,7 +987,7 @@ async def test_async_get_aas_token_retry_records_withhold_producer_text(
             cache=cache, retries=1, backoff=0.0
         )
 
-    failed = [r for r in caplog.records if "generation failed" in r.message]
+    failed = [r for r in caplog.records if "exchange failed" in r.message]
     assert len(failed) >= 2
     for record in failed:
         assert "LEAKED" not in record.getMessage()

@@ -1141,7 +1141,7 @@ class FcmRegister:
                 raise
             except Exception as e:
                 _logger.warning(
-                    "Existing credentials check-in failed; re-registering (%s at %s)",
+                    "Check-in with the existing registration failed; re-registering (%s at %s)",
                     describe_exception(e),
                     exception_origin(e),
                 )
@@ -1153,7 +1153,7 @@ class FcmRegister:
                 self.credentials_updated_callback(credentials)
             except Exception as e:  # avoid caller breaking the flow
                 _logger.debug(
-                    "credentials_updated_callback raised (%s at %s)",
+                    "Registration-update callback raised (%s at %s)",
                     describe_exception(e),
                     exception_origin(e),
                 )
@@ -1171,7 +1171,7 @@ class FcmRegister:
                 self.credentials_updated_callback(self.credentials)
             except Exception as e:
                 _logger.debug(
-                    "credentials_updated_callback raised (%s at %s)",
+                    "Registration-update callback raised (%s at %s)",
                     describe_exception(e),
                     exception_origin(e),
                 )
@@ -1254,7 +1254,7 @@ class FcmRegister:
                 self.credentials_updated_callback(res)
             except Exception as e:
                 _logger.debug(
-                    "credentials_updated_callback raised (%s at %s)",
+                    "Registration-update callback raised (%s at %s)",
                     describe_exception(e),
                     exception_origin(e),
                 )

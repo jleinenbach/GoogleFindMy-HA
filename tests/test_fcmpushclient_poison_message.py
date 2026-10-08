@@ -368,7 +368,7 @@ async def test_credential_decryption_error_surfaces_distinct_signal(
         r
         for r in caplog.records
         if r.levelno == logging.ERROR
-        and "credential material is corrupt" in r.getMessage()
+        and "registration data is corrupt" in r.getMessage()
     ]
     assert len(cred_errors) == 1
     # (d) Selective-ack must NOT be sent (config fault, not per-message poison).

@@ -1210,7 +1210,7 @@ class FcmPushClient[NotificationContextT]:  # pylint:disable=too-many-instance-a
             # restarting the listener against the same poison credentials
             # until the short-run crash cap fires.
             self.logger.error(
-                "FCM credential material is corrupt and requires re-registration: %s",
+                "FCM registration data is corrupt and requires re-registration: %s",
                 cred_err,
             )
             self.credential_error = cred_err

@@ -166,7 +166,7 @@ class FcmReceiver:  # pragma: no cover - legacy surface kept for compatibility
             _LOGGER.debug("Legacy FcmReceiver: credentials snapshot updated via shim.")
         except Exception as err:  # noqa: BLE001
             _LOGGER.debug(
-                "Legacy FcmReceiver: failed to persist credentials: %s",
+                "Legacy FcmReceiver: failed to persist the FCM registration: %s",
                 describe_exception(err),
             )
 
