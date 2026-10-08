@@ -6668,14 +6668,10 @@ def _label_entry_for_log(entry: ConfigEntry) -> str:
     email = _extract_email_from_entry(entry)
     if email:
         return _mask_email_for_logs(email)
-    title = getattr(entry, "title", None)
-    if isinstance(title, str) and title:
-        # The config flow titles an entry with the account e-mail. A title with
-        # an "@" is not logged at all: masking addresses inside free text cannot
-        # be made complete (separators, quoted local parts, address literals),
-        # and the entry ID below identifies the entry just as well.
-        if "@" not in title:
-            return title
+    # The entry title is never logged: the config flow sets it to the account
+    # e-mail, and a renamed title is free text that may name a person. Masking
+    # addresses inside free text cannot be made complete, and the entry ID
+    # identifies the entry just as well.
     entry_id = getattr(entry, "entry_id", None)
     if isinstance(entry_id, str) and entry_id:
         return entry_id

@@ -19,8 +19,8 @@ Static checks:
 Behavioural checks pin that persisting a secrets bundle logs no value of the
 bundle, no field name outside ``_LOGGABLE_BUNDLE_FIELDS`` (field names can embed
 the account e-mail) and nothing derived from the bundle's e-mail, and that the
-account label is masked on the bundle fallback and never carries an entry
-title that contains an address.
+account label is masked on the bundle fallback and never carries the entry
+title.
 
 Not covered: ``_LOGGER.log(level, ...)`` calls and aliases such as ``log_fn``
 (the Semgrep rule does not match them either); the secret-name check covers
@@ -256,7 +256,8 @@ def test_label_entry_for_log_masks_the_bundle_email() -> None:
     ("title", "expected"),
     [
         (_EMAIL, "entry-2"),
-        ("Family account", "Family account"),
+        ("Family account", "entry-2"),
+        ("Jane Doe +49 170 0000000", "entry-2"),
         (f"alice@{_DOMAIN},bob@{_DOMAIN}", "entry-2"),
         (f"Family ({_EMAIL})", "entry-2"),
         ('"pilot user"@[192.0.2.1]', "entry-2"),
@@ -264,7 +265,7 @@ def test_label_entry_for_log_masks_the_bundle_email() -> None:
         ("pilot.user@exämple.de", "entry-2"),
     ],
 )
-def test_label_entry_for_log_never_logs_a_title_with_an_address(
+def test_label_entry_for_log_never_logs_the_entry_title(
     title: str, expected: str
 ) -> None:
     entry = make_config_entry(entry_id="entry-2", data={}, options={}, title=title)
