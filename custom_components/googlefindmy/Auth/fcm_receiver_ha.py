@@ -831,7 +831,7 @@ class FcmReceiverHA:
             normalized = current.strip()
             if normalized and normalized != entry_id:
                 _LOGGER.warning(
-                    "[entry=%s] TokenCache provided to FCM receiver has mismatched entry_id '%s'; overriding.",
+                    "[entry=%s] Cache instance provided to FCM receiver has mismatched entry_id '%s'; overriding.",
                     entry_id,
                     normalized,
                 )
@@ -1136,7 +1136,7 @@ class FcmReceiverHA:
                 self.creds[entry_id] = creds_val
         except Exception as err:  # noqa: BLE001
             _LOGGER.debug(
-                "[entry=%s] Failed to load cached FCM credentials: %s",
+                "[entry=%s] Failed to load the cached FCM registration: %s",
                 entry_id,
                 describe_exception(err),
             )
@@ -1145,7 +1145,7 @@ class FcmReceiverHA:
             tokens_val = await cache.get("fcm_routing_tokens")
         except Exception as err:  # noqa: BLE001
             _LOGGER.debug(
-                "[entry=%s] Failed to load cached routing tokens: %s",
+                "[entry=%s] Failed to load cached routing entries: %s",
                 entry_id,
                 describe_exception(err),
             )
@@ -1869,7 +1869,7 @@ class FcmReceiverHA:
                         # charge this run to the crash cap -- corrective action
                         # is being taken, this is not a poison-message loop.
                         _LOGGER.error(
-                            "[entry=%s] FCM credential material corrupt (%s); "
+                            "[entry=%s] FCM registration data corrupt (%s); "
                             "invalidating FCM tokens to force re-registration",
                             entry_id,
                             credential_error,
@@ -2385,7 +2385,7 @@ class FcmReceiverHA:
             )
         elif isinstance(err, (KeyError, ValueError, TypeError)):
             _LOGGER.error(
-                "[entry=%s] FCM registration hit corrupt credentials: %s "
+                "[entry=%s] FCM registration data is corrupt: %s "
                 "- invalidating FCM tokens to force re-registration",
                 entry_id,
                 describe_exception(err),
@@ -2471,7 +2471,7 @@ class FcmReceiverHA:
                         await cache.set("fcm_routing_tokens", sorted(tokens))
                     except Exception as err:
                         _LOGGER.debug(
-                            "[entry=%s] Failed to flush pending routing tokens: %s",
+                            "[entry=%s] Failed to flush pending routing entries: %s",
                             entry.entry_id,
                             describe_exception(err),
                         )
@@ -2491,7 +2491,7 @@ class FcmReceiverHA:
                 )
         except Exception as err:
             _LOGGER.debug(
-                "Entry-scoped credentials persistence skipped: %s",
+                "Entry-scoped persistence of the FCM registration skipped: %s",
                 describe_exception(err),
             )
 
@@ -2516,7 +2516,7 @@ class FcmReceiverHA:
                                 self._update_token_routing(t, {entry.entry_id})
                 except Exception as err:
                     _LOGGER.debug(
-                        "[entry=%s] Failed to load persisted routing tokens: %s",
+                        "[entry=%s] Failed to load persisted routing entries: %s",
                         entry.entry_id,
                         describe_exception(err),
                     )
@@ -2957,7 +2957,7 @@ class FcmReceiverHA:
                     ",".join(sorted(new_entries)) or "<none>",
                 )
         except Exception as err:
-            _LOGGER.debug("Token routing update skipped: %s", describe_exception(err))
+            _LOGGER.debug("Routing update skipped: %s", describe_exception(err))
 
     async def _persist_routing_token(self, entry_id: str, token: str) -> None:
         """Persist routing tokens per entry (best-effort, entry-scoped if cache available)."""
@@ -2975,7 +2975,7 @@ class FcmReceiverHA:
                 await cache.set("fcm_routing_tokens", sorted(tokens))
             except Exception as err:
                 _LOGGER.debug(
-                    "Persisting routing token failed for %s: %s",
+                    "Persisting the routing entry failed for %s: %s",
                     entry_id,
                     describe_exception(err),
                 )
@@ -2995,7 +2995,7 @@ class FcmReceiverHA:
                 await cache.set("fcm_routing_tokens", sorted(tokens))
             except Exception as err:
                 _LOGGER.debug(
-                    "Persisting routing token failed for %s: %s",
+                    "Persisting the routing entry failed for %s: %s",
                     entry_id,
                     describe_exception(err),
                 )
@@ -3287,7 +3287,7 @@ class FcmReceiverHA:
             cache = self._entry_caches.get(entry_id)
             if cache is None:
                 _LOGGER.error(
-                    "No TokenCache available for entry %s during background decrypt",
+                    "No cache instance available for entry %s during background decrypt",
                     entry_id,
                 )
                 return {}
@@ -3480,7 +3480,7 @@ class FcmReceiverHA:
                 await cache.set("fcm_credentials", creds)
             except Exception as err:  # noqa: BLE001
                 _LOGGER.debug(
-                    "[entry=%s] Failed to save FCM credentials to entry cache: %s",
+                    "[entry=%s] Failed to save the FCM registration to entry cache: %s",
                     entry_id,
                     describe_exception(err),
                 )
@@ -3498,7 +3498,7 @@ class FcmReceiverHA:
                 await cache.set("fcm_credentials", creds)
             except Exception as err:  # noqa: BLE001
                 _LOGGER.debug(
-                    "[entry=%s] Failed to save FCM credentials to entry cache: %s",
+                    "[entry=%s] Failed to save the FCM registration to entry cache: %s",
                     entry_id,
                     describe_exception(err),
                 )

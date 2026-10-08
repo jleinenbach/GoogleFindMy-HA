@@ -145,6 +145,56 @@ def test_async_remove_config_entry_device_normalizes_identifier(monkeypatch) -> 
     assert updated_options[OPT_OPTIONS_SCHEMA_VERSION] == SCHEMA_VERSION
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "parent_entry_id", [None, "entry-1"], ids=["entry", "subentry"]
+)
+async def test_async_remove_config_entry_device_forgets_foreign_readings(
+    parent_entry_id: str | None,
+) -> None:
+    """CX-6: removing a device drops its foreign-reading state, even without runtime.
+
+    Only the removed device is forgotten; a sibling device of the same entry
+    and the same canonical ID under another entry keep their state. A
+    subentry's devices are keyed by the parent entry, like in the decoder.
+    """
+    from custom_components.googlefindmy.FMDNCrypto.foreign_tracker_cryptor import (
+        P256_FOREIGN_READINGS,
+    )
+    from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker.foreign_reading_tracker import (
+        FOREIGN_READING_TRACKER,
+    )
+
+    config_entries = _ConfigEntriesStub()
+    entry = make_config_entry(
+        entry_id="sub-1" if parent_entry_id else "entry-1",
+        parent_entry_id=parent_entry_id,
+        options={},
+        title="Test Entry",
+    )
+    config_entries.stored_entries.append(entry)
+    hass = SimpleNamespace(
+        config_entries=config_entries, data={DOMAIN: {"entries": {}}}
+    )
+    device_entry = SimpleNamespace(
+        config_entries={entry.entry_id},
+        identifiers=((DOMAIN, f"{entry.entry_id}:device-123"),),
+        name_by_user=None,
+        name="Device Name",
+    )
+    reading = P256_FOREIGN_READINGS[0]
+    removed = ("entry-1", "device-123")
+    kept = (("entry-1", "device-456"), ("entry-2", "device-123"))
+    for device in (removed, *kept):
+        FOREIGN_READING_TRACKER.note_success(device, reading, 32)
+
+    assert await async_remove_config_entry_device(hass, entry, device_entry) is True
+
+    assert FOREIGN_READING_TRACKER.preferred(removed) is None
+    for device in kept:
+        assert FOREIGN_READING_TRACKER.preferred(device) == reading.reading_id
+
+
 def test_migrate_entry_identifier_namespaces_updates_subentries() -> None:
     """Migration strips entry prefix from options and subentry visibility lists."""
 

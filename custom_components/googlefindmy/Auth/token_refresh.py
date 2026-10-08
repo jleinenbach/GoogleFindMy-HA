@@ -135,13 +135,13 @@ async def async_regenerate_fcm_token(
         on_cooldown, remaining = is_refresh_on_cooldown(entry_id, "fcm")
         if on_cooldown:
             _LOGGER.info(
-                "FCM token regeneration blocked: cooldown active (%.1fs remaining)",
+                "FCM re-registration blocked: cooldown active (%.1fs remaining)",
                 remaining,
             )
             return False
 
         _LOGGER.info(
-            "FCM token regeneration requested (entry: %s)",
+            "FCM re-registration requested (entry: %s)",
             entry_id,
         )
 
@@ -149,7 +149,7 @@ async def async_regenerate_fcm_token(
             bucket = hass.data.get(DOMAIN)
             if not bucket or not isinstance(bucket, dict):
                 _LOGGER.error(
-                    "FCM token regeneration failed: integration data not available"
+                    "FCM re-registration failed: integration data not available"
                 )
                 return False
 
@@ -159,7 +159,7 @@ async def async_regenerate_fcm_token(
                 receiver = bucket.get("fcm_receiver")
             if receiver is None:
                 _LOGGER.error(
-                    "FCM token regeneration failed: no FCM receiver found (entry: %s)",
+                    "FCM re-registration failed: no FCM receiver found (entry: %s)",
                     entry_id,
                 )
                 return False
@@ -169,20 +169,20 @@ async def async_regenerate_fcm_token(
             if success:
                 _record_refresh(entry_id, "fcm")
                 _LOGGER.info(
-                    "FCM token regeneration successful (entry: %s)",
+                    "FCM re-registration successful (entry: %s)",
                     entry_id,
                 )
                 return True
 
             _LOGGER.warning(
-                "FCM token regeneration failed (entry: %s)",
+                "FCM re-registration failed (entry: %s)",
                 entry_id,
             )
             return False
 
         except Exception as err:
             _LOGGER.error(
-                "FCM token regeneration failed (entry: %s): %s",
+                "FCM re-registration failed (entry: %s): %s",
                 entry_id,
                 describe_exception(err),
             )
@@ -221,7 +221,7 @@ async def async_regenerate_adm_token(
         on_cooldown, remaining = is_refresh_on_cooldown(entry_id, "adm")
         if on_cooldown:
             _LOGGER.info(
-                "ADM token regeneration blocked: cooldown active (%.1fs remaining)",
+                "ADM refresh blocked: cooldown active (%.1fs remaining)",
                 remaining,
             )
             return False
@@ -233,11 +233,11 @@ async def async_regenerate_adm_token(
         masked_user = _mask_email(user)
 
         if not user:
-            _LOGGER.error("ADM token regeneration failed: no username available")
+            _LOGGER.error("ADM refresh failed: no username available")
             return False
 
         _LOGGER.info(
-            "ADM token regeneration requested for %s (entry: %s)",
+            "ADM refresh requested for %s (entry: %s)",
             masked_user,
             entry_id,
         )
@@ -246,7 +246,7 @@ async def async_regenerate_adm_token(
             # Invalidate ADM token only
             adm_key = f"adm_token_{user.strip().lower()}"
             await cache.set(adm_key, None)
-            _LOGGER.info("Invalidated ADM token for %s", masked_user)
+            _LOGGER.info("Invalidated the cached ADM value for %s", masked_user)
 
             # Trigger ADM token regeneration
             # This will use existing AAS token or trigger AAS regeneration if needed
@@ -255,20 +255,20 @@ async def async_regenerate_adm_token(
             if new_token:
                 _record_refresh(entry_id, "adm")
                 _LOGGER.info(
-                    "ADM token regeneration successful for %s",
+                    "ADM refresh successful for %s",
                     masked_user,
                 )
                 return True
 
             _LOGGER.warning(
-                "ADM token regeneration returned empty token for %s",
+                "ADM refresh returned an empty result for %s",
                 masked_user,
             )
             return False
 
         except Exception as err:
             _LOGGER.error(
-                "ADM token regeneration failed for %s: %s",
+                "ADM refresh failed for %s: %s",
                 masked_user,
                 describe_exception(err),
             )

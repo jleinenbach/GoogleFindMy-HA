@@ -344,9 +344,9 @@ The integration provides a couple of Home Assistant Actions for use with automat
 
 ### Optional: faster legacy-tracker EID computation (advanced)
 
-Only **older** FMDN trackers exercise a pure-Python elliptic-curve path
-(SECP160r1) when computing rotating EIDs. Modern trackers use P-256, which is
-already C-backed (`cryptography`), so they are unaffected. For the legacy path,
+FMDN trackers on SECP160r1, the common case, exercise a pure-Python
+elliptic-curve path when computing rotating EIDs. Trackers that use P-256 (observed as
+rare, see [`docs/FMDN.md`](docs/FMDN.md)) run on a path that is already C-backed (`cryptography`), so they are unaffected. For the legacy path,
 `python-ecdsa` automatically uses `gmpy2` (preferred) or `gmpy` for its modular
 arithmetic **if either is importable**, with no configuration. If neither is
 present, it falls back to pure Python.
@@ -604,6 +604,53 @@ configuration.
 - The regeneration also refreshes the associated metadata so subsequent
   requests resume with the updated token immediately.
 
+### Reporting P-256 tracker results (#223)
+
+Crowdsourced (foreign) reports from P-256 trackers are decrypted with
+*provisional readings*: the report does not say how its key and nonce were
+derived, so the integration tries several candidates and keeps the one that
+verifies. Which candidate real trackers use is not yet confirmed. Your result
+decides which readings stay; the code (`P256_FOREIGN_READINGS` in
+`FMDNCrypto/foreign_tracker_cryptor.py`) states when the others may be removed,
+see also "Foreign-report readings" in
+[`docs/CRYPTOGRAPHY.md`](docs/CRYPTOGRAPHY.md#foreign-report-readings).
+
+1. **Search the log for `FMDN_FOREIGN_READING`.** Each line starts with
+   `FMDN_FOREIGN_READING <status>:`, where the status is one of:
+   - `decrypted`: a report was decrypted with a provisional reading (logged at
+     **INFO**, once per device and reading);
+   - `all_failed`: reports from a tracker failed with every reading (**WARNING**);
+   - `unsupported_length`: a report's `Sx` length matches no curve (**WARNING**).
+2. **Make INFO visible.** The `decrypted` line is logged at INFO and is hidden
+   at the default level. Either call the `logger.set_level` action (no restart
+   needed; it lasts until the next restart):
+   ```yaml
+   action: logger.set_level
+   data:
+     custom_components.googlefindmy: info
+   ```
+   or add the same line to your `configuration.yaml` and restart Home Assistant:
+   ```yaml
+   logger:
+     logs:
+       custom_components.googlefindmy: info
+   ```
+   If your `configuration.yaml` already has a `logger:` section, add the line
+   under its existing `logs:` key. Do **not** add a second `logger:` section: a
+   duplicate key replaces the first one (Home Assistant only logs a warning).
+   The log view under **Settings → System → Logs** lists warnings and errors
+   only; the INFO line appears in the full log. It is written with the next
+   report that decrypts after INFO was enabled.
+3. **Diagnostics.** Download the integration's diagnostics and copy **only** the
+   `foreign_report_readings` block. It names no device and carries no ID, but
+   the rest of the diagnostics file contains the entry id in clear.
+4. **What to post:** the `FMDN_FOREIGN_READING` line(s) and/or the
+   `foreign_report_readings` block, your integration version, and whether the
+   tracker's location now updates.
+5. **Never post keys, EIDs, coordinates or IDs.** The log lines and the block
+   are built to contain none of these.
+6. **Where:** <https://github.com/BSkando/GoogleFindMy-HA/issues/223>
+
 ## Privacy and Security
 
 - All location data uses Google's end-to-end encryption
@@ -697,7 +744,11 @@ choice this integration could make would help.
 Diagnostics downloads are redacted before they leave Home Assistant
 (`diagnostics.py`, `TO_REDACT` and `TO_REDACT_PREFIXES`), including the pasted
 bundle and the key names the token cache builds at run time, so an attached
-diagnostics file does not contain your tokens. It does contain the entry id in
+diagnostics file does not contain the token fields the integration knows
+about. In key names, every word that contains an `@` is replaced by
+`<account-N>`, so an e-mail address does not survive there either.
+Redaction of values works by field name: a value stored under a name neither
+list covers is passed through as it is. The file does contain the entry id in
 clear.
 
 ### What is *not* part of the Home Assistant runtime

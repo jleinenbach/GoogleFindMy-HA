@@ -5,30 +5,12 @@ from __future__ import annotations
 
 import asyncio
 import importlib
-import sys
-from types import ModuleType, SimpleNamespace
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
-
-if "custom_components.googlefindmy.diagnostics" not in sys.modules:
-    sys.modules["custom_components.googlefindmy.diagnostics"] = ModuleType(
-        "custom_components.googlefindmy.diagnostics"
-    )
-
-if "custom_components.googlefindmy.map_view" not in sys.modules:
-    map_module = ModuleType("custom_components.googlefindmy.map_view")
-
-    class _DummyView:  # pragma: no cover - stub for import
-        def __init__(self, hass: Any | None = None) -> None:
-            self.hass = hass
-
-    map_module.GoogleFindMyMapRedirectView = _DummyView
-    map_module.GoogleFindMyMapView = _DummyView
-    map_module.GoogleFindMyMapTilesTokenView = _DummyView
-    sys.modules["custom_components.googlefindmy.map_view"] = map_module
 
 gfm = importlib.import_module("custom_components.googlefindmy")
 

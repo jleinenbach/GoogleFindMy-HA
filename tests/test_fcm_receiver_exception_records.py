@@ -263,7 +263,7 @@ def test_token_routing_update_failure_is_summarised(
             raise RuntimeError(_MARKER)
 
     receiver._update_token_routing("token-1", _Broken())  # type: ignore[arg-type]
-    _summarised(caplog, "Token routing update skipped", "RuntimeError")
+    _summarised(caplog, "Routing update skipped", "RuntimeError")
 
 
 def test_canonic_id_extraction_failure_is_summarised(

@@ -14,7 +14,7 @@ jobs:
   hassfest:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: ${{ github.event.pull_request.head.repo.full_name }}
           ref: ${{ github.event.pull_request.head.ref }}
@@ -22,14 +22,16 @@ jobs:
 
       - name: Run hassfest (may rewrite manifest)
         id: hassfest
+        # Tracks the upstream branch on purpose (no maintained release tag); see AGENTS.md, Action pinning.
         uses: home-assistant/actions/hassfest@master
         continue-on-error: true
 
       - name: Commit hassfest auto-sorts (if any)
-        uses: stefanzweifel/git-auto-commit-action@v7.2.0
+        uses: stefanzweifel/git-auto-commit-action@4a55954c782fc1ea30b9056cd3e7a2b40ca8887d # v7.2.0
         with:
           commit_message: "chore(hassfest): auto-sort manifest keys"
           file_pattern: "custom_components/**/manifest.json"
 
       - name: Re-run hassfest
+        # Tracks the upstream branch on purpose (no maintained release tag); see AGENTS.md, Action pinning.
         uses: home-assistant/actions/hassfest@master

@@ -38,6 +38,7 @@ from .Auth.username_provider import username_string
 from .const import DOMAIN
 from .coordinator import DeviceIdentity, GoogleFindMyCoordinator
 from .FMDNCrypto._lazy_crypto import get_aesgcm_class, get_invalid_tag_exception
+from .FMDNCrypto.curve_profile import SECP160R1, SECP256R1
 from .FMDNCrypto.eid_generator import (
     FHNA_COUNTER_MASK,
     LEGACY_EID_LENGTH,
@@ -56,6 +57,9 @@ from .FMDNCrypto.eid_generator import (
 from .FMDNCrypto.mcu_utils import flip_bits, is_mcu_tracker
 from .KeyBackup.cloud_key_decryptor import decrypt_eik
 from .KeyBackup.shared_key_retrieval import async_get_shared_key
+from .NovaApi.ExecuteAction.LocateTracker.foreign_reading_tracker import (
+    FOREIGN_READING_TRACKER,
+)
 from .SpotApi.GetEidInfoForE2eeDevices.get_owner_key import (
     OwnerKeyInfo,
     async_get_owner_key,
@@ -1123,6 +1127,7 @@ class GoogleFindMyEIDResolver:
 
         self._ensure_cache_defaults()
         self._store = Store(self.hass, STORAGE_VERSION, STORAGE_KEY)
+        FOREIGN_READING_TRACKER.set_curve_provider(self.locked_curve_name)
         load_coro = self._async_load_locks()
         self._load_task = self.hass.async_create_task(load_coro)
         if self._load_task is None or not isinstance(self._load_task, asyncio.Task):
@@ -1497,12 +1502,19 @@ class GoogleFindMyEIDResolver:
                 self._known_timebases[identity.registry_id] = lock_time_basis
 
             is_legacy = rotation_ts is None
+            unknown_variant = False
             try:
                 locked_variant = EidVariant(lock.variant)
             except ValueError:
-                locked_variant = EidVariant.MODERN_P256_X32_BE
+                # A variant value this version does not know (for example one
+                # written by a newer release before a rollback) must not be
+                # reinterpreted as another variant. Discard the lock and clear
+                # the locked variant so ``_compute_variants`` tries every known
+                # variant again.
+                unknown_variant = True
+                locked_variant = None
 
-            if is_legacy:
+            if is_legacy or unknown_variant:
                 valid_hint = (
                     lock_time_basis
                     if lock_time_basis
@@ -1514,9 +1526,10 @@ class GoogleFindMyEIDResolver:
                     else None
                 )
                 _LOGGER.warning(
-                    "Discarding invalid/legacy lock for %s (legacy=%s). Force re-discovery.",
+                    "Discarding invalid/legacy lock for %s (legacy=%s, unknown_variant=%s). Force re-discovery.",
                     identity.registry_id,
                     is_legacy,
+                    unknown_variant,
                 )
                 self._locks.pop(identity.registry_id, None)
                 self._persisted_locks.pop(identity.registry_id, None)
@@ -1526,6 +1539,11 @@ class GoogleFindMyEIDResolver:
                 else:
                     self._known_timebases.pop(identity.registry_id, None)
                 lock = None
+                if unknown_variant:
+                    # Persist the discard like the other lock-removal paths;
+                    # otherwise the unchanged on-disk lock is reloaded at
+                    # every start and the discard repeats.
+                    self._schedule_lock_save()
             elif lock.canonical_id != clean_canonical_id:
                 _LOGGER.debug(
                     "Updating canonical_id to UUID-only for %s: %s -> %s",
@@ -3781,9 +3799,47 @@ class GoogleFindMyEIDResolver:
         except Exception as err:  # pragma: no cover - defensive
             _LOGGER.debug("Failed to cancel %s: %s", name, err)
 
+    def locked_curve_name(self, canonical_id: str) -> str | None:
+        """Return the curve of the EID variant a device is locked to.
+
+        The decryption path asks this through ``FOREIGN_READING_TRACKER`` to
+        tell a key-neutral foreign report from an authentication failure: a
+        device locked to a P-256 variant cannot be served by a report with a
+        20-byte ``Sx`` (see ``docs/Ephemeral_Identifier_Resolver_API.md``).
+        Only the current locks are read, so expiry, discarding and
+        :meth:`stop` take effect at once.
+
+        Both sides are reduced to the UUID part, as the work items are built,
+        and additionally lowercased, as ``foreign_device_key`` does: a lock
+        loaded from storage may still carry an ``account:``-namespaced ID until
+        the next refresh rewrites it, and the server may change the hex casing.
+
+        Args:
+            canonical_id: Canonical ID in any casing, with or without namespace.
+
+        Returns:
+            ``SECP256R1.name`` or ``SECP160R1.name``; ``None`` without a lock,
+            for an unknown variant, or when two locks of the ID disagree.
+        """
+        wanted = canonical_id.rsplit(":", 1)[-1].lower()
+        curves: set[str] = set()
+        for lock in list(self._locks.values()):
+            if lock.canonical_id.rsplit(":", 1)[-1].lower() != wanted:
+                continue
+            try:
+                variant = EidVariant(lock.variant)
+            except ValueError:
+                continue
+            # Every EidVariant has a row; test_every_eid_variant_is_covered
+            # fails with KeyError for a new variant without one.
+            order = _VARIANT_CURVE_PARAMS[variant][1]
+            curves.add(SECP256R1.name if order == P256_ORDER else SECP160R1.name)
+        return curves.pop() if len(curves) == 1 else None
+
     def stop(self) -> None:
         """Cancel background timers and clear cached state."""
 
+        FOREIGN_READING_TRACKER.clear_curve_provider(self.locked_curve_name)
         self._cancel_callback(self._unsub_alignment, "alignment timer")
         self._unsub_alignment = None
 

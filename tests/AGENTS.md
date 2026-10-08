@@ -498,6 +498,26 @@ reproduction (dropping the consumers from `sys.modules` and re-importing them
 inside the window) and leaked `entity.get_url` into `test_metadata_helpers.py`
 instead. Do not reintroduce that approach.
 
+### No module stubs in `sys.modules` at import time
+
+Do not write a stub for a `custom_components.googlefindmy.*` module into
+`sys.modules` at module level of a test file, not even behind an
+`if "<name>" not in sys.modules:` check. Whether the real module was already
+imported depends only on collection order, and the stub then stays for the rest
+of the session. `tests/test_manual_locate_resolution.py` used to do this for
+`diagnostics` and `map_view`: the full run stayed green, while a run that
+collected it before the first real `map_view` import errored in every test,
+because the session fixture `_prime_leaflet_asset_cache` found no
+`_LEAFLET_CACHE` on the stub. If a test genuinely needs a stub, install it with
+`monkeypatch.setitem(sys.modules, ...)` inside the test or a fixture.
+`tests/test_guard_import_time_module_stubs.py` checks every file under `tests/`
+for import-time writes (subscript assignment, `|=`, `setdefault`, `update`,
+`__setitem__`, also through `import sys as …`, `from sys import modules` or a
+plain `name = sys.modules`); a key that is not a string literal counts as a
+violation. Its docstring lists what it does not see, for example a write inside
+a function that is called at import time, other alias forms and indirect access
+such as `getattr(sys, "modules")`. The rule above covers those as well.
+
 ## No full-command-line process kills
 
 `pkill -f <pattern>` selects by matching the **full command line** of every

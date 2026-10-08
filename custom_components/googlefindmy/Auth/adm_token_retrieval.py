@@ -220,9 +220,8 @@ async def _seed_username_in_cache(username: str, *, cache: TokenCache) -> None:
         if cached != username and isinstance(username, str) and username:
             await cache.set(username_string, username)
             _LOGGER.debug(
-                "Seeded username cache key '%s' with '%s' (entry-scoped).",
-                username_string,
-                username,
+                "Seeded the entry-scoped username cache with %s.",
+                _mask_email(username),
             )
     except Exception as exc:  # Defensive: never fail token flow on seeding.
         _LOGGER.debug(
@@ -255,7 +254,7 @@ async def _resolve_android_id_for_entry(username: str, *, cache: TokenCache) -> 
             await cache.set(cache_key, android_id)
         except Exception as err:  # noqa: BLE001
             _LOGGER.debug(
-                "Failed to persist android_id from FCM credentials; cache write skipped. (%s at %s)",
+                "Failed to persist android_id from the FCM registration; cache write skipped. (%s at %s)",
                 describe_exception(err),
                 exception_origin(err),
             )
@@ -376,7 +375,7 @@ async def _resolve_android_id_for_isolated_flow(
                 cached_fcm = await cache_get("fcm_credentials")
             except Exception as err:  # noqa: BLE001
                 _LOGGER.debug(
-                    "Isolated exchange: failed to read cached FCM credentials; continuing without cached bundle. (%s at %s)",
+                    "Isolated exchange: failed to read the cached FCM registration; continuing without cached bundle. (%s at %s)",
                     describe_exception(err),
                     exception_origin(err),
                 )
@@ -389,7 +388,7 @@ async def _resolve_android_id_for_isolated_flow(
                 await cache_set(cache_key, android_id)
             except Exception as err:  # noqa: BLE001
                 _LOGGER.debug(
-                    "Isolated exchange: failed to persist android_id from secrets for account. (%s at %s)",
+                    "Isolated exchange: failed to persist android_id from the stored account bundle. (%s at %s)",
                     describe_exception(err),
                     exception_origin(err),
                     extra={"account": _mask_email(username)},
@@ -564,7 +563,7 @@ async def async_get_adm_token(  # noqa: PLR0912,PLR0915
                 if not retryable:
                     if retry_num > 0:
                         _LOGGER.error(
-                            "ADM token: generation failed (retry %d/%d). No more retries. "
+                            "ADM exchange failed (retry %d/%d). No more retries. "
                             "Error: %s",
                             retry_num,
                             max_retries,
@@ -572,7 +571,7 @@ async def async_get_adm_token(  # noqa: PLR0912,PLR0915
                         )
                     else:
                         _LOGGER.error(
-                            "ADM token: generation failed. Error: %s",
+                            "ADM exchange failed. Error: %s",
                             describe_exception(exc),
                         )
                     break
@@ -586,12 +585,12 @@ async def async_get_adm_token(  # noqa: PLR0912,PLR0915
                 sleep_s = backoff * (2**attempt)
                 if retry_num == 0:
                     _LOGGER.warning(
-                        "ADM token: generation failed. Error: %s. Retrying...",
+                        "ADM exchange failed. Error: %s. Retrying...",
                         describe_exception(exc),
                     )
                 else:
                     _LOGGER.warning(
-                        "ADM token: generation failed (retry %d/%d). Error: %s. "
+                        "ADM exchange failed (retry %d/%d). Error: %s. "
                         "Retrying in %.0fs...",
                         retry_num,
                         max_retries,

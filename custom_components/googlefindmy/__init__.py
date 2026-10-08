@@ -9403,6 +9403,17 @@ async def async_remove_config_entry_device(
     if _device_is_service_device(device_entry, entry.entry_id):
         return False
 
+    # The foreign-reading tracker is process-wide and survives reloads by
+    # design; a removed device would otherwise keep its entry until restart
+    # (CX-6). Keyed like the decoder: the parent entry's token-cache id.
+    from .NovaApi.ExecuteAction.LocateTracker.foreign_reading_tracker import (
+        FOREIGN_READING_TRACKER,
+    )
+
+    FOREIGN_READING_TRACKER.forget_device(
+        getattr(entry, "parent_entry_id", None) or entry.entry_id, canonical_id
+    )
+
     try:
         # Prefer entry.runtime_data (2026 standard), fall back to entries bucket.
         runtime: RuntimeData | GoogleFindMyCoordinator | None = getattr(
@@ -10011,6 +10022,15 @@ async def async_remove_entry(hass: HomeAssistant, entry: MyConfigEntry) -> None:
     # Same housekeeping for the reload latch: an entry that is gone will never
     # reach the setup or unload that would otherwise release it.
     discard_pending_entry_reload(hass, entry.entry_id)
+
+    # And for the foreign-reading tracker (CX-6): its per-device readings and
+    # once-per-device log gates survive reloads by design. Its keys carry the
+    # token-cache entry id, so a removed subentry's own id matches nothing.
+    from .NovaApi.ExecuteAction.LocateTracker.foreign_reading_tracker import (
+        FOREIGN_READING_TRACKER,
+    )
+
+    FOREIGN_READING_TRACKER.forget_entry(entry.entry_id)
 
     # Drop this entry's SECRETS_EXTRA_WATCH_PATHS from the running watcher. The
     # update listener that normally recomputes them was unregistered by the
