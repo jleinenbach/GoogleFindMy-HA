@@ -3,18 +3,22 @@
 
 A tag such as ``actions/checkout@v7`` can be moved to other code at any time; a
 40-character commit SHA cannot. Each pinned line carries a comment naming the
-release tag, which is what Dependabot's ``github-actions`` ecosystem reads to bump
-the SHA and the comment together. The contract is documented in the root
+release tag; Dependabot's ``github-actions`` ecosystem updates such pins and the
+version comment together. The contract is documented in the root
 ``AGENTS.md`` (bullet "Action pinning").
 
 Two actions track their default branch on purpose (see ``BRANCH_TRACKING_ACTIONS``).
 Their newest release tags lag far behind the branch, and a pinned SHA would freeze
 the validation rules they apply until someone refreshes it by hand.
 
-Blind spot: the lines are read as text, not as parsed YAML, so that the version
-comment survives. A ``uses:`` value spread over a YAML block scalar or built from an
-expression would not be seen; none exists today, and the vacuity check below fails
-if the reader stops finding lines at all.
+The lines are read as text so that the version comment survives. Forms the text
+reader cannot see (a flow mapping such as ``- {uses: ...}``, a value on the next
+line, a block scalar) are caught by ``test_text_reader_matches_yaml_parser``, which
+compares every ``uses`` value of the parsed YAML with what the reader found.
+
+Blind spot: only ``.github/workflows`` is read. Composite actions under
+``.github/actions`` would carry their own ``uses:`` lines; that directory does not
+exist today, and the "Action pinning" bullet scopes the contract to workflows.
 """
 
 from __future__ import annotations
@@ -25,6 +29,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
+import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW_DIR = REPO_ROOT / ".github" / "workflows"
@@ -37,7 +42,12 @@ BRANCH_TRACKING_ACTIONS: dict[str, frozenset[str]] = {
 }
 BRANCH_TRACKING_MARKER = "see AGENTS.md, Action pinning"
 
-_USES_RE = re.compile(r"^\s*(?:-\s*)?uses:\s*(?P<value>[^\s#]+)\s*(?P<comment>#.*)?$")
+# The value runs to the first blank, so ``@<sha>#v1`` stays part of the ref (YAML
+# reads it that way too) instead of passing as a comment.
+_USES_RE = re.compile(
+    r"""^\s*(?:-\s*)?["']?uses["']?:\s*(?P<value>"[^"]*"|'[^']*'|[^\s#]\S*)"""
+    r"(?:\s+(?P<comment>#.*))?\s*$"
+)
 _PINNED_RE = re.compile(r"^[0-9a-f]{40}$")
 _TAG_COMMENT_RE = re.compile(r"^#\s*v?\d+(?:\.\d+)*$")
 
@@ -64,7 +74,7 @@ def parse_uses_line(line: str) -> tuple[str, str, str] | None:
     match = _USES_RE.match(line)
     if match is None:
         return None
-    value = match.group("value")
+    value = match.group("value").strip("\"'")
     if value.startswith(("./", "docker://")) or "@" not in value:
         return None
     action, ref = value.rsplit("@", 1)
@@ -164,6 +174,41 @@ def test_one_sha_and_tag_per_action() -> None:
     assert not split, f"actions pinned to more than one SHA or tag: {split}"
 
 
+def _yaml_uses_values(node: object) -> list[str]:
+    """Collect every ``uses`` value of a parsed workflow, at step and at job level."""
+
+    found: list[str] = []
+    if isinstance(node, dict):
+        for key, value in node.items():
+            if key == "uses" and isinstance(value, str):
+                found.append(value)
+            else:
+                found.extend(_yaml_uses_values(value))
+    elif isinstance(node, list):
+        for item in node:
+            found.extend(_yaml_uses_values(item))
+    return found
+
+
+def test_text_reader_matches_yaml_parser() -> None:
+    """The text reader sees exactly the third-party ``uses`` values YAML sees."""
+
+    parsed: list[str] = []
+    for path in sorted(WORKFLOW_DIR.glob("*.y*ml")):
+        document = yaml.safe_load(path.read_text(encoding="utf-8"))
+        parsed.extend(
+            value
+            for value in _yaml_uses_values(document)
+            if not value.startswith(("./", "docker://"))
+        )
+    read = [f"{line.action}@{line.ref}" for line in USES_LINES]
+    assert sorted(parsed) == sorted(read), (
+        "a `uses:` form escapes the text reader; extend _USES_RE:\n"
+        f"only in YAML: {sorted(set(parsed) - set(read))}\n"
+        f"only in text: {sorted(set(read) - set(parsed))}"
+    )
+
+
 _SHA = "3d3c42e5aac5ba805825da76410c181273ba90b1"
 
 
@@ -178,6 +223,9 @@ _SHA = "3d3c42e5aac5ba805825da76410c181273ba90b1"
         (f"      - uses: actions/checkout@{_SHA[:-1]} # v7.0.1", False),
         (f"      - uses: actions/checkout@{_SHA.upper()} # v7.0.1", False),
         (f"      - uses: actions/checkout@{_SHA} # pinned", False),
+        (f"      - uses: actions/checkout@{_SHA}#v7.0.1", False),
+        (f'      - uses: "actions/checkout@{_SHA}" # v7.0.1', True),
+        (f"      - 'uses': 'actions/checkout@{_SHA}' # v7.0.1", True),
     ],
 )
 def test_pin_predicate_separates_pinned_from_mutable(line: str, expected: bool) -> None:
