@@ -110,28 +110,56 @@ def _module_level_consumers() -> set[str]:
     return consumers
 
 
-def _calls_import_module(loop: ast.For) -> bool:
-    """Return whether the loop body really imports its iteration variable.
+def _helper_imports() -> list[str]:
+    """Module names the shared import helper imports, in source order.
 
-    Without this, ``for consumer in COORDINATOR_CONSUMER_MODULES: pass`` would
-    keep the ordering test green while the fix does nothing: naming the tuple is
-    not the same as importing from it.
+    Only plain ``import a.b.c`` statements directly in the function body count.
+    An import under ``if``/``try`` or inside a nested function would not run
+    unconditionally, so it is reported as a failure instead of being counted.
     """
 
-    target = loop.target
-    if not isinstance(target, ast.Name):
-        return False
-    for node in ast.walk(loop):
-        if not isinstance(node, ast.Call):
-            continue
-        func = node.func
-        called = isinstance(func, ast.Attribute) and func.attr == "import_module"
-        if not called or not node.args:
-            continue
-        argument = node.args[0]
-        if isinstance(argument, ast.Name) and argument.id == target.id:
-            return True
-    return False
+    tree = ast.parse((_REPO_ROOT / "tests" / "conftest.py").read_text(encoding="utf-8"))
+    helper = next(
+        (
+            node
+            for node in tree.body
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "import_coordinator_consumers"
+        ),
+        None,
+    )
+    assert helper is not None, "tests/conftest.py lost import_coordinator_consumers"
+    body = helper.body
+    if (
+        body
+        and isinstance(body[0], ast.Expr)
+        and isinstance(body[0].value, ast.Constant)
+    ):
+        body = body[1:]
+    names: list[str] = []
+    for statement in body:
+        assert isinstance(statement, ast.Import), (
+            "import_coordinator_consumers may only contain plain import "
+            f"statements; found {ast.unparse(statement)!r} at line {statement.lineno}"
+        )
+        names.extend(alias.name for alias in statement.names if alias.asname is None)
+        assert all(alias.asname is None for alias in statement.names), (
+            f"aliased import at line {statement.lineno} binds a different name"
+        )
+    return names
+
+
+def test_import_helper_imports_exactly_the_consumer_list() -> None:
+    """The literal imports and the tuple must name the same modules.
+
+    The harnesses import the consumers through the helper, the identity check
+    and the drift test below read the tuple. If the two disagreed, a consumer
+    could be listed yet never imported before the patch window.
+    """
+
+    names = _helper_imports()
+    assert sorted(names) == sorted(COORDINATOR_CONSUMER_MODULES)
+    assert len(names) == len(set(names))
 
 
 def test_consumer_list_covers_every_module_level_binding() -> None:
@@ -178,20 +206,18 @@ def test_harness_imports_consumers_before_the_first_patch(
 
     import_line = min(
         (
-            loop.lineno
-            for loop in ast.walk(harness)
-            if isinstance(loop, ast.For)
-            and isinstance(loop.iter, ast.Name)
-            and loop.iter.id == "COORDINATOR_CONSUMER_MODULES"
-            and _calls_import_module(loop)
+            call.lineno
+            for call in ast.walk(harness)
+            if isinstance(call, ast.Call)
+            and isinstance(call.func, ast.Name)
+            and call.func.id == "import_coordinator_consumers"
         ),
         default=None,
     )
     assert import_line is not None, (
         f"{relative_path}::{function} no longer imports the consumer modules; "
-        "without a loop that actually calls importlib.import_module over "
-        "COORDINATOR_CONSUMER_MODULES, a lazy first import inside the patch "
-        "window keeps the stub"
+        "without a call to import_coordinator_consumers() before the first "
+        "patch, a lazy first import inside the patch window keeps the stub"
     )
 
     first_patch_line = min(

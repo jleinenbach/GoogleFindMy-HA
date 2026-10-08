@@ -34,7 +34,7 @@ from custom_components.googlefindmy.coordinator.helpers.registry import (
     resolve_device_by_identifiers,
 )
 from custom_components.googlefindmy.entity import GoogleFindMyDeviceEntity
-from tests.conftest import COORDINATOR_CONSUMER_MODULES
+from tests.conftest import import_coordinator_consumers
 
 pytest_plugins = ("pytest_homeassistant_custom_component",)
 
@@ -233,8 +233,7 @@ async def test_integration_device_info_uses_service_device(
     # patch below.  This used to be a hand-written subset (sensor and
     # device_tracker only); the shared list is AST-derived and pinned by
     # tests/test_guard_coordinator_identity.py.
-    for consumer in COORDINATOR_CONSUMER_MODULES:
-        importlib.import_module(consumer)
+    import_coordinator_consumers()
     binary_sensor_module = importlib.import_module(
         "custom_components.googlefindmy.binary_sensor"
     )

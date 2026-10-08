@@ -457,11 +457,15 @@ subclasses the poisoned symbol later fails with
 Whenever you patch a symbol that other modules bind at module level:
 
 * **Import every consumer before the first `monkeypatch.setattr`**, so the copy
-  they take is the production object. Use the shared tuple
-  `tests.conftest.COORDINATOR_CONSUMER_MODULES`; it was derived from an AST scan
-  for module-level `ImportFrom` nodes naming the symbol, not from guesswork. Do
-  **not** write a local subset: two harnesses used to carry hand-written,
-  incomplete copies, which is exactly the drift the shared list prevents.
+  they take is the production object. Call
+  `tests.conftest.import_coordinator_consumers()`; it imports each module of the
+  shared tuple `tests.conftest.COORDINATOR_CONSUMER_MODULES` with a literal
+  `import` statement. The tuple was derived from an AST scan for module-level
+  `ImportFrom` nodes naming the symbol, not from guesswork, and
+  `tests/test_guard_coordinator_identity.py` pins that the helper imports
+  exactly its modules. Do **not** write a local subset or a loop over
+  `importlib.import_module`: two harnesses used to carry hand-written,
+  incomplete copies, which is exactly the drift the shared helper prevents.
 * **Or patch the consumers too**, if a test genuinely needs them to see the
   stub (this is why the harness pops and re-imports `map_view`).
 
