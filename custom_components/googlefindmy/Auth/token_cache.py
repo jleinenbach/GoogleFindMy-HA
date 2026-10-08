@@ -217,7 +217,7 @@ class TokenCache:
         if not await self._async_store_contains_keys(frozenset(normalized_legacy)):
             _LOGGER.warning(
                 "googlefindmy: Keeping the legacy cache file %s because the merged "
-                "credentials for entry '%s' are not on disk; a restart will retry "
+                "cache data for entry '%s' is not on disk; a restart will retry "
                 "the migration.",
                 legacy_path,
                 self.entry_id,
@@ -556,7 +556,8 @@ class TokenCache:
         for key, value in raw.items():
             if not isinstance(key, str):
                 _LOGGER.debug(
-                    "Skipping non-string cache key from persisted data: %r", key
+                    "Skipping non-string cache key of type %s from persisted data",
+                    type(key).__name__,
                 )
                 continue
             coerced[key] = value
@@ -768,7 +769,7 @@ def set_cached_value(name: str, value: Any | None) -> None:
         )
 
     if not _INSTANCES:
-        _LOGGER.warning("Cache not initialized; cannot set '%s'", name)
+        _LOGGER.warning("Cache not initialized; cannot store the value")
         return
 
     cache = _get_default_cache()
@@ -802,9 +803,7 @@ def get_cached_value_or_set(name: str, generator: Callable[[], Any]) -> Any:
         )
 
     if not _INSTANCES:
-        _LOGGER.warning(
-            "Cache not initialized; computing '%s' without storing persistently", name
-        )
+        _LOGGER.warning("Cache not initialized; computing the value without storing it")
         return generator()
 
     cache = _get_default_cache()
