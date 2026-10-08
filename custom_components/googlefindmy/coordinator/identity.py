@@ -860,7 +860,7 @@ class IdentityOperations(_MixinBase):
             ):
                 _LOGGER.debug(
                     "Anchor fallback for %s: pair_date=%s invalid, "
-                    "using secrets_creation_date=%s as pair_date",
+                    "using the anchor date %s as pair_date",
                     canonical_id,
                     pair_date,
                     anchor_date,
