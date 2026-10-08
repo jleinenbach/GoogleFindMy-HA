@@ -20,10 +20,11 @@ properties it must have:
 * it *restores* the production class, so the blame stays with one test instead
   of spreading over every test that follows.
 
-The file also pins the *fix* statically: the consumer list the harnesses import
-up front must still match the modules that actually bind the symbol, and those
-imports must still happen before the first ``monkeypatch.setattr`` in **each**
-harness that patches the symbol.  Both are
+The file also pins the *fix* statically: the consumer list must still match the
+modules that actually bind the symbol, ``tests.conftest.import_coordinator_consumers``
+must import exactly that list with literal ``import`` statements, and each
+harness that patches the symbol must call the helper before its first
+``monkeypatch.setattr``.  All three are
 read out of the source with ``ast`` rather than reproduced at runtime.  An
 earlier draft did reproduce it, by dropping seven modules from ``sys.modules``
 and re-importing them inside a patch window; that test spread a second symbol
@@ -110,28 +111,103 @@ def _module_level_consumers() -> set[str]:
     return consumers
 
 
-def _calls_import_module(loop: ast.For) -> bool:
-    """Return whether the loop body really imports its iteration variable.
+_HELPER = "import_coordinator_consumers"
 
-    Without this, ``for consumer in COORDINATOR_CONSUMER_MODULES: pass`` would
-    keep the ordering test green while the fix does nothing: naming the tuple is
-    not the same as importing from it.
+
+def _bindings_of(tree: ast.AST, name: str) -> list[ast.AST]:
+    """Every node anywhere in ``tree`` that binds, deletes or rebinds ``name``.
+
+    Counts definitions, assignments (also under ``if``/``try``/loops), ``del``,
+    ``global``/``nonlocal`` declarations, import aliases and the string form
+    ``globals()["name"]``. Walking the whole tree instead of the module body
+    is what catches a rebinding hidden in a branch or a function.
     """
 
-    target = loop.target
-    if not isinstance(target, ast.Name):
-        return False
-    for node in ast.walk(loop):
-        if not isinstance(node, ast.Call):
-            continue
-        func = node.func
-        called = isinstance(func, ast.Attribute) and func.attr == "import_module"
-        if not called or not node.args:
-            continue
-        argument = node.args[0]
-        if isinstance(argument, ast.Name) and argument.id == target.id:
-            return True
-    return False
+    found: list[ast.AST] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
+            if node.name == name:
+                found.append(node)
+        elif isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store | ast.Del):
+            if node.id == name:
+                found.append(node)
+        elif isinstance(node, ast.Global | ast.Nonlocal):
+            if name in node.names:
+                found.append(node)
+        elif isinstance(node, ast.Import | ast.ImportFrom):
+            if any(
+                (alias.asname or alias.name.split(".")[0]) == name
+                for alias in node.names
+            ):
+                found.append(node)
+        elif isinstance(node, ast.Subscript) and isinstance(node.slice, ast.Constant):
+            if node.slice.value == name:
+                found.append(node)
+    return found
+
+
+def _helper_imports() -> list[str]:
+    """Module names the shared import helper imports, in source order.
+
+    Only plain ``import a.b.c`` statements directly in the function body count.
+    An import under ``if``/``try`` or inside a nested function would not run
+    unconditionally, so it is reported as a failure instead of being counted.
+    """
+
+    tree = ast.parse((_REPO_ROOT / "tests" / "conftest.py").read_text(encoding="utf-8"))
+    bindings = _bindings_of(tree, _HELPER)
+    assert len(bindings) == 1, (
+        f"tests/conftest.py must bind {_HELPER} exactly once; found "
+        f"{len(bindings)} binding(s) at line(s) "
+        f"{[getattr(node, 'lineno', '?') for node in bindings]}"
+    )
+    helper = bindings[0]
+    assert isinstance(helper, ast.FunctionDef) and helper in tree.body, (
+        "the helper must be a plain module-level function"
+    )
+    # A decorator (e.g. a cache) or a parameter could turn later calls into
+    # no-ops or make the imports depend on the caller.
+    assert not helper.decorator_list, (
+        "import_coordinator_consumers must not be decorated"
+    )
+    assert not (
+        helper.args.args
+        or helper.args.posonlyargs
+        or helper.args.kwonlyargs
+        or helper.args.vararg
+        or helper.args.kwarg
+    ), "import_coordinator_consumers must not take parameters"
+    body = helper.body
+    if (
+        body
+        and isinstance(body[0], ast.Expr)
+        and isinstance(body[0].value, ast.Constant)
+    ):
+        body = body[1:]
+    names: list[str] = []
+    for statement in body:
+        assert isinstance(statement, ast.Import), (
+            "import_coordinator_consumers may only contain plain import "
+            f"statements; found {ast.unparse(statement)!r} at line {statement.lineno}"
+        )
+        names.extend(alias.name for alias in statement.names if alias.asname is None)
+        assert all(alias.asname is None for alias in statement.names), (
+            f"aliased import at line {statement.lineno} binds a different name"
+        )
+    return names
+
+
+def test_import_helper_imports_exactly_the_consumer_list() -> None:
+    """The literal imports and the tuple must name the same modules.
+
+    The harnesses import the consumers through the helper, the identity check
+    and the drift test below read the tuple. If the two disagreed, a consumer
+    could be listed yet never imported before the patch window.
+    """
+
+    names = _helper_imports()
+    assert sorted(names) == sorted(COORDINATOR_CONSUMER_MODULES)
+    assert len(names) == len(set(names))
 
 
 def test_consumer_list_covers_every_module_level_binding() -> None:
@@ -176,21 +252,42 @@ def test_harness_imports_consumers_before_the_first_patch(
     )
     assert harness is not None, f"{function} no longer exists in {relative_path}"
 
+    # The call below only means something if the name is the conftest helper:
+    # a local function, lambda or reassignment of the same name would satisfy
+    # the call check while importing nothing.
+    bindings = _bindings_of(tree, _HELPER)
+    assert len(bindings) == 1, (
+        f"{relative_path} must bind {_HELPER} exactly once (the import from "
+        f"tests.conftest); found {len(bindings)} binding(s)"
+    )
+    binding = bindings[0]
+    assert (
+        isinstance(binding, ast.ImportFrom)
+        and binding.module == "tests.conftest"
+        and any(
+            alias.name == _HELPER and alias.asname is None for alias in binding.names
+        )
+    ), f"{relative_path} must import {_HELPER} from tests.conftest without an alias"
+
+    # Only a call that is itself a statement of the harness body counts: one
+    # under `if`, `try`, a loop or a nested function may never run.
     import_line = min(
         (
-            loop.lineno
-            for loop in ast.walk(harness)
-            if isinstance(loop, ast.For)
-            and isinstance(loop.iter, ast.Name)
-            and loop.iter.id == "COORDINATOR_CONSUMER_MODULES"
-            and _calls_import_module(loop)
+            statement.lineno
+            for statement in harness.body
+            if isinstance(statement, ast.Expr)
+            and isinstance(statement.value, ast.Call)
+            and isinstance(statement.value.func, ast.Name)
+            and statement.value.func.id == "import_coordinator_consumers"
+            and not statement.value.args
+            and not statement.value.keywords
         ),
         default=None,
     )
     assert import_line is not None, (
         f"{relative_path}::{function} no longer imports the consumer modules; "
-        "without a loop that actually calls importlib.import_module over "
-        "COORDINATOR_CONSUMER_MODULES, a lazy first import inside the patch "
+        "without a direct call to import_coordinator_consumers() in the harness "
+        "body before the first patch, a lazy first import inside the patch "
         "window keeps the stub"
     )
 

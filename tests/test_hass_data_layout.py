@@ -55,7 +55,7 @@ from custom_components.googlefindmy.const import (
     TRACKER_SUBENTRY_KEY,
     TRACKER_SUBENTRY_TRANSLATION_KEY,
 )
-from tests.conftest import COORDINATOR_CONSUMER_MODULES
+from tests.conftest import import_coordinator_consumers
 from tests.helpers import drain_loop
 from tests.helpers.config_entries_stub import make_config_entry
 from tests.helpers.config_flow import ConfigEntriesDomainUniqueIdLookupMixin
@@ -460,8 +460,7 @@ def _prepare_async_setup_entry_harness(
     # ``tests/test_guard_coordinator_identity.py`` (list completeness and the
     # ordering below) and at runtime by ``detect_coordinator_identity_leaks()``
     # in ``tests/conftest.py``.
-    for consumer in COORDINATOR_CONSUMER_MODULES:
-        importlib.import_module(consumer)
+    import_coordinator_consumers()
 
     cache = _StubCache()
     monkeypatch.setattr(integration.TokenCache, "create", AsyncMock(return_value=cache))

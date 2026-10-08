@@ -457,15 +457,19 @@ subclasses the poisoned symbol later fails with
 Whenever you patch a symbol that other modules bind at module level:
 
 * **Import every consumer before the first `monkeypatch.setattr`**, so the copy
-  they take is the production object. Use the shared tuple
-  `tests.conftest.COORDINATOR_CONSUMER_MODULES`; it was derived from an AST scan
-  for module-level `ImportFrom` nodes naming the symbol, not from guesswork. Do
-  **not** write a local subset: two harnesses used to carry hand-written,
-  incomplete copies, which is exactly the drift the shared list prevents.
+  they take is the production object. Call
+  `tests.conftest.import_coordinator_consumers()`; it imports each module of the
+  shared tuple `tests.conftest.COORDINATOR_CONSUMER_MODULES` with a literal
+  `import` statement. The tuple was derived from an AST scan for module-level
+  `ImportFrom` nodes naming the symbol, not from guesswork, and
+  `tests/test_guard_coordinator_identity.py` pins that the helper imports
+  exactly its modules. Do **not** write a local subset or a loop over
+  `importlib.import_module`: two harnesses used to carry hand-written,
+  incomplete copies, which is exactly the drift the shared helper prevents.
 * **Or patch the consumers too**, if a test genuinely needs them to see the
   stub (this is why the harness pops and re-imports `map_view`).
 
-Three harnesses patch the symbol and therefore consume the tuple:
+Three harnesses patch the symbol and therefore call the helper:
 `_prepare_async_setup_entry_harness` (`tests/test_hass_data_layout.py`),
 `_patch_integration_runtime` (`tests/test_device_entity_registration.py`) and
 `test_integration_device_info_uses_service_device`
@@ -486,8 +490,9 @@ when one of them actually bites.
 
 `tests/test_guard_coordinator_identity.py` covers the detection logic and pins
 the fix statically: the tuple must still equal the AST-derived set of
-module-level binders, and in **each** of the three harnesses a loop that really
-calls `importlib.import_module` over it must precede the first
+module-level binders, `import_coordinator_consumers()` must import exactly its
+modules with plain, unconditional `import` statements, and in **each** of the
+three harnesses a direct call to that helper must precede the first
 `monkeypatch.setattr`. The teardown *wiring* is verified by mutation rather
 than by a test: remove the early imports from
 `_prepare_async_setup_entry_harness` and

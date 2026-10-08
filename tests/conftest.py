@@ -65,6 +65,25 @@ COORDINATOR_CONSUMER_MODULES: tuple[str, ...] = (
     "custom_components.googlefindmy.sensor",
 )
 
+
+def import_coordinator_consumers() -> None:
+    """Import every module of ``COORDINATOR_CONSUMER_MODULES``.
+
+    One literal ``import`` statement per module instead of a loop with
+    ``importlib.import_module``: the module set is fixed, so naming each module
+    keeps the import visible to readers, linters and SAST tools.
+    ``tests/test_guard_coordinator_identity.py`` pins that these statements name
+    exactly the modules of the tuple, so the two cannot drift apart.
+    """
+    import custom_components.googlefindmy.binary_sensor  # noqa: F401
+    import custom_components.googlefindmy.button  # noqa: F401
+    import custom_components.googlefindmy.device_tracker  # noqa: F401
+    import custom_components.googlefindmy.eid_resolver  # noqa: F401
+    import custom_components.googlefindmy.entity  # noqa: F401
+    import custom_components.googlefindmy.repairs  # noqa: F401
+    import custom_components.googlefindmy.sensor  # noqa: F401
+
+
 #: Package prefix the guard scans.  Compared as ``name == PREFIX`` or
 #: ``name.startswith(PREFIX + ".")`` so a hypothetical sibling package such as
 #: ``custom_components.googlefindmy_legacy`` is not swept in by accident.

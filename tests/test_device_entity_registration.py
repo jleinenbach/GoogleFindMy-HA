@@ -25,7 +25,7 @@ from custom_components.googlefindmy.const import (
 from custom_components.googlefindmy.coordinator.helpers.registry import (
     resolve_device_by_identifiers,
 )
-from tests.conftest import COORDINATOR_CONSUMER_MODULES
+from tests.conftest import import_coordinator_consumers
 
 try:
     from pytest_homeassistant_custom_component.common import MockConfigEntry
@@ -73,8 +73,7 @@ async def _patch_integration_runtime(  # noqa: PLR0915
     # Import every module that copies GoogleFindMyCoordinator before the first
     # patch below, so none of them can capture the stub through a lazy first
     # import inside the patch window (see tests/AGENTS.md).
-    for consumer in COORDINATOR_CONSUMER_MODULES:
-        importlib.import_module(consumer)
+    import_coordinator_consumers()
 
     monkeypatch.setattr(integration, "async_setup", AsyncMock(return_value=True))
     monkeypatch.setattr(integration, "CONFIG_SCHEMA", lambda config: {})
