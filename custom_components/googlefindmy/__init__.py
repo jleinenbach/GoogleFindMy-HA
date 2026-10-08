@@ -38,7 +38,6 @@ import inspect
 import json
 import logging
 import os
-import re
 import socket
 import time
 from collections import defaultdict
@@ -6663,12 +6662,6 @@ def _mask_email_for_logs(email: str | None) -> str:
     return f"{masked_local}@{domain}"
 
 
-# One address per match: both parts stop at whitespace, "@" and the usual list
-# delimiters, so "a@x.com,b@y.org" yields two matches. The domain part accepts any
-# other character (internationalised domains) and may be empty ("name@").
-_EMAIL_IN_TEXT = re.compile(r"[^\s@,;:<>()\[\]\"]+@[^\s@,;:<>()\[\]\"]*")
-
-
 def _label_entry_for_log(entry: ConfigEntry) -> str:
     """Return a privacy-safe label for log messages referencing ``entry``."""
 
@@ -6677,11 +6670,12 @@ def _label_entry_for_log(entry: ConfigEntry) -> str:
         return _mask_email_for_logs(email)
     title = getattr(entry, "title", None)
     if isinstance(title, str) and title:
-        # The config flow titles an entry with the account e-mail; a renamed
-        # title may carry more than one address.
-        return _EMAIL_IN_TEXT.sub(
-            lambda match: _mask_email_for_logs(match.group(0)), title
-        )
+        # The config flow titles an entry with the account e-mail. A title with
+        # an "@" is not logged at all: masking addresses inside free text cannot
+        # be made complete (separators, quoted local parts, address literals),
+        # and the entry ID below identifies the entry just as well.
+        if "@" not in title:
+            return title
     entry_id = getattr(entry, "entry_id", None)
     if isinstance(entry_id, str) and entry_id:
         return entry_id

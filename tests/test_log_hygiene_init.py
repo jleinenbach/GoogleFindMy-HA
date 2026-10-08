@@ -19,8 +19,8 @@ Static checks:
 Behavioural checks pin that persisting a secrets bundle logs no value of the
 bundle, no field name outside ``_LOGGABLE_BUNDLE_FIELDS`` (field names can embed
 the account e-mail) and nothing derived from the bundle's e-mail, and that the
-account label is masked on both of its e-mail paths (bundle fallback and entry
-title).
+account label is masked on the bundle fallback and never carries an entry
+title that contains an address.
 
 Not covered: ``_LOGGER.log(level, ...)`` calls and aliases such as ``log_fn``
 (the Semgrep rule does not match them either); the secret-name check covers
@@ -255,17 +255,18 @@ def test_label_entry_for_log_masks_the_bundle_email() -> None:
 @pytest.mark.parametrize(
     ("title", "expected"),
     [
-        (_EMAIL, f"p***@{_DOMAIN}"),
+        (_EMAIL, "entry-2"),
         ("Family account", "Family account"),
-        (f"a@{_DOMAIN}, bob@{_DOMAIN}", f"*@{_DOMAIN}, b***@{_DOMAIN}"),
-        ("Home @ Berlin", "Home @ Berlin"),
-        (f"alice@{_DOMAIN},bob@{_DOMAIN}", f"a***@{_DOMAIN},b***@{_DOMAIN}"),
-        (f"Family ({_EMAIL})", f"Family (p***@{_DOMAIN})"),
-        ("pilot.user@exämple.de", "p***@exämple.de"),
-        ("pilot.user@", "p***@"),
+        (f"alice@{_DOMAIN},bob@{_DOMAIN}", "entry-2"),
+        (f"Family ({_EMAIL})", "entry-2"),
+        ('"pilot user"@[192.0.2.1]', "entry-2"),
+        (f"a@{_DOMAIN}/b@{_DOMAIN}|c@{_DOMAIN}", "entry-2"),
+        ("pilot.user@exämple.de", "entry-2"),
     ],
 )
-def test_label_entry_for_log_masks_an_e_mail_title(title: str, expected: str) -> None:
+def test_label_entry_for_log_never_logs_a_title_with_an_address(
+    title: str, expected: str
+) -> None:
     entry = make_config_entry(entry_id="entry-2", data={}, options={}, title=title)
 
     assert integration_init._label_entry_for_log(entry) == expected  # type: ignore[arg-type]
