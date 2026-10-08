@@ -60,7 +60,7 @@ IDs: section IDs like `S0`, `S3.2` are stable for internal linking.
 **Measured (peer-reviewed):**
 
 * EID / E2EE key agreement uses **NIST P-160R1** (i.e., *secp160r1*) by default in all tested trackers. (Böttger et al., 2025). ([Pet Symposium][1])
-* **P-256 EIDs** exist but were observed as rare and device-specific (e.g., Sony WH-1000XM5 in the study). (Böttger et al., 2025). ([Pet Symposium][1])
+* **P-256 EIDs** exist but were observed as rare and device-specific (e.g., Sony WH-1000XM5 in the study). (Böttger et al., 2025). ([Pet Symposium][1]) This integration decrypts crowdsourced reports from P-256 trackers with provisional readings; see "Foreign-report readings" in [`docs/CRYPTOGRAPHY.md`](CRYPTOGRAPHY.md#foreign-report-readings).
 * Finder → Owner E2EE location encryption in the measured design uses **HKDF-SHA-256** and **AES-EAX-256** (as described by the paper’s reconstruction). (Böttger et al., 2025). ([Pet Symposium][1])
 
 **Observed in your integration context:**

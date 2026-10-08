@@ -44,6 +44,12 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 MANIFEST = REPO_ROOT / "custom_components" / "googlefindmy" / "manifest.json"
 HACS_JSON = REPO_ROOT / "hacs.json"
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "pip_audit"
+#: Test-world manifest for the audit wiring tests. The live manifest no longer
+#: lists packages Home Assistant itself pins (hassfest rejects them), so the
+#: governed-package paths need a manifest that still carries aiohttp,
+#: cryptography and httpx. The live MANIFEST stays the input of the real gate
+#: and of the range-governed tripwires.
+GOVERNED_MANIFEST = FIXTURES / "manifest_with_governed.json"
 HA_CONSTRAINTS_URL = (
     "https://raw.githubusercontent.com/home-assistant/core/{version}/"
     "homeassistant/package_constraints.txt"
@@ -182,6 +188,19 @@ class TestManifestOnlyPipAuditGate:
 # ---------------------------------------------------------------------------
 # Offline engine unit tests (deterministic, no network)
 # ---------------------------------------------------------------------------
+
+
+def test_governed_manifest_fixture_tracks_the_live_manifest() -> None:
+    """The test-world manifest is the live one plus the three HA-pinned packages.
+
+    Without this, the fixture would drift silently when a live requirement is
+    added, bumped or dropped, and the wiring tests would audit a stale list.
+    """
+    live = audit_manifest.load_manifest_requirements(MANIFEST)
+    fixture = audit_manifest.load_manifest_requirements(GOVERNED_MANIFEST)
+    governed_only = {"aiohttp>=3.11.8", "cryptography>=43.0.3", "httpx>=0.28.0"}
+    assert sorted(set(fixture) - governed_only) == sorted(live)
+    assert governed_only <= set(fixture)
 
 
 def _write_json(path: Path, obj: object) -> Path:
@@ -695,7 +714,7 @@ class TestMainDecision:
         return audit_manifest.main(
             [
                 "--manifest",
-                str(MANIFEST),
+                str(GOVERNED_MANIFEST),
                 "--ha-constraints",
                 str(self._constraints(tmp_path)),
                 "--audit-json",
@@ -746,7 +765,7 @@ class TestMainDecision:
             rc = audit_manifest.main(
                 [
                     "--manifest",
-                    str(MANIFEST),
+                    str(GOVERNED_MANIFEST),
                     "--ha-constraints",
                     str(constraints),
                     "--audit-json",
@@ -767,6 +786,13 @@ class TestMainDecision:
         rc_false, out_false = run("python_version < '3.0'")
         assert rc_false == 1
         assert "BLOCKING (1)" in out_false
+        # Blocking as a direct manifest entry, not for the transitive reason:
+        # otherwise the test would stay green if the manifest lost aiohttp.
+        assert (
+            "aiohttp 3.13.3: CVE-MARKER-1 (fix: 3.14.1; bump the manifest floor)"
+            in out_false
+        )
+        assert "bump the direct parent dependency" not in out_false
 
     def test_fixable_transitive_finding_blocks(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
@@ -818,7 +844,7 @@ class TestMainDecision:
         rc = audit_manifest.main(
             [
                 "--manifest",
-                str(MANIFEST),
+                str(GOVERNED_MANIFEST),
                 "--ha-constraints",
                 str(self._constraints(tmp_path)),
                 "--audit-json",
@@ -913,7 +939,7 @@ class TestMainDecision:
         rc = audit_manifest.main(
             [
                 "--manifest",
-                str(MANIFEST),
+                str(GOVERNED_MANIFEST),
                 "--ha-constraints",
                 str(self._constraints(tmp_path)),
                 "--audit-json",
@@ -942,7 +968,7 @@ class TestMainDecision:
         rc = audit_manifest.main(
             [
                 "--manifest",
-                str(MANIFEST),
+                str(GOVERNED_MANIFEST),
                 "--ha-constraints",
                 str(self._constraints(tmp_path)),
             ]
@@ -967,7 +993,7 @@ class TestMainDecision:
         rc = audit_manifest.main(
             [
                 "--manifest",
-                str(MANIFEST),
+                str(GOVERNED_MANIFEST),
                 "--ha-constraints",
                 str(constraints),
                 "--audit-json",
@@ -1003,7 +1029,7 @@ class TestMainDecision:
         rc = audit_manifest.main(
             [
                 "--manifest",
-                str(MANIFEST),
+                str(GOVERNED_MANIFEST),
                 "--ha-constraints",
                 str(constraints),
                 "--audit-json",
@@ -1046,7 +1072,7 @@ class TestMainDecision:
         rc = audit_manifest.main(
             [
                 "--manifest",
-                str(MANIFEST),
+                str(GOVERNED_MANIFEST),
                 "--ha-constraints",
                 str(constraints),
                 "--audit-json",
@@ -1099,7 +1125,7 @@ class TestMainDecision:
         rc = audit_manifest.main(
             [
                 "--manifest",
-                str(MANIFEST),
+                str(GOVERNED_MANIFEST),
                 "--ha-constraints",
                 str(constraints),
                 "--audit-json",
@@ -1132,7 +1158,7 @@ class TestMainDecision:
         rc = audit_manifest.main(
             [
                 "--manifest",
-                str(MANIFEST),
+                str(GOVERNED_MANIFEST),
                 "--ha-constraints",
                 str(constraints),
                 "--audit-json",
@@ -1191,7 +1217,7 @@ def test_main_pins_governed_requirement_to_ha_version(
 
     monkeypatch.setattr(audit_manifest, "run_pip_audit", fake_run)
     rc = audit_manifest.main(
-        ["--manifest", str(MANIFEST), "--ha-constraints", str(constraints)]
+        ["--manifest", str(GOVERNED_MANIFEST), "--ha-constraints", str(constraints)]
     )
 
     assert rc == 0
@@ -1258,7 +1284,7 @@ def test_main_reaudits_governed_transitive_with_no_deps(
 
     monkeypatch.setattr(audit_manifest, "run_pip_audit", fake_run)
     rc = audit_manifest.main(
-        ["--manifest", str(MANIFEST), "--ha-constraints", str(constraints)]
+        ["--manifest", str(GOVERNED_MANIFEST), "--ha-constraints", str(constraints)]
     )
 
     assert rc == 0
@@ -1346,7 +1372,7 @@ def test_package_owned_at_minimum_but_governed_at_latest_still_blocks(
     rc = audit_manifest.main(
         [
             "--manifest",
-            str(MANIFEST),
+            str(GOVERNED_MANIFEST),
             "--ha-constraints",
             str(primary),
             "--ha-constraints",
@@ -1443,7 +1469,7 @@ def test_main_audits_governed_at_additional_ha_version(
     rc = audit_manifest.main(
         [
             "--manifest",
-            str(MANIFEST),
+            str(GOVERNED_MANIFEST),
             "--ha-constraints",
             str(primary),
             "--ha-constraints",
@@ -1524,7 +1550,7 @@ def test_main_audits_transitive_governed_only_by_a_newer_ha_snapshot(
     rc = audit_manifest.main(
         [
             "--manifest",
-            str(MANIFEST),
+            str(GOVERNED_MANIFEST),
             "--ha-constraints",
             str(primary),
             "--ha-constraints",
@@ -1575,7 +1601,7 @@ def test_main_owned_as_declared_pass_catches_above_floor_cve(
 
     monkeypatch.setattr(audit_manifest, "run_pip_audit", fake_run)
     rc = audit_manifest.main(
-        ["--manifest", str(MANIFEST), "--ha-constraints", str(constraints)]
+        ["--manifest", str(GOVERNED_MANIFEST), "--ha-constraints", str(constraints)]
     )
     report = capsys.readouterr().out
 
@@ -1601,7 +1627,7 @@ def test_offline_preview_documents_reduced_coverage_and_stays_offline(
     rc = audit_manifest.main(
         [
             "--manifest",
-            str(MANIFEST),
+            str(GOVERNED_MANIFEST),
             "--ha-constraints",
             str(primary),
             "--ha-constraints",

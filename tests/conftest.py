@@ -316,6 +316,32 @@ def disable_http_server() -> Iterable[None]:
         yield
 
 
+_FOREIGN_READING_TRACKER_MODULE = (
+    "custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker."
+    "foreign_reading_tracker"
+)
+
+
+def _reset_foreign_reading_tracker() -> None:
+    # Only when already imported: importing it here would pull the integration
+    # into tests that install their own stubs before the first import.
+    module = sys.modules.get(_FOREIGN_READING_TRACKER_MODULE)
+    if module is not None:
+        module.FOREIGN_READING_TRACKER.reset()
+
+
+@pytest.fixture(autouse=True)
+def reset_foreign_reading_tracker() -> Iterable[None]:
+    """Isolate the process-wide foreign-reading memory between tests.
+
+    The tracker keeps once-per-process log gates and remembered readings; a
+    test that runs after another could otherwise see no log line at all.
+    """
+    _reset_foreign_reading_tracker()
+    yield
+    _reset_foreign_reading_tracker()
+
+
 @pytest.hookimpl(trylast=True)
 def pytest_runtest_teardown() -> None:
     """Heal the lazy symbol, then fail the culprit of a cross-test symbol leak.

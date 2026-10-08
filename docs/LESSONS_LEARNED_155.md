@@ -18,6 +18,14 @@ scalar for the same inputs.
 **Action:** Every encrypt/decrypt pair and every EID-generate/EID-use pair must
 have a round-trip integration test.
 
+**Current state:** `_derive_scalar` no longer exists. Both sides now reduce
+through `reduce_scalar` in `FMDNCrypto/curve_profile.py`, and `calculate_r`
+reads its derivation from `VARIANT_DERIVATIONS`, so the generator and the
+decryption path cannot pick different formulas for SECP160r1. The same lesson
+shaped the P-256 foreign-report readings: each reading is tested as a
+round-trip against an independent report oracle (see "Foreign-report readings"
+in [`docs/CRYPTOGRAPHY.md`](CRYPTOGRAPHY.md#foreign-report-readings)).
+
 ---
 
 ## Lesson 2: Enum values are not identities

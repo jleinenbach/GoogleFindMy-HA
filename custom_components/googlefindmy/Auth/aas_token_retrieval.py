@@ -351,7 +351,7 @@ async def _exchange_oauth_for_aas(
         classified = classify_gpsoauth_error(error_value)
         error_kind = classified or "(none)"
         _LOGGER.warning(
-            "gpsoauth response missing token (user=%s, keys=%d)",
+            "gpsoauth response missing the AAS result field (user=%s, keys=%d)",
             _mask_email_for_logs(username),
             key_count,
             extra={
@@ -411,7 +411,19 @@ async def _generate_aas_token(*, cache: TokenCache) -> str:  # noqa: PLR0912, PL
     if oauth_token:
         reason = _disqualifies_oauth_for_exchange(oauth_token)
         if reason:
-            _LOGGER.warning("Ignoring value from '%s': %s.", CONF_OAUTH_TOKEN, reason)
+            # Fixed text instead of ``reason``: the record carries no value
+            # derived from the OAuth slot. Name the JWT case only when it is
+            # the one that applied, so a new filter reason cannot be mislabelled.
+            if _looks_like_jwt(oauth_token):
+                _LOGGER.warning(
+                    "Ignoring the configured OAuth value: it looks like a JWT "
+                    "(possibly an installation or ID token), not an OAuth token."
+                )
+            else:
+                _LOGGER.warning(
+                    "Ignoring the configured OAuth value: the negative filter "
+                    "disqualifies it for the AAS exchange."
+                )
             oauth_token = None  # Force fallback path
 
     # 2) Fallback: scan ADM tokens if no explicit OAuth token exists or it was disqualified
@@ -421,14 +433,14 @@ async def _generate_aas_token(*, cache: TokenCache) -> str:  # noqa: PLR0912, PL
                 "No username available; please ensure the account e-mail is configured."
             )
         _LOGGER.debug(
-            "Cached value for '%s' already looks like an AAS token; reusing without gpsoauth.exchange_token.",
-            CONF_OAUTH_TOKEN,
+            "The configured OAuth value already has the AAS form; reusing it "
+            "without gpsoauth.exchange_token."
         )
         try:
             await cache.set(DATA_AAS_TOKEN, oauth_token)
         except Exception as err:  # noqa: BLE001
             _LOGGER.debug(
-                "Failed to persist cached AAS token shortcut. (%s at %s)",
+                "Failed to persist the cached AAS shortcut. (%s at %s)",
                 describe_exception(err),
                 exception_origin(err),
             )
@@ -552,7 +564,7 @@ async def async_get_aas_token(
                 if not retryable:
                     if retry_num > 0:
                         _LOGGER.error(
-                            "AAS token: generation failed (retry %d/%d). No more retries. "
+                            "AAS retrieval failed (retry %d/%d). No more retries. "
                             "Error: %s",
                             retry_num,
                             max_retries,
@@ -560,7 +572,7 @@ async def async_get_aas_token(
                         )
                     else:
                         _LOGGER.error(
-                            "AAS token: generation failed. Error: %s",
+                            "AAS retrieval failed. Error: %s",
                             describe_exception(exc),
                         )
                     break
@@ -568,12 +580,12 @@ async def async_get_aas_token(
                 sleep_s = backoff * (2**attempt)
                 if retry_num == 0:
                     _LOGGER.warning(
-                        "AAS token: generation failed. Error: %s. Retrying...",
+                        "AAS retrieval failed. Error: %s. Retrying...",
                         describe_exception(exc),
                     )
                 else:
                     _LOGGER.warning(
-                        "AAS token: generation failed (retry %d/%d). Error: %s. "
+                        "AAS retrieval failed (retry %d/%d). Error: %s. "
                         "Retrying in %.0fs...",
                         retry_num,
                         max_retries,

@@ -12,6 +12,7 @@ import pytest
 from custom_components.googlefindmy.coordinator import DeviceIdentity
 from custom_components.googlefindmy.eid_resolver import (
     EIDGenerationLock,
+    EidVariant,
     GoogleFindMyEIDResolver,
 )
 
@@ -44,7 +45,9 @@ async def test_refresh_triggers_persistence_on_id_update(hass) -> None:
     resolver._locks["dev_1"] = EIDGenerationLock(
         device_id="dev_1",
         canonical_id="OLD_UUID",
-        variant="legacy",
+        # A real EidVariant value: an unknown one is discarded since AP5b.
+        # MODERN_P256_X32_BE is what the old fallback mapped "legacy" to.
+        variant=EidVariant.MODERN_P256_X32_BE.value,
         advertisement_reversed=False,
         eid_length=20,
         rotation_timestamp=1000,

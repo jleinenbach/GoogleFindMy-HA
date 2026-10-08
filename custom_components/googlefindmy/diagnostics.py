@@ -37,6 +37,7 @@ from .const import (
     CONF_GOOGLE_EMAIL,
     # secrets in entry.data (must never be exposed)
     CONF_OAUTH_TOKEN,
+    DATA_SECRET_BUNDLE,
     # defaults for options (used to avoid hard-coded literals)
     DEFAULT_DEVICE_POLL_DELAY,
     DEFAULT_ENABLE_STATS_ENTITIES,
@@ -71,6 +72,21 @@ TO_REDACT: list[str] = [
     # Known integration secrets (entry.data)
     CONF_OAUTH_TOKEN,
     CONF_GOOGLE_EMAIL,
+    # The whole credential bundle, and the two keys that decrypt locations.
+    # entry.data carries the bundle between the config flow and the migration in
+    # async_setup_entry; if setup fails in between, it is still there when a user
+    # downloads diagnostics for that very failure.
+    DATA_SECRET_BUNDLE,
+    "scanned_data",
+    "shared_key",
+    "owner_key",
+    # FCM credential material carried inside the bundle. These are fixed key
+    # names, so exact matching is enough; the surrounding fcm_* diagnostics
+    # (status, receiver state, counters) are deliberately NOT redacted.
+    "fcm_credentials",
+    "fcm_creds",
+    "fcm_installation",
+    "fcm_registration",
     # Common token/email/credential shapes
     "aas_token",
     "access_token",
@@ -143,6 +159,20 @@ TO_REDACT: list[str] = [
     "coarse_latitude",
     "coarse_longitude",
 ]
+
+# Key names the token cache builds at run time, so they can never appear in a
+# fixed list: `adm_token_<e-mail>`, `android_id_<e-mail>` and friends. Exact
+# matching alone would pass every one of them through.
+TO_REDACT_PREFIXES: tuple[str, ...] = (
+    "aas_token",
+    "adm_token",
+    "spot_token",
+    "android_id",
+    "owner_key",
+    "shared_key",
+    "oauth_token",
+)
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -586,7 +616,12 @@ async def async_get_config_entry_diagnostics(
     elif OPT_GOOGLE_HOME_FILTER_KEYWORDS in effective_config_for_diag:
         effective_config_for_diag[OPT_GOOGLE_HOME_FILTER_KEYWORDS] = []
 
-    redacted_effective_config = async_redact_data(effective_config_for_diag, TO_REDACT)
+    # One numbering for both redaction passes below, so that `<account-1>` in
+    # `effective_config` and in the rest of the payload is the same account.
+    accounts: dict[str, str] = {}
+    redacted_effective_config = async_redact_data(
+        effective_config_for_diag, TO_REDACT, TO_REDACT_PREFIXES, accounts=accounts
+    )
 
     config_summary = {
         # Durations and numeric thresholds
@@ -781,6 +816,17 @@ async def async_get_config_entry_diagnostics(
 
     eik_cache_stats = get_eik_cache_stats()
 
+    # Provisional P-256 readings of crowdsourced reports, per device of this
+    # entry. The block carries no ID value (positional index only) and is meant
+    # to be posted to the feedback issue on its own.
+    # Imported locally like the EIK block above, for symmetry only: unlike
+    # decrypt_locations, the tracker module has no import cycle with this one.
+    from .NovaApi.ExecuteAction.LocateTracker.foreign_reading_tracker import (
+        get_foreign_reading_diagnostics,
+    )
+
+    foreign_report_readings = get_foreign_reading_diagnostics(entry.entry_id)
+
     # --- Assemble payload (without secrets) ---
     payload: dict[str, Any] = {
         "integration": integration_meta,
@@ -798,6 +844,7 @@ async def async_get_config_entry_diagnostics(
         },
         "concurrency": concurrency,
         "eik_cache": eik_cache_stats,
+        "foreign_report_readings": foreign_report_readings,
     }
     if crypto_info:
         payload["crypto"] = _crypto_block(crypto_info)
@@ -808,4 +855,4 @@ async def async_get_config_entry_diagnostics(
 
     # --- Final safety net: redact known secret-like keys anywhere in the payload ---
     # (We already avoided including secrets, but this keeps us safe against future extensions.)
-    return async_redact_data(payload, TO_REDACT)
+    return async_redact_data(payload, TO_REDACT, TO_REDACT_PREFIXES, accounts=accounts)

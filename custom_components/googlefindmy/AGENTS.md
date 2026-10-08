@@ -84,6 +84,14 @@ running decryption in an executor without the surrounding context will cause mul
 Handle `StaleOwnerKeyError` from the decryptor by logging and skipping the update instead of crashing the pipeline so key
 rotation can proceed without interrupting other accounts.
 
+### EID curve lookup for the decryption path
+
+The EID resolver registers `locked_curve_name` with `FOREIGN_READING_TRACKER.set_curve_provider` in `__post_init__` and
+removes it with `clear_curve_provider` in `stop()`. This is a deliberate exception to "avoid module-global singletons":
+the decryption path has no public route to `hass`, exactly as for the Nova cache provider above. Keep the lookup
+read-only on the current locks, keep `stop()` unregistering it, and let `FOREIGN_READING_TRACKER.reset()` drop it so
+tests stay isolated. Any failure of the lookup must fall back to `None`, which restores the behaviour without a lock.
+
 Normalize FCM canonic IDs before validation (for example, compare `response_canonic_id.lower()` to
 `canonic_device_id.lower()` and store the lowercase string on decrypted payloads) so tracker updates are not discarded due
 to server-provided hex casing differences.
