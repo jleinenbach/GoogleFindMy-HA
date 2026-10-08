@@ -13,7 +13,7 @@ from datetime import datetime, timedelta
 from html import escape
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlencode
+from urllib.parse import quote, urlencode
 
 from aiohttp import web
 from homeassistant.config_entries import ConfigEntry
@@ -1316,6 +1316,14 @@ class GoogleFindMyMapView(HomeAssistantView):
 
 # ------------------------------ Redirect View -------------------------------
 
+# Same-origin target of the redirect view, derived from the map view's route so
+# the two cannot drift apart. The device id is appended percent-encoded as one
+# path segment; the dot segments ``.`` and ``..`` are rejected before that,
+# because a browser resolves them even when encoded, so the redirect stays on
+# the map path of the current origin.
+_MAP_PATH_PREFIX = GoogleFindMyMapView.url.removesuffix("{device_id}")
+_DOT_SEGMENTS = frozenset({".", ".."})
+
 
 class GoogleFindMyMapRedirectView(HomeAssistantView):
     """View to redirect to appropriate map URL based on request origin."""
@@ -1344,10 +1352,21 @@ class GoogleFindMyMapRedirectView(HomeAssistantView):
                 "Bad Request", "Missing authentication token.", status=400
             )
 
+        # aiohttp decodes the path parameter, so ``%2F``, ``%3F`` or ``%2E%2E``
+        # arrive here as ``/``, ``?`` and ``..``.
+        if device_id in _DOT_SEGMENTS:
+            return _html_response("Bad Request", "Invalid device id.", status=400)
+
         # Preserve all query parameters (incl. start/end/accuracy/token) in the redirect.
         # Build a relative URL so the browser keeps the current origin automatically.
+        # The device id is percent-encoded as a single path segment: an id
+        # containing ``?``, ``#``, ``%`` or ``/`` must not change the target.
+        # String concatenation keeps the constant prefix visible to static
+        # analysis (CodeQL ``py/url-redirection`` does not model f-strings).
         query_dict = dict(request.query.items())
-        redirect_url = f"/api/googlefindmy/map/{device_id}?{urlencode(query_dict)}"
+        redirect_url = (
+            _MAP_PATH_PREFIX + quote(device_id, safe="") + "?" + urlencode(query_dict)
+        )
         _LOGGER.debug("Relative redirect prepared for device_id=%s", device_id)
 
         raise web.HTTPFound(location=redirect_url, headers=NO_STORE_HEADERS)
