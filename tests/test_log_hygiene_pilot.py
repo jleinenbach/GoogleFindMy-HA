@@ -115,11 +115,45 @@ def test_no_credential_wording_before_placeholder() -> None:
     assert offenders == []
 
 
+def _key_names_in(node: ast.AST) -> list[str]:
+    """Key-name references anywhere below ``node``, except as ``type(<name>)``."""
+    if (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "type"
+    ):
+        return []
+    if isinstance(node, ast.Name) and node.id in _KEY_NAMES:
+        return [node.id]
+    found: list[str] = []
+    for child in ast.iter_child_nodes(node):
+        found.extend(_key_names_in(child))
+    return found
+
+
 def test_no_cache_key_name_passed_to_logger() -> None:
     offenders = [
-        (call.lineno, arg.id)
+        (call.lineno, name)
         for call in _logger_calls()
-        for arg in call.args[1:]
-        if isinstance(arg, ast.Name) and arg.id in _KEY_NAMES
+        for part in [*call.args, *(kw.value for kw in call.keywords)]
+        for name in _key_names_in(part)
     ]
     assert offenders == []
+
+
+@pytest.mark.parametrize(
+    ("snippet", "expected"),
+    [
+        ('_LOGGER.error("bad key %s", name)', ["name"]),
+        ('_LOGGER.error("bad key %s", str(name))', ["name"]),
+        ('_LOGGER.error(f"bad key {key}")', ["key"]),
+        ('_LOGGER.error("bad", extra={"k": cache_key})', ["cache_key"]),
+        ('_LOGGER.error("value of type %s", type(name).__name__)', []),
+    ],
+)
+def test_key_name_detector(snippet: str, expected: list[str]) -> None:
+    call = ast.parse(snippet).body[0]
+    assert isinstance(call, ast.Expr)
+    assert isinstance(call.value, ast.Call)
+    parts = [*call.value.args, *(kw.value for kw in call.value.keywords)]
+    assert [n for part in parts for n in _key_names_in(part)] == expected
