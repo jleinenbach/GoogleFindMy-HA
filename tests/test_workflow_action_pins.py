@@ -16,6 +16,10 @@ reader cannot see (a flow mapping such as ``- {uses: ...}``, a value on the next
 line, a block scalar) are caught by ``test_text_reader_matches_yaml_parser``, which
 compares every ``uses`` value of the parsed YAML with what the reader found.
 
+Blind spot: the suite runs without network access, so the test checks the form of
+each pin, not that the tag in the comment points at the SHA. That association is
+verified when a pin is written (see the "Action pinning" bullet).
+
 Blind spot: only ``.github/workflows`` is read. Composite actions under
 ``.github/actions`` would carry their own ``uses:`` lines; that directory does not
 exist today, and the "Action pinning" bullet scopes the contract to workflows.
