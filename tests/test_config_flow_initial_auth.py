@@ -2116,3 +2116,62 @@ async def test_creating_the_entry_hands_the_preflight_delete_to_the_gate(
     assert [job.imported_digest for job in jobs] == [scanned.digest]
     # Staged, not executed: only the durability gate may remove the file.
     assert bundle.exists()
+
+
+@pytest.mark.asyncio
+async def test_manual_tokens_dead_token_reports_cannot_connect(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A manual token that fails the probe shows ``cannot_connect``.
+
+    The validation failure is logged with the candidate sources only, without
+    the address.
+    """
+
+    class _ConfigEntries(ConfigEntriesDomainUniqueIdLookupMixin):
+        def __init__(self) -> None:
+            self.entries: list[Any] = []
+            attach_config_entries_flow_manager(self)
+
+        def async_entries(self, domain: str) -> list[Any]:
+            assert domain == config_flow.DOMAIN
+            return list(self.entries)
+
+    hass = SimpleNamespace(config_entries=_ConfigEntries())
+
+    async def _no_working_token(*_args: Any, **_kwargs: Any) -> str | None:
+        return None
+
+    monkeypatch.setattr(config_flow, "async_pick_working_token", _no_working_token)
+
+    flow = config_flow.ConfigFlow()
+    flow.hass = hass  # type: ignore[assignment]
+    flow.context = {}
+    set_config_flow_unique_id(flow, None)
+
+    async def _set_unique_id(value: str, *, raise_on_progress: bool = False) -> None:
+        set_config_flow_unique_id(flow, value)
+
+    flow.async_set_unique_id = _set_unique_id  # type: ignore[assignment]
+
+    async def _never_create_entry(**_: Any) -> Mapping[str, Any]:
+        raise AssertionError("async_create_entry must not be called")
+
+    flow.async_create_entry = _never_create_entry  # type: ignore[assignment]
+
+    with caplog.at_level(logging.WARNING, logger=config_flow.__name__):
+        result = await flow.async_step_individual_tokens(
+            {
+                CONF_GOOGLE_EMAIL: "user@example.com",
+                CONF_OAUTH_TOKEN: "aas_et/DEAD_TOKEN_VALUE",
+            }
+        )
+
+    assert result.get("type") == "form"
+    assert result.get("errors") == {"base": "cannot_connect"}
+    failures = [
+        r for r in caplog.records if "Token validation failed" in r.getMessage()
+    ]
+    assert len(failures) == 1
+    assert failures[0].__dict__["candidate_sources"]
+    assert "email" not in failures[0].__dict__
