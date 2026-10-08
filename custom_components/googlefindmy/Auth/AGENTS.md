@@ -153,7 +153,7 @@ _LOGGER.debug(
     describe_exception(err),
     exception_origin(err),
     extra={
-        "token_source": source,
+        "token_source": _probe_source_label(source),
         "error_key": key,
     },
 )

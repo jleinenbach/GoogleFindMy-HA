@@ -29,6 +29,8 @@ masked address).
 Not covered: logger calls that receive the values through a helper other than
 the ones named here, a namespace held under another name, ``extra`` built in a
 variable before the call or from a list of pairs (``dict([...])``), an
+address masked into a local before the call (``masked = _mask_email_for_logs(...)``
+then ``extra={"account": masked}``), an
 ``extra`` key held in a constant, ``getattr`` with a constant's name as a
 string, and logger methods bound to an alias (``dbg = _LOGGER.debug``).
 """
@@ -185,6 +187,7 @@ def test_config_flow_puts_no_address_into_extra() -> None:
     # reaches the log a user downloads; CodeQL reported the masked address
     # read from the secrets bundle there all the same.
     offenders = []
+    seen = 0
     for path, _source, call in _logger_calls():
         if path.name != "config_flow.py":
             continue
@@ -196,8 +199,10 @@ def test_config_flow_puts_no_address_into_extra() -> None:
                         for inner in ast.walk(value)
                         if isinstance(inner, ast.expr)
                     )
+                    seen += 1
                     if key == "email" or masked:
                         offenders.append(f"{path.name}:{call.lineno}:{key}")
+    assert seen > 0
     assert offenders == []
 
 
