@@ -151,8 +151,8 @@ is_ip_literal() {
         *:::*) return 1 ;;
       esac
       # An empty group at either end must be caught HERE, on the raw string,
-      # not inferred from the split below: word splitting on IFS=":" drops a
-      # single trailing separator, and the counting loop skips empty fields, so
+      # not inferred from the split below: the counting loop skips empty fields
+      # (it has to, for the "::" run), so
       # ":1:2:3:4:5:6:7:8" and "1:2:3:4:5:6:7:8:" would both produce eight
       # non-empty groups and satisfy the "exactly eight" rule. A leading or
       # trailing ":" is legal only as part of a "::" run ("::1", "1::", "::").
@@ -189,13 +189,14 @@ is_ip_literal() {
       # Group count and width. Without compression exactly eight groups are
       # required; with it at most seven may be written out, since "::" stands
       # for one or more omitted groups.
-      local saved_ifs=$IFS group groups=0
-      local -a parts=()
-      IFS=:
-      # shellcheck disable=SC2206  # word splitting on IFS is exactly the intent
-      parts=($inner)
-      IFS=$saved_ifs
-      for group in ${parts[@]+"${parts[@]}"}; do
+      # The groups are cut off one at a time with parameter expansion instead of
+      # word splitting, so IFS is never touched. Empty fields (the "::" run and
+      # its edges) are skipped; the structure checks above already rejected
+      # every empty field that is not part of a "::" run.
+      local rest="$inner:" group groups=0
+      while [ -n "$rest" ]; do
+        group="${rest%%:*}"
+        rest="${rest#*:}"
         [ -n "$group" ] || continue
         [ "${#group}" -le 4 ] || return 1
         groups=$((groups + 1))
@@ -208,23 +209,24 @@ is_ip_literal() {
       return 0
       ;;
   esac
-  # Structure BEFORE splitting, for the same reason as in the IPv6 branch: word
-  # splitting on IFS="." drops a single trailing separator, so "1.2.3.4." would
-  # yield four clean octets and pass the count check. A leading dot, a trailing
-  # dot and an inner ".." all mean an empty octet and are rejected on the raw
-  # string, where the emptiness is still visible.
+  # Structure BEFORE splitting, on the raw string where an empty octet is still
+  # visible: a leading dot, a trailing dot and an inner ".." all mean an empty
+  # octet. The split below also rejects an empty field, so this guard and the
+  # loop each catch the class on their own.
   case "$1" in
     *[!0-9.]* | "" | *..* | .* | *.) return 1 ;;
   esac
-  local IFS=.
-  # shellcheck disable=SC2206  # word splitting on IFS is exactly the intent
-  local -a octets=($1)
-  [ "${#octets[@]}" -eq 4 ] || return 1
-  local octet
-  for octet in "${octets[@]}"; do
+  # Octets are cut off one at a time with parameter expansion instead of word
+  # splitting, so IFS is never touched.
+  local rest="$1." octet octets=0
+  while [ -n "$rest" ]; do
+    octet="${rest%%.*}"
+    rest="${rest#*.}"
     [ -n "$octet" ] || return 1
     [ "$octet" -le 255 ] 2>/dev/null || return 1
+    octets=$((octets + 1))
   done
+  [ "$octets" -eq 4 ] || return 1
   return 0
 }
 

@@ -53,6 +53,9 @@ jobs:
           .git/
           .mypy_cache/
           __pycache__/
+          # Vendored third-party code is updated by replacing it, never edited
+          # here; CodeQL excludes the same tree via `paths-ignore`.
+          custom_components/googlefindmy/vendor/
           IGNORE
 
       - name: Run Semgrep scan (JSON)

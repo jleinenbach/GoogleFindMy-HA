@@ -1773,10 +1773,10 @@ def test_login_sh_rejects_unbalanced_ipv6_brackets(tmp_path: Path) -> None:
     promise "exactly one pair" in both comment blocks would be untrue and the
     value would still reach docker as a malformed port bind.
 
-    The matrix also covers the empty-field class. ``is_ip_literal`` splits on a
-    non-whitespace ``IFS`` and then counts the fields, but that splitter drops a
-    single TRAILING separator and the counting loops skip empty fields, so the
-    token result cannot testify to the shape of the raw value: ``1.2.3.4.``,
+    The matrix also covers the empty-field class. ``is_ip_literal`` cuts the
+    value into fields with parameter expansion and counts them, and the IPv6
+    counting loop skips empty fields (it has to, for the ``::`` run), so the
+    field count cannot testify to the shape of the raw value: ``1.2.3.4.``,
     ``:1:2:3:4:5:6:7:8`` and ``1:2:3:4:5:6:7:8:`` all produce the exact token
     count of a well-formed address. The structure is therefore checked BEFORE
     the split, and the positive controls below pin that the legal leading and
@@ -1820,6 +1820,8 @@ def test_login_sh_rejects_unbalanced_ipv6_brackets(tmp_path: Path) -> None:
         ("12345::1", True),
         ("1:2:3:4:5:6:7:8:9", True),
         ("1:2:3:4:5:6:7", True),
+        ("1:2:3:4:5:6:7:12345", True),
+        ("1:2:3:4:5:6:7:abcd", False),
         # A compression run stands for at least one omitted group, so eight
         # written-out groups next to it are already one too many.
         ("1:2:3:4:5:6:7:8::", True),
@@ -1870,6 +1872,10 @@ def test_login_sh_rejects_unbalanced_ipv6_brackets(tmp_path: Path) -> None:
         ("0.0.0.0", False),
         ("127.0.0.1", False),
         ("255.255.255.255", False),
+        # Count and range of the octet loop.
+        ("1.2.3.4.5", True),
+        ("1.2.3", True),
+        ("1.2.3.256", True),
     ):
         proc = subprocess.run(
             ["bash", str(script), "--ip", value],
