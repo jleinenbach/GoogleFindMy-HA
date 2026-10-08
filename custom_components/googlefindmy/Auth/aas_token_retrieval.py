@@ -411,13 +411,19 @@ async def _generate_aas_token(*, cache: TokenCache) -> str:  # noqa: PLR0912, PL
     if oauth_token:
         reason = _disqualifies_oauth_for_exchange(oauth_token)
         if reason:
-            _LOGGER.warning(
-                # Fixed text instead of ``reason``: the negative filter has a
-                # single outcome today, and a value derived from the OAuth
-                # slot never reaches a log record.
-                "Ignoring the configured OAuth value: it looks like a JWT "
-                "(possibly an installation or ID token), not an OAuth token."
-            )
+            # Fixed text instead of ``reason``: the record carries no value
+            # derived from the OAuth slot. Name the JWT case only when it is
+            # the one that applied, so a new filter reason cannot be mislabelled.
+            if _looks_like_jwt(oauth_token):
+                _LOGGER.warning(
+                    "Ignoring the configured OAuth value: it looks like a JWT "
+                    "(possibly an installation or ID token), not an OAuth token."
+                )
+            else:
+                _LOGGER.warning(
+                    "Ignoring the configured OAuth value: the negative filter "
+                    "disqualifies it for the AAS exchange."
+                )
             oauth_token = None  # Force fallback path
 
     # 2) Fallback: scan ADM tokens if no explicit OAuth token exists or it was disqualified
@@ -558,7 +564,7 @@ async def async_get_aas_token(
                 if not retryable:
                     if retry_num > 0:
                         _LOGGER.error(
-                            "AAS exchange failed (retry %d/%d). No more retries. "
+                            "AAS retrieval failed (retry %d/%d). No more retries. "
                             "Error: %s",
                             retry_num,
                             max_retries,
@@ -566,7 +572,7 @@ async def async_get_aas_token(
                         )
                     else:
                         _LOGGER.error(
-                            "AAS exchange failed. Error: %s",
+                            "AAS retrieval failed. Error: %s",
                             describe_exception(exc),
                         )
                     break
@@ -574,12 +580,12 @@ async def async_get_aas_token(
                 sleep_s = backoff * (2**attempt)
                 if retry_num == 0:
                     _LOGGER.warning(
-                        "AAS exchange failed. Error: %s. Retrying...",
+                        "AAS retrieval failed. Error: %s. Retrying...",
                         describe_exception(exc),
                     )
                 else:
                     _LOGGER.warning(
-                        "AAS exchange failed (retry %d/%d). Error: %s. "
+                        "AAS retrieval failed (retry %d/%d). Error: %s. "
                         "Retrying in %.0fs...",
                         retry_num,
                         max_retries,

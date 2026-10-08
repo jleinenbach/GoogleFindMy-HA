@@ -987,7 +987,7 @@ async def test_async_get_aas_token_retry_records_withhold_producer_text(
             cache=cache, retries=1, backoff=0.0
         )
 
-    failed = [r for r in caplog.records if "exchange failed" in r.message]
+    failed = [r for r in caplog.records if "retrieval failed" in r.message]
     assert len(failed) >= 2
     for record in failed:
         assert "LEAKED" not in record.getMessage()

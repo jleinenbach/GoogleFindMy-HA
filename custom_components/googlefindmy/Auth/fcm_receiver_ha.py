@@ -1145,7 +1145,7 @@ class FcmReceiverHA:
             tokens_val = await cache.get("fcm_routing_tokens")
         except Exception as err:  # noqa: BLE001
             _LOGGER.debug(
-                "[entry=%s] Failed to load cached routing ids: %s",
+                "[entry=%s] Failed to load cached routing entries: %s",
                 entry_id,
                 describe_exception(err),
             )
@@ -2471,7 +2471,7 @@ class FcmReceiverHA:
                         await cache.set("fcm_routing_tokens", sorted(tokens))
                     except Exception as err:
                         _LOGGER.debug(
-                            "[entry=%s] Failed to flush pending routing ids: %s",
+                            "[entry=%s] Failed to flush pending routing entries: %s",
                             entry.entry_id,
                             describe_exception(err),
                         )
@@ -2516,7 +2516,7 @@ class FcmReceiverHA:
                                 self._update_token_routing(t, {entry.entry_id})
                 except Exception as err:
                     _LOGGER.debug(
-                        "[entry=%s] Failed to load persisted routing ids: %s",
+                        "[entry=%s] Failed to load persisted routing entries: %s",
                         entry.entry_id,
                         describe_exception(err),
                     )
@@ -2975,7 +2975,7 @@ class FcmReceiverHA:
                 await cache.set("fcm_routing_tokens", sorted(tokens))
             except Exception as err:
                 _LOGGER.debug(
-                    "Persisting the routing id failed for %s: %s",
+                    "Persisting the routing entry failed for %s: %s",
                     entry_id,
                     describe_exception(err),
                 )
@@ -2995,7 +2995,7 @@ class FcmReceiverHA:
                 await cache.set("fcm_routing_tokens", sorted(tokens))
             except Exception as err:
                 _LOGGER.debug(
-                    "Persisting the routing id failed for %s: %s",
+                    "Persisting the routing entry failed for %s: %s",
                     entry_id,
                     describe_exception(err),
                 )

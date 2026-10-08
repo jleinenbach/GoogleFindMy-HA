@@ -5,11 +5,14 @@ Two static checks walk every logger call in the package:
 
 * No format string carries credential wording (``api key``, ``secret``,
   ``credential``, ``token``, ``password``) in front of a ``%s`` on the first
-  source line of the literal. That is exactly what the Semgrep rule
+  source line of the literal. That covers every call the Semgrep rule
   ``python-logger-credential-disclosure`` matches (AGENTS.md, "Log hygiene for
-  scanners"), so a reworded message cannot slip back.
-* No logger call passes a credential-named constant such as
-  ``CONF_OAUTH_TOKEN``; CodeQL treats such names as sensitive data.
+  scanners"; a superset on the receiver side), so a reworded message cannot
+  slip back.
+* No logger call passes an upper-case constant with a credential word in its
+  name, such as ``CONF_OAUTH_TOKEN``; CodeQL treats such names as sensitive
+  data. Not covered: attribute access (``const.CONF_OAUTH_TOKEN``) and
+  lower-case variables, which CodeQL may also flag.
 
 A behavioural check pins that seeding the username cache logs the masked
 account, not the raw e-mail.
@@ -25,11 +28,14 @@ from typing import Any
 
 import pytest
 
-from custom_components.googlefindmy.Auth import adm_token_retrieval
+from custom_components.googlefindmy.Auth import aas_token_retrieval, adm_token_retrieval
+from custom_components.googlefindmy.Auth.username_provider import username_string
+from custom_components.googlefindmy.const import CONF_OAUTH_TOKEN
 
 _AUTH_DIR = Path(adm_token_retrieval.__file__).parent
 _SEMGREP_FORMAT = re.compile(r"(?i).*(api.key|secret|credential|token|password).*%s.*")
-# Semgrep searches the receiver text for "log" (``_LOGGER``, ``self.logger`` ...).
+# Receiver test: Semgrep anchors this regex at the start of the receiver text;
+# searching anywhere makes the mirror a superset (``client.logger`` counts here).
 _LOGGER_OBJECT = re.compile(r"(?i)(_logger|logger|self.logger|log)")
 _LOG_METHODS = frozenset(
     {"debug", "info", "warn", "warning", "error", "exception", "critical"}
@@ -107,6 +113,9 @@ class _Cache:
     async def set(self, name: str, value: Any) -> None:
         self.data[name] = value
 
+    async def all(self) -> dict[str, Any]:
+        return dict(self.data)
+
 
 @pytest.mark.asyncio
 async def test_username_seeding_logs_masked_account(
@@ -120,3 +129,53 @@ async def test_username_seeding_logs_masked_account(
     seeded = [r for r in caplog.records if "username cache" in r.getMessage()]
     assert seeded, "the seeding must still be reported"
     assert all(_EMAIL not in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("oauth_value", "reason_jwt", "expected"),
+    [
+        ("eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.sig", True, "looks like a JWT"),
+        ("plain-oauth-value", False, "negative filter disqualifies"),
+    ],
+)
+async def test_disqualified_oauth_value_is_described_not_logged(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    oauth_value: str,
+    reason_jwt: bool,
+    expected: str,
+) -> None:
+    """The warning names the applying case in fixed text, never the value.
+
+    The second case stands for a future filter reason other than the JWT
+    shape: the warning must not call it a JWT.
+    """
+    cache = _Cache()
+    await cache.set(CONF_OAUTH_TOKEN, oauth_value)
+    await cache.set(username_string, _EMAIL)
+    await cache.set(f"adm_token_{_EMAIL}", "fallback-oauth")
+    if not reason_jwt:
+        monkeypatch.setattr(
+            aas_token_retrieval,
+            "_disqualifies_oauth_for_exchange",
+            lambda token: "some other reason",
+        )
+
+    def fake_exchange(
+        username: str, oauth_token: str, android_id: int
+    ) -> dict[str, Any]:
+        assert oauth_token == "fallback-oauth"
+        return {"Token": "aas_et/NEW", "Email": username}
+
+    monkeypatch.setattr(aas_token_retrieval.gpsoauth, "exchange_token", fake_exchange)
+    with caplog.at_level(logging.WARNING, logger=aas_token_retrieval._LOGGER.name):
+        result = await aas_token_retrieval._generate_aas_token(cache=cache)  # type: ignore[arg-type]
+
+    assert result == "aas_et/NEW"
+    ignoring = [
+        r for r in caplog.records if "Ignoring the configured" in r.getMessage()
+    ]
+    assert len(ignoring) == 1
+    assert expected in ignoring[0].getMessage()
+    assert all(oauth_value not in r.getMessage() for r in caplog.records)

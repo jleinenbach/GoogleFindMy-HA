@@ -135,7 +135,7 @@ async def async_regenerate_fcm_token(
         on_cooldown, remaining = is_refresh_on_cooldown(entry_id, "fcm")
         if on_cooldown:
             _LOGGER.info(
-                "FCM token regeneration blocked: cooldown active (%.1fs remaining)",
+                "FCM re-registration blocked: cooldown active (%.1fs remaining)",
                 remaining,
             )
             return False
@@ -149,7 +149,7 @@ async def async_regenerate_fcm_token(
             bucket = hass.data.get(DOMAIN)
             if not bucket or not isinstance(bucket, dict):
                 _LOGGER.error(
-                    "FCM token regeneration failed: integration data not available"
+                    "FCM re-registration failed: integration data not available"
                 )
                 return False
 
@@ -221,7 +221,7 @@ async def async_regenerate_adm_token(
         on_cooldown, remaining = is_refresh_on_cooldown(entry_id, "adm")
         if on_cooldown:
             _LOGGER.info(
-                "ADM token regeneration blocked: cooldown active (%.1fs remaining)",
+                "ADM refresh blocked: cooldown active (%.1fs remaining)",
                 remaining,
             )
             return False
@@ -233,7 +233,7 @@ async def async_regenerate_adm_token(
         masked_user = _mask_email(user)
 
         if not user:
-            _LOGGER.error("ADM token regeneration failed: no username available")
+            _LOGGER.error("ADM refresh failed: no username available")
             return False
 
         _LOGGER.info(
