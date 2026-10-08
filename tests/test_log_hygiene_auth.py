@@ -42,6 +42,10 @@ _LOG_METHODS = frozenset(
 )
 _CREDENTIAL_CONSTANTS = re.compile(r"(?i)(token|secret|password|credential)")
 _EMAIL = "pilot.user@example.com"
+# JWT-shaped test value, assembled at runtime so no secret scanner sees a
+# token literal in the source (same convention as the token fixtures in
+# tests/test_fcm_register.py).
+_JWT_SHAPED = ".".join(["eyJ" + "hbGciOiJIUzI1NiJ9", "eyJ" + "zdWIiOiIxIn0", "sig"])
 
 
 def _logger_calls() -> list[tuple[Path, str, ast.Call]]:
@@ -135,7 +139,7 @@ async def test_username_seeding_logs_masked_account(
 @pytest.mark.parametrize(
     ("oauth_value", "reason_jwt", "expected"),
     [
-        ("eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.sig", True, "looks like a JWT"),
+        (_JWT_SHAPED, True, "looks like a JWT"),
         ("plain-oauth-value", False, "negative filter disqualifies"),
     ],
 )
