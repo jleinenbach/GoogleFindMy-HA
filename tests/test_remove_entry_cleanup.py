@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -264,6 +265,42 @@ def test_async_remove_entry_respects_retention_option(
 
     assert all(item["issue_id"] != issue_id for item in issue_registry_capture.created)
     assert (DOMAIN, issue_id) in issue_registry_capture.deleted
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("purge", [True, False])
+async def test_async_remove_entry_logs_no_entry_title(
+    monkeypatch: pytest.MonkeyPatch,
+    issue_registry_capture: Any,
+    _no_fcm_release: list[None],
+    caplog: pytest.LogCaptureFixture,
+    purge: bool,
+) -> None:
+    """The removal log lines name the entry by ID, never by its title.
+
+    The config flow sets the title to the account e-mail; both the purge and the
+    retention branch used to log it in clear text."""
+
+    monkeypatch.setattr(integration, "_unregister_instance", lambda _entry_id: None)
+
+    entry = make_config_entry(
+        entry_id="entry-remove",
+        title="pilot.user@example.invalid",
+    )
+    entry.options[OPT_DELETE_CACHES_ON_REMOVE] = purge
+    _coordinator, token_cache, _filter, runtime_data = _setup_runtime(entry)
+    hass = _HassStub(entry, runtime_data)
+
+    with caplog.at_level(logging.DEBUG, logger=integration._LOGGER.name):
+        await integration.async_remove_entry(hass, entry)
+
+    assert token_cache.store_removed is purge
+    messages = [record.getMessage() for record in caplog.records]
+    expected = "Removed the cache store" if purge else "Preserved the cache store"
+    assert any(
+        expected in message and "entry-remove" in message for message in messages
+    ), messages
+    assert all("example.invalid" not in message for message in messages), messages
 
 
 def test_async_remove_entry_fallback_store_remove(

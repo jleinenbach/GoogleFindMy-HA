@@ -15,6 +15,9 @@ Static checks:
 * Every key of ``OPTIONAL_CREDENTIAL_KEYS`` has its own fixed log name.
 * The credential seed passes ``account_label=_label_entry_for_log(entry)`` when
   it persists a bundle.
+* No logger call passes the title of a config entry (``entry.title``,
+  ``config_entry.title``, ``self._entry.title``) or a local derived from it: the
+  config flow sets the title to the account e-mail.
 
 Behavioural checks pin that persisting a secrets bundle logs no value of the
 bundle, no field name outside ``_LOGGABLE_BUNDLE_FIELDS`` (field names can embed
@@ -26,10 +29,19 @@ Not covered: ``_LOGGER.log(level, ...)`` calls and aliases such as ``log_fn``
 (the Semgrep rule does not match them either); the secret-name check covers
 ``_resolve_entry_email`` only, so ``secrets_data`` in the credential seed and in
 ``_async_save_secrets_data`` stays a CodeQL source by design, and the behavioural
-checks pin what those functions log. The key-flow check follows ``key`` through
-plain, annotated and walrus assignments inside the two functions; it does not
-follow it through containers (``d[k] = key``), attributes, calls other than
-``_optional_credential_label`` or loop targets, and it checks no other function.
+checks pin what those functions log. The key-flow check starts from the name
+``key`` (each checked function must bind it, so a rename fails the check instead
+of emptying it) and follows it into every name bound from an expression that
+reads it: plain, annotated, augmented and walrus assignments, ``for`` and
+comprehension targets, ``with ... as``, ``match`` capture patterns and, after a
+``raise`` that reads it, every ``except ... as`` name of the function. Reads stop
+only at comparisons and at ``_optional_credential_label``; calls such as
+``str(key)`` and an assignment to ``d[k]`` or ``obj.attr`` taint the names in
+the target. It does not follow values through other functions, through
+``nonlocal``/``global`` or through a container read back under another name,
+and it checks only the two functions. The title check sees attribute reads and
+assignments in the same function; a title passed through another function or a
+container is not followed.
 """
 
 from __future__ import annotations
@@ -178,28 +190,73 @@ def _names_read(node: ast.AST) -> set[str]:
     return names
 
 
+def _target_names(target: ast.AST) -> set[str]:
+    """Return every name in an assignment, loop or capture target. A ``match``
+    pattern binds only its capture names, not the class or value names in it."""
+    names: set[str] = set()
+    if not isinstance(target, ast.pattern):
+        names = {name.id for name in ast.walk(target) if isinstance(name, ast.Name)}
+    names |= {
+        pattern.name
+        for pattern in ast.walk(target)
+        if isinstance(pattern, ast.MatchAs | ast.MatchStar) and pattern.name
+    }
+    names |= {
+        pattern.rest
+        for pattern in ast.walk(target)
+        if isinstance(pattern, ast.MatchMapping) and pattern.rest
+    }
+    return names
+
+
 def _names_bound_from_key(function: ast.AST) -> set[str]:
-    """Return ``key`` and every local assigned from it, directly or through
-    another such local (fixed point over plain, annotated and walrus
-    assignments)."""
+    """Return ``key`` and every name bound from an expression that reads it,
+    directly or through another such name (fixed point; forms listed in the
+    module docstring)."""
     bound = {"key"}
+    handlers = [
+        handler.name
+        for handler in ast.walk(function)
+        if isinstance(handler, ast.ExceptHandler) and handler.name
+    ]
     while True:
         before = len(bound)
         for node in ast.walk(function):
-            if isinstance(node, ast.Assign | ast.AnnAssign | ast.NamedExpr):
-                value = node.value
-                targets = (
-                    node.targets if isinstance(node, ast.Assign) else [node.target]
+            pairs: list[tuple[ast.AST | None, list[ast.AST]]] = []
+            if isinstance(node, ast.Assign):
+                pairs.append((node.value, list(node.targets)))
+            elif isinstance(node, ast.AnnAssign | ast.AugAssign | ast.NamedExpr):
+                pairs.append((node.value, [node.target]))
+            elif isinstance(node, ast.For | ast.AsyncFor | ast.comprehension):
+                pairs.append((node.iter, [node.target]))
+            elif isinstance(node, ast.With | ast.AsyncWith):
+                pairs.extend(
+                    (item.context_expr, [item.optional_vars])
+                    for item in node.items
+                    if item.optional_vars is not None
                 )
+            elif isinstance(node, ast.Match):
+                pairs.append((node.subject, [case.pattern for case in node.cases]))
+            elif isinstance(node, ast.Raise) and node.exc is not None:
+                if _names_read(node.exc) & bound:
+                    bound |= set(handlers)
+            for value, targets in pairs:
                 if value is not None and _names_read(value) & bound:
                     for target in targets:
-                        bound |= {
-                            name.id
-                            for name in ast.walk(target)
-                            if isinstance(name, ast.Name)
-                        }
+                        bound |= _target_names(target)
         if len(bound) == before:
             return bound
+
+
+def _binds_key(function: ast.AST) -> bool:
+    """Return whether ``function`` binds the name ``key`` itself."""
+    stored = {
+        name.id
+        for name in ast.walk(function)
+        if isinstance(name, ast.Name) and isinstance(name.ctx, ast.Store)
+    }
+    arguments = {arg.arg for arg in ast.walk(function) if isinstance(arg, ast.arg)}
+    return "key" in stored | arguments
 
 
 def test_bundle_and_credential_keys_never_reach_a_log_argument() -> None:
@@ -225,6 +282,10 @@ def test_bundle_and_credential_keys_never_reach_a_log_argument() -> None:
     names = sorted(function.name for function in functions)
     assert "_async_save_secrets_data" in names, names
     assert len(names) >= 2, f"no caller of _optional_credential_label: {names}"
+    unseeded = [function.name for function in functions if not _binds_key(function)]
+    assert unseeded == [], (
+        f"rename the key variable back to 'key' or extend the check: {unseeded}"
+    )
     offenders = [
         f"{function.name}:{call.lineno}"
         for function in functions
@@ -241,6 +302,63 @@ def test_bundle_and_credential_keys_never_reach_a_log_argument() -> None:
     assert offenders == [], f"logger call passes a key-derived value: {offenders}"
 
 
+_ENTRY_OBJECT = re.compile(r"(^|\.)_?(config_)?entry$")
+
+
+def _reads_entry_title(node: ast.AST, bound: set[str]) -> bool:
+    return any(
+        (
+            isinstance(current, ast.Attribute)
+            and current.attr == "title"
+            and _ENTRY_OBJECT.search(ast.unparse(current.value)) is not None
+        )
+        or (isinstance(current, ast.Name) and current.id in bound)
+        for current in ast.walk(node)
+    )
+
+
+def test_no_logger_call_passes_a_config_entry_title() -> None:
+    """The config flow sets the entry title to the account e-mail, so no log
+    line may carry it, neither directly nor through a local such as
+    ``display_name = entry.title or entry.entry_id``."""
+    _source, tree = _module_tree()
+    offenders: list[str] = []
+    for function in ast.walk(tree):
+        if not isinstance(function, ast.FunctionDef | ast.AsyncFunctionDef):
+            continue
+        bound: set[str] = set()
+        while True:
+            before = len(bound)
+            for node in ast.walk(function):
+                if (
+                    isinstance(
+                        node, ast.Assign | ast.AnnAssign | ast.AugAssign | ast.NamedExpr
+                    )
+                    and node.value is not None
+                    and _reads_entry_title(node.value, bound)
+                ):
+                    targets = (
+                        node.targets if isinstance(node, ast.Assign) else [node.target]
+                    )
+                    for target in targets:
+                        bound |= _target_names(target)
+            if len(bound) == before:
+                break
+        offenders.extend(
+            f"{function.name}:{call.lineno}"
+            for call in ast.walk(function)
+            if isinstance(call, ast.Call)
+            and isinstance(call.func, ast.Attribute)
+            and call.func.attr in _LOG_METHODS
+            and _LOGGER_OBJECT.search(ast.unparse(call.func.value))
+            and any(
+                _reads_entry_title(arg, bound)
+                for arg in [*call.args, *(kw.value for kw in call.keywords)]
+            )
+        )
+    assert offenders == [], f"logger call passes a config entry title: {offenders}"
+
+
 def test_label_entry_for_log_masks_the_bundle_email() -> None:
     entry = make_config_entry(
         entry_id="entry-1",
@@ -250,6 +368,17 @@ def test_label_entry_for_log_masks_the_bundle_email() -> None:
     )
 
     assert integration_init._label_entry_for_log(entry) == f"p***@{_DOMAIN}"  # type: ignore[arg-type]
+
+
+def test_label_entry_for_log_uses_the_entry_id_for_an_address_without_at() -> None:
+    entry = make_config_entry(
+        entry_id="entry-3",
+        data={"google_email": "pilotuser"},
+        options={},
+        title=_EMAIL,
+    )
+
+    assert integration_init._label_entry_for_log(entry) == "entry-3"  # type: ignore[arg-type]
 
 
 @pytest.mark.parametrize(

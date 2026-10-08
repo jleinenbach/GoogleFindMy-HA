@@ -6666,7 +6666,7 @@ def _label_entry_for_log(entry: ConfigEntry) -> str:
     """Return a privacy-safe label for log messages referencing ``entry``."""
 
     email = _extract_email_from_entry(entry)
-    if email:
+    if email and "@" in email:
         return _mask_email_for_logs(email)
     # The entry title is never logged: the config flow sets it to the account
     # e-mail, and a renamed title is free text that may name a person. Masking
@@ -9585,7 +9585,7 @@ async def async_remove_config_entry_device(
                 "Marked device '%s' (%s) as ignored for entry '%s'",
                 name_to_store,
                 canonical_id,
-                entry.title,
+                _label_entry_for_log(entry),
             )
     except Exception as err:
         _LOGGER.debug("Persisting delete decision failed for %s: %s", canonical_id, err)
