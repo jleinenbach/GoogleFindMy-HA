@@ -1774,13 +1774,15 @@ def test_login_sh_rejects_unbalanced_ipv6_brackets(tmp_path: Path) -> None:
     value would still reach docker as a malformed port bind.
 
     The matrix also covers the empty-field class. ``is_ip_literal`` cuts the
-    value into fields with parameter expansion and counts them, and the IPv6
-    counting loop skips empty fields (it has to, for the ``::`` run), so the
-    field count cannot testify to the shape of the raw value: ``1.2.3.4.``,
-    ``:1:2:3:4:5:6:7:8`` and ``1:2:3:4:5:6:7:8:`` all produce the exact token
-    count of a well-formed address. The structure is therefore checked BEFORE
-    the split, and the positive controls below pin that the legal leading and
-    trailing colons of ``::1`` / ``1::`` / ``::`` survive that guard.
+    value into fields with parameter expansion and counts them. The IPv6
+    counting loop skips empty fields (it has to, for the ``::`` run), so its
+    group count cannot testify to the shape of the raw value:
+    ``:1:2:3:4:5:6:7:8`` and ``1:2:3:4:5:6:7:8:`` both yield the eight groups of
+    a well-formed address. The IPv6 structure is therefore checked BEFORE the
+    split, and the positive controls below pin that the legal leading and
+    trailing colons of ``::1`` / ``1::`` / ``::`` survive that guard. The IPv4
+    loop rejects an empty octet itself; the structure check before it is a
+    second guard for ``1.2.3.4.`` and its neighbours.
 
     This runs the real script, so it is a behaviour test, not a re-implementation.
     """
@@ -1891,6 +1893,29 @@ def test_login_sh_rejects_unbalanced_ipv6_brackets(tmp_path: Path) -> None:
             f"login.sh --ip {value!r}: rejected={rejected}, expected "
             f"{expected_reject} (rc={proc.returncode}, stderr={proc.stderr!r})"
         )
+
+
+def test_login_sh_never_reassigns_ifs() -> None:
+    """``login.sh`` must not change ``IFS`` except for the ``read`` prefix.
+
+    ``is_ip_literal`` used to split on a reassigned ``IFS``; it now cuts fields
+    with parameter expansion. Both forms give the same result, so the
+    behaviour test above cannot tell them apart, and Semgrep's
+    ``ifs-tampering`` rule is a ``WARNING``, which the Semgrep gate in
+    ``semgrep.yml`` does not fail on. This text check keeps the reassignment
+    from coming back. ``IFS= read`` only sets ``IFS`` for that one command and
+    is allowed.
+    """
+
+    script = _read("login.sh")
+    offending = [
+        f"{number}: {line.strip()}"
+        for number, line in enumerate(script.splitlines(), 1)
+        if not line.lstrip().startswith("#")
+        and re.search(r"(?<![A-Za-z0-9_])IFS=", line)
+        and not re.search(r"(?<![A-Za-z0-9_])IFS= read\b", line)
+    ]
+    assert not offending, f"login.sh reassigns IFS: {offending}"
 
 
 def test_login_cmd_validates_ipv6_structure_not_just_a_colon() -> None:

@@ -200,6 +200,9 @@ is_ip_literal() {
         [ -n "$group" ] || continue
         [ "${#group}" -le 4 ] || return 1
         groups=$((groups + 1))
+        # More than eight groups is never valid; stop early instead of cutting
+        # through an arbitrarily long value.
+        [ "$groups" -le 8 ] || return 1
       done
       if [ "$has_compression" -eq 1 ]; then
         [ "$groups" -le 7 ] || return 1
@@ -225,6 +228,7 @@ is_ip_literal() {
     [ -n "$octet" ] || return 1
     [ "$octet" -le 255 ] 2>/dev/null || return 1
     octets=$((octets + 1))
+    [ "$octets" -le 4 ] || return 1
   done
   [ "$octets" -eq 4 ] || return 1
   return 0
