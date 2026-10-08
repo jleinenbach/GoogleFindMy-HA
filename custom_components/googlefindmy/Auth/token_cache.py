@@ -217,7 +217,7 @@ class TokenCache:
         if not await self._async_store_contains_keys(frozenset(normalized_legacy)):
             _LOGGER.warning(
                 "googlefindmy: Keeping the legacy cache file %s because the merged "
-                "credentials for entry '%s' are not on disk; a restart will retry "
+                "cache data for entry '%s' is not on disk; a restart will retry "
                 "the migration.",
                 legacy_path,
                 self.entry_id,
@@ -418,9 +418,11 @@ class TokenCache:
                     self._per_key_locks.pop(name, None)
             else:
                 if not self._is_jsonable(normalized):
+                    # Log the value type, not the key: key names can embed the
+                    # account e-mail (per-account cache keys), so they are PII.
                     _LOGGER.error(
-                        "Value for key '%s' is not JSON-serializable; skipping save.",
-                        name,
+                        "Cache value of type %s is not JSON-serializable; skipping save.",
+                        type(normalized).__name__,
                     )
                     return
                 self._data[name] = normalized
@@ -506,10 +508,12 @@ class TokenCache:
             return False
 
     def _is_valid_snapshot(self) -> bool:
-        for key, val in self._data.items():
+        for val in self._data.values():
             if not self._is_jsonable(val):
+                # Value type only: key names can embed the account e-mail.
                 _LOGGER.error(
-                    "Snapshot contains non-JSON-serializable value for key '%s'", key
+                    "Snapshot contains a non-JSON-serializable value of type %s",
+                    type(val).__name__,
                 )
                 return False
         return True
@@ -552,7 +556,8 @@ class TokenCache:
         for key, value in raw.items():
             if not isinstance(key, str):
                 _LOGGER.debug(
-                    "Skipping non-string cache key from persisted data: %r", key
+                    "Skipping non-string cache key of type %s from persisted data",
+                    type(key).__name__,
                 )
                 continue
             coerced[key] = value
@@ -603,7 +608,7 @@ def _register_instance(entry_id: str, instance: TokenCache) -> None:
                 setattr(instance, "entry_id", entry_id)
             except Exception as err:  # noqa: BLE001 - defensive logging only
                 _LOGGER.debug(
-                    "Failed to correct TokenCache entry_id to registry key (%s at %s)",
+                    "Failed to correct cache entry_id to registry key (%s at %s)",
                     describe_exception(err),
                     exception_origin(err),
                 )
@@ -612,7 +617,7 @@ def _register_instance(entry_id: str, instance: TokenCache) -> None:
                 setattr(instance, "entry_id", entry_id)
             except Exception as err:  # noqa: BLE001 - defensive logging only
                 _LOGGER.debug(
-                    "Failed to assign registry entry_id to TokenCache instance (%s at %s)",
+                    "Failed to assign registry entry_id to cache instance (%s at %s)",
                     describe_exception(err),
                     exception_origin(err),
                 )
@@ -621,7 +626,7 @@ def _register_instance(entry_id: str, instance: TokenCache) -> None:
             setattr(instance, "entry_id", entry_id)
         except Exception as err:  # noqa: BLE001 - defensive logging only
             _LOGGER.debug(
-                "Failed to assign registry entry_id to TokenCache instance (%s at %s)",
+                "Failed to assign registry entry_id to cache instance (%s at %s)",
                 describe_exception(err),
                 exception_origin(err),
             )
@@ -764,7 +769,7 @@ def set_cached_value(name: str, value: Any | None) -> None:
         )
 
     if not _INSTANCES:
-        _LOGGER.warning("Cache not initialized; cannot set '%s'", name)
+        _LOGGER.warning("Cache not initialized; cannot store the value")
         return
 
     cache = _get_default_cache()
@@ -798,9 +803,7 @@ def get_cached_value_or_set(name: str, generator: Callable[[], Any]) -> Any:
         )
 
     if not _INSTANCES:
-        _LOGGER.warning(
-            "Cache not initialized; computing '%s' without storing persistently", name
-        )
+        _LOGGER.warning("Cache not initialized; computing the value without storing it")
         return generator()
 
     cache = _get_default_cache()
