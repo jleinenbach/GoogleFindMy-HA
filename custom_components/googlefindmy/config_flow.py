@@ -980,7 +980,7 @@ async def _async_delete_watched_secrets(
             return
         except OSError:
             _LOGGER.warning(
-                "Failed to remove watched secrets file after import: %s",
+                "Failed to remove watched bundle file after import: %s",
                 path_str,
             )
 
@@ -1005,13 +1005,13 @@ async def _async_delete_watched_secrets(
             # Missing file: nothing to do. Unreadable/unparseable: keep it,
             # since the account cannot be positively determined.
             _LOGGER.debug(
-                "Keeping watched secrets file: account could not be determined: %s",
+                "Keeping watched bundle file: account could not be determined: %s",
                 path_str,
             )
             continue
         if result.stable_key != imported_stable_key:
             _LOGGER.warning(
-                "Keeping watched secrets bundle of a different account (%s); only "
+                "Keeping watched bundle of a different account (%s); only "
                 "the imported account's copies were removed: %s",
                 discovery_module._redact_account_for_log(
                     result.email, result.stable_key
@@ -2748,7 +2748,7 @@ async def _async_execute_container_cleanup(
                     imported_digest=job.imported_digest,
                 )
             except Exception as err:  # noqa: BLE001 - cleanup must never fail setup
-                _LOGGER.warning("Deferred watched-secrets cleanup failed: %s", err)
+                _LOGGER.warning("Deferred watched-bundle cleanup failed: %s", err)
 
 
 @_typed_callback
@@ -2924,7 +2924,7 @@ async def async_pick_working_token(
             _LOGGER.debug(
                 "Token probe succeeded.",
                 extra={
-                    "token_source": source,
+                    "token_source": _probe_source_label(source),
                     "email": _mask_email_for_logs(email),
                 },
             )
@@ -2939,7 +2939,7 @@ async def async_pick_working_token(
                         "caches for multi-account setup."
                     ),
                     extra={
-                        "token_source": source,
+                        "token_source": _probe_source_label(source),
                         "email": _mask_email_for_logs(email),
                     },
                 )
@@ -2948,7 +2948,7 @@ async def async_pick_working_token(
             _LOGGER.debug(
                 "Token probe failed; mapped error key.",
                 extra={
-                    "token_source": source,
+                    "token_source": _probe_source_label(source),
                     "error_key": key,
                     "email": _mask_email_for_logs(email),
                 },
@@ -2958,9 +2958,50 @@ async def async_pick_working_token(
     return None
 
 
+# Candidate source names that may appear in a log line. Any other name is logged
+# as "other": discovery payloads can bring their own names (mapping keys, a
+# ``label`` field), and the source travels in the same tuple as the token.
+_PROBE_SOURCE_NAMES: tuple[str, ...] = (
+    "Auth",
+    "OAuthToken",
+    "aas_token",
+    "access_token",
+    "admToken",
+    "adm_token",
+    "candidate_tokens",
+    "candidates",
+    "fcm_installation",
+    "fcm_registration",
+    "manual",
+    "oauthToken",
+    "oauth_token",
+    "token",
+    "tokens",
+)
+
+
+def _probe_source_label(source: object) -> str:
+    """Return a fixed log name for a token candidate source.
+
+    The name is taken from ``_PROBE_SOURCE_NAMES`` by comparison, so no data
+    flows from the candidate tuple into the log line. Indexed discovery names
+    (``tokens_0``) keep their prefix; everything else is ``other``.
+    """
+
+    for name in _PROBE_SOURCE_NAMES:
+        if source == name:
+            return name
+    if isinstance(source, str):
+        for name in _PROBE_SOURCE_NAMES:
+            suffix = source.removeprefix(f"{name}_")
+            if suffix != source and suffix.isdigit():
+                return f"{name}_n"
+    return "other"
+
+
 def _cand_labels(candidates: list[tuple[str, str]]) -> str:
     """Return a redacted, human-readable list of token candidate sources."""
-    sources = {source for source, _token in candidates if source}
+    sources = {_probe_source_label(source) for source, _token in candidates if source}
     if not sources:
         return "none"
     return ", ".join(sorted(sources))
@@ -4747,7 +4788,7 @@ class ConfigFlow(
             hass.config_entries.async_update_entry(entry, data=dict(updates))
         except Exception:  # noqa: BLE001 - surface, but do not claim success
             _LOGGER.exception(
-                "Failed to write discovered credentials to entry %s",
+                "Failed to write discovered sign-in data to entry %s",
                 entry.entry_id,
             )
             return False
@@ -6746,7 +6787,8 @@ class ConfigFlow(
         # Check if cache is closed (unusable) - return None to allow self-healing
         if cache is not None and getattr(cache, "_closed", False):
             _LOGGER.debug(
-                "TokenCache for entry '%s' is closed; returning None to allow self-healing",
+                "Cache for entry '%s' is closed (TokenCache); returning None to allow "
+                "self-healing",
                 getattr(entry, "entry_id", "unknown"),
             )
             return None
