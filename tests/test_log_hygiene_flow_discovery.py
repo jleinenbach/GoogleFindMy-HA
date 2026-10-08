@@ -13,16 +13,21 @@ Static checks walk every logger call in both modules:
   ``candidate_sources`` value by ``_cand_labels``, in a dict literal or a
   ``dict(...)`` call: the source name travels in the same tuple as the token,
   and discovery payloads can bring their own names.
+* ``config_flow.py`` never passes ``source``, ``token``, ``candidates`` or
+  ``cands`` to a logger outside these two helpers.
 * ``discovery.py`` passes a namespace (``ns``, ``self._namespace``) to a
   logger only through ``_namespace_label``.
 
-Behavioural checks pin that the token probe and the candidate list carry no
-part of a token or an address, and that the account label for discovery logs
+Behavioural checks pin that the failure path of the token probe and the
+candidate list carry no part of a token or an address (the success and guard
+paths are covered only statically), and that the account label for discovery logs
 carries none either when no e-mail argument is given (with one, it is the
 masked address).
 Not covered: logger calls that receive the values through a helper other than
-the ones named here, a namespace held under another name, and ``extra`` built
-in a variable before the call.
+the ones named here, a namespace held under another name, ``extra`` built in a
+variable before the call or from a list of pairs (``dict([...])``), an
+``extra`` key held in a constant, ``getattr`` with a constant's name as a
+string, and logger methods bound to an alias (``dbg = _LOGGER.debug``).
 """
 
 from __future__ import annotations
@@ -82,7 +87,9 @@ def _format_index(call: ast.Call) -> int:
 
 
 def _call_values(call: ast.Call) -> list[ast.expr]:
-    start = _format_index(call) + 1
+    # The message argument is included: a message formatted before the call
+    # (f-string, ``%``, ``.format``, ``+``) carries its values in that argument.
+    start = _format_index(call)
     return [*call.args[start:], *(kw.value for kw in call.keywords)]
 
 
@@ -167,6 +174,34 @@ def test_candidate_sources_are_always_fixed_labels() -> None:
                     if not _is_call_to(value, _FIXED_EXTRA[key]):
                         offenders.append(f"{path.name}:{call.lineno}:{key}")
     assert seen == {"token_source": 3, "candidate_sources": 1}
+    assert offenders == []
+
+
+_CANDIDATE_NAMES = frozenset({"source", "token", "candidates", "cands"})
+
+
+def _raw_candidate_names(node: ast.AST) -> list[str]:
+    """Return candidate names used outside ``_probe_source_label``/``_cand_labels``."""
+
+    if any(_is_call_to(node, helper) for helper in _FIXED_EXTRA.values()):
+        return []
+    if isinstance(node, ast.Name) and node.id in _CANDIDATE_NAMES:
+        return [node.id]
+    return [
+        name
+        for child in ast.iter_child_nodes(node)
+        for name in _raw_candidate_names(child)
+    ]
+
+
+def test_config_flow_logs_candidates_only_through_labels() -> None:
+    offenders = [
+        f"{path.name}:{call.lineno}:{name}"
+        for path, _source, call in _logger_calls()
+        if path.name == "config_flow.py"
+        for arg in _call_values(call)
+        for name in _raw_candidate_names(arg)
+    ]
     assert offenders == []
 
 
