@@ -53,6 +53,11 @@ jobs:
           .git/
           .mypy_cache/
           __pycache__/
+          # Leaflet is an unmodified third-party copy (see its VERSION file) that
+          # is updated by replacing it, never edited here. Only this directory is
+          # excluded: vendor/openlocationcode is a modified extract and is our
+          # own code to scan.
+          custom_components/googlefindmy/vendor/leaflet/
           IGNORE
 
       - name: Run Semgrep scan (JSON)

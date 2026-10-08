@@ -954,7 +954,11 @@ artifacts remain exempt when explicitly flagged by repo configuration).
     `MEDIUM` and below are uploaded to the Security tab but do not fail the job.
     The gate only counts what the scan produced: a scan that itself fails
     (Semgrep exit code 2, e.g. registry unreachable) uploads an empty artifact
-    with a `::notice` and leaves the job green.
+    with a `::notice` and leaves the job green. The workflow writes its own
+    `.semgrepignore` at run time (a committed one would be overwritten); it
+    excludes `custom_components/googlefindmy/vendor/leaflet/`, an unmodified
+    third-party copy pinned by the hashes in its `VERSION` file.
+    `vendor/openlocationcode` is a modified extract and stays in the scan.
   * **CodeQL scans the full tree.** `.github/workflows/codeql.yml` (advanced
     setup) analyzes `python` and `actions` on the merge ref of every
     `pull_request`, on every `push` to `main`, and on a weekly `schedule`;
