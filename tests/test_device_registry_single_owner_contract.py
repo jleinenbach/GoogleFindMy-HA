@@ -154,14 +154,26 @@ def _snapshot(device: Any, symbols: dict[str, str]) -> dict[str, Any]:
     def sym(value: Any) -> Any:
         return symbols.get(value, value)
 
+    # Core 2026.10 reports every read of the two shims and raises when the
+    # caller is not an integration, which a test module never is.  Reading them
+    # from an integration frame takes the logging branch instead, so the shim
+    # values stay under comparison on every core: 2026.8/2026.9 do not report at
+    # all, and the double does not care who asks.
+    config_entries = recorder_helpers.call_from_integration_frame(
+        lambda: device.config_entries
+    )
+    config_entries_subentries = recorder_helpers.call_from_integration_frame(
+        lambda: device.config_entries_subentries
+    )
+
     return {
         "exists": True,
         "config_entry_id": sym(device.config_entry_id),
         "config_subentry_id": sym(device.config_subentry_id),
-        "config_entries": sorted(sym(item) for item in device.config_entries),
+        "config_entries": sorted(sym(item) for item in config_entries),
         "config_entries_subentries": {
             sym(entry): sorted((sym(sub) if sub is not None else None) for sub in subs)
-            for entry, subs in device.config_entries_subentries.items()
+            for entry, subs in config_entries_subentries.items()
         },
         "composite_device_id": device.composite_device_id,
     }

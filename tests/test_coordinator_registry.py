@@ -881,18 +881,22 @@ class TestExtractSubentryLinks:
         result = extract_subentry_links(device, "entry1")
         assert result == {"subentry1", "subentry2", None}
 
-    def test_handles_non_collection_raw_links(self) -> None:
-        """Should handle non-collection raw_links (not None, not Collection)."""
+    def test_handles_lone_string_raw_links(self) -> None:
+        """A lone string value is one link (``agents/typing_guidance/AGENTS.md``).
+
+        It used to fall through to ``config_subentry_id``; the local copies in
+        ``services.py`` and ``coordinator/registry.py`` already read it as one
+        link, and both now delegate to this helper.
+        """
         device = Mock()
         device.config_entries_subentries = {
-            "entry1": "string_not_collection",  # String is excluded by check
+            "entry1": "string_not_collection",
         }
         device.config_subentry_id = "fallback"
         device.config_entries = {"entry1"}
 
         result = extract_subentry_links(device, "entry1")
-        # Falls through to fallback since string is not valid Collection
-        assert result == {"fallback"}
+        assert result == {"string_not_collection"}
 
 
 class TestHasSubentryLink:

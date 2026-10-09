@@ -671,9 +671,10 @@ async def async_get_config_entry_diagnostics(
         # reports is *using* the registry-wide container as a mapping -- from
         # 2026.9 the ``devices`` attribute hands out a view whose container
         # methods each raise a ``report_usage``; touching the attribute alone
-        # does not, and neither does iterating it.  The set-shaped
+        # does not, and neither does iterating it.  On 2026.9 the set-shaped
         # ``DeviceEntry.config_entries`` is a plain property and reports
-        # nothing at all.  Measured on 2026.9.1, reports per expression: the
+        # nothing at all; from 2026.10 it reports too (``breaks_in_ha_version
+        # ="2027.10.0"``).  Measured on 2026.9.1, reports per expression: the
         # attribute 0, a container method on it 1, the removed expression 1,
         # the line below 0, ``DeviceEntry.config_entries`` 0.  The ownership
         # read goes with it because from 2026.8 a device belongs to exactly one
