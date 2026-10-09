@@ -184,6 +184,15 @@ so the address never reached `home-assistant.log` or a downloaded debug log.
 Add an account to `extra` only where a reader needs it, and never from a value
 read through the bundle (root `AGENTS.md`, "Log hygiene for scanners").
 
+The classified gpsoauth error code (`classify_gpsoauth_error`) stays out of
+`extra` in `_exchange_oauth_for_aas` for the same reason: the kind is already on
+the raised error (the `error_kind` attribute and `kind=` in its message), and
+`async_get_aas_token` logs it from there via `describe_exception`. CodeQL
+reported the copy in `extra` as sensitive data, although Home Assistant's log
+format does not print it. The literal kinds `auth_error` and `exchange_error` in
+the other two warnings of that function stay in `extra`; CodeQL reports no flow
+for them.
+
 Inside an `except` handler whose types are not all defined in this package
 (`except Exception as exc`, `except (OSError, ssl.SSLError) as err`, ...), pass
 the exception through `Auth.log_safety.describe_exception(exc)` instead of
