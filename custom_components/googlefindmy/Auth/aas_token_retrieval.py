@@ -348,6 +348,10 @@ async def _exchange_oauth_for_aas(
         # ``Error`` field is a documented closed set (``BadAuthentication``,
         # ``NeedsBrowser``, ...); only a documented code is exposed as
         # ``error_kind``, any other value is server text and is sized.
+        # The kind travels on the raised error (attribute and ``kind=``), and
+        # ``async_get_aas_token`` logs it from there via ``describe_exception``.
+        # It is not copied into ``extra``: Home Assistant's log format does not
+        # print ``extra`` fields, so the copy was redundant (Auth AGENTS.md).
         classified = classify_gpsoauth_error(error_value)
         error_kind = classified or "(none)"
         _LOGGER.warning(
@@ -356,7 +360,6 @@ async def _exchange_oauth_for_aas(
             key_count,
             extra={
                 "error_field_present": bool(error_value),
-                "error_kind": classified or None,
                 "details_present": bool(error_details),
                 "response_key_count": key_count,
                 "user": _mask_email_for_logs(username),

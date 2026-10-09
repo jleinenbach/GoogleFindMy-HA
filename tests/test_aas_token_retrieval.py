@@ -101,10 +101,16 @@ async def test_exchange_oauth_for_aas_missing_token_logs_warning(
 
     caplog.set_level(logging.WARNING, logger=aas_token_retrieval.__name__)
 
-    with pytest.raises(RuntimeError, match="Missing 'Token' in gpsoauth response"):
+    with pytest.raises(
+        RuntimeError, match="Missing 'Token' in gpsoauth response"
+    ) as exc_info:
         await aas_token_retrieval._exchange_oauth_for_aas(
             "user@example.com", "oauth-secret-value", 0xDEADBEEF
         )
+
+    # The kind travels on the raised error, not in the record's ``extra``.
+    assert getattr(exc_info.value, "error_kind") == "BadAuthentication"
+    assert "kind=BadAuthentication" in str(exc_info.value)
 
     warnings = [
         record
@@ -117,7 +123,7 @@ async def test_exchange_oauth_for_aas_missing_token_logs_warning(
     assert getattr(warning, "error_field_present") is True
     assert getattr(warning, "response_key_count") == 1
     assert getattr(warning, "user") == "u***@example.com"
-    assert getattr(warning, "error_kind") == "BadAuthentication"
+    assert not hasattr(warning, "error_kind")
 
 
 async def test_exchange_oauth_for_aas_undocumented_error_is_sized_not_copied(
@@ -149,7 +155,10 @@ async def test_exchange_oauth_for_aas_undocumented_error_is_sized_not_copied(
         for r in caplog.records
         if "gpsoauth response missing the AAS result field" in r.message
     )
-    assert getattr(warning, "error_kind") == f"UNRECOGNIZED ({len(echoed)} chars)"
+    assert (
+        getattr(exc_info.value, "error_kind") == f"UNRECOGNIZED ({len(echoed)} chars)"
+    )
+    assert not hasattr(warning, "error_kind")
     everything = "\n".join(
         f"{r.getMessage()} {getattr(r, 'error_kind', '')}" for r in caplog.records
     )
