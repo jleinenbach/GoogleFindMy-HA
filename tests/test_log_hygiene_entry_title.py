@@ -16,7 +16,7 @@ check reports a logger argument that
   reads a local bound from such a read by an assignment, a ``for`` or a
   ``with ... as`` target, in the same scope or an enclosing one that the
   nested scope does not shadow (a comprehension target shadows inside the
-  comprehension);
+  comprehension; a method does not see its class body);
 * formats an entry as a whole: the argument itself, ``str(<entry>)``,
   ``repr(<entry>)`` or an f-string field, because ``ConfigEntry.__repr__``
   carries the title.
@@ -138,6 +138,15 @@ _FLAGGED = {
     "lambda_closure": (
         "def f(entry):\n    t = entry.title\n    return lambda: _LOGGER.info('%s', t)\n"
     ),
+    "method_skips_class_body": (
+        "def f(entry):\n"
+        "    t = entry.title\n"
+        "    class C:\n"
+        "        t = 'safe'\n"
+        "        def m(self):\n"
+        "            _LOGGER.info('%s', t)\n"
+        "    return C\n"
+    ),
     "closure": (
         "def f(entry):\n"
         "    t = entry.title\n"
@@ -213,6 +222,23 @@ _NOT_FLAGGED = {
         "def f(entry):\n"
         "    t = entry.title\n"
         "    return t, lambda t: _LOGGER.info('%s', t)\n"
+    ),
+    # A class body that rebinds the name shadows the outer title in the body.
+    "class_body_shadowing": (
+        "def f(entry):\n"
+        "    t = entry.title\n"
+        "    class C:\n"
+        "        t = 'safe'\n"
+        "        _LOGGER.info('%s', t)\n"
+        "    return C, t\n"
+    ),
+    # A parameter shadows a logger alias of the enclosing scope.
+    "alias_shadowed_by_parameter": (
+        "def f(entry):\n"
+        "    log_fn = _LOGGER.debug\n"
+        "    def g(log_fn):\n"
+        "        log_fn(entry.title)\n"
+        "    return g\n"
     ),
     # An alias bound in one function is not visible in a sibling function.
     "alias_in_sibling_scope": (

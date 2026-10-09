@@ -483,7 +483,8 @@ def entry_title_offenders(tree: ast.AST) -> list[tuple[str, int, str]]:
 
     Each function, lambda, class body and the module body is one scope; a nested scope
     sees the title locals and logger aliases of the scopes around it, except
-    names it binds itself (``_local_names``). A logger
+    names it binds itself (``_local_names``); a class body is skipped on the
+    way into its methods, as in Python. A logger
     call is ``<logger>.<method>(...)``, ``getattr(<logger>, name)(...)`` or a
     call through a name bound to one (``log_fn = _LOGGER.debug if quiet else
     _LOGGER.warning``). Names are bound through assignments, ``for`` and
@@ -502,10 +503,12 @@ def entry_title_offenders(tree: ast.AST) -> list[tuple[str, int, str]]:
             if isinstance(node, _SCOPE)
         )
     while pending:
-        scope, outer_bound, outer_aliases = pending.pop()
+        # ``visible_*``: what the enclosing scopes offer; the scope's own
+        # bindings shadow it (``_local_names``).
+        scope, visible_bound, visible_aliases = pending.pop()
         nodes = _scope_nodes(scope)
-        aliases = set(outer_aliases)
-        bound = set(outer_bound)
+        aliases = set(visible_aliases - _local_names(scope))
+        bound = set(visible_bound - _local_names(scope))
         while True:
             before = len(bound) + len(aliases)
             for node in nodes:
@@ -534,15 +537,14 @@ def entry_title_offenders(tree: ast.AST) -> list[tuple[str, int, str]]:
                 for arg in arguments
                 for form in _entry_object_args(arg)
             )
-        pending.extend(
-            (
-                node,
-                frozenset(bound - _local_names(node)),
-                frozenset(aliases - _local_names(node)),
-            )
-            for node in nodes
-            if isinstance(node, _SCOPE)
+        # Methods do not see the class namespace: a class body passes on what
+        # it was offered, not its own bindings.
+        offered = (
+            (visible_bound, visible_aliases)
+            if isinstance(scope, ast.ClassDef)
+            else (frozenset(bound), frozenset(aliases))
         )
+        pending.extend((node, *offered) for node in nodes if isinstance(node, _SCOPE))
     return offenders
 
 
