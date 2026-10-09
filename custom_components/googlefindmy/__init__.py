@@ -4350,16 +4350,13 @@ class EntityRecoveryManager:
             platform = getattr(entry, "domain", None)
             if not isinstance(platform, str):
                 continue
-            owner = getattr(
-                entry,
-                "integration_domain",
-                getattr(entry, "platform", None),
-            )
+            # ``RegistryEntry.platform`` names the integration that owns the
+            # entity on every supported core; ``RegistryEntry`` has no
+            # ``integration_domain`` field.
+            owner = getattr(entry, "platform", None)
             if owner is None:
-                # Home Assistant 2025.10+ exposes ``integration_domain`` on entity
-                # registry entries while older cores only expose ``platform``.
-                # Falling back to ``DOMAIN`` keeps legacy builds compatible and
-                # documents why both attributes remain supported during recovery.
+                # The entries are already scoped to this config entry, so a
+                # registry entry without ``platform`` (partial doubles) is ours.
                 owner = DOMAIN
             if owner != DOMAIN:
                 continue
