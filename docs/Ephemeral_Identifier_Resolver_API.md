@@ -282,6 +282,17 @@ invalidate the cached identity key on its own. The path asks
 it starts and removes it in `stop()`. Without a lock, or when the lookup fails,
 such a report still counts as an authentication failure.
 
+For the FMDN finder the resolver keeps, in memory only, the last sighting each
+lookup match confirmed: `GoogleFindMyEIDResolver.last_confirmed_sighting(registry_id)`
+returns a `ConfirmedSighting` with the variant and the window counter of the
+EID the device advertised (aligned to the 1024 s rotation window) and the
+wall-clock second of the sighting, or `None`. It is an observation, not a
+prediction: the finder encrypts its report to that EID and sends the sighting
+time, and the owner resolves the counter over the recent past and near future.
+A late advertisement of an older window does not replace a newer window seen
+at most one period earlier; matches of the heuristic phone path record no
+sighting. The method is not part of `GoogleFindMyEIDResolverProtocol`.
+
 The resolver also records both forward and reversed advertisements so scanners do not need to normalize byte order.
 
 #### 4. EID Derivation Algorithm

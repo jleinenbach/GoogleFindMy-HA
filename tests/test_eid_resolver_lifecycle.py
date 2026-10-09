@@ -10,6 +10,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from custom_components.googlefindmy.eid_resolver import (
+    ConfirmedSighting,
     EIDGenerationLock,
     EidVariant,
     GoogleFindMyEIDResolver,
@@ -63,6 +64,7 @@ def _build_resolver() -> GoogleFindMyEIDResolver:
     resolver._known_timebases = {}
     resolver._decryption_status = {}
     resolver._last_lock_confirmation = {}
+    resolver._confirmed_sightings = {}
     resolver._provisioning_warn_at = {}
     resolver._truncated_frame_log_at = {}
     resolver._refresh_lock = asyncio.Lock()
@@ -347,70 +349,31 @@ def test_prepare_work_item_legacy_discard_schedules_no_save() -> None:
     save.assert_not_called()
 
 
-# --- locked_variant_value(): the finder's view of a lock -------------------
-
-
-@pytest.mark.asyncio
-async def test_locked_variant_value_reads_locks_loaded_from_storage() -> None:
-    """A lock restored by ``_async_load_locks`` is reported by its variant."""
-    resolver = _build_resolver()
-    resolver._locks = {}
-    resolver._persisted_locks = {}
-    stored = EIDGenerationLock(
-        device_id="device-2",
-        canonical_id="canonical-2",
-        variant=EidVariant.SPEC_P256_X32_BE.value,
-        advertisement_reversed=False,
-        eid_length=32,
-    ).to_dict()
-
-    async def _load() -> list[dict[str, object]]:
-        return [stored]
-
-    resolver._store = SimpleNamespace(async_load=_load)
-    await resolver._async_load_locks()
-
-    assert resolver._persisted_locks == {}
-    assert resolver.locked_variant_value("device-2") == "spec_p256_x32_be"
-    assert resolver.locked_variant_value("device-1") is None
-
-
-def test_locked_variant_value_returns_an_unknown_value_unchanged() -> None:
-    """The stored string is returned as is; the caller decides what it means."""
-    resolver = _build_resolver()
-    resolver._locks["device-1"].variant = "no_such_variant"
-
-    assert resolver.locked_variant_value("device-1") == "no_such_variant"
-
-
-def test_locked_variant_value_follows_clear_and_stop() -> None:
-    """Clearing one lock or stopping the resolver takes effect at once."""
-    resolver = _build_resolver()
-    assert resolver.locked_variant_value("device-1") == "modern_p256_x32_be"
-
-    resolver._clear_lock_state("device-1")
-    assert resolver.locked_variant_value("device-1") is None
-
-    resolver = _build_resolver()
-    resolver.stop()
-    assert resolver.locked_variant_value("device-1") is None
-
-
-# --- encryption_counter: newest match, then the lock projection ------------
+# --- last_confirmed_sighting(): the observation the finder reports --------
 
 _PERIOD = 1024
+_T = 1_700_000_000
+_LEGACY = EidVariant.LEGACY_SECP160R1_X20_BE
 
 
 def _matched_resolver() -> GoogleFindMyEIDResolver:
-    """Resolver with two lookup EIDs for ``dev-m`` in windows 7 and 9."""
+    """Resolver with lookup EIDs for ``dev-m`` in windows 7 and 9.
+
+    Marker ``0x73`` is also window 7, but advertised by two devices that
+    share the tracker (``dev-m`` and ``dev-n``).
+    """
     from tests.test_ble_battery_sensor import _make_resolver, _match
 
     resolver = _make_resolver()
-    for marker, window in ((0x71, 7), (0x72, 9)):
+    for marker, window, devices in (
+        (0x71, 7, ("dev-m",)),
+        (0x72, 9, ("dev-m",)),
+        (0x73, 7, ("dev-m", "dev-n")),
+    ):
         eid = bytes([marker]) * 20
-        resolver._lookup[eid] = [_match("dev-m")]
+        resolver._lookup[eid] = [_match(device) for device in devices]
         resolver._lookup_metadata[eid] = {
-            "variant": EidVariant.LEGACY_SECP160R1_X20_BE.value,
+            "variant": _LEGACY.value,
             "rotation_timestamp": window * _PERIOD,
             "timestamp_basis": "pair_date",
         }
@@ -431,7 +394,7 @@ def _see(
     """
     from tests.test_ble_battery_sensor import _service_data_payload
 
-    observed = float(at - 1_700_000_000 + 50_000) if monotonic is None else monotonic
+    observed = float(at - _T + 50_000) if monotonic is None else monotonic
     # Delivered right when seen: _observation_clock then dates it at ``at``.
     with (
         patch("time.time", return_value=float(at)),
@@ -442,153 +405,205 @@ def _see(
         )
 
 
-def test_encryption_counter_is_none_without_match_or_timed_lock() -> None:
-    """No match and a lock without rotation timestamp give no counter."""
-    resolver = _build_resolver()  # its lock has no rotation_timestamp
-
-    assert resolver.encryption_counter("device-1", now=1_700_000_000) is None
-    assert resolver.encryption_counter("unknown", now=1_700_000_000) is None
+def _window(resolver: GoogleFindMyEIDResolver, device: str = "dev-m") -> int | None:
+    sighting = resolver.last_confirmed_sighting(device)
+    return None if sighting is None else sighting.window_counter // _PERIOD
 
 
-def test_encryption_counter_projects_the_lock_by_whole_periods() -> None:
-    """Without a match: rotation timestamp plus whole periods since creation."""
-    resolver = _build_resolver()
-    lock = resolver._locks["device-1"]
-    lock.rotation_timestamp = 40 * _PERIOD
-    lock.created_at = 1_700_000_000
-
-    assert resolver.encryption_counter(
-        "device-1", now=1_700_000_000 + 2 * _PERIOD + 5
-    ) == (42 * _PERIOD, "lock")
-    # A clock behind the lock creation does not move the counter backwards.
-    assert resolver.encryption_counter("device-1", now=1_699_000_000) == (
-        40 * _PERIOD,
-        "lock",
-    )
-
-
-def test_encryption_counter_follows_the_newest_match_not_the_lock() -> None:
-    """The lock keeps its first window; the counter follows later matches."""
+def test_sighting_records_variant_window_and_time() -> None:
+    """A match records what the device advertised and when it was seen."""
     resolver = _matched_resolver()
-    _see(resolver, 0x71, 1_700_000_000)
-    _see(resolver, 0x72, 1_700_000_100)
+    assert resolver.last_confirmed_sighting("dev-m") is None
 
-    assert resolver._locks["dev-m"].rotation_timestamp == 7 * _PERIOD
-    assert resolver.encryption_counter("dev-m", now=1_700_000_100) == (
-        9 * _PERIOD,
-        "last_match",
-    )
-    assert resolver.encryption_counter("dev-m", now=1_700_000_100 + 3 * _PERIOD) == (
-        12 * _PERIOD,
-        "last_match",
+    _see(resolver, 0x71, _T + 5)
+
+    assert resolver.last_confirmed_sighting("dev-m") == ConfirmedSighting(
+        variant=_LEGACY, window_counter=7 * _PERIOD, observed_at=_T + 5
     )
 
 
-def test_encryption_counter_advances_from_the_first_sighting_of_a_window() -> None:
-    """A later sighting of the same window does not delay the rollover.
+def test_sighting_aligns_the_window_timestamp() -> None:
+    """``lock_tracking`` windows need not be aligned; the counter is."""
+    resolver = _build_resolver()
+    resolver._note_confirmed_sighting(
+        "device-1",
+        {"variant": _LEGACY.value, "rotation_timestamp": 7 * _PERIOD + 256},
+        observed_at=_T,
+    )
 
-    Seen 3 s and 900 s into window 7: one period after the first sighting the
-    counter is window 8, not 900 s later.
+    sighting = resolver.last_confirmed_sighting("device-1")
+    assert sighting is not None
+    assert sighting.window_counter == 7 * _PERIOD
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        {"variant": "no_such_variant", "rotation_timestamp": 7 * _PERIOD},
+        {"variant": None, "rotation_timestamp": 7 * _PERIOD},
+        {"variant": 7, "rotation_timestamp": 7 * _PERIOD},
+        {"rotation_timestamp": 7 * _PERIOD},
+        {"variant": "legacy_secp160r1_x20_be", "rotation_timestamp": True},
+        {"variant": "legacy_secp160r1_x20_be", "rotation_timestamp": -_PERIOD},
+        {"variant": "legacy_secp160r1_x20_be", "rotation_timestamp": 2**32},
+        {"variant": "legacy_secp160r1_x20_be", "rotation_timestamp": 7.0 * _PERIOD},
+        {"variant": "legacy_secp160r1_x20_be"},
+    ],
+    ids=[
+        "unknown_variant",
+        "variant_none",
+        "variant_not_str",
+        "variant_missing",
+        "counter_bool",
+        "counter_negative",
+        "counter_beyond_u32",
+        "counter_float",
+        "counter_missing",
+    ],
+)
+def test_sighting_with_invalid_metadata_records_nothing(
+    metadata: dict[str, object],
+) -> None:
+    """Never raises, never records a sighting it cannot vouch for."""
+    resolver = _build_resolver()
+    resolver._note_confirmed_sighting("device-1", metadata, observed_at=_T)
+
+    assert resolver.last_confirmed_sighting("device-1") is None
+
+
+def test_sighting_accepts_the_largest_u32_counter() -> None:
+    """The upper bound is inclusive: ``FHNA_COUNTER_MASK`` itself is valid."""
+    resolver = _build_resolver()
+    resolver._note_confirmed_sighting(
+        "device-1",
+        {"variant": _LEGACY.value, "rotation_timestamp": 2**32 - 1},
+        observed_at=_T,
+    )
+
+    sighting = resolver.last_confirmed_sighting("device-1")
+    assert sighting is not None
+    assert sighting.window_counter == 2**32 - _PERIOD
+
+
+def test_newer_window_replaces_the_sighting() -> None:
+    resolver = _matched_resolver()
+    _see(resolver, 0x71, _T)
+    _see(resolver, 0x72, _T + 100)
+
+    assert _window(resolver) == 9
+
+
+def test_older_window_delivered_late_keeps_the_newer_one() -> None:
+    """Bermuda dates an advertisement without scanner stamp "now".
+
+    Such a late advertisement of window 7 is newer on the monotonic clock than
+    the sighting of window 9 fifty seconds earlier, but carries the older
+    window; the sighting stays on window 9.
     """
     resolver = _matched_resolver()
-    _see(resolver, 0x71, 1_700_000_003)
-    _see(resolver, 0x71, 1_700_000_900)
+    _see(resolver, 0x72, _T)
+    _see(resolver, 0x71, _T + 50)
 
-    assert resolver.encryption_counter("dev-m", now=1_700_000_003 + _PERIOD + 10) == (
-        8 * _PERIOD,
-        "last_match",
+    assert resolver.last_confirmed_sighting("dev-m") == ConfirmedSighting(
+        variant=_LEGACY, window_counter=9 * _PERIOD, observed_at=_T
     )
 
 
 @pytest.mark.parametrize(
-    ("second_wall", "second_monotonic"),
-    [
-        (1_700_005_000, 50_010.0),  # wall clock stepped forward
-        (1_700_007_203, 57_200.0),  # device clock stood still for two hours
-    ],
-    ids=["wall_clock_forward", "device_clock_stood_still"],
+    ("delay", "window"),
+    [(_PERIOD, 9), (_PERIOD + 1, 7)],
+    ids=["within_one_period", "after_one_period"],
 )
-def test_encryption_counter_stays_on_a_window_seen_again(
-    second_wall: int, second_monotonic: float
+def test_smaller_window_replaces_only_after_one_period(delay: int, window: int) -> None:
+    """After more than one period a smaller counter is a restarted device."""
+    resolver = _matched_resolver()
+    _see(resolver, 0x72, _T)
+    _see(resolver, 0x71, _T + delay)
+
+    assert _window(resolver) == window
+
+
+def test_same_window_takes_the_newer_sighting_time() -> None:
+    resolver = _matched_resolver()
+    _see(resolver, 0x71, _T)
+    _see(resolver, 0x71, _T + 500)
+
+    sighting = resolver.last_confirmed_sighting("dev-m")
+    assert sighting is not None
+    assert sighting.observed_at == _T + 500
+
+
+def test_wall_clock_stepped_back_does_not_freeze_the_sighting() -> None:
+    """Newer on the monotonic clock wins, even with an earlier wall time."""
+    resolver = _matched_resolver()
+    _see(resolver, 0x71, _T, monotonic=50_000.0)
+    _see(resolver, 0x71, _T - 5_000, monotonic=50_010.0)
+
+    sighting = resolver.last_confirmed_sighting("dev-m")
+    assert sighting is not None
+    assert sighting.observed_at == _T - 5_000
+
+
+@pytest.mark.parametrize(
+    ("replay_wall", "replay_monotonic"),
+    [(_T + 100, 50_000.0), (_T + 100 - 2_000, 48_000.0)],
+    ids=["same_wall_time", "more_than_a_period_older"],
+)
+def test_replayed_older_sighting_is_ignored(
+    replay_wall: int, replay_monotonic: float
 ) -> None:
-    """A sighting projects to the window it shows.
+    """Older on the monotonic clock: a replay, not a new observation.
 
-    Window 7 is seen again a period or more after its first sighting; the
-    counter at that moment is window 7, not a window the device has not
-    reached.
+    A replay more than one period older carries a smaller counter at a wall
+    time more than one period away; without the monotonic order it would look
+    like a device that restarted its counter.
     """
     resolver = _matched_resolver()
-    _see(resolver, 0x71, 1_700_000_003, monotonic=50_000.0)
-    _see(resolver, 0x71, second_wall, monotonic=second_monotonic)
+    _see(resolver, 0x72, _T + 100, monotonic=50_100.0)
+    _see(resolver, 0x71, replay_wall, monotonic=replay_monotonic)
 
-    assert resolver.encryption_counter("dev-m", now=second_wall) == (
-        7 * _PERIOD,
-        "last_match",
+    assert resolver.last_confirmed_sighting("dev-m") == ConfirmedSighting(
+        variant=_LEGACY, window_counter=9 * _PERIOD, observed_at=_T + 100
     )
 
 
-def test_encryption_counter_restarts_the_window_after_a_backward_wall_step() -> None:
-    """After a backward step the window is timed from the new sighting.
-
-    Without that, the counter would stay on window 7 for the size of the step
-    beyond one period.
-    """
+def test_shared_tracker_records_a_sighting_per_device() -> None:
     resolver = _matched_resolver()
-    _see(resolver, 0x71, 1_700_000_003, monotonic=50_000.0)
-    _see(resolver, 0x71, 1_699_995_000, monotonic=50_010.0)
+    _see(resolver, 0x73, _T)
 
-    assert resolver.encryption_counter("dev-m", now=1_699_995_000 + _PERIOD + 5) == (
-        8 * _PERIOD,
-        "last_match",
-    )
+    assert _window(resolver, "dev-m") == 7
+    assert _window(resolver, "dev-n") == 7
 
 
-def test_encryption_counter_ignores_an_older_replayed_match() -> None:
-    """A replay, older on the monotonic clock, keeps the newer window.
+def test_heuristic_match_records_no_sighting() -> None:
+    """Phones found by the heuristic path have no lookup window to report."""
+    from tests.test_ble_battery_sensor import _match, _service_data_payload
 
-    The replayed sighting carries an earlier time on the monotonic clock; that
-    clock orders the sightings within this process.
-    """
     resolver = _matched_resolver()
-    _see(resolver, 0x72, 1_700_000_100, monotonic=50_100.0)
-    _see(resolver, 0x71, 1_700_000_100, monotonic=50_000.0)  # replayed, older
+    with (
+        patch.object(
+            GoogleFindMyEIDResolver, "_heuristic_resolve", return_value=_match("dev-m")
+        ),
+        patch("time.time", return_value=float(_T)),
+    ):
+        assert resolver.resolve_eid(_service_data_payload(b"\x7f" * 20, 0))
 
-    assert resolver.encryption_counter("dev-m", now=1_700_000_100) == (
-        9 * _PERIOD,
-        "last_match",
-    )
+    assert resolver.last_confirmed_sighting("dev-m") is None
 
 
-def test_encryption_counter_follows_a_newer_match_after_a_wall_clock_step() -> None:
-    """Within this process, a wall clock stepped backwards does not freeze it.
-
-    The second sighting is newer on the monotonic clock but carries an
-    earlier wall time; it replaces the first, as it does for the lock. The
-    first sighting after a restart is still ordered against the lock's wall
-    stamp, as for drift_offset and last_seen_at.
-    """
+def test_sighting_follows_clear_reset_and_stop() -> None:
+    """Clearing, resetting or stopping drops the sighting at once."""
     resolver = _matched_resolver()
-    _see(resolver, 0x71, 1_700_000_000, monotonic=50_000.0)
-    _see(resolver, 0x72, 1_699_995_000, monotonic=50_100.0)
-
-    assert resolver._locks["dev-m"].last_seen_at == 1_699_995_000
-    assert resolver.encryption_counter("dev-m", now=1_699_995_000) == (
-        9 * _PERIOD,
-        "last_match",
-    )
-
-
-def test_encryption_counter_follows_clear_and_stop() -> None:
-    """Clearing a device or stopping the resolver drops the remembered match."""
-    resolver = _matched_resolver()
-    _see(resolver, 0x71, 1_700_000_000)
-    resolver._locks.clear()
-    assert resolver.encryption_counter("dev-m", now=1_700_000_000) is not None
-
+    _see(resolver, 0x71, _T)
     resolver._clear_lock_state("dev-m")
-    assert resolver.encryption_counter("dev-m", now=1_700_000_000) is None
+    assert resolver.last_confirmed_sighting("dev-m") is None
 
     resolver = _matched_resolver()
-    _see(resolver, 0x71, 1_700_000_000)
+    _see(resolver, 0x71, _T)
+    resolver.reset_device_offset("dev-m")
+    assert resolver.last_confirmed_sighting("dev-m") is None
+
+    resolver = _matched_resolver()
+    _see(resolver, 0x71, _T)
     resolver.stop()
-    assert resolver.encryption_counter("dev-m", now=1_700_000_000) is None
+    assert resolver.last_confirmed_sighting("dev-m") is None
