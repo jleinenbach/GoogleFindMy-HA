@@ -479,12 +479,35 @@ class TestEncrypt:
             encrypt(_PLAINTEXT, bytes(32), eid, reading=P256_FOREIGN_READINGS[0])
 
     def test_rejects_eid_length_of_no_curve(self) -> None:
-        with pytest.raises(UnsupportedCurveError):
+        # The message speaks of the EID, not of a report's Sx; the decrypt-side
+        # error stays reachable as the cause.
+        with pytest.raises(
+            ValueError, match=r"eid has 21 bytes; expected one of \[20, 32\]"
+        ) as exc_info:
             encrypt(_PLAINTEXT, bytes(32), bytes(21))
+        assert type(exc_info.value) is ValueError
+        assert isinstance(exc_info.value.__cause__, UnsupportedCurveError)
+        assert "Sx" not in str(exc_info.value)
 
-    def test_rejects_off_curve_p256_eid(self) -> None:
-        with pytest.raises(ForeignReportStructureError):
-            encrypt(_PLAINTEXT, bytes(32), _off_curve_p256_x())
+    @pytest.mark.parametrize(
+        ("eid_factory", "curve_name"),
+        [
+            (_off_curve_p256_x, "secp256r1"),
+            (lambda: ((1 << 160) - 1).to_bytes(20, "big"), "secp160r1"),
+            (lambda: (3).to_bytes(20, "big"), "secp160r1"),
+        ],
+        ids=["p256_not_on_curve", "secp160r1_above_p", "secp160r1_not_on_curve"],
+    )
+    def test_rejects_off_curve_eid(
+        self, eid_factory: Callable[[], bytes], curve_name: str
+    ) -> None:
+        with pytest.raises(
+            ValueError, match=f"eid is not an x-coordinate on {curve_name}"
+        ) as exc_info:
+            encrypt(_PLAINTEXT, bytes(32), eid_factory())
+        assert type(exc_info.value) is ValueError
+        assert isinstance(exc_info.value.__cause__, ForeignReportStructureError)
+        assert "Sx" not in str(exc_info.value)
 
     def test_zero_scalar_is_bumped_to_one(self) -> None:
         report = _report_for(1)

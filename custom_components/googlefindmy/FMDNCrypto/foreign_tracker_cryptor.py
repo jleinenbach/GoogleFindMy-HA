@@ -54,6 +54,7 @@ from custom_components.googlefindmy.FMDNCrypto._lazy_crypto import (
 from custom_components.googlefindmy.FMDNCrypto.curve_profile import (
     BE_MOD_N,
     BE_PLUS_ONE,
+    CURVES_BY_COORD_LEN,
     LE_PLUS_ONE,
     SECP160R1,
     SECP256R1,
@@ -375,12 +376,17 @@ def encrypt(
         and Sx is the x-coordinate of S, as long as ``eid``.
 
     Raises:
-        UnsupportedCurveError: If ``len(eid)`` maps to no supported curve.
-        ForeignReportStructureError: If ``eid`` is not an x-coordinate on the
-            curve.
-        ValueError: If ``reading`` belongs to another curve.
+        ValueError: If ``len(eid)`` maps to no supported curve, if ``eid`` is
+            not an x-coordinate on its curve, or if ``reading`` belongs to
+            another curve. The decrypt-side errors of ``curve_profile`` are
+            chained as ``__cause__``.
     """
-    curve = curve_for_coord_len(len(eid))
+    try:
+        curve = curve_for_coord_len(len(eid))
+    except ForeignReportStructureError as err:
+        raise ValueError(
+            f"eid has {len(eid)} bytes; expected one of {sorted(CURVES_BY_COORD_LEN)}"
+        ) from err
     if reading is None:
         reading = READINGS_BY_CURVE[curve.name][0]
     elif reading.curve != curve:
@@ -390,7 +396,8 @@ def encrypt(
         )
 
     # Derive scalar s from caller-provided randomness; guard s != 0
-    s = int.from_bytes(random, byteorder="big", signed=False) % curve.order
+    order: int = curve.order
+    s = int.from_bytes(random, byteorder="big", signed=False) % order
     if s == 0:
         # Extremely unlikely; avoid the point at infinity by bumping to 1
         s = 1
@@ -400,7 +407,11 @@ def encrypt(
     HKDF = get_hkdf_class()
     hashes = get_hashes_module()
     hkdf = HKDF(algorithm=hashes.SHA256(), length=32, salt=None, info=b"")
-    k: bytes = hkdf.derive(curve.ecdh_x(s, eid))
+    try:
+        shared_x = curve.ecdh_x(s, eid)
+    except ForeignReportStructureError as err:
+        raise ValueError(f"eid is not an x-coordinate on {curve.name}") from err
+    k: bytes = hkdf.derive(shared_x)
 
     h = reading.nonce_half_len
     nonce: bytes = eid[-h:] + sx[-h:]
