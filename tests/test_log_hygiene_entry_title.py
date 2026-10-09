@@ -15,7 +15,8 @@ check reports a logger argument that
 * reads a title as ``<entry>.title`` or ``getattr(<entry>, "title", ...)``, or
   reads a local bound from such a read by an assignment, a ``for`` or a
   ``with ... as`` target, in the same scope or an enclosing one that the
-  nested scope does not shadow;
+  nested scope does not shadow (a comprehension target shadows inside the
+  comprehension);
 * formats an entry as a whole: the argument itself, ``str(<entry>)``,
   ``repr(<entry>)`` or an f-string field, because ``ConfigEntry.__repr__``
   carries the title.
@@ -142,6 +143,16 @@ _FLAGGED = {
         "        _LOGGER.info('%s', t)\n"
         "    return g\n"
     ),
+    "comprehension_over_title": (
+        "def f(entry):\n"
+        "    t = entry.title\n"
+        "    _LOGGER.info('%s', [t for t in t.split()])\n"
+    ),
+    "comprehension_filter": (
+        "def f(entry, values):\n"
+        "    t = entry.title\n"
+        "    _LOGGER.info('%s', [v for v in values if v.startswith(t)])\n"
+    ),
     "closure": (
         "def f(entry):\n"
         "    t = entry.title\n"
@@ -205,6 +216,13 @@ _NOT_FLAGGED = {
         "        t = 1\n"
         "        _LOGGER.info('%s', t)\n"
         "    return g, t\n"
+    ),
+    # A comprehension target shadows the outer title local.
+    "comprehension_shadowing": (
+        "def f(entry, values):\n"
+        "    t = entry.title\n"
+        "    _LOGGER.info('%s', [t for t in values])\n"
+        "    return t\n"
     ),
     # An alias bound in one function is not visible in a sibling function.
     "alias_in_sibling_scope": (

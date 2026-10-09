@@ -313,27 +313,52 @@ def _is_entry(node: ast.AST) -> bool:
     return _ENTRY_OBJECT.search(ast.unparse(node)) is not None
 
 
-def _reads_entry_title(node: ast.AST, bound: set[str]) -> bool:
-    """True if ``node`` reads a config entry title: ``<entry>.title``,
-    ``getattr(<entry>, "title", ...)`` or a name in ``bound``."""
-    return any(
-        (
-            isinstance(current, ast.Attribute)
-            and current.attr == "title"
-            and _is_entry(current.value)
-        )
-        or (
-            isinstance(current, ast.Call)
-            and isinstance(current.func, ast.Name)
-            and current.func.id == "getattr"
-            and len(current.args) >= 2
-            and _is_entry(current.args[0])
-            and isinstance(current.args[1], ast.Constant)
-            and current.args[1].value == "title"
-        )
-        or (isinstance(current, ast.Name) and current.id in bound)
-        for current in ast.walk(node)
+def _is_title_read(node: ast.AST) -> bool:
+    """True for ``<entry>.title`` and ``getattr(<entry>, "title", ...)``."""
+    if isinstance(node, ast.Attribute):
+        return node.attr == "title" and _is_entry(node.value)
+    return (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "getattr"
+        and len(node.args) >= 2
+        and _is_entry(node.args[0])
+        and isinstance(node.args[1], ast.Constant)
+        and node.args[1].value == "title"
     )
+
+
+_COMPREHENSION = (ast.ListComp, ast.SetComp, ast.GeneratorExp, ast.DictComp)
+
+
+def _comprehension_reads_title(
+    node: ast.ListComp | ast.SetComp | ast.GeneratorExp | ast.DictComp,
+    bound: set[str],
+) -> bool:
+    """A comprehension target shadows a name of ``bound`` inside the
+    comprehension; its first iterable is evaluated outside and still sees
+    ``bound``."""
+    inner = set(bound)
+    for index, generator in enumerate(node.generators):
+        if _reads_entry_title(generator.iter, bound if index == 0 else inner):
+            return True
+        inner -= _plain_target_names(generator.target)
+        if any(_reads_entry_title(test, inner) for test in generator.ifs):
+            return True
+    elements = [node.key, node.value] if isinstance(node, ast.DictComp) else [node.elt]
+    return any(_reads_entry_title(element, inner) for element in elements)
+
+
+def _reads_entry_title(node: ast.AST, bound: set[str]) -> bool:
+    """True if ``node`` reads a config entry title (``_is_title_read``) or a
+    name in ``bound``, honouring comprehension shadowing."""
+    if _is_title_read(node):
+        return True
+    if isinstance(node, ast.Name):
+        return node.id in bound
+    if isinstance(node, _COMPREHENSION):
+        return _comprehension_reads_title(node, bound)
+    return any(_reads_entry_title(child, bound) for child in ast.iter_child_nodes(node))
 
 
 def _plain_target_names(target: ast.AST) -> set[str]:
