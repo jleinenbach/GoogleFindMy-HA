@@ -3023,11 +3023,14 @@ class GoogleFindMyEIDResolver:
         therefore dated "now": such a sighting carries an older window, and it
         must not replace a newer window seen at most one rotation period
         earlier. A smaller counter seen more than one period later on the wall
-        clock is a device that restarted its counter and replaces. A wall clock
-        stepped backwards never counts as that period: the late older window
-        is kept out, and the stale entry is not reported, because its time
-        lies ahead of the wall clock. The same counter replaces: the sighting
-        is newer on the monotonic clock, also after such a step.
+        clock is taken as a device that restarted its counter and replaces; a
+        wall clock stepped forward by more than one period looks the same.
+        After a wall clock stepped backwards by more than one period, a smaller
+        counter is either such a late window or a restarted device, and the
+        two cannot be told apart: the entry is dropped, so nothing is reported
+        until the next sighting records the window the device shows. The same
+        counter replaces: the sighting is newer on the monotonic clock, also
+        after such a step.
 
         Never raises: a variant this version does not know, or a window
         timestamp that is not an int in ``[0, FHNA_COUNTER_MASK]``, records
@@ -3049,12 +3052,13 @@ class GoogleFindMyEIDResolver:
             return
         window_counter = window_ts - window_ts % ROTATION_PERIOD
         previous = self._confirmed_sightings.get(device_id)
-        if (
-            previous is not None
-            and window_counter < previous.window_counter
-            and observed_at - previous.observed_at <= ROTATION_PERIOD
-        ):
-            return
+        if previous is not None and window_counter < previous.window_counter:
+            wall_gap = observed_at - previous.observed_at
+            if wall_gap < -ROTATION_PERIOD:
+                del self._confirmed_sightings[device_id]
+                return
+            if wall_gap <= ROTATION_PERIOD:
+                return
         self._confirmed_sightings[device_id] = ConfirmedSighting(
             variant=variant,
             window_counter=window_counter,

@@ -533,17 +533,25 @@ def test_same_window_takes_the_newer_sighting_time() -> None:
     assert sighting.observed_at == _T + 500
 
 
-def test_older_window_after_a_backward_wall_step_is_kept_out() -> None:
-    """A wall clock stepped back is no device reset.
+@pytest.mark.parametrize(
+    ("step_back", "kept"),
+    [(_PERIOD, True), (_PERIOD + 1, False), (5_000, False)],
+    ids=["step_of_one_period", "step_beyond_one_period", "step_of_5000_s"],
+)
+def test_smaller_window_after_a_backward_wall_step(step_back: int, kept: bool) -> None:
+    """Late older window or restarted device: undecidable, so nothing is kept.
 
-    Window 7 arrives late (dated "now"), after the wall clock was stepped back
-    by more than one period; the sighting stays on window 9.
+    Beyond one period back on the wall clock the entry is dropped; the next
+    sighting records the window the device shows, whichever case it was.
     """
     resolver = _matched_resolver()
     _see(resolver, 0x72, _T, monotonic=50_000.0)
-    _see(resolver, 0x71, _T - 5_000, monotonic=50_010.0)
+    _see(resolver, 0x71, _T - step_back, monotonic=50_010.0)
 
-    assert _window(resolver) == 9
+    assert _window(resolver) == (9 if kept else None)
+
+    _see(resolver, 0x71, _T - step_back + 30, monotonic=50_040.0)
+    assert _window(resolver) == (9 if kept else 7)
 
 
 def test_wall_clock_stepped_back_does_not_freeze_the_sighting() -> None:
