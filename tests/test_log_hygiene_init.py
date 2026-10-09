@@ -494,7 +494,12 @@ def entry_title_offenders(tree: ast.AST) -> list[tuple[str, int, str]]:
     class body is scanned as part of that body, so a name the class binds hides
     an outer title local from it, although Python resolves the outer name
     there; such a logger call is not reported. The package has no comprehension
-    directly in a class body. ``tests/test_log_hygiene_entry_title.py``
+    directly in a class body. A name declared ``global`` is treated like a
+    ``nonlocal`` one and sees what the enclosing scope sees, not what the
+    module binds, so a ``global`` read of a module-level title is missed when
+    an enclosing function rebinds that name; the package binds no title at
+    module level.
+    ``tests/test_log_hygiene_entry_title.py``
     applies this to every module of the package."""
     offenders: list[tuple[str, int, str]] = []
     pending: list[tuple[ast.AST, frozenset[str], frozenset[str]]] = []
