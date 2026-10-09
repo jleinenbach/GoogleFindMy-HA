@@ -563,7 +563,7 @@ async def async_rebuild_device_registry(hass: HomeAssistant, call: ServiceCall) 
 
         # 3. Find and remove orphaned devices
         devices_for_entry = dr.async_entries_for_config_entry(dev_reg, entry_id)
-        cleaned_devices_entry = 1 if service_cleanup_applied else 0
+        entry_cleaned_devices = 1 if service_cleanup_applied else 0
 
         for device in devices_for_entry:
             if device is None or not hasattr(device, "id"):
@@ -656,15 +656,15 @@ async def async_rebuild_device_registry(hass: HomeAssistant, call: ServiceCall) 
                 context_label="device",
                 error_log_template="[%s] Hub Cleanup: Failed to detach hub entry from device %s: %s",
             ):
-                cleaned_devices_entry += 1
+                entry_cleaned_devices += 1
 
-        if cleaned_devices_entry > 0:
+        if entry_cleaned_devices > 0:
             _LOGGER.info(
                 "[%s] Hub Cleanup: Removed %d orphaned device links.",
                 entry_id,
-                cleaned_devices_entry,
+                entry_cleaned_devices,
             )
-            cleaned_devices_total += cleaned_devices_entry
+            cleaned_devices_total += entry_cleaned_devices
 
     _LOGGER.info(
         "Device registry cleanup phase complete. Removed %d total orphaned device links.",

@@ -376,7 +376,7 @@ def _plain_target_names(target: ast.AST) -> set[str]:
     return set()
 
 
-_SCOPE = (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)
+_SCOPE = (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)
 
 
 def _scope_nodes(scope: ast.AST) -> list[ast.AST]:
@@ -452,7 +452,7 @@ def _local_names(scope: ast.AST) -> set[str]:
     ``for`` and ``with`` targets) without those declared ``nonlocal`` or
     ``global``. Such a name shadows the same name of an enclosing scope."""
     names: set[str] = set()
-    if isinstance(scope, ast.FunctionDef | ast.AsyncFunctionDef):
+    if isinstance(scope, ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda):
         arguments = scope.args
         names |= {
             arg.arg
@@ -481,7 +481,7 @@ def entry_title_offenders(tree: ast.AST) -> list[tuple[str, int, str]]:
     entry formatted as a whole (``_entry_object_args``). The config flow sets
     the title to the account e-mail.
 
-    Each function, class body and the module body is one scope; a nested scope
+    Each function, lambda, class body and the module body is one scope; a nested scope
     sees the title locals and logger aliases of the scopes around it, except
     names it binds itself (``_local_names``). A logger
     call is ``<logger>.<method>(...)``, ``getattr(<logger>, name)(...)`` or a
@@ -517,7 +517,9 @@ def entry_title_offenders(tree: ast.AST) -> list[tuple[str, int, str]]:
                         bound |= names
             if len(bound) + len(aliases) == before:
                 break
-        name = getattr(scope, "name", "<module>")
+        name = getattr(
+            scope, "name", "<lambda>" if isinstance(scope, ast.Lambda) else "<module>"
+        )
         for call in nodes:
             if not isinstance(call, ast.Call) or not (
                 _is_logger_method(call.func)

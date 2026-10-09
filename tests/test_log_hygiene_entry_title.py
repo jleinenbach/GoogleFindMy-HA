@@ -23,8 +23,8 @@ check reports a logger argument that
 
 A logger call is ``<logger>.<method>(...)``, ``getattr(<logger>, name)(...)``
 or a call through a name bound to one in the same or an enclosing scope.
-``_REVIEWED_NOT_AN_ENTRY`` lists names that end in ``entry`` but hold no config
-entry; a stale item fails the second test.
+There is no exception list: a value that is no config entry does not get a
+name ending in ``entry`` (``candidate_entry_id``, ``entry_cleaned_devices``).
 
 Not covered: a title passed through another function's parameters, a
 container, an object attribute (``self._t = entry.title``), a call result
@@ -44,17 +44,6 @@ import custom_components.googlefindmy as integration_init
 from tests.test_log_hygiene_init import entry_title_offenders
 
 _PACKAGE_ROOT = Path(integration_init.__file__).parent
-
-# (module, expression): the name ends in ``entry`` but the value is no config
-# entry, so formatting it as a whole logs no title.
-_REVIEWED_NOT_AN_ENTRY: frozenset[tuple[str, str]] = frozenset(
-    {
-        # The entry ID string, from ``getattr(entry, "entry_id", None)``.
-        ("Auth/fcm_receiver_ha.py", "candidate_entry"),
-        # A counter of detached device links.
-        ("services.py", "cleaned_devices_entry"),
-    }
-)
 
 
 def _package_modules() -> list[Path]:
@@ -83,15 +72,8 @@ def test_no_logger_call_in_the_package_passes_a_config_entry_title() -> None:
     offenders = [
         f"{module}:{line} ({scope}): {form}"
         for module, line, scope, form in _package_offenders()
-        if (module, form) not in _REVIEWED_NOT_AN_ENTRY
     ]
     assert offenders == [], f"logger call passes a config entry title: {offenders}"
-
-
-def test_reviewed_names_still_occur() -> None:
-    seen = {(module, form) for module, _line, _scope, form in _package_offenders()}
-    stale = sorted(_REVIEWED_NOT_AN_ENTRY - seen)
-    assert stale == [], f"remove stale items from _REVIEWED_NOT_AN_ENTRY: {stale}"
 
 
 _FLAGGED = {
@@ -152,6 +134,9 @@ _FLAGGED = {
         "def f(entry, values):\n"
         "    t = entry.title\n"
         "    _LOGGER.info('%s', [v for v in values if v.startswith(t)])\n"
+    ),
+    "lambda_closure": (
+        "def f(entry):\n    t = entry.title\n    return lambda: _LOGGER.info('%s', t)\n"
     ),
     "closure": (
         "def f(entry):\n"
@@ -223,6 +208,11 @@ _NOT_FLAGGED = {
         "    t = entry.title\n"
         "    _LOGGER.info('%s', [t for t in values])\n"
         "    return t\n"
+    ),
+    "shadowing_lambda": (
+        "def f(entry):\n"
+        "    t = entry.title\n"
+        "    return t, lambda t: _LOGGER.info('%s', t)\n"
     ),
     # An alias bound in one function is not visible in a sibling function.
     "alias_in_sibling_scope": (
