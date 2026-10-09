@@ -593,7 +593,7 @@ Run `poetry lock` to fix the lock file.
 ### Timebase hypotheses
 
 * Resolver scans currently seed three candidates: `ABSOLUTE` (wall-clock), `REL_PAIR` (pair-date anchored), and `REL_SECRETS` (secrets-creation anchored). Once a candidate yields a match, the resolver caches the winning epoch/offset per device to lock onto that timebase and narrow future rotation windows.
-* Code outside the resolver does not re-derive these candidates or pick one of them as "the" counter. The FMDN finder reports what a match observed (`GoogleFindMyEIDResolver.last_confirmed_sighting`: variant, window counter, sighting time) and sends nothing without a recent sighting; the owner resolves a report over the recent past and near future of the counter (FMDN specification, "Decryption of values encrypted with EID").
+* Runtime code outside the resolver does not re-derive these candidates or pick one of them as "the" counter (the CLI tool `SpotApi/UploadPrecomputedPublicKeyIds` computes its own range from `pair_date` for precomputed IDs and is not a consumer of the resolver). The FMDN finder reports what a match observed (`GoogleFindMyEIDResolver.last_confirmed_sighting`: variant, window counter, sighting time) and sends nothing without a recent sighting; the owner resolves a report over the recent past and near future of the counter (FMDN specification, "Decryption of values encrypted with EID").
 
 ### Owner-key error taxonomy (classify only from positive evidence)
 

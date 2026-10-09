@@ -542,6 +542,28 @@ async def test_semantic_upload_debug_log_masks_scanner_name(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("report_time", [1_699_999_000, None])
+async def test_semantic_upload_passes_the_report_time_on(
+    hass_mock: MagicMock, report_time: int | None
+) -> None:
+    """The sighting time reaches the uploader unchanged (None stays None)."""
+    upload_mock = AsyncMock()
+    with patch(
+        "custom_components.googlefindmy.fmdn_finder.location_uploader.async_process_fmdn_beacon_detection",
+        upload_mock,
+    ):
+        await _async_upload_semantic_location(
+            hass_mock,
+            eid=b"\xab" * 20,
+            area="Kitchen",
+            config_entry_id="entry_1",
+            report_time=report_time,
+        )
+
+    assert upload_mock.await_args.kwargs["report_time"] == report_time
+
+
+@pytest.mark.asyncio
 async def test_find_googlefindmy_device_info_keeps_entity_id_at_debug(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -915,8 +937,21 @@ async def test_finder_reports_the_seen_window_not_a_projection(variant: str) -> 
 
 
 @pytest.mark.asyncio
-async def test_finder_reports_nothing_after_a_restart_until_seen() -> None:
-    """A lock loaded from storage is no sighting; the next match is."""
+@pytest.mark.parametrize(
+    ("last_seen_at", "reported"),
+    [(_LOCK_NOW - 3 * 1024, True), (None, True), (_LOCK_NOW + 10, False)],
+    ids=["stored_lock_seen_earlier", "stored_lock_never_seen", "stored_stamp_ahead"],
+)
+async def test_finder_reports_nothing_after_a_restart_until_seen(
+    last_seen_at: int | None, reported: bool
+) -> None:
+    """A lock loaded from storage is no sighting; the first match after it is.
+
+    The first sighting after a restart is ordered against the lock's stored
+    wall stamp. A stamp ahead of the wall clock (clock stepped back across the
+    restart) holds the sighting back until wall time catches up, so nothing is
+    reported then, rather than a window that cannot be vouched for.
+    """
     from custom_components.googlefindmy.eid_resolver import EIDGenerationLock
 
     variant = "spec_p256_x32_be"
@@ -930,15 +965,18 @@ async def test_finder_reports_nothing_after_a_restart_until_seen() -> None:
         rotation_timestamp=5_000 * 1024,
         time_basis="secrets_creation_date",
         created_at=_LOCK_NOW - 3 * 1024 - 100,
+        last_seen_at=last_seen_at,
     )
     assert await _finder_upload_at(resolver, _LOCK_NOW) is None
 
     advertised = _device_eid(_LOCK_NOW - _SECRETS_DATE, variant)
-    resolver._locks.clear()
     _observe(resolver, advertised, _LOCK_NOW)
     upload = await _finder_upload_at(resolver, _LOCK_NOW)
-    assert upload is not None
-    assert upload.eid == advertised
+    if reported:
+        assert upload is not None
+        assert upload.eid == advertised
+    else:
+        assert upload is None
 
 
 @pytest.mark.asyncio

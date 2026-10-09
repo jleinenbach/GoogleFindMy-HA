@@ -533,6 +533,19 @@ def test_same_window_takes_the_newer_sighting_time() -> None:
     assert sighting.observed_at == _T + 500
 
 
+def test_older_window_after_a_backward_wall_step_is_kept_out() -> None:
+    """A wall clock stepped back is no device reset.
+
+    Window 7 arrives late (dated "now"), after the wall clock was stepped back
+    by more than one period; the sighting stays on window 9.
+    """
+    resolver = _matched_resolver()
+    _see(resolver, 0x72, _T, monotonic=50_000.0)
+    _see(resolver, 0x71, _T - 5_000, monotonic=50_010.0)
+
+    assert _window(resolver) == 9
+
+
 def test_wall_clock_stepped_back_does_not_freeze_the_sighting() -> None:
     """Newer on the monotonic clock wins, even with an earlier wall time."""
     resolver = _matched_resolver()

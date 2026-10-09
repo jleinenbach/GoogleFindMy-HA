@@ -46,7 +46,8 @@ Attributes: area (semantic location), scanner (BLE scanner name)
 
 Flow:
 - Bermuda area change detected → find GoogleFindMy entity on SAME HA device
-- Get current EID from GoogleFindMy coordinator's identity keys
+- Take the EID of the device's last sighting the EID resolver confirmed
+  (last_confirmed_sighting), never one predicted from the clock
 - Upload semantic location to Google FMDN backend
 
 References:

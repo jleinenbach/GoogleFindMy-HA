@@ -150,7 +150,9 @@ listener that:
    uploader. The report is encrypted to the EID of the tracker's last
    sighting that the EID resolver confirmed and carries the time of that
    sighting; without such a sighting, or when it is older than one rotation
-   period (1024 s), no report is prepared. The uploader currently
+   period (1024 s), no report is prepared. The location is the area Bermuda
+   reports now; Bermuda resolves the tracker's advertisements itself, so the
+   sighting is normally seconds old. The uploader currently
    short-circuits and logs that the upload is disabled (DroidGuard
    attestation unavailable); no traffic reaches Google.
 

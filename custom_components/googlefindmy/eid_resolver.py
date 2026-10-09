@@ -3022,10 +3022,12 @@ class GoogleFindMyEIDResolver:
         Bermuda delivers late without a scanner timestamp and that are
         therefore dated "now": such a sighting carries an older window, and it
         must not replace a newer window seen at most one rotation period
-        earlier. A smaller counter after more than one period is a device that
-        restarted its counter and replaces. The same counter replaces too: the
-        sighting is newer on the monotonic clock, also when the wall clock was
-        stepped backwards in between.
+        earlier. A smaller counter seen more than one period later on the wall
+        clock is a device that restarted its counter and replaces. A wall clock
+        stepped backwards never counts as that period: the late older window
+        is kept out, and the stale entry is not reported, because its time
+        lies ahead of the wall clock. The same counter replaces: the sighting
+        is newer on the monotonic clock, also after such a step.
 
         Never raises: a variant this version does not know, or a window
         timestamp that is not an int in ``[0, FHNA_COUNTER_MASK]``, records
@@ -3050,7 +3052,7 @@ class GoogleFindMyEIDResolver:
         if (
             previous is not None
             and window_counter < previous.window_counter
-            and abs(observed_at - previous.observed_at) <= ROTATION_PERIOD
+            and observed_at - previous.observed_at <= ROTATION_PERIOD
         ):
             return
         self._confirmed_sightings[device_id] = ConfirmedSighting(
