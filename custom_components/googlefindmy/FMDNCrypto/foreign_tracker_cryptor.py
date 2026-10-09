@@ -24,7 +24,9 @@ Notes:
   appears among the readings of its curve; the test suite pins that binding.
   Truncated P-256 variants (20 of 32 bytes) are excluded: a finder cannot run
   a P-256 ECDH from them, so their reports are not decryptable.
-- ``encrypt`` still covers SECP160R1 only (20-byte EIDs).
+- ``encrypt`` is the finder-side counterpart: it selects the curve from
+  ``len(eid)`` and takes the nonce width from a reading of that curve (by
+  default the first one).
 """
 
 # custom_components/googlefindmy/FMDNCrypto/foreign_tracker_cryptor.py
@@ -43,7 +45,6 @@ from custom_components.googlefindmy.FMDNCrypto._ecdsa_shim import (
     CurveParametersProtocol,
     load_curve,
     load_curve_fp_class,
-    load_point_class,
 )
 from custom_components.googlefindmy.FMDNCrypto._lazy_crypto import (
     get_aes_class,
@@ -87,8 +88,6 @@ _AES_KEY_LEN: int = 32
 _AES_TAG_LEN: int = 16
 # SECP160r1 coordinate length in bytes (160 bits)
 _COORD_LEN: int = 20
-# Nonce used by ``encrypt``: LRx(8) || LSx(8) = 16 bytes (SECP160R1 practice)
-_NONCE_LEN: int = 16
 
 # Single definition of the place where users post which reading decrypted
 # their P-256 reports (read by the log line and the diagnostics block).
@@ -246,11 +245,6 @@ def _get_curve_fp() -> type:
     return load_curve_fp_class()
 
 
-def _get_point() -> type:
-    """Get the Point class, loading lazily on first access."""
-    return load_point_class()
-
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -260,6 +254,14 @@ def _require_len(name: str, b: bytes, expected: int) -> None:
     """Validate a fixed length for bytes-like inputs."""
     if len(b) != expected:
         raise ValueError(f"{name} must be exactly {expected} bytes (got {len(b)})")
+
+
+def _require_nonce_len(nonce: bytes) -> None:
+    """Accept only the nonce lengths a reading can produce."""
+    if len(nonce) not in _NONCE_LENS:
+        raise ValueError(
+            f"nonce must be one of {sorted(_NONCE_LENS)} bytes (got {len(nonce)})"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -272,7 +274,8 @@ def encrypt_aes_eax(data: bytes, nonce: bytes, key: bytes) -> tuple[bytes, bytes
 
     Args:
         data: Plaintext bytes.
-        nonce: 16-byte nonce used for EAX.
+        nonce: Nonce used for EAX; one of the lengths a reading produces
+            (16 or 20 bytes).
         key: 32-byte AES key (AES-256).
 
     Returns:
@@ -281,7 +284,7 @@ def encrypt_aes_eax(data: bytes, nonce: bytes, key: bytes) -> tuple[bytes, bytes
     Raises:
         ValueError: On invalid nonce/key lengths.
     """
-    _require_len("nonce", nonce, _NONCE_LEN)
+    _require_nonce_len(nonce)
     _require_len("key", key, _AES_KEY_LEN)
 
     AES = get_aes_class()
@@ -292,10 +295,7 @@ def encrypt_aes_eax(data: bytes, nonce: bytes, key: bytes) -> tuple[bytes, bytes
 
 def _eax_cipher(nonce: bytes, key: bytes, tag: bytes) -> Any:
     """Validate lengths and return an AES-EAX-256 cipher for decryption."""
-    if len(nonce) not in _NONCE_LENS:
-        raise ValueError(
-            f"nonce must be one of {sorted(_NONCE_LENS)} bytes (got {len(nonce)})"
-        )
+    _require_nonce_len(nonce)
     _require_len("key", key, _AES_KEY_LEN)
     _require_len("tag", tag, _AES_TAG_LEN)
     AES = get_aes_class()
@@ -348,59 +348,67 @@ def calculate_r(identity_key: bytes, time_counter_u32: int) -> int:
     )
 
 
-def encrypt(message: bytes, random: bytes, eid: bytes) -> tuple[bytes, bytes]:
+def encrypt(
+    message: bytes,
+    random: bytes,
+    eid: bytes,
+    *,
+    reading: ForeignReading | None = None,
+) -> tuple[bytes, bytes]:
     """Encrypt a message for a tracker identity using ECDH + AES-EAX-256.
+
+    The finder-side counterpart of ``decrypt_foreign_report``: the curve comes
+    from ``len(eid)`` and the nonce is ``Rx[-h:] || Sx[-h:]`` with ``h`` the
+    reading's half length. The scalar derivation of the reading plays no role
+    here, because the finder only knows ``R`` (the EID), not ``r``.
 
     Args:
         message: Plaintext to encrypt.
         random: Caller-provided random bytes (entropy source for s).
-        eid: 20-byte X coordinate (compressed point) for the receiver.
+        eid: x-coordinate of the receiver's point ``R`` (20 bytes for
+            SECP160R1, 32 bytes for SECP256R1).
+        reading: Reading that fixes the nonce width; must belong to the curve
+            of ``eid``. Defaults to the first reading of that curve.
 
     Returns:
         (encrypted_with_tag, Sx) where encrypted_with_tag = m' || tag (tag=16B),
-        and Sx is 20-byte X coordinate of S.
+        and Sx is the x-coordinate of S, as long as ``eid``.
 
     Raises:
-        ValueError: On invalid inputs (lengths) or curve mismatch.
+        UnsupportedCurveError: If ``len(eid)`` maps to no supported curve.
+        ForeignReportStructureError: If ``eid`` is not an x-coordinate on the
+            curve.
+        ValueError: If ``reading`` belongs to another curve.
     """
-    # Curve parameters
-    curve = _get_curve()
-    order: int = int(curve.order)
-
-    # Validate EID length (x coordinate on SECP160r1)
-    _require_len("eid", eid, _COORD_LEN)
+    curve = curve_for_coord_len(len(eid))
+    if reading is None:
+        reading = READINGS_BY_CURVE[curve.name][0]
+    elif reading.curve != curve:
+        raise ValueError(
+            f"reading {reading.reading_id} does not apply to a "
+            f"{len(eid)}-byte EID ({curve.name})"
+        )
 
     # Derive scalar s from caller-provided randomness; guard s != 0
-    s = int.from_bytes(random, byteorder="big", signed=False) % order
+    s = int.from_bytes(random, byteorder="big", signed=False) % curve.order
     if s == 0:
         # Extremely unlikely; avoid the point at infinity by bumping to 1
         s = 1
 
-    # S = s·G
-    generator = curve.generator
-    S = s * generator
-
-    # Rebuild R from EID (x only) and choose even Y
-    Rx = int.from_bytes(eid, byteorder="big")
-    Ry = rx_to_ry(Rx, curve.curve)
-    Point = _get_point()
-    R = Point(curve.curve, Rx, Ry)
-
-    # Derive AES-256 key via HKDF-SHA256 over (s·R).x (20 bytes)
+    # S = s·G; the AES-256 key is HKDF-SHA256 over (s·R).x, R rebuilt from eid
+    sx = curve.point_x(s)
     HKDF = get_hkdf_class()
     hashes = get_hashes_module()
     hkdf = HKDF(algorithm=hashes.SHA256(), length=32, salt=None, info=b"")
-    k: bytes = hkdf.derive((s * R).x().to_bytes(_COORD_LEN, "big"))
+    k: bytes = hkdf.derive(curve.ecdh_x(s, eid))
 
-    # Nonce = LRx(8) || LSx(8)
-    LRx = Rx.to_bytes(_COORD_LEN, "big")[-8:]
-    LSx = S.x().to_bytes(_COORD_LEN, "big")[-8:]
-    nonce: bytes = LRx + LSx  # 16 bytes
+    h = reading.nonce_half_len
+    nonce: bytes = eid[-h:] + sx[-h:]
 
     # Encrypt (AES-EAX-256) → m' || tag
     m_dash, tag = encrypt_aes_eax(message, nonce, k)
     encrypted_with_tag: bytes = m_dash + tag
-    return encrypted_with_tag, S.x().to_bytes(_COORD_LEN, "big")
+    return encrypted_with_tag, sx
 
 
 def _ordered_readings(

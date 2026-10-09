@@ -71,6 +71,8 @@ from homeassistant.helpers import entity_registry as er
 if TYPE_CHECKING:
     from homeassistant.helpers.event import EventStateChangedData
 
+    from ..FMDNCrypto.eid_generator import EidVariant
+
 from ..const import DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
@@ -660,10 +662,7 @@ async def _async_get_device_eid(  # noqa: PLR0911, PLR0912, PLR0915
 
     # Generate EID
     try:
-        from ..FMDNCrypto.eid_generator import (  # noqa: PLC0415
-            EidVariant,
-            generate_eid_variant,
-        )
+        from ..FMDNCrypto.eid_generator import EidVariant  # noqa: PLC0415
 
         # Calculate beacon time counter
         rotation_period = 1024  # Default FMDN rotation period in seconds
@@ -685,22 +684,12 @@ async def _async_get_device_eid(  # noqa: PLR0911, PLR0912, PLR0915
                     lock_variant_str = getattr(lock, "variant", None)
                     if lock_variant_str:
                         try:
-                            locked_variant = EidVariant(lock_variant_str)
-                            # Only use SECP160r1 variants for encryption (encrypt() only supports SECP160r1)
-                            if locked_variant == EidVariant.LEGACY_SECP160R1_X20_BE:
-                                variant = locked_variant
-                                _LOGGER.debug(
-                                    "Using locked EID variant for device %s: %s",
-                                    device_id,
-                                    variant.value,
-                                )
-                            else:
-                                _LOGGER.warning(
-                                    "Device %s uses %s variant which is not supported for upload "
-                                    "(encrypt() only supports SECP160r1). Trying LEGACY_SECP160R1_X20_BE.",
-                                    device_id,
-                                    lock_variant_str,
-                                )
+                            variant = EidVariant(lock_variant_str)
+                            _LOGGER.debug(
+                                "Using locked EID variant for device %s: %s",
+                                device_id,
+                                variant.value,
+                            )
                         except ValueError:
                             _LOGGER.debug(
                                 "Unknown variant in lock: %s", lock_variant_str
@@ -715,13 +704,9 @@ async def _async_get_device_eid(  # noqa: PLR0911, PLR0912, PLR0915
             variant.value,
         )
 
-        # Generate EID using the determined variant
-        # Note: encrypt() in foreign_tracker_cryptor.py only supports SECP160r1 (20-byte EID)
-        eid = generate_eid_variant(
-            eik=identity_key,
-            time_counter_u32=beacon_time_counter,
-            variant=variant,
-        )
+        # Generate the EID of the determined variant; encrypt() picks the curve
+        # from its length.
+        eid = _encryptable_eid(identity_key, beacon_time_counter, variant)
 
         _LOGGER.debug(
             "Generated EID for device %s: %s...",
@@ -736,6 +721,44 @@ async def _async_get_device_eid(  # noqa: PLR0911, PLR0912, PLR0915
     except Exception as err:
         _LOGGER.warning("Failed to generate EID for device %s: %s", device_id, err)
         return None
+
+
+def _encryptable_eid(
+    identity_key: bytes, time_counter: int, variant: EidVariant
+) -> bytes:
+    """Return the EID of ``variant`` in the length ``encrypt()`` needs.
+
+    ``encrypt()`` selects the curve from ``len(eid)`` and runs the ECDH on the
+    full x-coordinate. A truncated P-256 variant (20 of 32 bytes) cannot be
+    used for that, so the full-length variant with the same curve and scalar
+    derivation stands in for it; its x-coordinate is the one the truncated
+    EID was cut from.
+    """
+    from ..FMDNCrypto.eid_generator import (  # noqa: PLC0415
+        VARIANT_DERIVATIONS,
+        generate_eid_variant,
+    )
+
+    eid = generate_eid_variant(
+        eik=identity_key, time_counter_u32=time_counter, variant=variant
+    )
+    curve, derivation = VARIANT_DERIVATIONS[variant]
+    if len(eid) == curve.coord_len:
+        return eid
+    for sibling, (sibling_curve, sibling_derivation) in VARIANT_DERIVATIONS.items():
+        if sibling_curve != curve or sibling_derivation != derivation:
+            continue
+        full = generate_eid_variant(
+            eik=identity_key, time_counter_u32=time_counter, variant=sibling
+        )
+        if len(full) == curve.coord_len:
+            _LOGGER.debug(
+                "Variant %s is truncated; encrypting for %s instead",
+                variant.value,
+                sibling.value,
+            )
+            return full
+    raise ValueError(f"No full-length variant for {variant.value}")
 
 
 async def _async_upload_semantic_location(  # noqa: PLR0913, PLR0917

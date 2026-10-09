@@ -54,6 +54,7 @@ from custom_components.googlefindmy.FMDNCrypto.foreign_tracker_cryptor import (
     decrypt_aes_eax,
     decrypt_foreign_report,
     encrypt,
+    encrypt_aes_eax,
 )
 from tests.helpers.fmdn_report_oracle import (
     OracleReport,
@@ -428,6 +429,79 @@ class TestAesEaxWrapper:
         try_decrypt = foreign_tracker_cryptor._try_decrypt_aes_eax
         with pytest.raises(ValueError, match="key must be exactly 32 bytes"):
             try_decrypt(b"abc", bytes(16), bytes(20), bytes(16))
+
+
+class TestEncrypt:
+    """Finder side: curve from ``len(eid)``, nonce width from the reading.
+
+    Expected bytes come from ``build_p256_report`` (the oracle), not from
+    ``encrypt`` itself.
+    """
+
+    @pytest.mark.parametrize("k", _READING_NUMBERS)
+    def test_matches_oracle_report(self, k: int) -> None:
+        report = _report_for(k)
+        encrypted, sx = encrypt(
+            _PLAINTEXT,
+            _EPHEMERAL.to_bytes(32, "big"),
+            report.rx,
+            reading=P256_FOREIGN_READINGS[k - 1],
+        )
+        assert (encrypted, sx) == (report.encrypted_and_tag, report.sx)
+
+    @pytest.mark.parametrize("k", _READING_NUMBERS)
+    def test_roundtrip_selects_the_encrypting_reading(self, k: int) -> None:
+        report = _report_for(k)
+        encrypted, sx = encrypt(
+            _PLAINTEXT,
+            bytes(range(1, 33)),
+            report.rx,
+            reading=P256_FOREIGN_READINGS[k - 1],
+        )
+        result = decrypt_foreign_report([_EIK], encrypted, sx, _COUNTER)
+        assert result.plaintext == _PLAINTEXT
+        assert result.reading.reading_id == _EXPECTED_P256_IDS[k - 1]
+
+    def test_default_is_first_reading_of_the_curve(self) -> None:
+        report = _report_for(1)
+        random = _EPHEMERAL.to_bytes(32, "big")
+        default = encrypt(_PLAINTEXT, random, report.rx)
+        assert default == (report.encrypted_and_tag, report.sx)
+        assert len(default[1]) == 32
+        eid = generate_eid_variant(_EIK, _COUNTER, EidVariant.LEGACY_SECP160R1_X20_BE)
+        assert encrypt(_PLAINTEXT, random, eid) == encrypt(
+            _PLAINTEXT, random, eid, reading=SECP160R1_FOREIGN_READINGS[0]
+        )
+
+    def test_rejects_reading_of_other_curve(self) -> None:
+        eid = generate_eid_variant(_EIK, _COUNTER, EidVariant.LEGACY_SECP160R1_X20_BE)
+        with pytest.raises(ValueError, match="does not apply to a 20-byte EID"):
+            encrypt(_PLAINTEXT, bytes(32), eid, reading=P256_FOREIGN_READINGS[0])
+
+    def test_rejects_eid_length_of_no_curve(self) -> None:
+        with pytest.raises(UnsupportedCurveError):
+            encrypt(_PLAINTEXT, bytes(32), bytes(21))
+
+    def test_rejects_off_curve_p256_eid(self) -> None:
+        with pytest.raises(ForeignReportStructureError):
+            encrypt(_PLAINTEXT, bytes(32), _off_curve_p256_x())
+
+    def test_zero_scalar_is_bumped_to_one(self) -> None:
+        report = _report_for(1)
+        _, sx = encrypt(_PLAINTEXT, SECP256R1.order.to_bytes(32, "big"), report.rx)
+        assert sx == p256_x(1)
+
+    @pytest.mark.parametrize("nonce_len", [12, 17])
+    def test_aes_eax_rejects_nonce_length_of_no_reading(self, nonce_len: int) -> None:
+        with pytest.raises(ValueError, match=r"nonce must be one of \[16, 20\] bytes"):
+            encrypt_aes_eax(_PLAINTEXT, bytes(nonce_len), bytes(32))
+
+    @pytest.mark.parametrize("nonce_len", [16, 20])
+    def test_aes_eax_accepts_every_reading_nonce(self, nonce_len: int) -> None:
+        key = bytes(range(32))
+        nonce = bytes(range(nonce_len))
+        ciphertext, tag = encrypt_aes_eax(_PLAINTEXT, nonce, key)
+        assert decrypt_aes_eax(ciphertext, tag, nonce, key) == _PLAINTEXT
 
 
 class TestSecp160r1Unchanged:

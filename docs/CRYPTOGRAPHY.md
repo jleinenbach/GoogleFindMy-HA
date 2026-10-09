@@ -391,7 +391,7 @@ plaintext = AES-EAX-decrypt(key, ciphertext)
 | Function | Purpose |
 |----------|---------|
 | `rx_to_ry(Rx, curve)` | Point decompression (recover Y from X); re-exported from `curve_profile.py` |
-| `encrypt(message, random, eid)` | ECDH + AES-EAX-256 encryption |
+| `encrypt(message, random, eid, *, reading=None)` | Finder-side ECDH + AES-EAX-256 encryption; the curve comes from `len(eid)` (20 bytes SECP160r1, 32 bytes SECP256R1), the nonce width from `reading` (default: the first reading of that curve). The FMDN finder passes a 32-byte EID for a device locked to a P-256 variant; for a truncated variant it uses the 32-byte variant with the same scalar derivation |
 | `decrypt(identity_key, data, Sx, time)` | ECDH + AES-EAX-256 decryption; thin wrapper around `decrypt_foreign_report` |
 | `decrypt_foreign_report(identity_keys, encrypted_and_tag, sx, beacon_time_counter, *, preferred_reading_id=None)` | Try every identity key and every reading of the curve selected by `len(sx)`; returns the plaintext, the index of the identity key and the reading that verified (see [Foreign-report readings](#foreign-report-readings)) |
 | `calculate_r(identity_key, time)` | Derive scalar r for EID (SECP160r1, via `reduce_scalar`) |

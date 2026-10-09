@@ -585,3 +585,133 @@ async def test_find_googlefindmy_device_info_keeps_entity_id_at_debug(
         r.levelno == logging.DEBUG and entity_id in r.getMessage()
         for r in caplog.records
     )
+
+
+# --- Z13: the finder encrypts for the locked variant on its own curve ------
+
+_LOCK_EIK = bytes(range(32))
+_LOCK_NOW = 1_700_000_000
+_LOCK_COUNTER = _LOCK_NOW // 1024  # pair_date 0, rotation period 1024 s
+
+# Variant whose EID the finder must produce for a lock, written out by hand:
+# full-length variants map to themselves, truncated P-256 variants to the
+# 32-byte variant with the same scalar derivation (encrypt() needs the full
+# x-coordinate).
+_UPLOAD_VARIANT_FOR_LOCK = {
+    "legacy_secp160r1_x20_be": "legacy_secp160r1_x20_be",
+    "modern_p256_x32_be": "modern_p256_x32_be",
+    "modern_p256_x20_trunc_be": "modern_p256_x32_be",
+    "modern_p256_x32_le_scalar": "modern_p256_x32_le_scalar",
+    "modern_p256_x20_trunc_le": "modern_p256_x32_le_scalar",
+    "spec_p256_x32_be": "spec_p256_x32_be",
+    "spec_p256_x20_trunc_be": "spec_p256_x32_be",
+}
+
+
+def _hass_with_lock(variant: str | None) -> MagicMock:
+    from custom_components.googlefindmy.const import DOMAIN
+
+    resolver = MagicMock()
+    resolver._persisted_locks = (
+        {} if variant is None else {"reg-1": MagicMock(variant=variant)}
+    )
+    hass = MagicMock()
+    hass.data = {DOMAIN: {"eid_resolver": resolver}}
+    return hass
+
+
+def _coordinator_with_identity() -> MagicMock:
+    identity = MagicMock(
+        canonical_id="entry:dev-1",
+        identity_key=_LOCK_EIK,
+        pair_date=0,
+        registry_id="reg-1",
+    )
+    coordinator = MagicMock()
+    coordinator.get_active_device_identities.return_value = [identity]
+    return coordinator
+
+
+async def _device_eid(variant: str | None) -> bytes | None:
+    from custom_components.googlefindmy.fmdn_finder import bermuda_listener
+
+    with patch.object(bermuda_listener.time, "time", return_value=_LOCK_NOW):
+        return await bermuda_listener._async_get_device_eid(
+            _hass_with_lock(variant), _coordinator_with_identity(), "dev-1"
+        )
+
+
+def test_upload_table_covers_every_variant() -> None:
+    from custom_components.googlefindmy.FMDNCrypto.eid_generator import EidVariant
+
+    assert set(_UPLOAD_VARIANT_FOR_LOCK) == {v.value for v in EidVariant}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("lock_variant", sorted(_UPLOAD_VARIANT_FOR_LOCK))
+async def test_locked_variant_yields_encryptable_eid(
+    lock_variant: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Z13: a P-256 lock yields that curve's EID; no WARNING fallback."""
+    from custom_components.googlefindmy.FMDNCrypto.eid_generator import (
+        EidVariant,
+        generate_eid_variant,
+    )
+    from custom_components.googlefindmy.FMDNCrypto.foreign_tracker_cryptor import (
+        decrypt_foreign_report,
+        encrypt,
+    )
+
+    caplog.set_level(logging.DEBUG)
+    eid = await _device_eid(lock_variant)
+
+    expected = generate_eid_variant(
+        _LOCK_EIK, _LOCK_COUNTER, EidVariant(_UPLOAD_VARIANT_FOR_LOCK[lock_variant])
+    )
+    assert eid == expected
+    assert len(eid) == (20 if lock_variant.startswith("legacy") else 32)
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+    # The owner side decrypts what the finder encrypts for this EID.
+    encrypted, sx = encrypt(b"payload", bytes(range(1, 33)), eid)
+    result = decrypt_foreign_report([_LOCK_EIK], encrypted, sx, _LOCK_COUNTER)
+    assert result.plaintext == b"payload"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("lock_variant", [None, "no_such_variant"])
+async def test_missing_or_unknown_lock_uses_legacy_variant(
+    lock_variant: str | None,
+) -> None:
+    from custom_components.googlefindmy.FMDNCrypto.eid_generator import (
+        EidVariant,
+        generate_eid_variant,
+    )
+
+    eid = await _device_eid(lock_variant)
+    assert eid == generate_eid_variant(
+        _LOCK_EIK, _LOCK_COUNTER, EidVariant.LEGACY_SECP160R1_X20_BE
+    )
+
+
+def test_truncated_variant_without_full_sibling_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from types import MappingProxyType
+
+    from custom_components.googlefindmy.fmdn_finder.bermuda_listener import (
+        _encryptable_eid,
+    )
+    from custom_components.googlefindmy.FMDNCrypto import eid_generator
+    from custom_components.googlefindmy.FMDNCrypto.eid_generator import EidVariant
+
+    trunc = EidVariant.SPEC_P256_X20_TRUNC_BE
+    only_trunc = MappingProxyType(
+        {
+            v: d
+            for v, d in eid_generator.VARIANT_DERIVATIONS.items()
+            if v is not EidVariant.SPEC_P256_X32_BE
+        }
+    )
+    monkeypatch.setattr(eid_generator, "VARIANT_DERIVATIONS", only_trunc)
+    with pytest.raises(ValueError, match="No full-length variant"):
+        _encryptable_eid(_LOCK_EIK, _LOCK_COUNTER, trunc)
