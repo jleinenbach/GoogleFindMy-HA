@@ -560,14 +560,13 @@ class TestCandLabels:
 
 
 class TestLogTokenValidationFailure:
-    """Empiricism: emits a single warning with masked email + candidate sources."""
+    """Empiricism: emits a single warning with the candidate sources only."""
 
-    def test_emits_warning_with_masked_email(
+    def test_emits_warning_with_candidate_sources(
         self, caplog: pytest.LogCaptureFixture
     ) -> None:
         caplog.set_level(logging.WARNING, logger=cf._LOGGER.name)
         cf._log_token_validation_failure(
-            email="user@example.com",
             candidates=[("aas_token", "x" * 16)],
         )
         assert any(

@@ -486,3 +486,28 @@ async def test_an_old_core_without_schedule_reload_does_not_burn_the_latch(
     )
 
     assert claims == []
+
+
+@pytest.mark.asyncio
+async def test_reauth_dead_token_reports_cannot_connect_without_address(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A bundle with a shared_key but no working token fails the probe.
+
+    The step must answer ``cannot_connect``, must not persist, and must log the
+    validation failure with the candidate sources only, without the address.
+    """
+    flow, _entry, captured = _build_reauth_flow(monkeypatch, pick_returns_none=True)
+
+    with caplog.at_level("WARNING", logger=config_flow.__name__):
+        result = await _run_reauth(flow, _shared_present_bundle())
+
+    assert captured["pick_calls"] == 1
+    assert result.get("errors") == {"base": "cannot_connect"}
+    assert "persist" not in captured
+    failures = [
+        r for r in caplog.records if "Token validation failed" in r.getMessage()
+    ]
+    assert len(failures) == 1
+    assert failures[0].__dict__["candidate_sources"]
+    assert "email" not in failures[0].__dict__

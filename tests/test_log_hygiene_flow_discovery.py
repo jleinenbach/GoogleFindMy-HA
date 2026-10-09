@@ -13,6 +13,9 @@ Static checks walk every logger call in both modules:
   ``candidate_sources`` value by ``_cand_labels``, in a dict literal or a
   ``dict(...)`` call: the source name travels in the same tuple as the token,
   and discovery payloads can bring their own names.
+* No ``extra`` item in ``config_flow.py`` is keyed ``email`` or holds a
+  ``_mask_email_for_logs`` call: the address there can come from the secrets
+  bundle, and the masked form is still reported by CodeQL.
 * ``config_flow.py`` never passes ``source``, ``token``, ``candidates`` or
   ``cands`` to a logger outside these two helpers.
 * ``discovery.py`` passes a namespace (``ns``, ``self._namespace``) to a
@@ -26,6 +29,8 @@ masked address).
 Not covered: logger calls that receive the values through a helper other than
 the ones named here, a namespace held under another name, ``extra`` built in a
 variable before the call or from a list of pairs (``dict([...])``), an
+address masked into a local before the call (``masked = _mask_email_for_logs(...)``
+then ``extra={"account": masked}``), an
 ``extra`` key held in a constant, ``getattr`` with a constant's name as a
 string, and logger methods bound to an alias (``dbg = _LOGGER.debug``).
 """
@@ -177,6 +182,30 @@ def test_candidate_sources_are_always_fixed_labels() -> None:
     assert offenders == []
 
 
+def test_config_flow_puts_no_address_into_extra() -> None:
+    # Home Assistant's log format does not print ``extra``, so the field never
+    # reaches the log a user downloads; CodeQL reported the masked address
+    # read from the secrets bundle there all the same.
+    offenders = []
+    seen = 0
+    for path, _source, call in _logger_calls():
+        if path.name != "config_flow.py":
+            continue
+        for arg in _call_values(call):
+            for node in ast.walk(arg):
+                for key, value in _extra_items(node):
+                    masked = any(
+                        _is_call_to(inner, "_mask_email_for_logs")
+                        for inner in ast.walk(value)
+                        if isinstance(inner, ast.expr)
+                    )
+                    seen += 1
+                    if key == "email" or masked:
+                        offenders.append(f"{path.name}:{call.lineno}:{key}")
+    assert seen > 0
+    assert offenders == []
+
+
 _CANDIDATE_NAMES = frozenset({"source", "token", "candidates", "cands"})
 
 
@@ -268,7 +297,7 @@ async def test_token_probe_logs_no_token_or_address(
             email,
             candidates,
         )
-        config_flow._log_token_validation_failure(email=email, candidates=candidates)
+        config_flow._log_token_validation_failure(candidates=candidates)
 
     assert chosen is None
     records = [r for r in caplog.records if r.name == config_flow.__name__]
@@ -280,6 +309,7 @@ async def test_token_probe_logs_no_token_or_address(
         text = f"{record.getMessage()} {record.__dict__}"
         assert _TOKEN not in text
         assert _LOCAL_PART not in text
+        assert "email" not in record.__dict__
 
 
 def test_account_label_without_email_names_only_the_kind() -> None:
