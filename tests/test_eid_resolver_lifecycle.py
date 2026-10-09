@@ -484,6 +484,22 @@ def test_encryption_counter_follows_the_newest_match_not_the_lock() -> None:
     )
 
 
+def test_encryption_counter_advances_from_the_first_sighting_of_a_window() -> None:
+    """A later sighting of the same window does not delay the rollover.
+
+    Seen 3 s and 900 s into window 7: one period after the first sighting the
+    counter is window 8, not 900 s later.
+    """
+    resolver = _matched_resolver()
+    _see(resolver, 0x71, 1_700_000_003)
+    _see(resolver, 0x71, 1_700_000_900)
+
+    assert resolver.encryption_counter("dev-m", now=1_700_000_003 + _PERIOD + 10) == (
+        8 * _PERIOD,
+        "last_match",
+    )
+
+
 def test_encryption_counter_ignores_an_older_replayed_match() -> None:
     """A replay, older on the monotonic clock, keeps the newer window.
 

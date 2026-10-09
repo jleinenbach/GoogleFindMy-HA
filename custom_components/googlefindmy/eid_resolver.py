@@ -3108,9 +3108,14 @@ class GoogleFindMyEIDResolver:
         # Same ordering rule as drift_offset and last_seen_at: an older,
         # replayed sighting is ``stale`` (monotonic clock within this process)
         # and must not replace a newer counter. No wall-clock guard here, see
-        # _sighting_is_older_than_the_lock.
+        # _sighting_is_older_than_the_lock. Within one window the first
+        # sighting is kept: the device entered the window at or before it, so
+        # advancing from there rolls over close to the device's own boundary,
+        # while a later sighting would delay the rollover by up to one period.
         if not stale and isinstance(window_ts, int) and not isinstance(window_ts, bool):
-            self._last_match_window[match.device_id] = (window_ts, now)
+            previous_match = self._last_match_window.get(match.device_id)
+            if previous_match is None or previous_match[0] != window_ts:
+                self._last_match_window[match.device_id] = (window_ts, now)
 
         self._known_advertisement_reversed[match.device_id] = match.is_reversed
 
@@ -3979,18 +3984,22 @@ class GoogleFindMyEIDResolver:
         be the counter the device itself advertises with, not one recomputed
         from ``pair_date``. Two sources, in this order:
 
-        * ``"last_match"``: the window timestamp of the newest lookup match
+        * ``"last_match"``: the window timestamp of the newest matched window
           (the counter the matched EID was generated with), advanced by the
-          whole rotation periods since that sighting.
+          whole rotation periods since the *first* sighting of that window.
         * ``"lock"``: without a match since start, the lock's projection, the
-          centre ``_compute_lock_windows`` searches around.
+          centre ``_compute_lock_windows`` searches around; it advances from
+          the lock's first match the same way.
 
-        Both advance by whole periods from a sighting whose phase within its
-        window is unknown, so once a window boundary has passed since the
-        sighting the result can be one window behind the device, as the
-        resolver's own projection can. The lock's
-        ``drift_offset`` is not applied: it is the ``semantic_offset`` of the
-        matching window, and its reference depends on the window group.
+        The device entered the window at or before its first sighting. While
+        the device advertises regularly in range, that sighting follows its
+        window boundary closely and the result rolls over close to the
+        device's own boundary. When the first sighting came late in the window
+        (the device just came into range, or the first match after a start),
+        the result can be one window behind until the next window is seen, as
+        the resolver's own projection can. The lock's ``drift_offset`` is not
+        applied: it is the ``semantic_offset`` of the matching window, and its
+        reference depends on the window group.
 
         Args:
             registry_id: Home Assistant device registry ID of the device.

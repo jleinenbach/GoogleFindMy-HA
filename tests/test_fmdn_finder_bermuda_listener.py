@@ -989,6 +989,34 @@ async def test_finder_advances_the_matched_window_by_whole_periods(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("variant", _COUNTER_VARIANTS)
+async def test_finder_rolls_over_at_the_devices_window_boundary(variant: str) -> None:
+    """The device's next window, a few seconds after its boundary.
+
+    The device follows the ``secrets_creation_date`` reference: its window
+    starts 752 s before ``_LOCK_NOW`` and ends 272 s after it. It is seen
+    3 s after the window started and again at ``_LOCK_NOW``. Five seconds after
+    the boundary the comparison value is the lookup built for that moment,
+    current window under the same basis. Advancing from the newest sighting
+    would still give the old window for another 747 s.
+    """
+    resolver = _built_resolver(_LOCK_NOW)
+    observed = _pick_eid(resolver._lookup_metadata, variant, "secrets_creation_date", 0)
+    _observe(resolver, observed, _LOCK_NOW - 752 + 3)
+    _observe(resolver, observed, _LOCK_NOW)
+    after_boundary = _LOCK_NOW + 272 + 5
+    expected = _pick_eid(
+        _built_resolver(after_boundary)._lookup_metadata,
+        variant,
+        "secrets_creation_date",
+        0,
+    )
+
+    assert expected != observed
+    assert await _finder_eid_at(resolver, after_boundary) == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("variant", _COUNTER_VARIANTS)
 async def test_finder_uses_the_lock_projection_after_a_restart(variant: str) -> None:
     """Without a match since start, the centre of the lock-tracking windows.
 
