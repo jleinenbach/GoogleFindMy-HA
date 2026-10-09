@@ -664,36 +664,34 @@ async def _async_get_device_eid(  # noqa: PLR0911, PLR0912, PLR0915
     try:
         from ..FMDNCrypto.eid_generator import EidVariant  # noqa: PLC0415
 
-        # Calculate beacon time counter
-        rotation_period = 1024  # Default FMDN rotation period in seconds
+        # Seconds since pair_date, the unit the resolver uses for this basis;
+        # generate_eid_variant() aligns it to the rotation window itself. The
+        # lock's time basis, drift offset and millisecond anchors are not
+        # applied here, and a missing pair_date counts as 0 (plain Unix time),
+        # an anchor the resolver rejects.
         pair_date = getattr(identity, "pair_date", None) or 0
         current_time = int(time.time())
-        beacon_time_counter = (current_time - pair_date) // rotation_period
+        beacon_time_counter = current_time - pair_date
 
-        # Determine EID variant - check EID resolver's persisted lock first
+        # Determine EID variant - check the EID resolver's lock first
         variant = EidVariant.LEGACY_SECP160R1_X20_BE  # Default for most FMDN trackers
         eid_resolver = hass.data.get(DOMAIN, {}).get("eid_resolver")
         if eid_resolver:
             # Get the HA device registry ID from the identity
             registry_id = getattr(identity, "registry_id", None)
             if registry_id:
-                # Check for persisted lock with known variant
-                locks = getattr(eid_resolver, "_persisted_locks", {})
-                lock = locks.get(registry_id)
-                if lock:
-                    lock_variant_str = getattr(lock, "variant", None)
-                    if lock_variant_str:
-                        try:
-                            variant = EidVariant(lock_variant_str)
-                            _LOGGER.debug(
-                                "Using locked EID variant for device %s: %s",
-                                device_id,
-                                variant.value,
-                            )
-                        except ValueError:
-                            _LOGGER.debug(
-                                "Unknown variant in lock: %s", lock_variant_str
-                            )
+                # Also covers locks loaded from storage after a restart.
+                lock_variant_str = eid_resolver.locked_variant_value(registry_id)
+                if lock_variant_str:
+                    try:
+                        variant = EidVariant(lock_variant_str)
+                        _LOGGER.debug(
+                            "Using locked EID variant for device %s: %s",
+                            device_id,
+                            variant.value,
+                        )
+                    except ValueError:
+                        _LOGGER.debug("Unknown variant in lock: %s", lock_variant_str)
 
         _LOGGER.debug(
             "Generating EID for device %s: pair_date=%s, current=%s, counter=%s, variant=%s",

@@ -3845,6 +3845,24 @@ class GoogleFindMyEIDResolver:
             curves.add(SECP256R1.name if order == P256_ORDER else SECP160R1.name)
         return curves.pop() if len(curves) == 1 else None
 
+    def locked_variant_value(self, registry_id: str) -> str | None:
+        """Return the stored EID variant value a device is locked to.
+
+        The finder asks this to generate the EID the device actually
+        advertises. ``_locks`` is read because it is filled both when a lock
+        is created and when locks are loaded from storage after a restart;
+        ``_persisted_locks`` only holds locks created in this process.
+
+        Args:
+            registry_id: Home Assistant device registry ID of the device.
+
+        Returns:
+            The lock's ``variant`` string as stored (it may name a variant this
+            version does not know), or ``None`` without a lock.
+        """
+        lock = self._locks.get(registry_id)
+        return lock.variant if lock is not None else None
+
     def stop(self) -> None:
         """Cancel background timers and clear cached state."""
 

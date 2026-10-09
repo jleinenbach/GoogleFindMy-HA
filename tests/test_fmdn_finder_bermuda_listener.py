@@ -1,3 +1,4 @@
+# tests/test_fmdn_finder_bermuda_listener.py
 """Tests for FMDN Finder bermuda_listener module.
 
 Tests the Bermuda device_tracker listener that triggers FMDN location uploads
@@ -7,6 +8,8 @@ when area changes are detected on Bermuda tracker entities.
 from __future__ import annotations
 
 import logging
+from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -587,11 +590,15 @@ async def test_find_googlefindmy_device_info_keeps_entity_id_at_debug(
     )
 
 
-# --- Z13: the finder encrypts for the locked variant on its own curve ------
+# --- The finder encrypts for the locked variant on its own curve ----------
 
 _LOCK_EIK = bytes(range(32))
 _LOCK_NOW = 1_700_000_000
-_LOCK_COUNTER = _LOCK_NOW // 1024  # pair_date 0, rotation period 1024 s
+# Seconds since pair_date. With pair_date 0, as here, that is plain Unix time;
+# the resolver rejects such an anchor, so these tests compare against
+# generate_eid_variant() directly. The tests further down use a real anchor
+# and compare against the resolver's lookup table.
+_LOCK_COUNTER = _LOCK_NOW
 
 # Variant whose EID the finder must produce for a lock, written out by hand:
 # full-length variants map to themselves, truncated P-256 variants to the
@@ -610,10 +617,11 @@ _UPLOAD_VARIANT_FOR_LOCK = {
 
 def _hass_with_lock(variant: str | None) -> MagicMock:
     from custom_components.googlefindmy.const import DOMAIN
+    from custom_components.googlefindmy.eid_resolver import GoogleFindMyEIDResolver
 
-    resolver = MagicMock()
-    resolver._persisted_locks = (
-        {} if variant is None else {"reg-1": MagicMock(variant=variant)}
+    resolver = MagicMock(spec=GoogleFindMyEIDResolver)
+    resolver.locked_variant_value.side_effect = lambda registry_id: (
+        variant if registry_id == "reg-1" else None
     )
     hass = MagicMock()
     hass.data = {DOMAIN: {"eid_resolver": resolver}}
@@ -652,7 +660,7 @@ def test_upload_table_covers_every_variant() -> None:
 async def test_locked_variant_yields_encryptable_eid(
     lock_variant: str, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """Z13: a P-256 lock yields that curve's EID; no WARNING fallback."""
+    """A P-256 lock yields that curve's EID; no WARNING fallback."""
     from custom_components.googlefindmy.FMDNCrypto.eid_generator import (
         EidVariant,
         generate_eid_variant,
@@ -715,3 +723,124 @@ def test_truncated_variant_without_full_sibling_raises(
     monkeypatch.setattr(eid_generator, "VARIANT_DERIVATIONS", only_trunc)
     with pytest.raises(ValueError, match="No full-length variant"):
         _encryptable_eid(_LOCK_EIK, _LOCK_COUNTER, trunc)
+
+
+# --- Counter in seconds, locks as loaded after a restart ------------------
+
+_PAIR_DATE = 1_699_000_000
+
+
+def _real_resolver() -> Any:
+    from custom_components.googlefindmy.eid_resolver import GoogleFindMyEIDResolver
+
+    resolver = GoogleFindMyEIDResolver.__new__(GoogleFindMyEIDResolver)
+    resolver.hass = SimpleNamespace(data={})
+    resolver._ensure_cache_defaults()
+    for attr in (
+        "_lookup",
+        "_lookup_metadata",
+        "_locks",
+        "_persisted_locks",
+        "_known_offsets",
+        "_known_advertisement_reversed",
+        "_known_timebases",
+        "_decryption_status",
+        "_last_lock_confirmation",
+        "_provisioning_warn_at",
+    ):
+        setattr(resolver, attr, {})
+    return resolver
+
+
+def _restarted_resolver(variant: str) -> Any:
+    """Resolver whose only lock came from storage, as after an HA restart."""
+    from custom_components.googlefindmy.eid_resolver import EIDGenerationLock
+
+    resolver = _real_resolver()
+    stored = EIDGenerationLock(
+        device_id="reg-1",
+        canonical_id="dev-1",
+        variant=variant,
+        advertisement_reversed=False,
+        eid_length=32,
+    ).to_dict()
+
+    async def _load() -> list[dict[str, Any]]:
+        return [stored]
+
+    resolver._store = SimpleNamespace(async_load=_load)
+    return resolver
+
+
+def _resolver_lookup_metadata() -> dict[bytes, dict[str, Any]]:
+    """EIDs the resolver expects for the device at ``_LOCK_NOW``, unlocked."""
+    from custom_components.googlefindmy.coordinator import DeviceIdentity
+
+    resolver = _real_resolver()
+    identity = DeviceIdentity(
+        registry_id="reg-1",
+        canonical_id="dev-1",
+        identity_key=_LOCK_EIK,
+        encrypted_identity_key=None,
+        owner_key_version=None,
+        device_type=None,
+        config_entry_id="entry",
+        fast_pair_model_id=None,
+        pair_date=_PAIR_DATE,
+    )
+    resolver._cached_identities = [identity]
+    work_items = resolver._collect_work_items([identity], now_unix=_LOCK_NOW)
+    _lookup, metadata, _ids = resolver._build_lookup_sync(
+        work_items, _LOCK_NOW, resolver._build_rotation_params()
+    )
+    return metadata
+
+
+async def _finder_eid_with(resolver: Any) -> bytes | None:
+    from custom_components.googlefindmy.const import DOMAIN
+    from custom_components.googlefindmy.fmdn_finder import bermuda_listener
+
+    hass = MagicMock()
+    hass.data = {DOMAIN: {"eid_resolver": resolver}}
+    coordinator = _coordinator_with_identity()
+    coordinator.get_active_device_identities.return_value[0].pair_date = _PAIR_DATE
+    with patch.object(bermuda_listener.time, "time", return_value=_LOCK_NOW):
+        return await bermuda_listener._async_get_device_eid(hass, coordinator, "dev-1")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("lock_variant", sorted(_UPLOAD_VARIANT_FOR_LOCK))
+async def test_finder_eid_is_in_the_resolvers_current_window(
+    lock_variant: str,
+) -> None:
+    """The finder's EID is one the resolver expects right now.
+
+    The comparison value comes from the resolver's lookup table, not from a
+    formula in this test: the EID must be listed for the same variant, the
+    ``pair_date`` basis and the rotation window that contains ``_LOCK_NOW``.
+    The old ``// 1024`` counter produced an EID the table does not contain.
+    """
+    resolver = _restarted_resolver(lock_variant)
+    await resolver._async_load_locks()
+    eid = await _finder_eid_with(resolver)
+
+    metadata = _resolver_lookup_metadata()
+    assert eid in metadata
+    meta = metadata[eid]
+    elapsed = _LOCK_NOW - _PAIR_DATE
+    assert meta["variant"] == _UPLOAD_VARIANT_FOR_LOCK[lock_variant]
+    assert meta["timestamp_basis"] == "pair_date"
+    assert meta["rotation_timestamp"] == elapsed - elapsed % 1024
+
+
+@pytest.mark.asyncio
+async def test_finder_uses_a_lock_loaded_after_restart() -> None:
+    """A lock loaded from storage is seen, not only new ones."""
+    resolver = _restarted_resolver("spec_p256_x32_be")
+    await resolver._async_load_locks()
+    assert resolver._persisted_locks == {}  # what the old code read
+
+    eid = await _finder_eid_with(resolver)
+
+    assert eid is not None
+    assert len(eid) == 32

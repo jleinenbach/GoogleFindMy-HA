@@ -345,3 +345,52 @@ def test_prepare_work_item_legacy_discard_schedules_no_save() -> None:
     assert item.lock is None
     assert "device-1" not in resolver._locks
     save.assert_not_called()
+
+
+# --- locked_variant_value(): the finder's view of a lock -------------------
+
+
+@pytest.mark.asyncio
+async def test_locked_variant_value_reads_locks_loaded_from_storage() -> None:
+    """A lock restored by ``_async_load_locks`` is reported by its variant."""
+    resolver = _build_resolver()
+    resolver._locks = {}
+    resolver._persisted_locks = {}
+    stored = EIDGenerationLock(
+        device_id="device-2",
+        canonical_id="canonical-2",
+        variant=EidVariant.SPEC_P256_X32_BE.value,
+        advertisement_reversed=False,
+        eid_length=32,
+    ).to_dict()
+
+    async def _load() -> list[dict[str, object]]:
+        return [stored]
+
+    resolver._store = SimpleNamespace(async_load=_load)
+    await resolver._async_load_locks()
+
+    assert resolver._persisted_locks == {}
+    assert resolver.locked_variant_value("device-2") == "spec_p256_x32_be"
+    assert resolver.locked_variant_value("device-1") is None
+
+
+def test_locked_variant_value_returns_an_unknown_value_unchanged() -> None:
+    """The stored string is returned as is; the caller decides what it means."""
+    resolver = _build_resolver()
+    resolver._locks["device-1"].variant = "no_such_variant"
+
+    assert resolver.locked_variant_value("device-1") == "no_such_variant"
+
+
+def test_locked_variant_value_follows_clear_and_stop() -> None:
+    """Clearing one lock or stopping the resolver takes effect at once."""
+    resolver = _build_resolver()
+    assert resolver.locked_variant_value("device-1") == "modern_p256_x32_be"
+
+    resolver._clear_lock_state("device-1")
+    assert resolver.locked_variant_value("device-1") is None
+
+    resolver = _build_resolver()
+    resolver.stop()
+    assert resolver.locked_variant_value("device-1") is None
