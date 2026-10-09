@@ -1231,3 +1231,23 @@ async def test_half_known_ownership_with_a_subentry_only_is_a_no_op(
 
     assert registry.removed == []
     assert registry.updated == []
+
+
+def test_attr_entry_id_matches_rebuild_registry_service_field() -> None:
+    """``ATTR_ENTRY_ID`` is the ``rebuild_registry`` field name in ``services.yaml``.
+
+    Home Assistant core exposes no ``ATTR_ENTRY_ID`` constant, so the module
+    defines it locally; this binds the local value to the documented schema.
+    """
+
+    from pathlib import Path
+
+    import yaml
+
+    services_yaml = (
+        Path(services.__file__).with_name("services.yaml").read_text(encoding="utf-8")
+    )
+    schema = yaml.safe_load(services_yaml)
+
+    assert services.ATTR_ENTRY_ID == "entry_id"
+    assert services.ATTR_ENTRY_ID in schema[SERVICE_REBUILD_REGISTRY]["fields"]

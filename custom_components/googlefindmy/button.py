@@ -33,7 +33,7 @@ from homeassistant.exceptions import ServiceValidationError
 from homeassistant.helpers import entity_platform
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
-from homeassistant.helpers.entity import DeviceInfo
+from homeassistant.helpers.entity import DeviceInfo, EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.restore_state import RestoreEntity as HARestoreEntity
 from homeassistant.util import dt as dt_util
@@ -42,11 +42,6 @@ if TYPE_CHECKING:
     from .ha_typing import RestoreEntity as RestoreEntityType
 else:
     RestoreEntityType = HARestoreEntity
-
-try:
-    from homeassistant.const import EntityCategory
-except ImportError:  # Home Assistant <2025.11
-    from homeassistant.helpers.entity import EntityCategory
 
 from . import EntityRecoveryManager
 from .const import (

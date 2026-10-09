@@ -28,11 +28,6 @@ from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.network import NoURLAvailableError, get_url
 
-try:  # Home Assistant 2025.5+: attribute constant exposed
-    from homeassistant.const import ATTR_ENTRY_ID
-except ImportError:  # pragma: no cover - forward compatibility for HA < 2025.5
-    ATTR_ENTRY_ID = "entry_id"
-
 from .const import (
     DEFAULT_MAP_VIEW_TOKEN_EXPIRATION,
     DOMAIN,
@@ -65,6 +60,10 @@ from .coordinator.helpers.registry import (
 )
 
 _LOGGER = logging.getLogger(__name__)
+
+# Service field name of ``rebuild_registry`` (see ``services.yaml``); Home
+# Assistant core has no ``ATTR_ENTRY_ID`` constant in ``homeassistant.const``.
+ATTR_ENTRY_ID: str = "entry_id"
 
 try:
     from homeassistant.exceptions import ConfigEntryError
