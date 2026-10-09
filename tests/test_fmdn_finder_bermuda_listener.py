@@ -623,6 +623,8 @@ def _hass_with_lock(variant: str | None) -> MagicMock:
     resolver.locked_variant_value.side_effect = lambda registry_id: (
         variant if registry_id == "reg-1" else None
     )
+    # No match and no lock projection: these tests pin the pair_date fallback.
+    resolver.encryption_counter.return_value = None
     hass = MagicMock()
     hass.data = {DOMAIN: {"eid_resolver": resolver}}
     return hass
@@ -844,3 +846,175 @@ async def test_finder_uses_a_lock_loaded_after_restart() -> None:
 
     assert eid is not None
     assert len(eid) == 32
+
+
+# --- The counter the device used: newest match, lock after a restart -------
+
+_SECRETS_DATE = _PAIR_DATE + 50_000
+# The counter choice does not depend on the variant; one 20-byte and one
+# 32-byte representative cover both EID lengths.
+_COUNTER_VARIANTS = ["legacy_secp160r1_x20_be", "spec_p256_x32_be"]
+
+
+def _identity_two_anchors() -> Any:
+    from custom_components.googlefindmy.coordinator import DeviceIdentity
+
+    return DeviceIdentity(
+        registry_id="reg-1",
+        canonical_id="dev-1",
+        identity_key=_LOCK_EIK,
+        encrypted_identity_key=None,
+        owner_key_version=None,
+        device_type=None,
+        config_entry_id="entry",
+        fast_pair_model_id=None,
+        pair_date=_PAIR_DATE,
+        secrets_creation_date=_SECRETS_DATE,
+    )
+
+
+def _built_resolver(now: int) -> Any:
+    """Resolver with the lookup built for the two-anchor device at ``now``."""
+    from tests.test_ble_battery_sensor import _make_resolver
+
+    resolver = _make_resolver()
+    identity = _identity_two_anchors()
+    resolver._cached_identities = [identity]
+    work_items = resolver._collect_work_items([identity], now_unix=now)
+    lookup, metadata, _ids = resolver._build_lookup_sync(
+        work_items, now, resolver._build_rotation_params()
+    )
+    resolver._lookup, resolver._lookup_metadata = lookup, metadata
+    return resolver
+
+
+def _pick_eid(
+    metadata: dict[bytes, dict[str, Any]], variant: str, basis: str, window: int
+) -> bytes:
+    """The one lookup EID of ``variant`` under ``basis``, ``window`` periods on.
+
+    ``time_offset`` is the window start minus the unaligned reference counter,
+    so the current window has an offset in ``(-1024, 0]`` and window ``k`` one
+    in ``((k - 1) * 1024, k * 1024]``.
+    """
+    hits = [
+        eid
+        for eid, meta in metadata.items()
+        if meta["variant"] == variant
+        and basis in meta["timestamp_bases"]
+        and -(-meta["time_offset"] // 1024) == window
+        and not meta["advertisement_reversed"]
+    ]
+    assert len(hits) == 1, hits
+    return hits[0]
+
+
+def _observe(resolver: Any, eid: bytes, at: int) -> None:
+    """Feed ``eid`` as an advertisement seen at wall time ``at``."""
+    from tests.test_ble_battery_sensor import (
+        _modern_service_data_payload,
+        _service_data_payload,
+    )
+
+    build = _modern_service_data_payload if len(eid) == 32 else _service_data_payload
+    with (
+        patch("time.time", return_value=float(at)),
+        patch("time.monotonic", return_value=50_000.0),
+    ):
+        assert resolver.resolve_eid(build(eid, 0)) is not None
+
+
+async def _finder_eid_at(resolver: Any, at: int) -> bytes | None:
+    from custom_components.googlefindmy.const import DOMAIN
+    from custom_components.googlefindmy.fmdn_finder import bermuda_listener
+
+    hass = MagicMock()
+    hass.data = {DOMAIN: {"eid_resolver": resolver}}
+    coordinator = _coordinator_with_identity()
+    coordinator.get_active_device_identities.return_value[0].pair_date = _PAIR_DATE
+    with patch.object(bermuda_listener.time, "time", return_value=at):
+        return await bermuda_listener._async_get_device_eid(hass, coordinator, "dev-1")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("variant", _COUNTER_VARIANTS)
+@pytest.mark.parametrize(
+    ("basis", "window"),
+    [("secrets_creation_date", 0), ("pair_date", 2)],
+    ids=["secrets_creation_date", "pair_date_two_windows_ahead"],
+)
+async def test_finder_encrypts_for_the_eid_the_device_advertised(
+    variant: str, basis: str, window: int
+) -> None:
+    """The upload EID is the observed EID, not one recomputed from pair_date.
+
+    The comparison value is the advertised EID itself. A match through
+    ``secrets_creation_date`` or through a window two periods ahead of
+    ``pair_date`` gives a different EID than ``now - pair_date``.
+    """
+    resolver = _built_resolver(_LOCK_NOW)
+    observed = _pick_eid(resolver._lookup_metadata, variant, basis, window)
+    _observe(resolver, observed, _LOCK_NOW)
+
+    assert await _finder_eid_at(resolver, _LOCK_NOW) == observed
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("variant", _COUNTER_VARIANTS)
+async def test_finder_advances_the_matched_window_by_whole_periods(
+    variant: str,
+) -> None:
+    """Three periods after the sighting, the EID three windows later.
+
+    The comparison value is the lookup built at the later time: the EID listed
+    under the same basis in the current window. ``(_LOCK_NOW - _SECRETS_DATE) % 1024`` is
+    752, so adding ``3 * 1024 + 7`` seconds stays three windows on.
+    """
+    observed = _pick_eid(
+        _built_resolver(_LOCK_NOW)._lookup_metadata,
+        variant,
+        "secrets_creation_date",
+        0,
+    )
+    resolver = _built_resolver(_LOCK_NOW)
+    _observe(resolver, observed, _LOCK_NOW)
+    later = _LOCK_NOW + 3 * 1024 + 7
+    expected = _pick_eid(
+        _built_resolver(later)._lookup_metadata, variant, "secrets_creation_date", 0
+    )
+
+    assert expected != observed
+    assert await _finder_eid_at(resolver, later) == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("variant", _COUNTER_VARIANTS)
+async def test_finder_uses_the_lock_projection_after_a_restart(variant: str) -> None:
+    """Without a match since start, the centre of the lock-tracking windows.
+
+    The lock comes from storage with a rotation timestamp far from the
+    ``pair_date`` windows. The comparison value is the lookup EID the
+    resolver lists under ``lock_tracking`` in the projected window.
+    """
+    from custom_components.googlefindmy.eid_resolver import EIDGenerationLock
+
+    resolver = _built_resolver(_LOCK_NOW)
+    resolver._lookup, resolver._lookup_metadata = {}, {}
+    resolver._locks["reg-1"] = EIDGenerationLock(
+        device_id="reg-1",
+        canonical_id="dev-1",
+        variant=variant,
+        advertisement_reversed=False,
+        eid_length=32 if variant.startswith(("modern", "spec")) else 20,
+        rotation_timestamp=5_000 * 1024,
+        time_basis="secrets_creation_date",
+        created_at=_LOCK_NOW - 3 * 1024 - 100,
+    )
+    identity = _identity_two_anchors()
+    work_items = resolver._collect_work_items([identity], now_unix=_LOCK_NOW)
+    _lookup, metadata, _ids = resolver._build_lookup_sync(
+        work_items, _LOCK_NOW, resolver._build_rotation_params()
+    )
+    expected = _pick_eid(metadata, variant, "lock_tracking", 0)
+
+    assert await _finder_eid_at(resolver, _LOCK_NOW) == expected

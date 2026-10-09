@@ -394,3 +394,142 @@ def test_locked_variant_value_follows_clear_and_stop() -> None:
     resolver = _build_resolver()
     resolver.stop()
     assert resolver.locked_variant_value("device-1") is None
+
+
+# --- encryption_counter: newest match, then the lock projection ------------
+
+_PERIOD = 1024
+
+
+def _matched_resolver() -> GoogleFindMyEIDResolver:
+    """Resolver with two lookup EIDs for ``dev-m`` in windows 7 and 9."""
+    from tests.test_ble_battery_sensor import _make_resolver, _match
+
+    resolver = _make_resolver()
+    for marker, window in ((0x71, 7), (0x72, 9)):
+        eid = bytes([marker]) * 20
+        resolver._lookup[eid] = [_match("dev-m")]
+        resolver._lookup_metadata[eid] = {
+            "variant": EidVariant.LEGACY_SECP160R1_X20_BE.value,
+            "rotation_timestamp": window * _PERIOD,
+            "timestamp_basis": "pair_date",
+        }
+    return resolver
+
+
+def _see(
+    resolver: GoogleFindMyEIDResolver,
+    marker: int,
+    at: int,
+    *,
+    monotonic: float | None = None,
+) -> None:
+    """Feed one sighting at wall time ``at``.
+
+    ``monotonic`` is the advertisement time on the monotonic clock, as HA
+    hands it over; by default it advances with ``at``.
+    """
+    from tests.test_ble_battery_sensor import _service_data_payload
+
+    observed = float(at - 1_700_000_000 + 50_000) if monotonic is None else monotonic
+    # Delivered right when seen: _observation_clock then dates it at ``at``.
+    with (
+        patch("time.time", return_value=float(at)),
+        patch("time.monotonic", return_value=observed),
+    ):
+        assert resolver.resolve_eid(
+            _service_data_payload(bytes([marker]) * 20, 0), observed_at=observed
+        )
+
+
+def test_encryption_counter_is_none_without_match_or_timed_lock() -> None:
+    """No match and a lock without rotation timestamp give no counter."""
+    resolver = _build_resolver()  # its lock has no rotation_timestamp
+
+    assert resolver.encryption_counter("device-1", now=1_700_000_000) is None
+    assert resolver.encryption_counter("unknown", now=1_700_000_000) is None
+
+
+def test_encryption_counter_projects_the_lock_by_whole_periods() -> None:
+    """Without a match: rotation timestamp plus whole periods since creation."""
+    resolver = _build_resolver()
+    lock = resolver._locks["device-1"]
+    lock.rotation_timestamp = 40 * _PERIOD
+    lock.created_at = 1_700_000_000
+
+    assert resolver.encryption_counter(
+        "device-1", now=1_700_000_000 + 2 * _PERIOD + 5
+    ) == (42 * _PERIOD, "lock")
+    # A clock behind the lock creation does not move the counter backwards.
+    assert resolver.encryption_counter("device-1", now=1_699_000_000) == (
+        40 * _PERIOD,
+        "lock",
+    )
+
+
+def test_encryption_counter_follows_the_newest_match_not_the_lock() -> None:
+    """The lock keeps its first window; the counter follows later matches."""
+    resolver = _matched_resolver()
+    _see(resolver, 0x71, 1_700_000_000)
+    _see(resolver, 0x72, 1_700_000_100)
+
+    assert resolver._locks["dev-m"].rotation_timestamp == 7 * _PERIOD
+    assert resolver.encryption_counter("dev-m", now=1_700_000_100) == (
+        9 * _PERIOD,
+        "last_match",
+    )
+    assert resolver.encryption_counter("dev-m", now=1_700_000_100 + 3 * _PERIOD) == (
+        12 * _PERIOD,
+        "last_match",
+    )
+
+
+def test_encryption_counter_ignores_an_older_replayed_match() -> None:
+    """A replay, older on the monotonic clock, keeps the newer window.
+
+    The replayed sighting carries an earlier time on the monotonic clock; that
+    clock orders the sightings within this process.
+    """
+    resolver = _matched_resolver()
+    _see(resolver, 0x72, 1_700_000_100, monotonic=50_100.0)
+    _see(resolver, 0x71, 1_700_000_100, monotonic=50_000.0)  # replayed, older
+
+    assert resolver.encryption_counter("dev-m", now=1_700_000_100) == (
+        9 * _PERIOD,
+        "last_match",
+    )
+
+
+def test_encryption_counter_follows_a_newer_match_after_a_wall_clock_step() -> None:
+    """Within this process, a wall clock stepped backwards does not freeze it.
+
+    The second sighting is newer on the monotonic clock but carries an
+    earlier wall time; it replaces the first, as it does for the lock. The
+    first sighting after a restart is still ordered against the lock's wall
+    stamp, as for drift_offset and last_seen_at.
+    """
+    resolver = _matched_resolver()
+    _see(resolver, 0x71, 1_700_000_000, monotonic=50_000.0)
+    _see(resolver, 0x72, 1_699_995_000, monotonic=50_100.0)
+
+    assert resolver._locks["dev-m"].last_seen_at == 1_699_995_000
+    assert resolver.encryption_counter("dev-m", now=1_699_995_000) == (
+        9 * _PERIOD,
+        "last_match",
+    )
+
+
+def test_encryption_counter_follows_clear_and_stop() -> None:
+    """Clearing a device or stopping the resolver drops the remembered match."""
+    resolver = _matched_resolver()
+    _see(resolver, 0x71, 1_700_000_000)
+    resolver._locks.clear()
+    assert resolver.encryption_counter("dev-m", now=1_700_000_000) is not None
+
+    resolver._clear_lock_state("dev-m")
+    assert resolver.encryption_counter("dev-m", now=1_700_000_000) is None
+
+    resolver = _matched_resolver()
+    _see(resolver, 0x71, 1_700_000_000)
+    resolver.stop()
+    assert resolver.encryption_counter("dev-m", now=1_700_000_000) is None

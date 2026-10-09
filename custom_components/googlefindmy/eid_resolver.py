@@ -1076,6 +1076,13 @@ class GoogleFindMyEIDResolver:
     _lock_last_seen_monotonic: dict[str, float] = field(
         init=False, default_factory=dict
     )
+    # Window timestamp and wall-clock observation of the newest lookup match
+    # per device, in memory only. The window timestamp is the time counter the
+    # device used for the matched EID, so it is what encryption_counter()
+    # advances; the lock only keeps the counter of its first match.
+    _last_match_window: dict[str, tuple[int, int]] = field(
+        init=False, default_factory=dict
+    )
     _known_advertisement_reversed: dict[str, bool] = field(
         init=False, default_factory=dict
     )
@@ -1169,6 +1176,8 @@ class GoogleFindMyEIDResolver:
             self._last_lock_confirmation = {}
         if not hasattr(self, "_lock_last_seen_monotonic"):
             self._lock_last_seen_monotonic = {}
+        if not hasattr(self, "_last_match_window"):
+            self._last_match_window = {}
         if not hasattr(self, "_provisioning_warn_at"):
             self._provisioning_warn_at = {}
         if not hasattr(self, "_locks"):
@@ -1221,6 +1230,7 @@ class GoogleFindMyEIDResolver:
             "_known_timebases",
             "_last_lock_confirmation",
             "_lock_last_seen_monotonic",
+            "_last_match_window",
         ):
             mapping = getattr(self, attr, None)
             if isinstance(mapping, dict) and device_id in mapping:
@@ -3016,6 +3026,14 @@ class GoogleFindMyEIDResolver:
         if not stale and now_monotonic is not None:
             self._lock_last_seen_monotonic[match.device_id] = now_monotonic
 
+        window_ts = metadata.get("rotation_timestamp")
+        # Same ordering rule as drift_offset and last_seen_at: an older,
+        # replayed sighting is ``stale`` (monotonic clock within this process)
+        # and must not replace a newer counter. No wall-clock guard here, see
+        # _sighting_is_older_than_the_lock.
+        if not stale and isinstance(window_ts, int) and not isinstance(window_ts, bool):
+            self._last_match_window[match.device_id] = (window_ts, now)
+
         self._known_advertisement_reversed[match.device_id] = match.is_reversed
 
         if anchor_basis is not None and not basis_explicitly_invalid and not stale:
@@ -3874,6 +3892,51 @@ class GoogleFindMyEIDResolver:
         lock = self._locks.get(registry_id)
         return lock.variant if lock is not None else None
 
+    def encryption_counter(
+        self, registry_id: str, *, now: int
+    ) -> tuple[int, str] | None:
+        """Return the time counter the device most likely uses at ``now``.
+
+        The finder encrypts a report to the EID of this counter, so it has to
+        be the counter the device itself advertises with, not one recomputed
+        from ``pair_date``. Two sources, in this order:
+
+        * ``"last_match"``: the window timestamp of the newest lookup match
+          (the counter the matched EID was generated with), advanced by the
+          whole rotation periods since that sighting.
+        * ``"lock"``: without a match since start, the lock's projection, the
+          centre ``_compute_lock_windows`` searches around.
+
+        Both advance by whole periods from a sighting whose phase within its
+        window is unknown, so once a window boundary has passed since the
+        sighting the result can be one window behind the device, as the
+        resolver's own projection can. The lock's
+        ``drift_offset`` is not applied: it is the ``semantic_offset`` of the
+        matching window, and its reference depends on the window group.
+
+        Args:
+            registry_id: Home Assistant device registry ID of the device.
+            now: Wall-clock time in whole seconds.
+
+        Returns:
+            ``(counter, source)``, or ``None`` without a match and without a
+            lock carrying a rotation timestamp.
+        """
+        period = ROTATION_PERIOD
+        last_match = getattr(self, "_last_match_window", {}).get(registry_id)
+        if last_match is not None:
+            window_ts, seen_at = last_match
+            elapsed = max(0, now - seen_at)
+            return window_ts + (elapsed // period) * period, "last_match"
+        lock = self._locks.get(registry_id)
+        if lock is None:
+            return None
+        rotation_ts = lock.rotation_timestamp
+        if not isinstance(rotation_ts, int) or isinstance(rotation_ts, bool):
+            return None
+        elapsed = max(0, now - lock.created_at)
+        return rotation_ts + (elapsed // period) * period, "lock"
+
     def stop(self) -> None:
         """Cancel background timers and clear cached state."""
 
@@ -3894,3 +3957,7 @@ class GoogleFindMyEIDResolver:
         self._lookup_metadata.clear()
         self._locks.clear()
         self._persisted_locks.clear()
+        # Stubs that bypass __init__ may lack the field.
+        last_match_window = getattr(self, "_last_match_window", None)
+        if isinstance(last_match_window, dict):
+            last_match_window.clear()

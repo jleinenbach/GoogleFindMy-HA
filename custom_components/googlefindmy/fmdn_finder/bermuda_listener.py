@@ -664,14 +664,14 @@ async def _async_get_device_eid(  # noqa: PLR0911, PLR0912, PLR0915
     try:
         from ..FMDNCrypto.eid_generator import EidVariant  # noqa: PLC0415
 
-        # Seconds since pair_date, the unit the resolver uses for this basis;
-        # generate_eid_variant() aligns it to the rotation window itself. The
-        # lock's time basis, drift offset and millisecond anchors are not
-        # applied here, and a missing pair_date counts as 0 (plain Unix time),
-        # an anchor the resolver rejects.
         pair_date = getattr(identity, "pair_date", None) or 0
         current_time = int(time.time())
+        # Fallback only: seconds since pair_date, which generate_eid_variant()
+        # aligns to the rotation window itself. It ignores the time basis and
+        # window the resolver actually matched, and a missing pair_date counts
+        # as 0 (plain Unix time), an anchor the resolver rejects.
         beacon_time_counter = current_time - pair_date
+        counter_source = "pair_date"
 
         # Determine EID variant - check the EID resolver's lock first
         variant = EidVariant.LEGACY_SECP160R1_X20_BE  # Default for most FMDN trackers
@@ -680,6 +680,13 @@ async def _async_get_device_eid(  # noqa: PLR0911, PLR0912, PLR0915
             # Get the HA device registry ID from the identity
             registry_id = getattr(identity, "registry_id", None)
             if registry_id:
+                # The counter the device itself used: its newest match, or
+                # the lock's projection after a restart.
+                resolved_counter = eid_resolver.encryption_counter(
+                    registry_id, now=current_time
+                )
+                if resolved_counter is not None:
+                    beacon_time_counter, counter_source = resolved_counter
                 # Also covers locks loaded from storage after a restart.
                 lock_variant_str = eid_resolver.locked_variant_value(registry_id)
                 if lock_variant_str:
@@ -694,11 +701,13 @@ async def _async_get_device_eid(  # noqa: PLR0911, PLR0912, PLR0915
                         _LOGGER.debug("Unknown variant in lock: %s", lock_variant_str)
 
         _LOGGER.debug(
-            "Generating EID for device %s: pair_date=%s, current=%s, counter=%s, variant=%s",
+            "Generating EID for device %s: pair_date=%s, current=%s, counter=%s "
+            "(source=%s), variant=%s",
             device_id,
             pair_date,
             current_time,
             beacon_time_counter,
+            counter_source,
             variant.value,
         )
 
