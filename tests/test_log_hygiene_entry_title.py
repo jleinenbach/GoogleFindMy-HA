@@ -14,7 +14,8 @@ check reports a logger argument that
 
 * reads a title as ``<entry>.title`` or ``getattr(<entry>, "title", ...)``, or
   reads a local bound from such a read by an assignment, a ``for`` or a
-  ``with ... as`` target, in the same scope or an enclosing one;
+  ``with ... as`` target, in the same scope or an enclosing one that the
+  nested scope does not shadow;
 * formats an entry as a whole: the argument itself, ``str(<entry>)``,
   ``repr(<entry>)`` or an f-string field, because ``ConfigEntry.__repr__``
   carries the title.
@@ -132,6 +133,15 @@ _FLAGGED = {
     "alias_from_enclosing_scope": (
         "log_fn = _LOGGER.debug\ndef f(entry):\n    log_fn('%s', entry.title)\n"
     ),
+    "nonlocal_closure": (
+        "def f(entry):\n"
+        "    t = entry.title\n"
+        "    def g():\n"
+        "        nonlocal t\n"
+        "        t = t.strip()\n"
+        "        _LOGGER.info('%s', t)\n"
+        "    return g\n"
+    ),
     "closure": (
         "def f(entry):\n"
         "    t = entry.title\n"
@@ -179,6 +189,22 @@ _NOT_FLAGGED = {
     "sibling_scope": (
         "def a(entry):\n    t = entry.title\n    return t\n"
         "def b(t):\n    _LOGGER.info('%s', t)\n"
+    ),
+    # A nested scope that binds the name itself shadows the outer title.
+    "shadowing_parameter": (
+        "def f(entry):\n"
+        "    t = entry.title\n"
+        "    def g(t):\n"
+        "        _LOGGER.info('%s', t)\n"
+        "    return g\n"
+    ),
+    "shadowing_assignment": (
+        "def f(entry):\n"
+        "    t = entry.title\n"
+        "    def g():\n"
+        "        t = 1\n"
+        "        _LOGGER.info('%s', t)\n"
+        "    return g, t\n"
     ),
     # An alias bound in one function is not visible in a sibling function.
     "alias_in_sibling_scope": (

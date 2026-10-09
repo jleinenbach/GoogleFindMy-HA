@@ -422,6 +422,32 @@ def _entry_object_args(arg: ast.AST) -> list[str]:
     ]
 
 
+def _local_names(scope: ast.AST) -> set[str]:
+    """Return the names ``scope`` binds itself (parameters and assignment,
+    ``for`` and ``with`` targets) without those declared ``nonlocal`` or
+    ``global``. Such a name shadows the same name of an enclosing scope."""
+    names: set[str] = set()
+    if isinstance(scope, ast.FunctionDef | ast.AsyncFunctionDef):
+        arguments = scope.args
+        names |= {
+            arg.arg
+            for arg in [
+                *arguments.posonlyargs,
+                *arguments.args,
+                *arguments.kwonlyargs,
+                *([arguments.vararg] if arguments.vararg else []),
+                *([arguments.kwarg] if arguments.kwarg else []),
+            ]
+        }
+    declared: set[str] = set()
+    for node in _scope_nodes(scope):
+        for target, _value in _title_bindings(node):
+            names |= _plain_target_names(target)
+        if isinstance(node, ast.Nonlocal | ast.Global):
+            declared |= set(node.names)
+    return names - declared
+
+
 def entry_title_offenders(tree: ast.AST) -> list[tuple[str, int, str]]:
     """Return ``(scope, line, form)`` for every logger call in ``tree`` that
     passes the title of a config entry: ``form`` is ``"title"`` for a title
@@ -431,7 +457,8 @@ def entry_title_offenders(tree: ast.AST) -> list[tuple[str, int, str]]:
     the title to the account e-mail.
 
     Each function, class body and the module body is one scope; a nested scope
-    sees the title locals and logger aliases of the scopes around it. A logger
+    sees the title locals and logger aliases of the scopes around it, except
+    names it binds itself (``_local_names``). A logger
     call is ``<logger>.<method>(...)``, ``getattr(<logger>, name)(...)`` or a
     call through a name bound to one (``log_fn = _LOGGER.debug if quiet else
     _LOGGER.warning``). Names are bound through assignments, ``for`` and
@@ -481,7 +508,11 @@ def entry_title_offenders(tree: ast.AST) -> list[tuple[str, int, str]]:
                 for form in _entry_object_args(arg)
             )
         pending.extend(
-            (node, frozenset(bound), frozenset(aliases))
+            (
+                node,
+                frozenset(bound - _local_names(node)),
+                frozenset(aliases - _local_names(node)),
+            )
             for node in nodes
             if isinstance(node, _SCOPE)
         )
