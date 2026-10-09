@@ -925,6 +925,31 @@ def test_build_one_window_later_recomputes_only_the_new_keys(
     assert calls["mask"] - after_first["mask"] == mask_both - mask_one
 
 
+@pytest.mark.usefixtures("low_floors")
+def test_smaller_build_keeps_the_keys_it_still_needs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """After a larger build, a smaller one recomputes nothing it had before.
+
+    Shrinking the memo before generating would evict by the order of the
+    larger build and drop the remaining device's keys. Three devices leave
+    more entries (1134 EID keys) than the bound of one device (756), so the
+    shrink has to evict.
+    """
+    fleet = _aged_fleet(3)
+    [(eid_keys, mask_keys)] = _unbounded_key_counts(fleet[:1], _FLEET_NOW)
+    resolver = _fleet_resolver()
+    calls = _counting_crypto(monkeypatch)
+
+    _build(resolver, fleet, _FLEET_NOW)
+    after_large = dict(calls)
+    _build(resolver, fleet[:1], _FLEET_NOW)
+
+    assert calls == after_large
+    assert resolver._eid_memo.maxsize == 2 * eid_keys
+    assert resolver._flags_mask_memo.maxsize == 2 * mask_keys
+
+
 def test_hard_cap_bounds_the_memos_and_keeps_the_values(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -139,21 +139,25 @@ _EID_MASK_MEMO_MAXSIZE = 1024
 
 # Per-build sizing. The key count grows with device age and anchors: one device
 # with pair_date and secrets_creation_date five years back spans 54 windows per
-# build (378 EID keys, 216 mask keys), ten years back 86 (602 and 344); the
-# window count is only capped by max_window (85 per side and basis), reached
-# after decades. Fixed bounds for that cap would size the memos for devices
-# decades old, so _build_lookup_sync counts the exact keys of the build and sets each
-# memo to _MEMO_HEADROOM times that count, never below the bounds above and
-# never above the hard caps below. The headroom leaves room for the keys of the
-# previous build next to those of the current one, so no key the build still
-# needs can be evicted, whatever the order of access. With an exact bound that
-# depends on the order in which keys are reused; for windows moving on by one
-# it happens to hold (measured for 13 such devices: 182 new EID and 104 new
-# mask keys, exactly those recomputed). Measured with tracemalloc, a build of
-# 13 such devices (4914 EID and 2808 mask entries) grows the process by about
-# 1.5 MB including the lookup table; extrapolated, the hard caps bound both
-# memos together to about 10 MB. Beyond the caps, entries are recomputed,
-# never wrong.
+# build (378 EID keys, 216 mask keys), ten years back 86 (602 and 344). For the
+# relative bases the window count is only capped by max_window (85 per side and
+# basis), reached after decades; the absolute Unix basis, off by default, spans
+# at least MIN_UNIX_WINDOW_SIZE windows per side without that cap. Fixed bounds
+# for the cap would size the memos for devices decades old, so
+# _build_lookup_sync counts the exact keys of the build and sets each memo to
+# _MEMO_HEADROOM times that count, never below the bounds above and never above
+# the hard caps below. It grows a memo before generating and shrinks it only
+# afterwards, when the least recently used entries are the ones this build did
+# not touch; shrinking first would evict by the order of the previous build and
+# drop keys a smaller build still needs. The headroom leaves room for the keys
+# of the previous build next to those of the current one. For windows moving on
+# by one an exact bound would do as well (measured for 13 such devices: 182 new
+# EID and 104 new mask keys, exactly those recomputed). Measured with
+# tracemalloc, the two memos of a build of 13 such devices (4914 EID and 2808
+# mask entries) hold about 1.5 MB; the lookup table comes on top. Extrapolated,
+# the hard caps bound both memos together to about 10 MB. A build that needs
+# more than a cap recomputes all of its entries on every build (a sequential
+# pass over a smaller LRU never hits); the values stay correct.
 _MEMO_HEADROOM = 2
 _EID_MEMO_HARD_CAP = 32768
 _EID_MASK_MEMO_HARD_CAP = 16384
@@ -224,6 +228,12 @@ class _BoundedLRUCache:
             self._store.move_to_end(key)
             while len(self._store) > self._maxsize:
                 self._store.popitem(last=False)
+
+    @property
+    def maxsize(self) -> int:
+        """Return the current bound."""
+
+        return self._maxsize
 
     def resize(self, maxsize: int) -> None:
         """Set a new bound, evicting least-recently-used entries past it."""
@@ -2215,18 +2225,15 @@ class GoogleFindMyEIDResolver:
                     mask_keys.add((spec.key_bytes, timestamp, *curve_params))
             planned.append((work_item, specs))
 
-        self._eid_memo.resize(
-            _memo_capacity(
-                len(eid_keys), floor=_EID_MEMO_MAXSIZE, cap=_EID_MEMO_HARD_CAP
-            )
+        eid_bound = _memo_capacity(
+            len(eid_keys), floor=_EID_MEMO_MAXSIZE, cap=_EID_MEMO_HARD_CAP
         )
-        self._flags_mask_memo.resize(
-            _memo_capacity(
-                len(mask_keys),
-                floor=_EID_MASK_MEMO_MAXSIZE,
-                cap=_EID_MASK_MEMO_HARD_CAP,
-            )
+        mask_bound = _memo_capacity(
+            len(mask_keys), floor=_EID_MASK_MEMO_MAXSIZE, cap=_EID_MASK_MEMO_HARD_CAP
         )
+        # Grow now, shrink after pass two (see _MEMO_HEADROOM).
+        self._eid_memo.resize(max(eid_bound, self._eid_memo.maxsize))
+        self._flags_mask_memo.resize(max(mask_bound, self._flags_mask_memo.maxsize))
 
         # Pass two: generate and register.
         for work_item, specs in planned:
@@ -2261,6 +2268,9 @@ class GoogleFindMyEIDResolver:
                         advertisement_reversed=generated.is_reversed,
                         flags_xor_mask=xor_mask,
                     )
+
+        self._eid_memo.resize(eid_bound)
+        self._flags_mask_memo.resize(mask_bound)
 
         lookup, lookup_metadata = builder.finalize()
         return lookup, lookup_metadata, invalid_hint_ids
