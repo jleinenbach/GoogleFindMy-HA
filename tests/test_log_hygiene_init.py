@@ -490,7 +490,11 @@ def entry_title_offenders(tree: ast.AST) -> list[tuple[str, int, str]]:
     _LOGGER.warning``). Names are bound through assignments, ``for`` and
     ``with ... as`` targets, plain names only (``_plain_target_names``); a
     name once bound stays bound for its scope, so a later rebinding to a
-    harmless value is still reported. ``tests/test_log_hygiene_entry_title.py``
+    harmless value is still reported. Known gap: a comprehension directly in a
+    class body is scanned as part of that body, so a name the class binds hides
+    an outer title local from it, although Python resolves the outer name
+    there; such a logger call is not reported. The package has no comprehension
+    directly in a class body. ``tests/test_log_hygiene_entry_title.py``
     applies this to every module of the package."""
     offenders: list[tuple[str, int, str]] = []
     pending: list[tuple[ast.AST, frozenset[str], frozenset[str]]] = []
