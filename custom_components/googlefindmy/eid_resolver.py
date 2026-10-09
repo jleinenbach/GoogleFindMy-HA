@@ -129,13 +129,41 @@ _VARIANT_CURVE_PARAMS: dict[EidVariant, tuple[int, int, ScalarDerivation]] = {
 # devices need 1183 EID keys and 676 mask keys.
 # Older devices span more windows (two more per further ~237 days of drift
 # allowance, see _compute_relative_windows), and a device with both pair_date
-# and secrets_creation_date gets a window set per anchor. Fleets of such
-# devices overflow the bounds earlier; that costs recomputation on the next
-# build, never a wrong value. tests/test_eid_resolver_memoization.py measures
-# the per-device key counts of the sizing case and fails if a new variant or
-# derivation outgrows these bounds.
+# and secrets_creation_date gets a window set per anchor. For them these bounds
+# are only the floor: each build sizes both memos to its own key count (see
+# _MEMO_HEADROOM below). tests/test_eid_resolver_memoization.py measures the
+# per-device key counts of the sizing case and fails if a new variant or
+# derivation outgrows these floors.
 _EID_MEMO_MAXSIZE = 2048
 _EID_MASK_MEMO_MAXSIZE = 1024
+
+# Per-build sizing. The key count grows with device age and anchors: one device
+# with pair_date and secrets_creation_date five years back spans 54 windows per
+# build (378 EID keys, 216 mask keys), ten years back 86 (602 and 344); the
+# window count is only capped by max_window (85 per side and basis), reached
+# after decades. Fixed bounds for that cap would size the memos for devices
+# decades old, so _build_lookup_sync counts the exact keys of the build and sets each
+# memo to _MEMO_HEADROOM times that count, never below the bounds above and
+# never above the hard caps below. The headroom leaves room for the keys of the
+# previous build next to those of the current one, so no key the build still
+# needs can be evicted, whatever the order of access. With an exact bound that
+# depends on the order in which keys are reused; for windows moving on by one
+# it happens to hold (measured for 13 such devices: 182 new EID and 104 new
+# mask keys, exactly those recomputed). Measured with tracemalloc, a build of
+# 13 such devices (4914 EID and 2808 mask entries) grows the process by about
+# 1.5 MB including the lookup table; extrapolated, the hard caps bound both
+# memos together to about 10 MB. Beyond the caps, entries are recomputed,
+# never wrong.
+_MEMO_HEADROOM = 2
+_EID_MEMO_HARD_CAP = 32768
+_EID_MASK_MEMO_HARD_CAP = 16384
+
+
+def _memo_capacity(needed: int, *, floor: int, cap: int) -> int:
+    """Return the memo bound for a build that uses ``needed`` distinct keys."""
+
+    return min(cap, max(floor, _MEMO_HEADROOM * needed))
+
 
 # Heuristic phone-discovery memoization (AP-SWEEP).
 # ``generate_heuristic_eid`` is the on-loop sibling of the build-side crypto: it
@@ -194,6 +222,14 @@ class _BoundedLRUCache:
         with self._lock:
             self._store[key] = value
             self._store.move_to_end(key)
+            while len(self._store) > self._maxsize:
+                self._store.popitem(last=False)
+
+    def resize(self, maxsize: int) -> None:
+        """Set a new bound, evicting least-recently-used entries past it."""
+
+        with self._lock:
+            self._maxsize = maxsize
             while len(self._store) > self._maxsize:
                 self._store.popitem(last=False)
 
@@ -2149,6 +2185,12 @@ class GoogleFindMyEIDResolver:
         builder = CacheBuilder()
         invalid_hint_ids: list[str] = []
 
+        # Pass one: the variant specs of the whole build, and the exact memo
+        # keys they will use (same tuples as _generate_variant and
+        # _compute_flags_xor_mask build), so both memos can be sized first.
+        planned: list[tuple[WorkItem, list[VariantSpec]]] = []
+        eid_keys: set[tuple[bytes, int, EidVariant]] = set()
+        mask_keys: set[tuple[bytes, int, int, int, ScalarDerivation]] = set()
         for work_item in work_items:
             windows, invalid_hint = self._compute_time_windows(
                 work_item, now_unix=now_unix, params=rotation_params
@@ -2160,39 +2202,65 @@ class GoogleFindMyEIDResolver:
                 work_item.registry_id,
                 len(windows),
             )
-            for window in windows:
-                variants = self._compute_variants(work_item, window)
-                for variant_spec in variants:
-                    xor_mask: int | None = None
-                    try:
-                        curve_len, curve_ord, derivation = _VARIANT_CURVE_PARAMS[
-                            variant_spec.variant
-                        ]
-                        xor_mask = self._compute_flags_xor_mask(
-                            variant_spec.key_bytes,
-                            variant_spec.window.timestamp,
-                            curve_byte_len=curve_len,
-                            curve_order=curve_ord,
-                            derivation=derivation,
-                        )
-                    except Exception:  # noqa: BLE001
-                        pass
-                    for generated in self._generate_eids_from_spec(variant_spec):
-                        match = EIDMatch(
-                            device_id=work_item.registry_id,
-                            config_entry_id=work_item.config_entry_id,
-                            canonical_id=work_item.canonical_id,
-                            time_offset=generated.window.semantic_offset,
-                            is_reversed=generated.is_reversed,
-                        )
-                        builder.register_eid(
-                            generated.eid_bytes,
-                            match=match,
-                            variant=generated.variant,
-                            window=generated.window,
-                            advertisement_reversed=generated.is_reversed,
-                            flags_xor_mask=xor_mask,
-                        )
+            specs = [
+                spec
+                for window in windows
+                for spec in self._compute_variants(work_item, window)
+            ]
+            for spec in specs:
+                timestamp = spec.window.timestamp
+                eid_keys.add((spec.key_bytes, timestamp, spec.variant))
+                curve_params = _VARIANT_CURVE_PARAMS.get(spec.variant)
+                if curve_params is not None:
+                    mask_keys.add((spec.key_bytes, timestamp, *curve_params))
+            planned.append((work_item, specs))
+
+        self._eid_memo.resize(
+            _memo_capacity(
+                len(eid_keys), floor=_EID_MEMO_MAXSIZE, cap=_EID_MEMO_HARD_CAP
+            )
+        )
+        self._flags_mask_memo.resize(
+            _memo_capacity(
+                len(mask_keys),
+                floor=_EID_MASK_MEMO_MAXSIZE,
+                cap=_EID_MASK_MEMO_HARD_CAP,
+            )
+        )
+
+        # Pass two: generate and register.
+        for work_item, specs in planned:
+            for variant_spec in specs:
+                xor_mask: int | None = None
+                try:
+                    curve_len, curve_ord, derivation = _VARIANT_CURVE_PARAMS[
+                        variant_spec.variant
+                    ]
+                    xor_mask = self._compute_flags_xor_mask(
+                        variant_spec.key_bytes,
+                        variant_spec.window.timestamp,
+                        curve_byte_len=curve_len,
+                        curve_order=curve_ord,
+                        derivation=derivation,
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
+                for generated in self._generate_eids_from_spec(variant_spec):
+                    match = EIDMatch(
+                        device_id=work_item.registry_id,
+                        config_entry_id=work_item.config_entry_id,
+                        canonical_id=work_item.canonical_id,
+                        time_offset=generated.window.semantic_offset,
+                        is_reversed=generated.is_reversed,
+                    )
+                    builder.register_eid(
+                        generated.eid_bytes,
+                        match=match,
+                        variant=generated.variant,
+                        window=generated.window,
+                        advertisement_reversed=generated.is_reversed,
+                        flags_xor_mask=xor_mask,
+                    )
 
         lookup, lookup_metadata = builder.finalize()
         return lookup, lookup_metadata, invalid_hint_ids
