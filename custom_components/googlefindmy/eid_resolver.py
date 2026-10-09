@@ -120,12 +120,22 @@ _VARIANT_CURVE_PARAMS: dict[EidVariant, tuple[int, int, ScalarDerivation]] = {
 # ``self`` (and pins it), leaking the resolver and preventing per-instance caches.
 # The minimal OrderedDict+Lock helper below keys only on the crypto inputs.
 #
-# _EID_MEMO_MAXSIZE = 512: 13 devices x 5 variants x 4 concurrently live
-# time_counter windows ~= 260, x ~2 headroom -> 512 (next power of two).
-_EID_MEMO_MAXSIZE = 512
-# _EID_MASK_MEMO_MAXSIZE = 512: same dimensioning; mask key cardinality is
-# <= devices x windows x 2 curves < 512 (no per-variant fan-out for the mask).
-_EID_MASK_MEMO_MAXSIZE = 512
+# Both bounds are sized so that one lookup build of 13 unlocked devices fits,
+# with headroom, rounded up to the next power of two. The sizing case is an
+# unlocked device with a single time anchor that is younger than about 237
+# days: it spans 13 time windows per build, giving 13 x 7 variants = 91 EID
+# keys and 13 x 4 mask keys = 52 mask keys (the mask key carries curve and
+# scalar derivation, and the seven variants use four distinct pairs). 13 such
+# devices need 1183 EID keys and 676 mask keys.
+# Older devices span more windows (two more per further ~237 days of drift
+# allowance, see _compute_relative_windows), and a device with both pair_date
+# and secrets_creation_date gets a window set per anchor. Fleets of such
+# devices overflow the bounds earlier; that costs recomputation on the next
+# build, never a wrong value. tests/test_eid_resolver_memoization.py measures
+# the per-device key counts of the sizing case and fails if a new variant or
+# derivation outgrows these bounds.
+_EID_MEMO_MAXSIZE = 2048
+_EID_MASK_MEMO_MAXSIZE = 1024
 
 # Heuristic phone-discovery memoization (AP-SWEEP).
 # ``generate_heuristic_eid`` is the on-loop sibling of the build-side crypto: it
@@ -501,7 +511,8 @@ def _framed_eid_lengths(
 
     * The 32-byte reading is probed first wherever it fits, including in
       ``0x40`` frames. The first 20 bytes of a 32-byte EID are a precomputed
-      lookup entry in their own right (``MODERN_P256_X20_TRUNC_*``), so the
+      lookup entry in their own right (``SPEC_P256_X20_TRUNC_BE``,
+      ``MODERN_P256_X20_TRUNC_*``), so the
       shorter reading would otherwise match first and put the hashed-flags
       byte at octet 28 instead of 40 -- on EID material, which decodes into a
       stable but fabricated battery level and UWT bit.

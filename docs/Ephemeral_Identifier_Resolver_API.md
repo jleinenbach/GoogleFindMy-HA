@@ -265,8 +265,9 @@ enforces this.
 
 **Truncated variants do not enable P-256 foreign reports.** A finder cannot run
 P-256 ECDH from 20 of the 32 x-coordinate bytes; a report for a
-`MODERN_P256_X20_TRUNC_*` match carries a 20-byte `Sx`, is routed to SECP160r1
-by `curve_for_coord_len(20)` and cannot be decrypted. The binding test names
+`SPEC_P256_X20_TRUNC_BE` or `MODERN_P256_X20_TRUNC_*` match carries a 20-byte
+`Sx`, is routed to SECP160r1 by `curve_for_coord_len(20)` and cannot be
+decrypted. The binding test names
 these variants as its exclusions, and
 `test_truncated_p256_variant_reports_are_undecryptable` pins that such a
 report never decrypts. Because no key can authenticate it, the decryption path

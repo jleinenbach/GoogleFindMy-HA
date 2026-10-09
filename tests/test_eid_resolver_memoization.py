@@ -391,6 +391,57 @@ def test_flags_mask_memo_is_bounded_at_maxsize() -> None:
     assert len(resolver._flags_mask_memo) == _EID_MASK_MEMO_MAXSIZE
 
 
+# The device count the memo bounds are sized for (see the comment above
+# ``_EID_MEMO_MAXSIZE`` in eid_resolver.py).
+_MEMO_SIZED_FOR_DEVICES = 13
+
+
+def test_memo_bounds_hold_one_build_of_the_sized_device_count() -> None:
+    """Both memos hold the keys of one build for the sized device count.
+
+    Measures the keys a single unlocked device of the sizing case (one time
+    anchor, younger than about 237 days) adds in one lookup build and requires
+    room for ``_MEMO_SIZED_FOR_DEVICES`` of them. A new variant or a new scalar
+    derivation raises the per-device count; this test then fails instead of
+    the memo silently evicting its own entries on every build. Older devices
+    and devices with two anchors span more windows and are not covered here.
+    """
+
+    resolver = _build_resolver()
+    resolver.hass = SimpleNamespace(data={})
+    for attr in (
+        "_lookup",
+        "_lookup_metadata",
+        "_locks",
+        "_persisted_locks",
+        "_known_offsets",
+        "_known_advertisement_reversed",
+        "_known_timebases",
+    ):
+        setattr(resolver, attr, {})
+    identity = DeviceIdentity(
+        registry_id="registry-id",
+        canonical_id="canonical-id",
+        identity_key=b"\xaa" * 32,
+        encrypted_identity_key=None,
+        owner_key_version=None,
+        device_type=None,
+        config_entry_id="entry-id",
+        fast_pair_model_id=None,
+        pair_date=1_699_000_000,
+    )
+    now = 1_700_000_000
+    work_items = resolver._collect_work_items([identity], now_unix=now)
+    resolver._build_lookup_sync(work_items, now, resolver._build_rotation_params())
+
+    eid_keys = len(resolver._eid_memo)
+    mask_keys = len(resolver._flags_mask_memo)
+    assert eid_keys > 0
+    assert mask_keys > 0
+    assert _EID_MEMO_MAXSIZE >= _MEMO_SIZED_FOR_DEVICES * eid_keys
+    assert _EID_MASK_MEMO_MAXSIZE >= _MEMO_SIZED_FOR_DEVICES * mask_keys
+
+
 def test_flags_mask_memo_keys_on_derivation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
