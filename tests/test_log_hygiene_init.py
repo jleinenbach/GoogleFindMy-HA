@@ -15,9 +15,11 @@ Static checks:
 * Every key of ``OPTIONAL_CREDENTIAL_KEYS`` has its own fixed log name.
 * The credential seed passes ``account_label=_label_entry_for_log(entry)`` when
   it persists a bundle.
-* No logger call passes the title of a config entry (``entry.title``,
-  ``config_entry.title``, ``self._entry.title``) or a local derived from it: the
-  config flow sets the title to the account e-mail.
+* ``entry_title_offenders`` finds logger calls that pass the title of a config
+  entry (``entry.title``, ``config_entry.title``, ``self._entry.title``) or a
+  local derived from it; ``tests/test_log_hygiene_entry_title.py`` applies it to
+  every module of the package, because the config flow sets the title to the
+  account e-mail.
 
 Behavioural checks pin that persisting a secrets bundle logs no value of the
 bundle, no field name outside ``_LOGGABLE_BUNDLE_FIELDS`` (field names can embed
@@ -317,12 +319,29 @@ def _reads_entry_title(node: ast.AST, bound: set[str]) -> bool:
     )
 
 
-def test_no_logger_call_passes_a_config_entry_title() -> None:
-    """The config flow sets the entry title to the account e-mail, so no log
-    line may carry it, neither directly nor through a local such as
-    ``display_name = entry.title or entry.entry_id``."""
-    _source, tree = _module_tree()
-    offenders: list[str] = []
+def _plain_target_names(target: ast.AST) -> set[str]:
+    """Return the names a title assignment binds: plain names, also inside a
+    tuple, list or starred target. ``entry.title = new_title`` stores into the
+    entry and does not make ``entry`` itself a title, so attribute and
+    subscript targets bind nothing (unlike ``_target_names``, which the key
+    check needs)."""
+    if isinstance(target, ast.Name):
+        return {target.id}
+    if isinstance(target, ast.Starred):
+        return _plain_target_names(target.value)
+    if isinstance(target, ast.Tuple | ast.List):
+        return {name for elt in target.elts for name in _plain_target_names(elt)}
+    return set()
+
+
+def entry_title_offenders(tree: ast.AST) -> list[tuple[str, int]]:
+    """Return ``(function, line)`` for every logger call in ``tree`` that passes
+    the title of a config entry, directly or through a local such as
+    ``display_name = entry.title or entry.entry_id``. The config flow sets the
+    title to the account e-mail. Only plain-name targets are bound
+    (``_plain_target_names``). ``tests/test_log_hygiene_entry_title.py``
+    applies this to every module of the package."""
+    offenders: list[tuple[str, int]] = []
     for function in ast.walk(tree):
         if not isinstance(function, ast.FunctionDef | ast.AsyncFunctionDef):
             continue
@@ -341,11 +360,11 @@ def test_no_logger_call_passes_a_config_entry_title() -> None:
                         node.targets if isinstance(node, ast.Assign) else [node.target]
                     )
                     for target in targets:
-                        bound |= _target_names(target)
+                        bound |= _plain_target_names(target)
             if len(bound) == before:
                 break
         offenders.extend(
-            f"{function.name}:{call.lineno}"
+            (function.name, call.lineno)
             for call in ast.walk(function)
             if isinstance(call, ast.Call)
             and isinstance(call.func, ast.Attribute)
@@ -356,7 +375,7 @@ def test_no_logger_call_passes_a_config_entry_title() -> None:
                 for arg in [*call.args, *(kw.value for kw in call.keywords)]
             )
         )
-    assert offenders == [], f"logger call passes a config entry title: {offenders}"
+    return offenders
 
 
 def test_label_entry_for_log_masks_the_bundle_email() -> None:

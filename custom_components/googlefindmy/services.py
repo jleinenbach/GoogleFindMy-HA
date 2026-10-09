@@ -412,7 +412,9 @@ async def async_rebuild_device_registry(hass: HomeAssistant, call: ServiceCall) 
             continue
 
         entry_id = entry.entry_id
-        _LOGGER.info("[%s] Hub Cleanup: Processing entry '%s'", entry_id, entry.title)
+        # The entry title is never logged: the config flow sets it to the account
+        # e-mail. The entry ID identifies the entry just as well.
+        _LOGGER.info("[%s] Hub Cleanup: Processing entry", entry_id)
 
         # 1. Find the correct Service Device ID
         service_device_ident = service_device_identifier(entry_id)
