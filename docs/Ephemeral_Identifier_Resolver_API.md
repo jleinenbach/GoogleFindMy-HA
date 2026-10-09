@@ -231,10 +231,14 @@ The Frame Type (Packet Prefix) is located at **Octet 7** of the Service Data.
 The resolver iterates all supported formats unless a per-device lock is present:
 
 * `LEGACY_SECP160R1_X20_BE` — 20-byte legacy EID, big-endian scalar on secp160r1.
+* `SPEC_P256_X32_BE` — 32-byte EID on P-256 as the specification derives it (`r' mod n`, big-endian `r'`).
+* `SPEC_P256_X20_TRUNC_BE` — 20-byte truncated x-coordinate of `SPEC_P256_X32_BE`.
 * `MODERN_P256_X32_BE` — 32-byte modern EID, big-endian scalar on P-256.
 * `MODERN_P256_X20_TRUNC_BE` — 20-byte truncated x-coordinate derived from P-256 (big-endian scalar).
 * `MODERN_P256_X32_LE_SCALAR` — 32-byte EID with little-endian scalar input on P-256.
 * `MODERN_P256_X20_TRUNC_LE` — 20-byte truncated x-coordinate derived from P-256 with little-endian scalar input.
+
+The specification variants come first, then the `MODERN_P256_*` variants.
 
 The scalar derivation of each variant is listed in `VARIANT_DERIVATIONS`
 (`FMDNCrypto/eid_generator.py`); see "Scalar Derivation" in
@@ -251,8 +255,10 @@ discarded, not reinterpreted.
 
 **Binding to foreign-report readings.** A 32-byte variant is only useful if its
 trackers' crowdsourced reports can also be decrypted, so each derivation used
-by `MODERN_P256_X32_BE` and `MODERN_P256_X32_LE_SCALAR` is also a reading in
-`P256_FOREIGN_READINGS` (`MODERN_P256_X32_LE_SCALAR` matches readings 5 and 6,
+by `SPEC_P256_X32_BE`, `MODERN_P256_X32_BE` and `MODERN_P256_X32_LE_SCALAR` is
+also a reading in `P256_FOREIGN_READINGS` (`SPEC_P256_X32_BE` matches readings
+1 and 2, `p256/mod_n/nonce8` and `p256/mod_n/nonce10`;
+`MODERN_P256_X32_LE_SCALAR` matches readings 5 and 6,
 `p256/plus1_le/nonce8` and `p256/plus1_le/nonce10`).
 `TestReadingsBoundToVariants` in `tests/test_foreign_tracker_cryptor_p256.py`
 enforces this.

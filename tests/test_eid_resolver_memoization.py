@@ -33,6 +33,11 @@ from custom_components.googlefindmy.eid_resolver import (
     GoogleFindMyEIDResolver,
     LearnedHeuristicParams,
 )
+from custom_components.googlefindmy.FMDNCrypto.curve_profile import (
+    BE_MOD_N,
+    BE_PLUS_ONE,
+    LE_PLUS_ONE,
+)
 from custom_components.googlefindmy.FMDNCrypto.eid_generator import (
     LEGACY_EID_LENGTH,
     MODERN_EID_LENGTH,
@@ -185,6 +190,7 @@ def test_compute_flags_xor_mask_memoizes_repeated_calls(
         SAMPLE_COUNTER,
         curve_byte_len=MODERN_EID_LENGTH,
         curve_order=P256_ORDER,
+        derivation=BE_MOD_N,
     )
     assert calls["count"] == 1
 
@@ -194,6 +200,7 @@ def test_compute_flags_xor_mask_memoizes_repeated_calls(
             SAMPLE_COUNTER,
             curve_byte_len=MODERN_EID_LENGTH,
             curve_order=P256_ORDER,
+            derivation=BE_MOD_N,
         )
         assert again == first
 
@@ -237,11 +244,15 @@ def test_both_seams_recompute_zero_times_on_second_pass(
                 time_counter=SAMPLE_COUNTER,
                 variant=variant,
             )
+            curve_len, curve_order, derivation = resolver_mod._VARIANT_CURVE_PARAMS[
+                variant
+            ]
             resolver._compute_flags_xor_mask(
                 SAMPLE_EIK,
                 SAMPLE_COUNTER,
-                curve_byte_len=MODERN_EID_LENGTH,
-                curve_order=P256_ORDER,
+                curve_byte_len=curve_len,
+                curve_order=curve_order,
+                derivation=derivation,
             )
 
     # Pass one warms the caches.
@@ -374,9 +385,55 @@ def test_flags_mask_memo_is_bounded_at_maxsize() -> None:
             SAMPLE_COUNTER + counter,
             curve_byte_len=LEGACY_EID_LENGTH,
             curve_order=None,
+            derivation=BE_MOD_N,
         )
 
     assert len(resolver._flags_mask_memo) == _EID_MASK_MEMO_MAXSIZE
+
+
+def test_flags_mask_memo_keys_on_derivation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Same key, counter and curve with three derivations: three entries.
+
+    Without ``derivation`` in the memo key, the second and third call would
+    return the first mask; the three masks differ for the sample inputs.
+    """
+
+    resolver = _build_resolver()
+    calls = {"count": 0}
+    real_mask = resolver_mod.compute_flags_xor_mask
+
+    def _counting_mask(*args: object, **kwargs: object) -> int:
+        calls["count"] += 1
+        return real_mask(*args, **kwargs)
+
+    monkeypatch.setattr(resolver_mod, "compute_flags_xor_mask", _counting_mask)
+
+    masks = [
+        resolver._compute_flags_xor_mask(
+            SAMPLE_EIK,
+            SAMPLE_COUNTER,
+            curve_byte_len=MODERN_EID_LENGTH,
+            curve_order=P256_ORDER,
+            derivation=derivation,
+        )
+        for derivation in (BE_MOD_N, BE_PLUS_ONE, LE_PLUS_ONE)
+    ]
+
+    assert calls["count"] == 3
+    assert len(resolver._flags_mask_memo) == 3
+    assert len(set(masks)) == 3
+    assert masks == [
+        real_mask(
+            SAMPLE_EIK,
+            SAMPLE_COUNTER,
+            curve_byte_len=MODERN_EID_LENGTH,
+            curve_order=P256_ORDER,
+            derivation=derivation,
+        )
+        for derivation in (BE_MOD_N, BE_PLUS_ONE, LE_PLUS_ONE)
+    ]
 
 
 # ---------------------------------------------------------------------------

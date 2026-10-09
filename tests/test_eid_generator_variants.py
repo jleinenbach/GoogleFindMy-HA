@@ -11,7 +11,13 @@ import pytest
 
 from custom_components.googlefindmy.FMDNCrypto import curve_profile
 from custom_components.googlefindmy.FMDNCrypto._ecdsa_shim import load_curve
-from custom_components.googlefindmy.FMDNCrypto.curve_profile import ScalarRule
+from custom_components.googlefindmy.FMDNCrypto.curve_profile import (
+    BE_MOD_N,
+    BE_PLUS_ONE,
+    LE_PLUS_ONE,
+    ScalarDerivation,
+    ScalarRule,
+)
 from custom_components.googlefindmy.FMDNCrypto.eid_generator import (
     FHNA_COUNTER_MASK,
     FHNA_K,
@@ -44,6 +50,16 @@ SAMPLE_EIK = bytes.fromhex(
 )
 SAMPLE_COUNTER = 0x12345678
 
+# Variants whose EID is 20 bytes; every other variant emits 32 bytes.
+TWENTY_BYTE_VARIANTS = frozenset(
+    {
+        EidVariant.LEGACY_SECP160R1_X20_BE,
+        EidVariant.MODERN_P256_X20_TRUNC_BE,
+        EidVariant.MODERN_P256_X20_TRUNC_LE,
+        EidVariant.SPEC_P256_X20_TRUNC_BE,
+    }
+)
+
 PRF_INPUT_HEX = "ffffffffffffffffffffff0a1234540000000000000000000000000a12345400"
 PRF_OUTPUT_HEX = "52c746bf4ab7c7c35f0ddb3b2c8632d129f0a0453f76767a29f033d00dee96ba"
 
@@ -53,6 +69,11 @@ GOLDEN_VECTORS: dict[EidVariant, str] = {
     EidVariant.MODERN_P256_X20_TRUNC_BE: "72d4e4be2c6f3c1c5328f10d884ab58e0a474b06",
     EidVariant.MODERN_P256_X32_LE_SCALAR: "acc9009d7630b76c89cfb17f126fe640508ba7e184528341cbdb217053dd4050",
     EidVariant.MODERN_P256_X20_TRUNC_LE: "acc9009d7630b76c89cfb17f126fe640508ba7e1",
+    # Specification variants: taken from tests/helpers/fmdn_report_oracle.py
+    # (``p256_x(owner_scalar(SAMPLE_EIK, SAMPLE_COUNTER, "mod_n"))``), which
+    # does not import the production derivation.
+    EidVariant.SPEC_P256_X32_BE: "acc59dd9869606e1eb6b479e346889d98f4e8540bc41ade656acc5854a4f901c",
+    EidVariant.SPEC_P256_X20_TRUNC_BE: "acc59dd9869606e1eb6b479e346889d98f4e8540",
 }
 
 
@@ -155,11 +176,7 @@ def test_generate_eid_variants_match_golden_vectors() -> None:
         eid = generate_eid_variant(SAMPLE_EIK, SAMPLE_COUNTER, variant)
         assert eid.hex() == expected_hex
 
-        if variant in (
-            EidVariant.LEGACY_SECP160R1_X20_BE,
-            EidVariant.MODERN_P256_X20_TRUNC_BE,
-            EidVariant.MODERN_P256_X20_TRUNC_LE,
-        ):
+        if variant in TWENTY_BYTE_VARIANTS:
             assert len(eid) == LEGACY_EID_LENGTH
         else:
             assert len(eid) == MODERN_EID_LENGTH
@@ -337,6 +354,60 @@ def test_compute_flags_xor_mask_p256_branch_uses_supplied_order() -> None:
     assert actual != legacy
 
 
+@pytest.mark.parametrize(
+    "derivation", [BE_MOD_N, BE_PLUS_ONE, LE_PLUS_ONE], ids=lambda d: d.id_token
+)
+def test_compute_flags_xor_mask_follows_supplied_derivation(
+    derivation: ScalarDerivation,
+) -> None:
+    """The mask uses the byte order and rule of the supplied derivation.
+
+    The expected value comes from the oracle's ``owner_scalar``, which reads
+    ``r'`` in the named byte order and applies the named rule on its own.
+    """
+
+    import hashlib
+
+    from tests.helpers.fmdn_report_oracle import owner_scalar
+
+    rule = "mod_n" if derivation.rule is ScalarRule.MOD_N else "plus1"
+    scalar = owner_scalar(
+        SAMPLE_EIK, SAMPLE_COUNTER, rule, r_dash_byteorder=derivation.byteorder
+    )
+    expected = hashlib.sha256(scalar.to_bytes(MODERN_EID_LENGTH, "big")).digest()[-1]
+
+    actual = compute_flags_xor_mask(
+        SAMPLE_EIK,
+        SAMPLE_COUNTER,
+        curve_byte_len=MODERN_EID_LENGTH,
+        curve_order=P256_ORDER,
+        derivation=derivation,
+    )
+
+    assert actual == expected
+
+
+def test_compute_flags_xor_mask_derivations_differ() -> None:
+    """The three P-256 derivations give three different masks for the sample.
+
+    Without this, a mask that ignored ``derivation`` would pass the
+    parametrized test only if all three expectations happened to coincide.
+    """
+
+    masks = {
+        compute_flags_xor_mask(
+            SAMPLE_EIK,
+            SAMPLE_COUNTER,
+            curve_byte_len=MODERN_EID_LENGTH,
+            curve_order=P256_ORDER,
+            derivation=derivation,
+        )
+        for derivation in (BE_MOD_N, BE_PLUS_ONE, LE_PLUS_ONE)
+    }
+
+    assert len(masks) == 3
+
+
 def test_generate_eid_shim_warns_and_matches_variant() -> None:
     """The deprecated generate_eid shim must warn and equal generate_eid_variant."""
 
@@ -461,11 +532,7 @@ def test_heuristic_single_all_variants_have_expected_lengths() -> None:
         first = _generate_heuristic_eid_single(SAMPLE_EIK, counter, variant)
         second = _generate_heuristic_eid_single(SAMPLE_EIK, counter, variant)
         assert first == second  # deterministic
-        if variant in (
-            EidVariant.LEGACY_SECP160R1_X20_BE,
-            EidVariant.MODERN_P256_X20_TRUNC_BE,
-            EidVariant.MODERN_P256_X20_TRUNC_LE,
-        ):
+        if variant in TWENTY_BYTE_VARIANTS:
             assert len(first) == LEGACY_EID_LENGTH
         else:
             assert len(first) == MODERN_EID_LENGTH
@@ -568,6 +635,12 @@ HEURISTIC_GOLDEN_VECTORS: dict[EidVariant, str] = {
     EidVariant.MODERN_P256_X20_TRUNC_BE: "a7d711fc0f8760abf4ae3444d5c56122fc74a4f7",
     EidVariant.MODERN_P256_X32_LE_SCALAR: "383cec434412038ca6c92ed44d377c8481c10136d5c09edf27c546d1ebb65d5e",
     EidVariant.MODERN_P256_X20_TRUNC_LE: "383cec434412038ca6c92ed44d377c8481c10136",
+    # Added with the specification variants; recomputed from the oracle's AES,
+    # ``r' mod n`` and ``cryptography``'s point multiplication over the
+    # heuristic PRF input of counter 1_699_999_200 (the same recomputation
+    # reproduces the MODERN_P256_X32_BE entry above).
+    EidVariant.SPEC_P256_X32_BE: "c3689779f6d92402e88d3db8ac5317a78f2451382679e57eb39dc1c76c42a4c1",
+    EidVariant.SPEC_P256_X20_TRUNC_BE: "c3689779f6d92402e88d3db8ac5317a78f245138",
 }
 
 
@@ -617,7 +690,15 @@ _P256_VARIANTS: tuple[EidVariant, ...] = (
 _EXPECTED_RULE: dict[EidVariant, ScalarRule] = {
     EidVariant.LEGACY_SECP160R1_X20_BE: ScalarRule.MOD_N,
     **dict.fromkeys(_P256_VARIANTS, ScalarRule.PLUS_ONE),
+    EidVariant.SPEC_P256_X32_BE: ScalarRule.MOD_N,
+    EidVariant.SPEC_P256_X20_TRUNC_BE: ScalarRule.MOD_N,
 }
+
+
+def test_expected_rule_covers_every_variant() -> None:
+    """The spy table below must name every variant, so none escapes the spy."""
+
+    assert set(_EXPECTED_RULE) == set(EidVariant)
 
 
 def _scalar_paths() -> list[tuple[str, Callable[[], object], ScalarRule]]:
@@ -665,6 +746,19 @@ def _scalar_paths() -> list[tuple[str, Callable[[], object], ScalarRule]]:
             ScalarRule.MOD_N,
         )
     )
+    paths.append(
+        (
+            "compute_flags_xor_mask[p256, BE_PLUS_ONE]",
+            lambda: compute_flags_xor_mask(
+                SAMPLE_EIK,
+                SAMPLE_COUNTER,
+                curve_byte_len=MODERN_EID_LENGTH,
+                curve_order=P256_ORDER,
+                derivation=BE_PLUS_ONE,
+            ),
+            ScalarRule.PLUS_ONE,
+        )
+    )
     return paths
 
 
@@ -676,8 +770,9 @@ def test_scalar_sites_route_through_reduce_scalar(
     The spy replaces ``reduce_scalar`` in the namespace of each loaded module
     that imported it, so a caller that spells out its own formula again is
     caught by behaviour, not by a text search. The recorded rule pins the
-    unchanged semantics: ``MOD_N`` for legacy EIDs and the flags mask,
-    ``PLUS_ONE`` for the persisted ``MODERN_P256_*`` variants.
+    semantics: ``MOD_N`` for legacy and ``SPEC_P256_*`` EIDs and the default
+    flags mask, ``PLUS_ONE`` for the persisted ``MODERN_P256_*`` variants and
+    for a flags mask given their derivation.
 
     Known limits: a caller that calls ``reduce_scalar`` but discards the result
     still passes, and a caller that reaches the function through the module

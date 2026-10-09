@@ -109,7 +109,7 @@ Coord Len: 32 bytes (256 bits)
 - NIST standard curve, widely implemented
 - 128-bit security level
 - Used for ECDH key agreement in cloud key backup
-- Also used for P-256 tracker EIDs (`MODERN_P256_*` variants) and for
+- Also used for P-256 tracker EIDs (`SPEC_P256_*` and `MODERN_P256_*` variants) and for
   decrypting crowdsourced reports from P-256 trackers (see
   [Foreign-report readings](#foreign-report-readings))
 
@@ -219,6 +219,7 @@ EID variant uses is listed in `VARIANT_DERIVATIONS` in
 
 ```
 LEGACY_SECP160R1_X20_BE:          big-endian r', r = r' mod order               (BE_MOD_N)
+SPEC_P256_X32_BE / _X20_TRUNC_BE:     big-endian r', r = r' mod order               (BE_MOD_N)
 MODERN_P256_X32_BE / _X20_TRUNC_BE:   big-endian r', r = (r' mod (order - 1)) + 1  (BE_PLUS_ONE)
 MODERN_P256_X32_LE_SCALAR / _X20_TRUNC_LE: little-endian r', same +1 projection  (LE_PLUS_ONE)
 ```
@@ -234,6 +235,16 @@ all read `r'` big-endian. Both stay because the resolver matches trackers
 through these variants; foreign reports from such trackers are decrypted
 through the provisional readings described in
 [Foreign-report readings](#foreign-report-readings).
+
+The `SPEC_P256_*` variants follow the specification on P-256. They use the
+derivation of the reading `p256/mod_n/*`, so a tracker the resolver locks to
+`SPEC_P256_X32_BE` has a reading that decrypts its reports. The resolver tries
+them before the `MODERN_P256_*` variants. The `*_X20_TRUNC_*` variants keep the
+first 20 bytes of the x-coordinate.
+
+The Hashed Flags mask (`compute_flags_xor_mask`) is the last byte of
+`SHA256(r)`. The resolver computes it with the derivation of the variant whose
+EID matched, so mask and EID always use the same `r`.
 
 **CRITICAL**: The `calculate_r` function used for *decryption* must use the
 same reduction as the EID generator. For SECP160r1, this is `r' mod order`

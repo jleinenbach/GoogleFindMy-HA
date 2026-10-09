@@ -38,7 +38,7 @@ from .Auth.username_provider import username_string
 from .const import DOMAIN
 from .coordinator import DeviceIdentity, GoogleFindMyCoordinator
 from .FMDNCrypto._lazy_crypto import get_aesgcm_class, get_invalid_tag_exception
-from .FMDNCrypto.curve_profile import SECP160R1, SECP256R1
+from .FMDNCrypto.curve_profile import SECP160R1, SECP256R1, ScalarDerivation
 from .FMDNCrypto.eid_generator import (
     FHNA_COUNTER_MASK,
     LEGACY_EID_LENGTH,
@@ -47,6 +47,7 @@ from .FMDNCrypto.eid_generator import (
     ROTATION_PERIOD,
     ROTATION_PERIOD_900,
     ROTATION_PERIOD_3600,
+    VARIANT_DERIVATIONS,
     EidVariant,
     HeuristicBasis,
     HeuristicEidResult,
@@ -98,14 +99,14 @@ FMDN_HASHED_FLAGS_BATTERY_MASK = 0x03  # 2-bit field after right-shift
 FMDN_HASHED_FLAGS_BATTERY_SHIFT = 1
 FMDN_HASHED_FLAGS_UWT_MODE_MASK = 0x01  # 1-bit field, standard LSB
 
-# Curve parameters for compute_flags_xor_mask(), keyed by EidVariant.
-# (curve_byte_len, curve_order): Legacy uses secp160r1 (None=default), P256 uses P256_ORDER.
-_VARIANT_CURVE_PARAMS: dict[EidVariant, tuple[int, int | None]] = {
-    EidVariant.LEGACY_SECP160R1_X20_BE: (LEGACY_EID_LENGTH, None),
-    EidVariant.MODERN_P256_X32_BE: (MODERN_EID_LENGTH, P256_ORDER),
-    EidVariant.MODERN_P256_X20_TRUNC_BE: (MODERN_EID_LENGTH, P256_ORDER),
-    EidVariant.MODERN_P256_X32_LE_SCALAR: (MODERN_EID_LENGTH, P256_ORDER),
-    EidVariant.MODERN_P256_X20_TRUNC_LE: (MODERN_EID_LENGTH, P256_ORDER),
+# Parameters for compute_flags_xor_mask(), keyed by EidVariant:
+# (curve_byte_len, curve_order, derivation). Derived from VARIANT_DERIVATIONS,
+# so the mask uses the same scalar as the EID of its variant; truncated
+# variants keep the full coordinate length of their curve. A plain dict so a
+# test can remove a row and observe the loud failure in locked_curve_name.
+_VARIANT_CURVE_PARAMS: dict[EidVariant, tuple[int, int, ScalarDerivation]] = {
+    variant: (curve.coord_len, curve.order, derivation)
+    for variant, (curve, derivation) in VARIANT_DERIVATIONS.items()
 }
 
 # Per-variant crypto memoization (AP-A).
@@ -1876,8 +1877,11 @@ class GoogleFindMyEIDResolver:
                 variant=variant,
                 window=window_candidate,
             )
+            # Specification variants before the heuristic MODERN_P256_* ones.
             for variant in (
                 EidVariant.LEGACY_SECP160R1_X20_BE,
+                EidVariant.SPEC_P256_X32_BE,
+                EidVariant.SPEC_P256_X20_TRUNC_BE,
                 EidVariant.MODERN_P256_X32_BE,
                 EidVariant.MODERN_P256_X20_TRUNC_BE,
                 EidVariant.MODERN_P256_X32_LE_SCALAR,
@@ -2139,15 +2143,16 @@ class GoogleFindMyEIDResolver:
                 variants = self._compute_variants(work_item, window)
                 for variant_spec in variants:
                     xor_mask: int | None = None
-                    curve_len, curve_ord = _VARIANT_CURVE_PARAMS.get(
-                        variant_spec.variant, (LEGACY_EID_LENGTH, None)
-                    )
                     try:
+                        curve_len, curve_ord, derivation = _VARIANT_CURVE_PARAMS[
+                            variant_spec.variant
+                        ]
                         xor_mask = self._compute_flags_xor_mask(
                             variant_spec.key_bytes,
                             variant_spec.window.timestamp,
                             curve_byte_len=curve_len,
                             curve_order=curve_ord,
+                            derivation=derivation,
                         )
                     except Exception:  # noqa: BLE001
                         pass
@@ -2251,17 +2256,20 @@ class GoogleFindMyEIDResolver:
         *,
         curve_byte_len: int,
         curve_order: int | None,
+        derivation: ScalarDerivation,
     ) -> int:
         """Memoized wrapper around ``compute_flags_xor_mask``.
 
         Keyed per resolver instance on ``(key_bytes, time_counter,
-        curve_byte_len, curve_order)``. The mask is a pure function of these
-        inputs, so a hit returns the identical integer without recomputation.
+        curve_byte_len, curve_order, derivation)``. The mask is a pure function
+        of these inputs, so a hit returns the identical integer without
+        recomputation. ``derivation`` belongs in the key: two variants on the
+        same curve with different derivations have different masks.
         Invalidation is implicit via key rotation, identical to
         ``_generate_variant``.
         """
 
-        cache_key = (key_bytes, time_counter, curve_byte_len, curve_order)
+        cache_key = (key_bytes, time_counter, curve_byte_len, curve_order, derivation)
         cached = self._flags_mask_memo.get(cache_key)
         if cached is not None:
             return cast(int, cached)
@@ -2273,6 +2281,7 @@ class GoogleFindMyEIDResolver:
             time_counter,
             curve_byte_len=curve_byte_len,
             curve_order=curve_order,
+            derivation=derivation,
         )
         self._flags_mask_memo.put(cache_key, mask)
         return mask

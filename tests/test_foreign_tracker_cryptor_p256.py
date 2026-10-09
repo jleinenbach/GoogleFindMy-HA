@@ -85,7 +85,11 @@ _READING_NUMBERS = [1, 2, 3, 4, 5, 6]
 # P-256 ECDH from 20 of 32 bytes, so their reports are not decryptable
 # (see test_truncated_p256_variant_reports_are_undecryptable).
 _TRUNCATED_VARIANTS = frozenset(
-    {EidVariant.MODERN_P256_X20_TRUNC_BE, EidVariant.MODERN_P256_X20_TRUNC_LE}
+    {
+        EidVariant.MODERN_P256_X20_TRUNC_BE,
+        EidVariant.MODERN_P256_X20_TRUNC_LE,
+        EidVariant.SPEC_P256_X20_TRUNC_BE,
+    }
 )
 
 # Sixteen fixed (EIK, counter) pairs, including unaligned and boundary counters.
@@ -486,6 +490,9 @@ class TestScalarInvariance:
         )
         assert material is not None
         assert material[0] == p256_x(owner_scalar(eik, counter, "mod_n"))
+        assert material[0] == generate_eid_variant(
+            eik, counter, EidVariant.SPEC_P256_X32_BE
+        )
 
     @pytest.mark.parametrize(("eik", "counter"), _INVARIANCE_PAIRS)
     def test_p256_plus1_le_matches_le_variant(self, eik: bytes, counter: int) -> None:

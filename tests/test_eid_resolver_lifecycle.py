@@ -217,6 +217,17 @@ def _identity() -> SimpleNamespace:
     )
 
 
+# A variant name no release defines. ``spec_p256_x20_trunc_be`` served here
+# until it became a real variant and the three tests below started to fail.
+_UNKNOWN_VARIANT = "unknown_variant_for_tests"
+
+
+def test_unknown_variant_fixture_is_not_a_variant() -> None:
+    """The fixture must stay unknown, or the discard tests test nothing."""
+
+    assert _UNKNOWN_VARIANT not in {variant.value for variant in EidVariant}
+
+
 def test_prepare_work_item_discards_lock_with_unknown_variant() -> None:
     """A persisted lock whose variant this version does not know is discarded.
 
@@ -229,7 +240,7 @@ def test_prepare_work_item_discards_lock_with_unknown_variant() -> None:
     """
 
     resolver = _build_resolver()
-    lock = _lock_with_variant("spec_p256_x20_trunc_be")
+    lock = _lock_with_variant(_UNKNOWN_VARIANT)
     resolver._locks = {"device-1": lock}
     resolver._persisted_locks = {"device-1": lock}
 
@@ -248,7 +259,7 @@ def test_prepare_work_item_unknown_variant_logs_discard(
     """The discard of an unknown-variant lock is logged at WARNING."""
 
     resolver = _build_resolver()
-    lock = _lock_with_variant("spec_p256_x20_trunc_be")
+    lock = _lock_with_variant(_UNKNOWN_VARIANT)
     resolver._locks = {"device-1": lock}
     resolver._persisted_locks = {"device-1": lock}
 
@@ -290,7 +301,7 @@ def test_prepare_work_item_persists_unknown_variant_discard() -> None:
     """
 
     resolver = _build_resolver()
-    lock = _lock_with_variant("spec_p256_x20_trunc_be")
+    lock = _lock_with_variant(_UNKNOWN_VARIANT)
     resolver._locks = {"device-1": lock}
     resolver._persisted_locks = {"device-1": lock}
 
