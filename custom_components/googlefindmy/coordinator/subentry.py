@@ -190,9 +190,11 @@ class SubentryOperations(_MixinBase):
         entry = self.config_entry or getattr(self, "entry", None)
         entry_id = getattr(entry, "entry_id", None) if entry is not None else None
         if entry is None or not isinstance(entry_id, str) or not entry_id:
+            # Not the entry itself: ConfigEntry.__repr__ carries the title,
+            # which the config flow sets to the account e-mail.
             _LOGGER.debug(
                 "Skipping core subentry repair: config entry unavailable (entry=%s)",
-                entry,
+                type(entry).__name__,
             )
             return []
 
