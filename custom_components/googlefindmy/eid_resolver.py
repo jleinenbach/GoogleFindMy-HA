@@ -156,8 +156,8 @@ _EID_MASK_MEMO_MAXSIZE = 1024
 # tracemalloc, the two memos of a build of 13 such devices (4914 EID and 2808
 # mask entries) hold about 1.5 MB; the lookup table comes on top. Extrapolated,
 # the hard caps bound both memos together to about 10 MB. A build that needs
-# more than a cap recomputes all of its entries on every build (a sequential
-# pass over a smaller LRU never hits); the values stay correct.
+# more than a cap recomputes all of its entries on every build (no entry of one
+# build survives to the next); the values stay correct.
 _MEMO_HEADROOM = 2
 _EID_MEMO_HARD_CAP = 32768
 _EID_MASK_MEMO_HARD_CAP = 16384
@@ -1122,10 +1122,11 @@ class GoogleFindMyEIDResolver:
     _lock_last_seen_monotonic: dict[str, float] = field(
         init=False, default_factory=dict
     )
-    # Window timestamp and wall-clock observation of the newest lookup match
-    # per device, in memory only. The window timestamp is the time counter the
-    # device used for the matched EID, so it is what encryption_counter()
-    # advances; the lock only keeps the counter of its first match.
+    # Window timestamp of the newest matched window per device and the
+    # wall-clock time of its first sighting, in memory only. The window
+    # timestamp is the time counter the device used for the matched EID, so
+    # it is what encryption_counter() advances; the lock only keeps the
+    # counter of its first match.
     _last_match_window: dict[str, tuple[int, int]] = field(
         init=False, default_factory=dict
     )
@@ -2235,42 +2236,45 @@ class GoogleFindMyEIDResolver:
         self._eid_memo.resize(max(eid_bound, self._eid_memo.maxsize))
         self._flags_mask_memo.resize(max(mask_bound, self._flags_mask_memo.maxsize))
 
-        # Pass two: generate and register.
-        for work_item, specs in planned:
-            for variant_spec in specs:
-                xor_mask: int | None = None
-                try:
-                    curve_len, curve_ord, derivation = _VARIANT_CURVE_PARAMS[
-                        variant_spec.variant
-                    ]
-                    xor_mask = self._compute_flags_xor_mask(
-                        variant_spec.key_bytes,
-                        variant_spec.window.timestamp,
-                        curve_byte_len=curve_len,
-                        curve_order=curve_ord,
-                        derivation=derivation,
-                    )
-                except Exception:  # noqa: BLE001
-                    pass
-                for generated in self._generate_eids_from_spec(variant_spec):
-                    match = EIDMatch(
-                        device_id=work_item.registry_id,
-                        config_entry_id=work_item.config_entry_id,
-                        canonical_id=work_item.canonical_id,
-                        time_offset=generated.window.semantic_offset,
-                        is_reversed=generated.is_reversed,
-                    )
-                    builder.register_eid(
-                        generated.eid_bytes,
-                        match=match,
-                        variant=generated.variant,
-                        window=generated.window,
-                        advertisement_reversed=generated.is_reversed,
-                        flags_xor_mask=xor_mask,
-                    )
-
-        self._eid_memo.resize(eid_bound)
-        self._flags_mask_memo.resize(mask_bound)
+        try:
+            # Pass two: generate and register.
+            for work_item, specs in planned:
+                for variant_spec in specs:
+                    xor_mask: int | None = None
+                    try:
+                        curve_len, curve_ord, derivation = _VARIANT_CURVE_PARAMS[
+                            variant_spec.variant
+                        ]
+                        xor_mask = self._compute_flags_xor_mask(
+                            variant_spec.key_bytes,
+                            variant_spec.window.timestamp,
+                            curve_byte_len=curve_len,
+                            curve_order=curve_ord,
+                            derivation=derivation,
+                        )
+                    except Exception:  # noqa: BLE001
+                        pass
+                    for generated in self._generate_eids_from_spec(variant_spec):
+                        match = EIDMatch(
+                            device_id=work_item.registry_id,
+                            config_entry_id=work_item.config_entry_id,
+                            canonical_id=work_item.canonical_id,
+                            time_offset=generated.window.semantic_offset,
+                            is_reversed=generated.is_reversed,
+                        )
+                        builder.register_eid(
+                            generated.eid_bytes,
+                            match=match,
+                            variant=generated.variant,
+                            window=generated.window,
+                            advertisement_reversed=generated.is_reversed,
+                            flags_xor_mask=xor_mask,
+                        )
+        finally:
+            # Shrink even when pass two raised, so a failed build does not
+            # leave the grown bound in place until the next one.
+            self._eid_memo.resize(eid_bound)
+            self._flags_mask_memo.resize(mask_bound)
 
         lookup, lookup_metadata = builder.finalize()
         return lookup, lookup_metadata, invalid_hint_ids
@@ -3112,9 +3116,17 @@ class GoogleFindMyEIDResolver:
         # sighting is kept: the device entered the window at or before it, so
         # advancing from there rolls over close to the device's own boundary,
         # while a later sighting would delay the rollover by up to one period.
+        # It is kept only while it projects to the window just seen, that is
+        # less than one period back and not ahead of this sighting: a wall
+        # clock step or a device whose clock stood still would otherwise make
+        # the projection leave a window the device is still advertising.
         if not stale and isinstance(window_ts, int) and not isinstance(window_ts, bool):
             previous_match = self._last_match_window.get(match.device_id)
-            if previous_match is None or previous_match[0] != window_ts:
+            if (
+                previous_match is None
+                or previous_match[0] != window_ts
+                or not 0 <= now - previous_match[1] < ROTATION_PERIOD
+            ):
                 self._last_match_window[match.device_id] = (window_ts, now)
 
         self._known_advertisement_reversed[match.device_id] = match.is_reversed
@@ -3997,7 +4009,11 @@ class GoogleFindMyEIDResolver:
         device's own boundary. When the first sighting came late in the window
         (the device just came into range, or the first match after a start),
         the result can be one window behind until the next window is seen, as
-        the resolver's own projection can. The lock's ``drift_offset`` is not
+        the resolver's own projection can. A first sighting a period or more
+        back, or ahead of a new sighting of the same window (wall clock step,
+        device clock standing still), is replaced by that sighting, so the
+        result never leaves a window the device was last seen advertising
+        before one period has passed since that sighting. The lock's ``drift_offset`` is not
         applied: it is the ``semantic_offset`` of the matching window, and its
         reference depends on the window group.
 

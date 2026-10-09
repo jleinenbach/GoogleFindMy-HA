@@ -267,7 +267,10 @@ enforces this.
 P-256 ECDH from 20 of the 32 x-coordinate bytes; a report for a
 `SPEC_P256_X20_TRUNC_BE` or `MODERN_P256_X20_TRUNC_*` match carries a 20-byte
 `Sx`, is routed to SECP160r1 by `curve_for_coord_len(20)` and cannot be
-decrypted. The binding test names
+decrypted. This integration's own finder is not such a finder: it holds the
+EIK and encrypts for the full-length variant with the same curve and scalar
+derivation (`_encryptable_eid` in `fmdn_finder/bermuda_listener.py`), so its
+reports carry a 32-byte `Sx`. The binding test names
 these variants as its exclusions, and
 `test_truncated_p256_variant_reports_are_undecryptable` pins that such a
 report never decrypts. Because no key can authenticate it, the decryption path

@@ -950,6 +950,27 @@ def test_smaller_build_keeps_the_keys_it_still_needs(
     assert resolver._flags_mask_memo.maxsize == 2 * mask_keys
 
 
+@pytest.mark.usefixtures("low_floors")
+def test_failed_build_still_shrinks_the_memos(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An error in pass two does not leave the grown bound in place."""
+    fleet = _aged_fleet(3)
+    [(eid_keys, mask_keys)] = _unbounded_key_counts(fleet[:1], _FLEET_NOW)
+    resolver = _fleet_resolver()
+    _build(resolver, fleet, _FLEET_NOW)
+
+    def _fail(*args: object, **kwargs: object) -> None:
+        raise RuntimeError("register failed")
+
+    monkeypatch.setattr(resolver_mod.CacheBuilder, "register_eid", _fail)
+    with pytest.raises(RuntimeError):
+        _build(resolver, fleet[:1], _FLEET_NOW)
+
+    assert resolver._eid_memo.maxsize == 2 * eid_keys
+    assert resolver._flags_mask_memo.maxsize == 2 * mask_keys
+
+
 def test_hard_cap_bounds_the_memos_and_keeps_the_values(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

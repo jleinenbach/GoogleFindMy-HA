@@ -500,6 +500,49 @@ def test_encryption_counter_advances_from_the_first_sighting_of_a_window() -> No
     )
 
 
+@pytest.mark.parametrize(
+    ("second_wall", "second_monotonic"),
+    [
+        (1_700_005_000, 50_010.0),  # wall clock stepped forward
+        (1_700_007_203, 57_200.0),  # device clock stood still for two hours
+    ],
+    ids=["wall_clock_forward", "device_clock_stood_still"],
+)
+def test_encryption_counter_stays_on_a_window_seen_again(
+    second_wall: int, second_monotonic: float
+) -> None:
+    """A sighting projects to the window it shows.
+
+    Window 7 is seen again a period or more after its first sighting; the
+    counter at that moment is window 7, not a window the device has not
+    reached.
+    """
+    resolver = _matched_resolver()
+    _see(resolver, 0x71, 1_700_000_003, monotonic=50_000.0)
+    _see(resolver, 0x71, second_wall, monotonic=second_monotonic)
+
+    assert resolver.encryption_counter("dev-m", now=second_wall) == (
+        7 * _PERIOD,
+        "last_match",
+    )
+
+
+def test_encryption_counter_restarts_the_window_after_a_backward_wall_step() -> None:
+    """After a backward step the window is timed from the new sighting.
+
+    Without that, the counter would stay on window 7 for the size of the step
+    beyond one period.
+    """
+    resolver = _matched_resolver()
+    _see(resolver, 0x71, 1_700_000_003, monotonic=50_000.0)
+    _see(resolver, 0x71, 1_699_995_000, monotonic=50_010.0)
+
+    assert resolver.encryption_counter("dev-m", now=1_699_995_000 + _PERIOD + 5) == (
+        8 * _PERIOD,
+        "last_match",
+    )
+
+
 def test_encryption_counter_ignores_an_older_replayed_match() -> None:
     """A replay, older on the monotonic clock, keeps the newer window.
 
