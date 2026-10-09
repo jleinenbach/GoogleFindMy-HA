@@ -15,9 +15,11 @@ Static checks:
 * Every key of ``OPTIONAL_CREDENTIAL_KEYS`` has its own fixed log name.
 * The credential seed passes ``account_label=_label_entry_for_log(entry)`` when
   it persists a bundle.
-* No logger call passes the title of a config entry (``entry.title``,
-  ``config_entry.title``, ``self._entry.title``) or a local derived from it: the
-  config flow sets the title to the account e-mail.
+* ``entry_title_offenders`` finds logger calls that pass the title of a config
+  entry (``entry.title``, ``config_entry.title``, ``self._entry.title``, a
+  local derived from it, or the entry formatted as a whole);
+  ``tests/test_log_hygiene_entry_title.py`` applies it to every module of the
+  package, because the config flow sets the title to the account e-mail.
 
 Behavioural checks pin that persisting a secrets bundle logs no value of the
 bundle, no field name outside ``_LOGGABLE_BUNDLE_FIELDS`` (field names can embed
@@ -302,61 +304,257 @@ def test_bundle_and_credential_keys_never_reach_a_log_argument() -> None:
     assert offenders == [], f"logger call passes a key-derived value: {offenders}"
 
 
-_ENTRY_OBJECT = re.compile(r"(^|\.)_?(config_)?entry$")
+# A config entry by name: ``entry``, ``config_entry``, ``self._entry``,
+# ``existing_entry``, ``parent_entry``. ``subentry`` is not a config entry.
+_ENTRY_OBJECT = re.compile(r"(^|\.)(\w*_)?entry$")
 
 
-def _reads_entry_title(node: ast.AST, bound: set[str]) -> bool:
-    return any(
-        (
-            isinstance(current, ast.Attribute)
-            and current.attr == "title"
-            and _ENTRY_OBJECT.search(ast.unparse(current.value)) is not None
-        )
-        or (isinstance(current, ast.Name) and current.id in bound)
-        for current in ast.walk(node)
+def _is_entry(node: ast.AST) -> bool:
+    return _ENTRY_OBJECT.search(ast.unparse(node)) is not None
+
+
+def _is_title_read(node: ast.AST) -> bool:
+    """True for ``<entry>.title`` and ``getattr(<entry>, "title", ...)``."""
+    if isinstance(node, ast.Attribute):
+        return node.attr == "title" and _is_entry(node.value)
+    return (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "getattr"
+        and len(node.args) >= 2
+        and _is_entry(node.args[0])
+        and isinstance(node.args[1], ast.Constant)
+        and node.args[1].value == "title"
     )
 
 
-def test_no_logger_call_passes_a_config_entry_title() -> None:
-    """The config flow sets the entry title to the account e-mail, so no log
-    line may carry it, neither directly nor through a local such as
-    ``display_name = entry.title or entry.entry_id``."""
-    _source, tree = _module_tree()
-    offenders: list[str] = []
-    for function in ast.walk(tree):
-        if not isinstance(function, ast.FunctionDef | ast.AsyncFunctionDef):
-            continue
-        bound: set[str] = set()
-        while True:
-            before = len(bound)
-            for node in ast.walk(function):
-                if (
-                    isinstance(
-                        node, ast.Assign | ast.AnnAssign | ast.AugAssign | ast.NamedExpr
-                    )
-                    and node.value is not None
-                    and _reads_entry_title(node.value, bound)
-                ):
-                    targets = (
-                        node.targets if isinstance(node, ast.Assign) else [node.target]
-                    )
-                    for target in targets:
-                        bound |= _target_names(target)
-            if len(bound) == before:
-                break
-        offenders.extend(
-            f"{function.name}:{call.lineno}"
-            for call in ast.walk(function)
-            if isinstance(call, ast.Call)
-            and isinstance(call.func, ast.Attribute)
-            and call.func.attr in _LOG_METHODS
-            and _LOGGER_OBJECT.search(ast.unparse(call.func.value))
-            and any(
-                _reads_entry_title(arg, bound)
-                for arg in [*call.args, *(kw.value for kw in call.keywords)]
-            )
+_COMPREHENSION = (ast.ListComp, ast.SetComp, ast.GeneratorExp, ast.DictComp)
+
+
+def _comprehension_reads_title(
+    node: ast.ListComp | ast.SetComp | ast.GeneratorExp | ast.DictComp,
+    bound: set[str],
+) -> bool:
+    """A comprehension target shadows a name of ``bound`` inside the
+    comprehension; its first iterable is evaluated outside and still sees
+    ``bound``."""
+    inner = set(bound)
+    for index, generator in enumerate(node.generators):
+        if _reads_entry_title(generator.iter, bound if index == 0 else inner):
+            return True
+        inner -= _plain_target_names(generator.target)
+        if any(_reads_entry_title(test, inner) for test in generator.ifs):
+            return True
+    elements = [node.key, node.value] if isinstance(node, ast.DictComp) else [node.elt]
+    return any(_reads_entry_title(element, inner) for element in elements)
+
+
+def _reads_entry_title(node: ast.AST, bound: set[str]) -> bool:
+    """True if ``node`` reads a config entry title (``_is_title_read``) or a
+    name in ``bound``, honouring comprehension shadowing."""
+    if _is_title_read(node):
+        return True
+    if isinstance(node, ast.Name):
+        return node.id in bound
+    if isinstance(node, _COMPREHENSION):
+        return _comprehension_reads_title(node, bound)
+    return any(_reads_entry_title(child, bound) for child in ast.iter_child_nodes(node))
+
+
+def _plain_target_names(target: ast.AST) -> set[str]:
+    """Return the names a title assignment binds: plain names, also inside a
+    tuple, list or starred target. ``entry.title = new_title`` stores into the
+    entry and does not make ``entry`` itself a title, so attribute and
+    subscript targets bind nothing (unlike ``_target_names``, which the key
+    check needs)."""
+    if isinstance(target, ast.Name):
+        return {target.id}
+    if isinstance(target, ast.Starred):
+        return _plain_target_names(target.value)
+    if isinstance(target, ast.Tuple | ast.List):
+        return {name for elt in target.elts for name in _plain_target_names(elt)}
+    return set()
+
+
+_SCOPE = (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)
+
+
+def _scope_nodes(scope: ast.AST) -> list[ast.AST]:
+    """Return the nodes of ``scope`` without those of nested functions and
+    classes, which are scopes of their own."""
+    nodes: list[ast.AST] = []
+    pending = list(ast.iter_child_nodes(scope))
+    while pending:
+        node = pending.pop()
+        nodes.append(node)
+        if not isinstance(node, _SCOPE):
+            pending.extend(ast.iter_child_nodes(node))
+    return nodes
+
+
+def _title_bindings(node: ast.AST) -> list[tuple[ast.AST, ast.AST]]:
+    """Return ``(target, value)`` pairs through which ``node`` binds names:
+    assignments, ``for`` targets and ``with ... as``. A comprehension target
+    is not bound: it exists only inside the comprehension, which a logger
+    argument then reads in full."""
+    if isinstance(node, ast.Assign):
+        return [(target, node.value) for target in node.targets]
+    if isinstance(node, ast.AnnAssign | ast.AugAssign | ast.NamedExpr):
+        return [(node.target, node.value)] if node.value is not None else []
+    if isinstance(node, ast.For | ast.AsyncFor):
+        return [(node.target, node.iter)]
+    if isinstance(node, ast.withitem) and node.optional_vars is not None:
+        return [(node.optional_vars, node.context_expr)]
+    return []
+
+
+def _is_logger_method(node: ast.AST) -> bool:
+    """True for ``<logger>.<method>`` and ``getattr(<logger>, <name>)``."""
+    if isinstance(node, ast.Attribute):
+        return (
+            node.attr in _LOG_METHODS
+            and _LOGGER_OBJECT.search(ast.unparse(node.value)) is not None
         )
-    assert offenders == [], f"logger call passes a config entry title: {offenders}"
+    return (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "getattr"
+        and len(node.args) >= 2
+        and _LOGGER_OBJECT.search(ast.unparse(node.args[0])) is not None
+    )
+
+
+def _entry_object_args(arg: ast.AST) -> list[str]:
+    """Return the config entries ``arg`` formats as a whole: the argument
+    itself, a ``str``/``repr`` call or an f-string field. ``ConfigEntry.__repr__``
+    carries the title, so logging the entry logs the account e-mail."""
+    candidates = [arg]
+    candidates += [
+        node.args[0]
+        for node in ast.walk(arg)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id in {"str", "repr"}
+        and node.args
+    ]
+    candidates += [
+        node.value for node in ast.walk(arg) if isinstance(node, ast.FormattedValue)
+    ]
+    return [
+        ast.unparse(node)
+        for node in candidates
+        if isinstance(node, ast.Name | ast.Attribute) and _is_entry(node)
+    ]
+
+
+def _local_names(scope: ast.AST) -> set[str]:
+    """Return the names ``scope`` binds itself (parameters and assignment,
+    ``for`` and ``with`` targets) without those declared ``nonlocal`` or
+    ``global``. Such a name shadows the same name of an enclosing scope."""
+    names: set[str] = set()
+    if isinstance(scope, ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda):
+        arguments = scope.args
+        names |= {
+            arg.arg
+            for arg in [
+                *arguments.posonlyargs,
+                *arguments.args,
+                *arguments.kwonlyargs,
+                *([arguments.vararg] if arguments.vararg else []),
+                *([arguments.kwarg] if arguments.kwarg else []),
+            ]
+        }
+    declared: set[str] = set()
+    for node in _scope_nodes(scope):
+        for target, _value in _title_bindings(node):
+            names |= _plain_target_names(target)
+        if isinstance(node, ast.Nonlocal | ast.Global):
+            declared |= set(node.names)
+    return names - declared
+
+
+def entry_title_offenders(tree: ast.AST) -> list[tuple[str, int, str]]:
+    """Return ``(scope, line, form)`` for every logger call in ``tree`` that
+    passes the title of a config entry: ``form`` is ``"title"`` for a title
+    read, directly or through a local such as
+    ``display_name = entry.title or entry.entry_id``, and the expression for an
+    entry formatted as a whole (``_entry_object_args``). The config flow sets
+    the title to the account e-mail.
+
+    Each function, lambda, class body and the module body is one scope; a nested scope
+    sees the title locals and logger aliases of the scopes around it, except
+    names it binds itself (``_local_names``); a class body is skipped on the
+    way into its methods, as in Python. A logger
+    call is ``<logger>.<method>(...)``, ``getattr(<logger>, name)(...)`` or a
+    call through a name bound to one (``log_fn = _LOGGER.debug if quiet else
+    _LOGGER.warning``). Names are bound through assignments, ``for`` and
+    ``with ... as`` targets, plain names only (``_plain_target_names``); a
+    name once bound stays bound for its scope, so a later rebinding to a
+    harmless value is still reported. Known gap: a comprehension directly in a
+    class body is scanned as part of that body, so a name the class binds hides
+    an outer title local from it, although Python resolves the outer name
+    there; such a logger call is not reported. The package has no comprehension
+    directly in a class body. A name declared ``global`` is treated like a
+    ``nonlocal`` one and sees what the enclosing scope sees, not what the
+    module binds, so a ``global`` read of a module-level title is missed when
+    an enclosing function rebinds that name; the package binds no title at
+    module level.
+    ``tests/test_log_hygiene_entry_title.py``
+    applies this to every module of the package."""
+    offenders: list[tuple[str, int, str]] = []
+    pending: list[tuple[ast.AST, frozenset[str], frozenset[str]]] = []
+    if isinstance(tree, _SCOPE):
+        pending.append((tree, frozenset(), frozenset()))
+    else:
+        pending.extend(
+            (node, frozenset(), frozenset())
+            for node in ast.walk(tree)
+            if isinstance(node, _SCOPE)
+        )
+    while pending:
+        # ``visible_*``: what the enclosing scopes offer; the scope's own
+        # bindings shadow it (``_local_names``).
+        scope, visible_bound, visible_aliases = pending.pop()
+        nodes = _scope_nodes(scope)
+        aliases = set(visible_aliases - _local_names(scope))
+        bound = set(visible_bound - _local_names(scope))
+        while True:
+            before = len(bound) + len(aliases)
+            for node in nodes:
+                for target, value in _title_bindings(node):
+                    names = _plain_target_names(target)
+                    if any(_is_logger_method(part) for part in ast.walk(value)):
+                        aliases |= names
+                    if _reads_entry_title(value, bound):
+                        bound |= names
+            if len(bound) + len(aliases) == before:
+                break
+        name = getattr(
+            scope, "name", "<lambda>" if isinstance(scope, ast.Lambda) else "<module>"
+        )
+        for call in nodes:
+            if not isinstance(call, ast.Call) or not (
+                _is_logger_method(call.func)
+                or (isinstance(call.func, ast.Name) and call.func.id in aliases)
+            ):
+                continue
+            arguments = [*call.args, *(kw.value for kw in call.keywords)]
+            if any(_reads_entry_title(arg, bound) for arg in arguments):
+                offenders.append((name, call.lineno, "title"))
+            offenders.extend(
+                (name, call.lineno, form)
+                for arg in arguments
+                for form in _entry_object_args(arg)
+            )
+        # Methods do not see the class namespace: a class body passes on what
+        # it was offered, not its own bindings.
+        offered = (
+            (visible_bound, visible_aliases)
+            if isinstance(scope, ast.ClassDef)
+            else (frozenset(bound), frozenset(aliases))
+        )
+        pending.extend((node, *offered) for node in nodes if isinstance(node, _SCOPE))
+    return offenders
 
 
 def test_label_entry_for_log_masks_the_bundle_email() -> None:

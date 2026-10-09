@@ -3845,19 +3845,19 @@ class FcmReceiverHA:
 
         for coordinator in self.coordinators.copy():
             entry = getattr(coordinator, "config_entry", None)
-            candidate_entry = (
+            candidate_entry_id = (
                 getattr(entry, "entry_id", None) if entry is not None else None
             )
-            if candidate_entry is None:
+            if candidate_entry_id is None:
                 continue
 
-            candidate_cache = self._entry_caches.get(candidate_entry)
+            candidate_cache = self._entry_caches.get(candidate_entry_id)
             if candidate_cache is None:
                 candidate_cache = getattr(coordinator, "cache", None) or getattr(
                     coordinator, "_cache", None
                 )
                 if candidate_cache is not None:
-                    self._entry_caches[candidate_entry] = candidate_cache
+                    self._entry_caches[candidate_entry_id] = candidate_cache
 
             present = False
             present_fn = getattr(coordinator, "is_device_present", None)
@@ -3867,7 +3867,7 @@ class FcmReceiverHA:
                 except Exception as err:  # noqa: BLE001
                     _LOGGER.debug(
                         "[entry=%s] Manual locate presence check failed for %s: %s",
-                        candidate_entry,
+                        candidate_entry_id,
                         canonic_id[:8],
                         describe_exception(err),
                     )
@@ -3882,14 +3882,14 @@ class FcmReceiverHA:
                         has_display = False
 
             if present:
-                return candidate_entry, candidate_cache
+                return candidate_entry_id, candidate_cache
 
             if has_display:
-                display_entry = candidate_entry
+                display_entry = candidate_entry_id
                 display_cache = candidate_cache
 
             if fallback_entry is None:
-                fallback_entry = candidate_entry
+                fallback_entry = candidate_entry_id
                 fallback_cache = candidate_cache
 
         if display_entry is not None:
