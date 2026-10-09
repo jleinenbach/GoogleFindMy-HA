@@ -3535,13 +3535,13 @@ async def _async_purge_unloaded_subentry_registrations(
 
     devices_for_entry = dr.async_entries_for_config_entry(dev_reg, parent_entry_id)
     for device in devices_for_entry:
-        # ``extract_subentry_links`` reads ``config_entries_subentries`` and,
-        # when that is not a mapping, falls back to ``config_subentry_id``.  The
-        # hand-written predicate this replaced had no such fallback and skipped
-        # the device instead.  No supported core reaches the fallback (all three
-        # expose the mapping, as a field on 2025.9.1 and as a shim property from
-        # 2026.8), but a registry double can, and there it now selects a device
-        # the old shape passed over.
+        # ``extract_subentry_links`` reads the scalar ``config_entry_id`` and
+        # ``config_subentry_id`` first (Core 2026.8+), then the
+        # ``config_entries_subentries`` mapping (the real data below 2026.8),
+        # and only then a bare ``config_subentry_id``.  The hand-written
+        # predicate this replaced had no such fallback and skipped the device
+        # instead.  No supported core reaches the last step, but a registry
+        # double can, and there it selects a device the old shape passed over.
         if config_subentry_id not in extract_subentry_links(device, parent_entry_id):
             continue
         if caps is None:  # pragma: no cover - defensive guard

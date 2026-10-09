@@ -1026,10 +1026,44 @@ def normalize_device_name(name: Any) -> str | None:
 
 
 def extract_subentry_links(device: Any, entry_id: str | None) -> set[str | None]:
-    """Extract subentry links from a device object for a given entry_id.
+    """Return the subentry links ``device`` has under ``entry_id``.
 
-    Checks config_entries_subentries mapping first, falls back to
-    config_subentry_id attribute.
+    ``None`` in the result is the hub link: the device belongs to the entry
+    itself rather than to one of its subentries. An empty set means the device
+    has no link to ``entry_id`` at all.
+
+    Read order, newest spelling first, so the call site does not branch on the
+    core version:
+
+    1. From Core 2026.8 a device has exactly one owner, in the scalar fields
+       ``config_entry_id`` and ``config_subentry_id``. When ``config_entry_id``
+       is a non-empty string it is the whole answer. For the owning entry that
+       is ``{config_subentry_id}`` when it names a subentry, the hub link
+       ``{None}`` when it is ``None`` or empty, and an empty set for any other
+       type; for any other entry it is an empty set.
+    2. Below 2026.8 the scalar fields do not exist and the many-to-many
+       ``config_entries_subentries`` mapping is the real data. It is read only
+       when step 1 found no owner, which is also the case for registry doubles
+       that model the mapping alone.
+    3. A device that names neither carries at most a bare ``config_subentry_id``
+       or legacy ownership; :func:`device_belongs_to_entry` answers the latter.
+
+    Why the order matters: ``config_entries_subentries`` (and
+    ``config_entries``) survive on 2026.8+ as compatibility shims, and from Core
+    2026.10 every read of them calls ``report_usage`` with
+    ``breaks_in_ha_version="2027.10.0"`` (``homeassistant/helpers/
+    device_registry.py`` at tag ``2026.10.0``,
+    ``_report_deprecated_config_entries_property``). For a custom integration
+    that is a report on every call, logged once per call site; from core code,
+    which is what the test suite counts as, it is a ``RuntimeError``. Reading the scalar fields first
+    keeps both shims out of the path on every core that has them.
+
+    One deliberate narrowing, the same one :func:`device_belongs_to_entry`
+    states: a restored composite device (synthesized by ``async_get`` for a
+    pre-migration composite id) reports several entries through the shim but
+    one through ``config_entry_id``. The callers of this function take their
+    devices from ``async_entries_for_config_entry`` or an identifier lookup,
+    which return stored devices only, never the synthesized composite.
 
     Args:
         device: Device registry entry object.
@@ -1041,12 +1075,25 @@ def extract_subentry_links(device: Any, entry_id: str | None) -> set[str | None]
     if device is None or not entry_id:
         return set()
 
-    # Try config_entries_subentries mapping first
+    subentry = getattr(device, "config_subentry_id", None)
+    owner = getattr(device, "config_entry_id", None)
+    if isinstance(owner, str) and owner:
+        if owner != entry_id:
+            return set()
+        if isinstance(subentry, str) and subentry:
+            return {subentry}
+        if subentry is None or subentry == "":
+            return {None}
+        return set()
+
     mapping_obj = getattr(device, "config_entries_subentries", None)
     if isinstance(mapping_obj, Mapping):
         raw_links = mapping_obj.get(entry_id)
+        if isinstance(raw_links, str):
+            # A lone string is one link, per ``agents/typing_guidance/AGENTS.md``.
+            return {raw_links}
         if isinstance(raw_links, Collection) and not isinstance(
-            raw_links, (str, bytes, Mapping)
+            raw_links, (bytes, Mapping)
         ):
             typed_links: set[str | None] = set()
             for item in raw_links:
@@ -1058,14 +1105,10 @@ def extract_subentry_links(device: Any, entry_id: str | None) -> set[str | None]
         if raw_links is None:
             return set()
 
-    # Fallback to config_subentry_id attribute
-    fallback = getattr(device, "config_subentry_id", None)
-    if isinstance(fallback, str):
-        return {fallback}
+    if isinstance(subentry, str):
+        return {subentry}
 
-    # If device has config_entries but no subentry, return {None}
-    config_entries = getattr(device, "config_entries", None)
-    if config_entries is not None and fallback is None:
+    if subentry is None and device_belongs_to_entry(device, entry_id):
         return {None}
 
     return set()

@@ -56,9 +56,9 @@ from .const import (
 from .coordinator.helpers.registry import (
     OwnershipIntent,
     detect_device_registry_capabilities,
-    device_belongs_to_entry,
     device_owning_entry_ids,
     execute_ownership_plan,
+    extract_subentry_links,
     plan_device_ownership,
     read_device_ownership,
     resolve_device_by_identifiers,
@@ -311,38 +311,16 @@ async def async_rebuild_device_registry(hass: HomeAssistant, call: ServiceCall) 
         return set()
 
     def _entry_links_for_device(device: Any, target_entry_id: str) -> set[str | None]:
-        """Return normalized subentry identifiers for ``target_entry_id``."""
+        """Return normalized subentry identifiers for ``target_entry_id``.
+
+        Delegates to the shared accessor, which reads the scalar ownership
+        fields before the ``config_entries_subentries`` shim that Core 2026.10
+        reports on every read.
+        """
 
         if not isinstance(target_entry_id, str) or not target_entry_id:
             return set()
-
-        mapping_obj = getattr(device, "config_entries_subentries", None)
-        normalized: set[str | None] = set()
-        if isinstance(mapping_obj, Mapping):
-            raw_links = mapping_obj.get(target_entry_id)
-            if isinstance(raw_links, str):
-                normalized.add(raw_links)
-            elif isinstance(raw_links, Iterable) and not isinstance(
-                raw_links, (str, bytes)
-            ):
-                for candidate in raw_links:
-                    if isinstance(candidate, str):
-                        normalized.add(candidate)
-                    elif candidate is None:
-                        normalized.add(None)
-            elif raw_links is None and target_entry_id in mapping_obj:
-                normalized.add(None)
-
-        if not normalized:
-            fallback = getattr(device, "config_subentry_id", None)
-            if isinstance(fallback, str):
-                normalized.add(fallback)
-            elif fallback is None and device_belongs_to_entry(device, target_entry_id):
-                # No subentry of ours, but the entry owns the device: that is
-                # the hub link, which this set spells ``None``.
-                normalized.add(None)
-
-        return normalized
+        return extract_subentry_links(device, target_entry_id)
 
     processed_coordinators = 0
     seen_coordinators: set[int] = set()
@@ -572,30 +550,25 @@ async def async_rebuild_device_registry(hass: HomeAssistant, call: ServiceCall) 
                 continue
 
             # Check if the device is correctly linked to the tracker subentry
-            tracker_linked_entry_ids: set[str] = set()
-            device_subentry_mapping = getattr(device, "config_entries_subentries", None)
-            if isinstance(device_subentry_mapping, Mapping):
-                for (
-                    mapped_entry_id,
-                    mapped_subentries,
-                ) in device_subentry_mapping.items():
-                    normalized_entry_id = str(mapped_entry_id)
-                    if not normalized_entry_id:
-                        continue
-
-                    normalized_subentries: set[str] = set()
-                    if isinstance(mapped_subentries, str):
-                        if mapped_subentries:
-                            normalized_subentries = {mapped_subentries}
-                    elif isinstance(mapped_subentries, Iterable):
-                        normalized_subentries = {
-                            candidate
-                            for candidate in mapped_subentries
-                            if isinstance(candidate, str) and candidate
-                        }
-
-                    if correct_tracker_subentry_id in normalized_subentries:
-                        tracker_linked_entry_ids.add(normalized_entry_id)
+            # One accessor for every core: the owning entries come from the
+            # scalar ``config_entry_id`` where it exists (2026.8+) and from the
+            # legacy set below that, and the subentry links per entry come from
+            # ``extract_subentry_links``. Neither reads the
+            # ``config_entries_subentries`` shim that Core 2026.10 reports.
+            # Only a real subentry id can confirm a tracker link; ``None`` in
+            # the link set is the hub link and must not match a missing id.
+            tracker_linked_entry_ids: set[str] = (
+                {
+                    owner_entry_id
+                    for owner_entry_id in device_owning_entry_ids(device)
+                    if owner_entry_id
+                    and correct_tracker_subentry_id
+                    in extract_subentry_links(device, owner_entry_id)
+                }
+                if isinstance(correct_tracker_subentry_id, str)
+                and correct_tracker_subentry_id
+                else set()
+            )
 
             linked_entry_ids = {
                 link_entry_id

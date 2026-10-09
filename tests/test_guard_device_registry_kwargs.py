@@ -21,6 +21,26 @@ as an inventory of today's tree:
    ``getattr`` form, and
 5. ``async_get_device``, whose identifier lookup is no longer unique.
 
+Rule 3 has a sibling, 3b, added with Home Assistant 2026.10: the two other
+ownership shims, ``DeviceEntry.config_entries_subentries`` and
+``DeviceEntry.primary_config_entry``.  From that core every read of any of the
+three calls ``report_usage`` (``breaks_in_ha_version="2027.10.0"``), which logs
+for a custom integration and raises for core code.  Rule 3 alone let three
+readers of the mapping shim through outside the translator (two local copies of
+the link lookup and an orphan pass); the translator's own
+``extract_subentry_links`` read it too, which no static rule here can see,
+because the translator is exempt by design -- ``tests/test_device_entry_shim_reads.py``
+covers it at run time.  No entry manager or module carries either name, so 3b
+needs no allow list: every receiver outside the translator is a finding.
+
+Rule 3b sees the attribute form (``device.config_entries_subentries``), the
+``getattr`` form with a string literal, and ``hasattr`` with a string literal,
+which calls the property and reports just the same.  Not seen, and accepted
+because none of them occurs in the tree and each needs deliberate indirection:
+``getattr``/``hasattr`` with a name held in a variable or constant, an alias of
+``getattr`` or ``builtins.getattr``, ``operator.attrgetter``, and
+``type(device).__getattribute__``.  Review covers those.
+
 The check is static and AST-based, following
 ``tests/test_guard_config_flow_reload_deprecation.py``: a runtime test cannot see
 a call site that no test happens to exercise, and a grep cannot tell
@@ -78,6 +98,10 @@ _OWNERSHIP_KWARGS = frozenset(
 _CONFIG_ENTRIES_OWNERS = frozenset(
     {"hass", "_hass", "self", "self.hass", "self._hass", "hass_arg", "cf"}
 )
+
+#: Rule 3b: the other two single-owner shims.  Unlike ``config_entries`` no
+#: entry manager or module uses these names, so there is no receiver allow list.
+_OWNERSHIP_SHIMS = frozenset({"config_entries_subentries", "primary_config_entry"})
 
 #: Receivers whose ``.devices`` is *not* the deprecated registry mapping.  An
 #: allow list for the same reason as ``_CONFIG_ENTRIES_OWNERS``: a deny list of
@@ -207,6 +231,38 @@ def scan_file(path: Path, relative: str) -> tuple[list[Finding], list[Finding]]:
                 findings.append(
                     Finding("config_entries", relative, _where(node), receiver)
                 )
+        # Rule 3b -- the other two ownership shims, attribute form.
+        if (
+            isinstance(node, ast.Attribute)
+            and node.attr in _OWNERSHIP_SHIMS
+            and not in_translator
+        ):
+            findings.append(
+                Finding(
+                    node.attr,
+                    relative,
+                    _where(node),
+                    _receiver(node.value) or "<expression>",
+                )
+            )
+        # Rule 3b -- hasattr evaluates the property, so it reports too.
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "hasattr"
+            and len(node.args) >= 2
+            and isinstance(node.args[1], ast.Constant)
+            and node.args[1].value in _OWNERSHIP_SHIMS
+            and not in_translator
+        ):
+            findings.append(
+                Finding(
+                    str(node.args[1].value),
+                    relative,
+                    _where(node),
+                    f"hasattr {_receiver(node.args[0]) or '<expression>'}",
+                )
+            )
         if (
             isinstance(node, ast.Call)
             and isinstance(node.func, ast.Name)
@@ -216,6 +272,16 @@ def scan_file(path: Path, relative: str) -> tuple[list[Finding], list[Finding]]:
         ):
             attribute = node.args[1].value
             receiver = _receiver(node.args[0])
+            # Rule 3b -- the same shims through getattr.
+            if attribute in _OWNERSHIP_SHIMS and not in_translator:
+                findings.append(
+                    Finding(
+                        str(attribute),
+                        relative,
+                        _where(node),
+                        f"getattr {receiver or '<expression>'}",
+                    )
+                )
             if attribute == "config_entries":
                 if receiver is None:
                     undecidable.append(
@@ -409,6 +475,53 @@ def test_ratchet_has_no_stale_entries() -> None:
     assert not problems, "KNOWN_VIOLATIONS no longer describes the tree:\n" + "\n".join(
         problems
     )
+
+
+def test_rule_3b_input_space(tmp_path: Path) -> None:
+    """Pin which forms of a shim read rule 3b reports and which it does not.
+
+    Reported: the attribute form, ``getattr`` and ``hasattr`` with a literal.
+    Not reported: prose (docstrings, comments, log strings), and the dynamic
+    forms the module docstring lists as accepted blind spots.  A change in
+    either direction has to show up here, not in a silent shift of the gate.
+    """
+    source = (
+        '"""Mentions config_entries_subentries in a docstring."""\n'
+        "import logging\n"
+        "NAME = 'primary_config_entry'\n"
+        "def reads(device, devices):\n"
+        "    a = device.config_entries_subentries\n"
+        "    b = devices[0].primary_config_entry\n"
+        "    c = getattr(device, 'config_entries_subentries', None)\n"
+        "    d = hasattr(device, 'primary_config_entry')\n"
+        "    return a, b, c, d\n"
+        "def blind(device):\n"
+        "    # device.config_entries_subentries in a comment\n"
+        "    logging.debug('config_entries_subentries %s', device)\n"
+        "    return getattr(device, NAME), hasattr(device, NAME)\n"
+    )
+    probe = tmp_path / "probe.py"
+    probe.write_text(source, encoding="utf-8")
+
+    findings, _ = scan_file(probe, "probe.py")
+    shim_findings = sorted(
+        (item.rule, item.function, item.detail)
+        for item in findings
+        if item.rule in _OWNERSHIP_SHIMS
+    )
+
+    assert shim_findings == [
+        ("config_entries_subentries", "<module>.reads", "device"),
+        ("config_entries_subentries", "<module>.reads", "getattr device"),
+        # A subscript receiver is not a simple name; the rule still reports it.
+        ("primary_config_entry", "<module>.reads", "<expression>"),
+        ("primary_config_entry", "<module>.reads", "hasattr device"),
+    ]
+
+    translator_findings, _ = scan_file(probe, _TRANSLATOR)
+    assert not [
+        item for item in translator_findings if item.rule in _OWNERSHIP_SHIMS
+    ], "the translator may read the shims; it is the compatibility layer"
 
 
 def test_undecidable_constructs_are_reported_not_hidden() -> None:

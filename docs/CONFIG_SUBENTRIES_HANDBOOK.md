@@ -475,7 +475,8 @@ To ensure `async_remove_subentry` cleans up devices, the Device Registry entry m
 > exactly one config entry and exactly one config subentry, held in
 > `DeviceEntry.config_entry_id` and `DeviceEntry.config_subentry_id`. The older
 > `config_entries_subentries` mapping survives only as a compatibility shim that
-> always reports one pair, and it is marked for removal in Core 2027.8. Two rules
+> always reports one pair; Core 2026.8 marked it for removal in 2027.8, and from
+> Core 2026.10 every read of it reports with a deadline of 2027.10. Two rules
 > follow for the manual paths described below. First, a manual correction through
 > `async_update_device` is only permitted as `new_config_subentry_id` (or
 > `new_config_entry_id` together with it); these keywords arrive in Core 2026.8.0 and

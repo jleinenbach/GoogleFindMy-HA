@@ -416,13 +416,30 @@ class TestExtractSubentryLinks:
         # 42 is filtered out (not str/None); None is kept; str passes through.
         assert extract_subentry_links(device, "e1") == {"sub-1", "sub-2", None}
 
-    def test_mapping_with_string_value_falls_through(self):
-        """Branch 2b: raw_links is a str -> not Collection-of-items -> fallback."""
+    def test_mapping_with_string_value_is_one_link(self):
+        """Branch 2b: a lone string is one link, not a fallback trigger.
+
+        ``agents/typing_guidance/AGENTS.md`` asks registry mappings to treat
+        lone strings as one-item collections. The local copies in
+        ``services.py`` and ``coordinator/registry.py`` did; this helper fell
+        through to ``config_subentry_id`` instead. Since both copies now
+        delegate here, the helper follows the contract.
+        """
         device = SimpleNamespace(
             config_entries_subentries={"e1": "sub-string"},
             config_subentry_id="sub-1",
         )
-        assert extract_subentry_links(device, "e1") == {"sub-1"}
+        assert extract_subentry_links(device, "e1") == {"sub-string"}
+
+    def test_scalar_owner_with_empty_subentry_is_the_hub_link(self):
+        """An empty ``config_subentry_id`` names no subentry: the hub link."""
+        device = SimpleNamespace(config_entry_id="e1", config_subentry_id="")
+        assert extract_subentry_links(device, "e1") == {None}
+
+    def test_scalar_owner_with_unknown_subentry_type_has_no_links(self):
+        """A subentry that is neither a string nor ``None`` names nothing."""
+        device = SimpleNamespace(config_entry_id="e1", config_subentry_id=42)
+        assert extract_subentry_links(device, "e1") == set()
 
     def test_mapping_with_none_value_returns_empty(self):
         """Branch 2c: explicit None value -> empty set (no fallback)."""
@@ -460,6 +477,80 @@ class TestExtractSubentryLinks:
             config_subentry_id="sub-fallback",
         )
         assert extract_subentry_links(device, "e1") == set()
+
+    def test_scalar_owner_answers_without_touching_the_shims(self):
+        """Core 2026.8+: the scalar fields are the whole answer.
+
+        Core 2026.10 reports every read of ``config_entries`` and
+        ``config_entries_subentries`` and raises when the caller is core code.
+        The double raises on any such read, so a regression that consults a
+        shim first fails here instead of only in a log line on a user's system.
+        """
+        device = _ShimRefusingDevice(config_entry_id="e1", config_subentry_id="s1")
+        assert extract_subentry_links(device, "e1") == {"s1"}
+
+    def test_scalar_owner_without_subentry_is_the_hub_link(self):
+        """A device at the entry root reports the hub link ``None``."""
+        device = _ShimRefusingDevice(config_entry_id="e1", config_subentry_id=None)
+        assert extract_subentry_links(device, "e1") == {None}
+
+    def test_scalar_owner_of_another_entry_has_no_links(self):
+        """A device owned by a different entry links to nothing of ``e1``."""
+        device = _ShimRefusingDevice(config_entry_id="other", config_subentry_id="s1")
+        assert extract_subentry_links(device, "e1") == set()
+
+    def test_scalar_owner_wins_over_a_disagreeing_mapping(self):
+        """When both spellings exist, the scalar fields decide.
+
+        Real Core derives the mapping from the scalars, so the two never
+        disagree there; the double makes them disagree on purpose to prove
+        which one is read.
+        """
+        device = SimpleNamespace(
+            config_entry_id="e1",
+            config_subentry_id="s-scalar",
+            config_entries_subentries={"e1": {"s-mapping"}},
+        )
+        assert extract_subentry_links(device, "e1") == {"s-scalar"}
+
+    def test_empty_scalar_owner_falls_back_to_the_mapping(self):
+        """An empty ``config_entry_id`` names no entry; the mapping answers."""
+        device = SimpleNamespace(
+            config_entry_id="",
+            config_entries_subentries={"e1": {"sub-1"}},
+        )
+        assert extract_subentry_links(device, "e1") == {"sub-1"}
+
+    def test_legacy_owners_of_another_entry_are_not_a_hub_link(self):
+        """Legacy ``config_entries`` naming only another entry yields no link.
+
+        Before, any ``config_entries`` attribute produced ``{None}`` whatever
+        it contained. Membership is now asked through
+        ``device_belongs_to_entry``, so a device owned elsewhere is no longer
+        reported as sitting on this entry's root.
+        """
+        device = SimpleNamespace(config_entries=["other"], config_subentry_id=None)
+        assert extract_subentry_links(device, "e1") == set()
+
+
+class _ShimRefusingDevice:
+    """A 2026.8+ device double whose compatibility shims refuse to be read."""
+
+    def __init__(self, *, config_entry_id: str, config_subentry_id: str | None):
+        self.config_entry_id = config_entry_id
+        self.config_subentry_id = config_subentry_id
+
+    @property
+    def config_entries(self) -> set[str]:
+        raise AssertionError("DeviceEntry.config_entries shim was read")
+
+    @property
+    def config_entries_subentries(self) -> dict[str, set[str | None]]:
+        raise AssertionError("DeviceEntry.config_entries_subentries shim was read")
+
+    @property
+    def primary_config_entry(self) -> str:
+        raise AssertionError("DeviceEntry.primary_config_entry shim was read")
 
 
 # ---------------------------------------------------------------------------

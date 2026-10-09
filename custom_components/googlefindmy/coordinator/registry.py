@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import inspect
 import logging
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -881,56 +881,16 @@ class RegistryOperations(_MixinBase):
             identifiers.add(service_subentry_identifier)
 
         def _service_entry_links(device: Any) -> set[str | None]:
-            """Return the set of subentry identifiers linked to ``entry``."""
+            """Return the set of subentry identifiers linked to ``entry``.
+
+            Delegates to the shared accessor, which reads the scalar ownership
+            fields before the ``config_entries_subentries`` shim that Core
+            2026.10 reports on every read; see ``extract_subentry_links``.
+            """
 
             if not entry_id:
                 return set()
-
-            mapping_obj = getattr(device, "config_entries_subentries", None)
-            normalized: set[str | None] = set()
-            if isinstance(mapping_obj, Mapping):
-                raw_links = mapping_obj.get(entry_id)
-                if isinstance(raw_links, str):
-                    normalized.add(raw_links)
-                elif isinstance(raw_links, Iterable) and not isinstance(
-                    raw_links, (str, bytes)
-                ):
-                    for candidate in raw_links:
-                        if isinstance(candidate, str):
-                            normalized.add(candidate)
-                        elif candidate is None:
-                            normalized.add(None)
-                elif raw_links is None and entry_id in mapping_obj:
-                    normalized.add(None)
-
-            if not normalized:
-                fallback = getattr(device, "config_subentry_id", None)
-                if isinstance(fallback, str):
-                    normalized.add(fallback)
-                elif (  # pragma: no cover
-                    fallback is None and _device_belongs_to_entry_impl(device, entry_id)
-                ):
-                    # Not reachable on any supported core: every caller runs
-                    # after ``async_get_or_create`` for this entry, and from
-                    # Core 2025.3 that leaves the entry in
-                    # ``config_entries_subentries``, which the lookup above
-                    # already answered. Kept for registry doubles that model
-                    # membership without the mapping.
-                    # A device that belongs to us and names no subentry sits on
-                    # the entry root; that is what ``None`` means in this set.
-                    # The shared helper replaces a direct read of the deprecated
-                    # ``config_entries`` shim in this branch. Two limits, stated
-                    # rather than implied: the lookup above still reads
-                    # ``config_entries_subentries``, the same compatibility shim
-                    # under a different name, which no work package has claimed
-                    # yet; and the answer differs from the old one for a device
-                    # split from a pre-migration composite, where the shim can
-                    # name several entries and ``config_entry_id`` names one.
-                    # That narrowing is deliberate and matches the entry-scoped
-                    # lookup two calls earlier.
-                    normalized.add(None)
-
-            return normalized
+            return _extract_subentry_links_impl(device, entry_id)
 
         def _service_has_service_link(device: Any) -> bool:
             if service_config_subentry_id is None:

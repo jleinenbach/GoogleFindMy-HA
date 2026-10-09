@@ -27,6 +27,7 @@ Use this guide alongside the official release notes and Home Assistant developer
 | Released in 2025.10 | Entity services | Register platform services via `async_register_platform_entity_service` in `async_setup` | [IV.3](#3-registration-of-platform-entity-services-new-api-pattern) |
 | Released in 2025.11 | API translations | `get_services` no longer returns action translations; fetch via `frontend/get_translations` | [IV.5](#5-api-endpoints-removal-of-service-translations-websocketrest) |
 | Behavior change in 2026.8, warnings from 2026.9, deadline 2027.8 | Device registry | A device belongs to one config entry and one subentry; `add_config_entry_id`/`remove_config_entry_id` change meaning, `async_get_device` is deprecated | [VI](#vi-device-registry-single-ownership-of-devices-core-20268) |
+| Warnings from 2026.10, deadline 2027.10 | Device registry | Reading `DeviceEntry.config_entries`, `config_entries_subentries` or `primary_config_entry` reports; read `config_entry_id`/`config_subentry_id` through the shared accessors | [VI](#vi-device-registry-single-ownership-of-devices-core-20268) |
 
 ### Critical migration tables
 
@@ -430,6 +431,7 @@ This section summarizes the findings in a prioritized checklist.
 - [ ] `async_update_statistics_metadata`: If you provide statistics, locate calls to `async_update_statistics_metadata`. **Action:** Ensure that the `new_unit_class` argument is always supplied explicitly (for example, `new_unit_class=None`) (see Section II.2).
 - [ ] `Config` alias: Search for imports of `Config` from `homeassistant.core`. **Action:** Change the import path to `from homeassistant.core_config import Config` (see Section II.3).
 - [x] Device registry ownership keywords: Search for `add_config_entry_id`, `add_config_subentry_id`, `remove_config_entry_id`, `remove_config_subentry_id`. **Action:** Express the intent instead. Move a device with `new_config_entry_id` and/or `new_config_subentry_id`, remove it with `async_remove_device` (deadline 2027.8, warnings from 2026.9; see Section VI).
+- [x] Device ownership shims: Search for `config_entries_subentries`, `primary_config_entry` and `config_entries` read on a device entry. **Action:** Read `config_entry_id`/`config_subentry_id` through `device_belongs_to_entry`, `device_owning_entry_ids` or `extract_subentry_links` in `coordinator/helpers/registry.py` (warnings from 2026.10, deadline 2027.10; see Section VI).
 - [x] Ambiguous device lookups: Search for `async_get_device(` and for `device_registry.devices` used as a mapping. **Action:** Replace the lookup with `async_get_device_by_identifier`, `async_get_device_by_connection` or `async_get_devices`, and replace mapping access with `async_get` or `async_entries_for_config_entry` (deadlines 2027.8 and 2027.9; see Section VI).
 
 > **Status of the three device-registry items above, measured 2026-09-09 in this
@@ -486,9 +488,15 @@ Core 2026.8 replaced the model: a device now belongs to **exactly one** config
 entry and **exactly one** config subentry, held in the new scalar fields
 `DeviceEntry.config_entry_id` and `DeviceEntry.config_subentry_id`. The old
 `config_entries` and `config_entries_subentries` attributes survive as
-compatibility properties that always report a single pair; the core marks them
+compatibility properties that always report a single pair; the core marked them
 for removal in 2027.8 (`homeassistant/helpers/device_registry.py` at tag
-`2026.8.0`, lines 507-508).
+`2026.8.0`, lines 507-508). Core 2026.10 moved that date: every read of
+`config_entries`, `config_entries_subentries` or `primary_config_entry` now calls
+`report_usage` with `breaks_in_ha_version="2027.10.0"`
+(`_report_deprecated_config_entries_property` at tag `2026.10.0`), which logs for
+a custom integration and raises for core code, except on a restored composite
+device. This integration reads ownership only through the shared accessors in
+`coordinator/helpers/registry.py`, which read the scalar fields first.
 
 Three consequences matter more than the deprecation warnings.
 
