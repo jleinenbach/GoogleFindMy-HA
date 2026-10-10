@@ -291,9 +291,11 @@ prediction: the finder encrypts its report to that EID and sends the sighting
 time, and the owner resolves the counter over the recent past and near future.
 A late advertisement of an older window does not replace a newer window seen
 at most one period earlier. If the older window arrives with a wall time earlier
-than the newer sighting (the wall clock stepped back), the sighting is dropped,
-and nothing is reported until the next match. Matches of the heuristic phone
-path record no sighting. The method is not part of `GoogleFindMyEIDResolverProtocol`.
+than the newer sighting (the wall clock stepped back), the recorded sighting is
+dropped, because such a late window cannot be told apart from a device that
+restarted its counter; nothing is reported until the next match. Matches of
+the heuristic phone path record no sighting. The method is not part of
+`GoogleFindMyEIDResolverProtocol`.
 
 The resolver also records both forward and reversed advertisements so scanners do not need to normalize byte order.
 
