@@ -62,9 +62,11 @@ else:  # pragma: no cover - fallback for environments with stubbed helpers
 
 from .const import (
     CONF_GOOGLE_EMAIL,
+    DEFAULT_MAP_VIEW_ENABLED,
     DEFAULT_MAP_VIEW_TOKEN_EXPIRATION,
     DOMAIN,
     INTEGRATION_VERSION,
+    OPT_MAP_VIEW_ENABLED,
     OPT_MAP_VIEW_TOKEN_EXPIRATION,
     SERVICE_DEVICE_MANUFACTURER,
     SERVICE_DEVICE_MODEL,
@@ -627,7 +629,17 @@ class GoogleFindMyDeviceEntity(GoogleFindMyEntity):
     def device_configuration_url(
         self, *, redirect: bool = False, absolute: bool = False
     ) -> str | None:
-        """Return a stable configuration URL for the device if resolvable."""
+        """Return a stable configuration URL for the device if resolvable.
+
+        Returns None when Map View is disabled for this entry, rather than a
+        link to an endpoint that was never registered.
+        """
+
+        config_entry = getattr(self.coordinator, "config_entry", None)
+        if not bool(
+            _entry_option(config_entry, OPT_MAP_VIEW_ENABLED, DEFAULT_MAP_VIEW_ENABLED)
+        ):
+            return None
 
         token = self._get_map_token()
         path = self._build_map_path(self.device_id, token, redirect=redirect)

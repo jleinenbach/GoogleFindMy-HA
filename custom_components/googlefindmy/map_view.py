@@ -23,8 +23,10 @@ from homeassistant.helpers import entity_registry as er
 from homeassistant.util import dt as dt_util
 
 from .const import (
+    DEFAULT_MAP_VIEW_ENABLED,
     DEFAULT_MAP_VIEW_TOKEN_EXPIRATION,
     DOMAIN,
+    OPT_MAP_VIEW_ENABLED,
     OPT_MAP_VIEW_TOKEN_EXPIRATION,
     WEEK_SECONDS,
     map_token_hex_digest,
@@ -623,6 +625,23 @@ def _resolve_entry_by_token(
     return None, None
 
 
+def _is_map_view_enabled_for_entry(entry: ConfigEntry) -> bool:
+    """Return whether Map View is enabled for the resolved config entry.
+
+    Shared by every view that resolves an entry from a share token, since
+    views stay registered process-wide (no unregister_view API) even after
+    an entry turns the feature off.
+    """
+    entry_options = getattr(entry, "options", {}) or {}
+    entry_data = getattr(entry, "data", {}) or {}
+    return bool(
+        entry_options.get(
+            OPT_MAP_VIEW_ENABLED,
+            entry_data.get(OPT_MAP_VIEW_ENABLED, DEFAULT_MAP_VIEW_ENABLED),
+        )
+    )
+
+
 def _map_tiles_access_token(hass: Any) -> str | None:
     """Return the newest Core ``map_tiles`` access token, or ``None`` to fall back.
 
@@ -681,6 +700,19 @@ class GoogleFindMyMapView(HomeAssistantView):
         entry, _accepted = _resolve_entry_by_token(self.hass, auth_token)
         if not entry:
             _LOGGER.debug("Map token mismatch for device_id=%s", device_id)
+            return _html_response(
+                "Unauthorized", "Invalid authentication token.", status=401
+            )
+
+        # Defense in depth (see _is_map_view_enabled_for_entry). Reuse the exact
+        # invalid-token response so a disabled-but-valid token can't be
+        # confirmed valid by a different refusal.
+        if not _is_map_view_enabled_for_entry(entry):
+            _LOGGER.debug(
+                "Map view disabled for entry=%s; refusing device_id=%s",
+                entry.entry_id,
+                device_id,
+            )
             return _html_response(
                 "Unauthorized", "Invalid authentication token.", status=401
             )
@@ -1411,6 +1443,9 @@ class GoogleFindMyMapTilesTokenView(HomeAssistantView):
             return web.Response(status=401, headers=NO_STORE_HEADERS)
         entry, _accepted = _resolve_entry_by_token(self.hass, auth_token)
         if entry is None:
+            return web.Response(status=401, headers=NO_STORE_HEADERS)
+        if not _is_map_view_enabled_for_entry(entry):
+            # Same rule as the main map view: 401, not a distinguishable 404.
             return web.Response(status=401, headers=NO_STORE_HEADERS)
         token = _map_tiles_access_token(self.hass)
         if token is None:

@@ -10,6 +10,7 @@ from homeassistant.helpers.network import NoURLAvailableError
 import custom_components.googlefindmy as integration
 from custom_components.googlefindmy.const import (
     DOMAIN,
+    OPT_MAP_VIEW_ENABLED,
     OPT_MAP_VIEW_TOKEN_EXPIRATION,
     map_token_hex_digest,
     map_token_secret_seed,
@@ -94,6 +95,117 @@ async def test_async_refresh_device_urls_updates_registry(
     assert update["configuration_url"] == device.configuration_url
     assert update["translation_placeholders"] in ({}, None)
     assert update["new_identifiers"] is None
+
+
+@pytest.mark.asyncio
+async def test_async_refresh_device_urls_clears_url_when_map_view_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Refresh helper clears a stale configuration_url when Map View is off.
+
+    Rather than refreshing a link to a deliberately-unregistered endpoint, the
+    device's ``configuration_url`` is cleared entirely.
+    """
+
+    base_url = "https://example.test"
+
+    entry = make_config_entry(
+        entry_id="entry-1",
+        options={OPT_MAP_VIEW_ENABLED: False},
+    )
+    hass = SimpleNamespace()
+    hass.data = {"core.uuid": "ha-uuid"}
+    hass.config_entries = SimpleNamespace(async_entries=lambda domain: [entry])
+
+    monkeypatch.setattr(integration, "get_url", lambda _hass, **kwargs: base_url)
+
+    registry = dr.async_get(hass)
+    device = registry.async_get_or_create(
+        config_entry_id=entry.entry_id,
+        identifiers={(DOMAIN, f"{entry.entry_id}:device-alpha")},
+        manufacturer="Google",
+        model="Nest",
+        name="Alpha",
+    )
+    registry.async_update_device(
+        device_id=device.id,
+        configuration_url=f"{base_url}/api/googlefindmy/map/device-alpha?token=stale",
+    )
+    assert device.configuration_url is not None
+
+    await integration._async_refresh_device_urls(hass)
+
+    # Real HA's ``device_registry.async_update_device`` treats the ``UNDEFINED``
+    # sentinel as "leave unchanged" and ``None`` as "clear this field" -- the
+    # opposite of what one might guess. The shared stub registry here does not
+    # model that distinction: unlike real HA, it skips applying a ``None`` value
+    # to the device object itself (see ``_StubDeviceRegistry.async_update_device``
+    # in ``tests/conftest.py``), so ``device.configuration_url`` stays stale even
+    # though the call is correct. The recorded call in ``updated`` is therefore
+    # the source of truth here, not ``device.configuration_url``: it proves the
+    # production code passed ``None`` (the real clearing sentinel) for the
+    # disabled case, which is what matters.
+    update = registry.updated[-1]
+    assert update["device_id"] == device.id
+    assert update["configuration_url"] is None
+
+
+@pytest.mark.asyncio
+async def test_async_refresh_device_urls_clears_disabled_url_without_a_base_url(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A disabled entry's stale link is cleared even with no reachable HA URL.
+
+    Clearing ``configuration_url`` for a disabled entry needs no base URL to
+    compute anything, so it must not be skipped just because Home Assistant
+    has no external/internal URL configured -- and, since no *enabled* entry
+    needs a base URL here either, no "no reachable URL available" warning
+    should be logged.
+    """
+
+    entry = make_config_entry(
+        entry_id="entry-1",
+        options={OPT_MAP_VIEW_ENABLED: False},
+    )
+    hass = SimpleNamespace()
+    hass.data = {"core.uuid": "ha-uuid"}
+    hass.config_entries = SimpleNamespace(async_entries=lambda domain: [entry])
+
+    def _no_url(_hass: object, **kwargs: object) -> str:
+        raise NoURLAvailableError
+
+    monkeypatch.setattr(integration, "get_url", _no_url)
+
+    registry = dr.async_get(hass)
+    device = registry.async_get_or_create(
+        config_entry_id=entry.entry_id,
+        identifiers={(DOMAIN, f"{entry.entry_id}:device-alpha")},
+        manufacturer="Google",
+        model="Nest",
+        name="Alpha",
+    )
+    registry.async_update_device(
+        device_id=device.id,
+        configuration_url="https://stale.example/api/googlefindmy/map/device-alpha?token=stale",
+    )
+
+    caplog.set_level(logging.DEBUG)
+    await integration._async_refresh_device_urls(hass)
+
+    update = registry.updated[-1]
+    assert update["device_id"] == device.id
+    assert update["configuration_url"] is None
+
+    warnings = [
+        record
+        for record in caplog.records
+        if record.levelno >= logging.WARNING
+        and "reachable URL" in record.getMessage()
+    ]
+    assert warnings == [], (
+        "no enabled entry needs a base URL here, so no warning should fire"
+    )
 
 
 def test_device_configuration_url_warns_when_external_url_missing(

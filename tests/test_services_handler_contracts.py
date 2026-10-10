@@ -60,7 +60,7 @@ def _make_hass(entries: list[Any] | None = None) -> SimpleNamespace:
 
 @pytest.fixture
 def full_ctx() -> dict[str, Any]:
-    """A complete 14-key ctx with every callable stubbed.
+    """A complete 16-key ctx with every callable stubbed.
 
     Mirrors the keys documented on ``async_register_services``; every callable
     is a ``Mock``/``AsyncMock`` so a handler that reaches for any of them gets a
@@ -71,9 +71,17 @@ def full_ctx() -> dict[str, Any]:
         "resolve_canonical": mock.Mock(return_value=("CANON", "Friendly Name")),
         "is_active_entry": mock.Mock(return_value=True),
         "primary_active_entry": mock.Mock(return_value=None),
-        "opt": mock.Mock(return_value=False),
+        # Mirrors the real _opt(entry, key, default): with no matching option
+        # set on the (empty options/data) test entries, it always falls
+        # through to the caller's own default -- a flat return_value=False
+        # would silently satisfy every bool-typed option read the same way,
+        # colliding once a second option (map_view_enabled, default True) is
+        # read through the same reader.
+        "opt": mock.Mock(side_effect=lambda entry, key, default: default),
         "default_map_view_token_expiration": False,
         "opt_map_view_token_expiration_key": "map_view_token_expiration",
+        "default_map_view_enabled": True,
+        "opt_map_view_enabled_key": "map_view_enabled",
         "redact_url_token": mock.Mock(return_value="<redacted-url>"),
         "soft_migrate_entry": mock.AsyncMock(),
         "migrate_unique_ids": mock.AsyncMock(),

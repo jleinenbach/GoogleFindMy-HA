@@ -26,6 +26,7 @@ from custom_components.googlefindmy import _platform_value
 from custom_components.googlefindmy.const import (
     DOMAIN,
     OPT_ENABLE_STATS_ENTITIES,
+    OPT_MAP_VIEW_ENABLED,
     SERVICE_SUBENTRY_KEY,
     TRACKER_SUBENTRY_KEY,
     service_device_identifier,
@@ -171,6 +172,31 @@ def test_device_configuration_url_absolute_rejects_invalid_base_url(
         entity, "_resolve_absolute_base_url", lambda: "example.local/home"
     )
 
+    assert entity.device_configuration_url(absolute=True) is None
+
+
+def test_device_configuration_url_none_when_map_view_disabled(
+    hass: HomeAssistant,
+    stub_coordinator_factory: Callable[..., type[Any]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``None`` when the owning entry has disabled Map View.
+
+    A disabled entry must not hand out a link to an endpoint that is
+    deliberately refused for every request against it (see map_view.py's
+    ``_is_map_view_enabled_for_entry``) -- neither a relative link for the
+    local device page nor an absolute one for notifications.
+    """
+
+    entity = _build_device_entity(hass, stub_coordinator_factory, monkeypatch)
+    entity.coordinator.config_entry = SimpleNamespace(
+        options={OPT_MAP_VIEW_ENABLED: False}, data={}
+    )
+
+    assert entity.device_configuration_url() is None
+    monkeypatch.setattr(
+        entity, "_resolve_absolute_base_url", lambda: "https://external.domain"
+    )
     assert entity.device_configuration_url(absolute=True) is None
 
 
