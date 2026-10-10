@@ -46,7 +46,8 @@ Attributes: area (semantic location), scanner (BLE scanner name)
 
 Flow:
 - Bermuda area change detected → find GoogleFindMy entity on SAME HA device
-- Get current EID from GoogleFindMy coordinator's identity keys
+- Take the EID of the device's last sighting the EID resolver confirmed
+  (last_confirmed_sighting), never one predicted from the clock
 - Upload semantic location to Google FMDN backend
 
 References:
@@ -62,7 +63,7 @@ import logging
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 from homeassistant.const import EVENT_STATE_CHANGED
 from homeassistant.core import Event, HomeAssistant, State, callback
@@ -70,6 +71,8 @@ from homeassistant.helpers import entity_registry as er
 
 if TYPE_CHECKING:
     from homeassistant.helpers.event import EventStateChangedData
+
+    from ..FMDNCrypto.eid_generator import EidVariant
 
 from ..const import DOMAIN
 
@@ -96,6 +99,19 @@ AREA_STABILIZATION_SECONDS = (
     30  # Wait 30 seconds after area change to confirm it's stable
 )
 MIN_UPLOAD_INTERVAL_SECONDS = 60  # Minimum time between uploads for same device
+# Oldest confirmed sighting the finder still reports, in seconds: one rotation
+# period (ROTATION_PERIOD). The owner resolves a report against the recent past
+# and near future of its counter, so the EID of the window seen at most one
+# period ago is still resolvable, and the report carries the sighting time.
+FINDER_SIGHTING_MAX_AGE_SECONDS = 1024
+
+
+class _UploadEid(NamedTuple):
+    """EID to encrypt a report to, with the wall-clock second it was seen."""
+
+    eid: bytes
+    observed_at: int
+
 
 # Log formatting
 EID_LOG_PREFIX_LENGTH = (
@@ -395,15 +411,18 @@ async def _async_handle_area_change(
     # Type narrowing for mypy
     assert isinstance(config_entry_id, str)
 
-    # Get current EID for the device
-    eid = await _async_get_device_eid(hass, coordinator, google_device_id)
+    # EID of the device's last confirmed sighting; without one there is
+    # nothing the owner could decrypt, which is a regular state (the device
+    # was not matched recently), not a fault.
+    upload = await _async_get_device_eid(hass, coordinator, google_device_id)
 
-    if not eid:
-        _LOGGER.warning(
-            "Cannot get EID for GoogleFindMy device %s, skipping upload",
+    if upload is None:
+        _LOGGER.debug(
+            "No reportable EID for GoogleFindMy device %s, skipping upload",
             google_device_id,
         )
         return
+    eid = upload.eid
 
     # The area name is an operator label and stays at DEBUG (AGENTS.md
     # section 5 b); the device id (class b) and the EID prefix (class a) may
@@ -429,6 +448,7 @@ async def _async_handle_area_change(
         scanner=attributes.get(ATTR_SCANNER),
         google_device_id=google_device_id,
         coordinator=coordinator,
+        report_time=upload.observed_at,
     )
 
 
@@ -585,14 +605,19 @@ async def _async_find_googlefindmy_device(  # noqa: PLR0911
     }
 
 
-async def _async_get_device_eid(  # noqa: PLR0911, PLR0912, PLR0915
+async def _async_get_device_eid(  # noqa: PLR0911
     hass: HomeAssistant,
     coordinator: Any,
     device_id: str,
-) -> bytes | None:
-    """Get the current EID for a GoogleFindMy device.
+) -> _UploadEid | None:
+    """Return the EID of the device's last confirmed sighting.
 
-    The EID is computed from the device's identity key and current time.
+    The EID is the one the device advertised in the window the EID resolver
+    last matched, not one predicted from the identity key and the clock: the
+    owner resolves a report against the recent past and near future of its
+    counter, and a prediction from ``pair_date`` ignores the time basis,
+    offset and units the resolver matched. A sighting older than
+    ``FINDER_SIGHTING_MAX_AGE_SECONDS`` is not reported.
 
     Args:
         hass: Home Assistant instance
@@ -600,7 +625,8 @@ async def _async_get_device_eid(  # noqa: PLR0911, PLR0912, PLR0915
         device_id: Google device UUID (e.g., "68419b51-0000-2131-873b-fc411691d329")
 
     Returns:
-        Current EID bytes (20 or 32 bytes), or None if unavailable
+        The EID to encrypt to (20 or 32 bytes, see ``_encryptable_eid``) and
+        the time of the sighting, or None if there is no reportable sighting
     """
     # Get device identities from coordinator
     get_identities = getattr(coordinator, "get_active_device_identities", None)
@@ -658,84 +684,92 @@ async def _async_get_device_eid(  # noqa: PLR0911, PLR0912, PLR0915
         )
         return None
 
-    # Generate EID
+    eid_resolver = hass.data.get(DOMAIN, {}).get("eid_resolver")
+    registry_id = getattr(identity, "registry_id", None)
+    if eid_resolver is None or not registry_id:
+        _LOGGER.debug(
+            "No EID resolver or registry id for device %s, nothing to report",
+            device_id,
+        )
+        return None
+
     try:
-        from ..FMDNCrypto.eid_generator import (  # noqa: PLC0415
-            EidVariant,
-            generate_eid_variant,
-        )
+        sighting = eid_resolver.last_confirmed_sighting(registry_id)
+        if sighting is None:
+            _LOGGER.debug(
+                "No confirmed sighting of device %s since start, nothing to report",
+                device_id,
+            )
+            return None
+        age = int(time.time()) - sighting.observed_at
+        # A negative age means the wall clock was stepped back after the
+        # sighting; its real age is unknown, so it is not reported either.
+        if not 0 <= age <= FINDER_SIGHTING_MAX_AGE_SECONDS:
+            _LOGGER.debug(
+                "Last confirmed sighting of device %s is %s s old, nothing to report",
+                device_id,
+                age,
+            )
+            return None
 
-        # Calculate beacon time counter
-        rotation_period = 1024  # Default FMDN rotation period in seconds
-        pair_date = getattr(identity, "pair_date", None) or 0
-        current_time = int(time.time())
-        beacon_time_counter = (current_time - pair_date) // rotation_period
-
-        # Determine EID variant - check EID resolver's persisted lock first
-        variant = EidVariant.LEGACY_SECP160R1_X20_BE  # Default for most FMDN trackers
-        eid_resolver = hass.data.get(DOMAIN, {}).get("eid_resolver")
-        if eid_resolver:
-            # Get the HA device registry ID from the identity
-            registry_id = getattr(identity, "registry_id", None)
-            if registry_id:
-                # Check for persisted lock with known variant
-                locks = getattr(eid_resolver, "_persisted_locks", {})
-                lock = locks.get(registry_id)
-                if lock:
-                    lock_variant_str = getattr(lock, "variant", None)
-                    if lock_variant_str:
-                        try:
-                            locked_variant = EidVariant(lock_variant_str)
-                            # Only use SECP160r1 variants for encryption (encrypt() only supports SECP160r1)
-                            if locked_variant == EidVariant.LEGACY_SECP160R1_X20_BE:
-                                variant = locked_variant
-                                _LOGGER.debug(
-                                    "Using locked EID variant for device %s: %s",
-                                    device_id,
-                                    variant.value,
-                                )
-                            else:
-                                _LOGGER.warning(
-                                    "Device %s uses %s variant which is not supported for upload "
-                                    "(encrypt() only supports SECP160r1). Trying LEGACY_SECP160R1_X20_BE.",
-                                    device_id,
-                                    lock_variant_str,
-                                )
-                        except ValueError:
-                            _LOGGER.debug(
-                                "Unknown variant in lock: %s", lock_variant_str
-                            )
+        # encrypt() picks the curve from the EID's length.
+        eid = _encryptable_eid(identity_key, sighting.window_counter, sighting.variant)
 
         _LOGGER.debug(
-            "Generating EID for device %s: pair_date=%s, current=%s, counter=%s, variant=%s",
+            "Reporting the sighting of device %s from %s s ago: counter=%s, "
+            "variant=%s, EID=%s...",
             device_id,
-            pair_date,
-            current_time,
-            beacon_time_counter,
-            variant.value,
-        )
-
-        # Generate EID using the determined variant
-        # Note: encrypt() in foreign_tracker_cryptor.py only supports SECP160r1 (20-byte EID)
-        eid = generate_eid_variant(
-            eik=identity_key,
-            time_counter_u32=beacon_time_counter,
-            variant=variant,
-        )
-
-        _LOGGER.debug(
-            "Generated EID for device %s: %s...",
-            device_id,
+            age,
+            sighting.window_counter,
+            sighting.variant.value,
             eid[:EID_LOG_PREFIX_LENGTH].hex()
             if len(eid) >= EID_LOG_PREFIX_LENGTH
             else eid.hex(),
         )
 
-        return eid
+        return _UploadEid(eid=eid, observed_at=sighting.observed_at)
 
     except Exception as err:
         _LOGGER.warning("Failed to generate EID for device %s: %s", device_id, err)
         return None
+
+
+def _encryptable_eid(
+    identity_key: bytes, time_counter: int, variant: EidVariant
+) -> bytes:
+    """Return the EID of ``variant`` in the length ``encrypt()`` needs.
+
+    ``encrypt()`` selects the curve from ``len(eid)`` and runs the ECDH on the
+    full x-coordinate. A truncated P-256 variant (20 of 32 bytes) cannot be
+    used for that, so the full-length variant with the same curve and scalar
+    derivation stands in for it; its x-coordinate is the one the truncated
+    EID was cut from.
+    """
+    from ..FMDNCrypto.eid_generator import (  # noqa: PLC0415
+        VARIANT_DERIVATIONS,
+        generate_eid_variant,
+    )
+
+    eid = generate_eid_variant(
+        eik=identity_key, time_counter_u32=time_counter, variant=variant
+    )
+    curve, derivation = VARIANT_DERIVATIONS[variant]
+    if len(eid) == curve.coord_len:
+        return eid
+    for sibling, (sibling_curve, sibling_derivation) in VARIANT_DERIVATIONS.items():
+        if sibling_curve != curve or sibling_derivation != derivation:
+            continue
+        full = generate_eid_variant(
+            eik=identity_key, time_counter_u32=time_counter, variant=sibling
+        )
+        if len(full) == curve.coord_len:
+            _LOGGER.debug(
+                "Variant %s is truncated; encrypting for %s instead",
+                variant.value,
+                sibling.value,
+            )
+            return full
+    raise ValueError(f"No full-length variant for {variant.value}")
 
 
 async def _async_upload_semantic_location(  # noqa: PLR0913, PLR0917
@@ -746,6 +780,8 @@ async def _async_upload_semantic_location(  # noqa: PLR0913, PLR0917
     scanner: str | None = None,
     google_device_id: str | None = None,
     coordinator: Any | None = None,
+    *,
+    report_time: int | None = None,
 ) -> None:
     """Upload semantic location to Google FMDN backend.
 
@@ -757,6 +793,7 @@ async def _async_upload_semantic_location(  # noqa: PLR0913, PLR0917
         scanner: Optional scanner name for logging
         google_device_id: Google device ID for semantic_name update
         coordinator: GoogleFindMy coordinator for semantic_name update
+        report_time: Wall-clock second the EID was seen; the report's time
     """
     from .location_uploader import (  # noqa: PLC0415
         _mask_address_for_logs,
@@ -784,6 +821,7 @@ async def _async_upload_semantic_location(  # noqa: PLR0913, PLR0917
         entity_id=f"bermuda_semantic_{area}",
         google_device_id=google_device_id,
         coordinator=coordinator,
+        report_time=report_time,
     )
 
 
