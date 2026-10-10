@@ -73,16 +73,18 @@ def _resolver(*locks: EIDGenerationLock) -> GoogleFindMyEIDResolver:
     return resolver
 
 
-@pytest.mark.parametrize(
-    ("variant", "curve"),
-    [
-        (EidVariant.MODERN_P256_X20_TRUNC_BE, SECP256R1.name),
-        (EidVariant.MODERN_P256_X20_TRUNC_LE, SECP256R1.name),
-        (EidVariant.MODERN_P256_X32_BE, SECP256R1.name),
-        (EidVariant.MODERN_P256_X32_LE_SCALAR, SECP256R1.name),
-        (EidVariant.LEGACY_SECP160R1_X20_BE, SECP160R1.name),
-    ],
-)
+_VARIANT_CURVES: list[tuple[EidVariant, str]] = [
+    (EidVariant.MODERN_P256_X20_TRUNC_BE, SECP256R1.name),
+    (EidVariant.MODERN_P256_X20_TRUNC_LE, SECP256R1.name),
+    (EidVariant.MODERN_P256_X32_BE, SECP256R1.name),
+    (EidVariant.MODERN_P256_X32_LE_SCALAR, SECP256R1.name),
+    (EidVariant.SPEC_P256_X32_BE, SECP256R1.name),
+    (EidVariant.SPEC_P256_X20_TRUNC_BE, SECP256R1.name),
+    (EidVariant.LEGACY_SECP160R1_X20_BE, SECP160R1.name),
+]
+
+
+@pytest.mark.parametrize(("variant", "curve"), _VARIANT_CURVES)
 def test_every_variant_maps_to_its_curve(variant: EidVariant, curve: str) -> None:
     resolver = _resolver(_lock("dev-1", "abc123", variant.value))
 
@@ -91,6 +93,7 @@ def test_every_variant_maps_to_its_curve(variant: EidVariant, curve: str) -> Non
 
 def test_every_eid_variant_is_covered() -> None:
     """A new variant must be added to the parametrization above."""
+    assert {variant for variant, _curve in _VARIANT_CURVES} == set(EidVariant)
     resolver = _resolver()
     for variant in EidVariant:
         resolver._locks = {"dev-1": _lock("dev-1", "abc123", variant.value)}

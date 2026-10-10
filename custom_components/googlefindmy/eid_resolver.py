@@ -38,7 +38,7 @@ from .Auth.username_provider import username_string
 from .const import DOMAIN
 from .coordinator import DeviceIdentity, GoogleFindMyCoordinator
 from .FMDNCrypto._lazy_crypto import get_aesgcm_class, get_invalid_tag_exception
-from .FMDNCrypto.curve_profile import SECP160R1, SECP256R1
+from .FMDNCrypto.curve_profile import SECP160R1, SECP256R1, ScalarDerivation
 from .FMDNCrypto.eid_generator import (
     FHNA_COUNTER_MASK,
     LEGACY_EID_LENGTH,
@@ -47,6 +47,7 @@ from .FMDNCrypto.eid_generator import (
     ROTATION_PERIOD,
     ROTATION_PERIOD_900,
     ROTATION_PERIOD_3600,
+    VARIANT_DERIVATIONS,
     EidVariant,
     HeuristicBasis,
     HeuristicEidResult,
@@ -98,14 +99,14 @@ FMDN_HASHED_FLAGS_BATTERY_MASK = 0x03  # 2-bit field after right-shift
 FMDN_HASHED_FLAGS_BATTERY_SHIFT = 1
 FMDN_HASHED_FLAGS_UWT_MODE_MASK = 0x01  # 1-bit field, standard LSB
 
-# Curve parameters for compute_flags_xor_mask(), keyed by EidVariant.
-# (curve_byte_len, curve_order): Legacy uses secp160r1 (None=default), P256 uses P256_ORDER.
-_VARIANT_CURVE_PARAMS: dict[EidVariant, tuple[int, int | None]] = {
-    EidVariant.LEGACY_SECP160R1_X20_BE: (LEGACY_EID_LENGTH, None),
-    EidVariant.MODERN_P256_X32_BE: (MODERN_EID_LENGTH, P256_ORDER),
-    EidVariant.MODERN_P256_X20_TRUNC_BE: (MODERN_EID_LENGTH, P256_ORDER),
-    EidVariant.MODERN_P256_X32_LE_SCALAR: (MODERN_EID_LENGTH, P256_ORDER),
-    EidVariant.MODERN_P256_X20_TRUNC_LE: (MODERN_EID_LENGTH, P256_ORDER),
+# Parameters for compute_flags_xor_mask(), keyed by EidVariant:
+# (curve_byte_len, curve_order, derivation). Derived from VARIANT_DERIVATIONS,
+# so the mask uses the same scalar as the EID of its variant; truncated
+# variants keep the full coordinate length of their curve. A plain dict so a
+# test can remove a row and observe the loud failure in locked_curve_name.
+_VARIANT_CURVE_PARAMS: dict[EidVariant, tuple[int, int, ScalarDerivation]] = {
+    variant: (curve.coord_len, curve.order, derivation)
+    for variant, (curve, derivation) in VARIANT_DERIVATIONS.items()
 }
 
 # Per-variant crypto memoization (AP-A).
@@ -119,12 +120,54 @@ _VARIANT_CURVE_PARAMS: dict[EidVariant, tuple[int, int | None]] = {
 # ``self`` (and pins it), leaking the resolver and preventing per-instance caches.
 # The minimal OrderedDict+Lock helper below keys only on the crypto inputs.
 #
-# _EID_MEMO_MAXSIZE = 512: 13 devices x 5 variants x 4 concurrently live
-# time_counter windows ~= 260, x ~2 headroom -> 512 (next power of two).
-_EID_MEMO_MAXSIZE = 512
-# _EID_MASK_MEMO_MAXSIZE = 512: same dimensioning; mask key cardinality is
-# <= devices x windows x 2 curves < 512 (no per-variant fan-out for the mask).
-_EID_MASK_MEMO_MAXSIZE = 512
+# Both bounds are sized so that one lookup build of 13 unlocked devices fits,
+# with headroom, rounded up to the next power of two. The sizing case is an
+# unlocked device with a single time anchor that is younger than about 237
+# days: it spans 13 time windows per build, giving 13 x 7 variants = 91 EID
+# keys and 13 x 4 mask keys = 52 mask keys (the mask key carries curve and
+# scalar derivation, and the seven variants use four distinct pairs). 13 such
+# devices need 1183 EID keys and 676 mask keys.
+# Older devices span more windows (two more per further ~237 days of drift
+# allowance, see _compute_relative_windows), and a device with both pair_date
+# and secrets_creation_date gets a window set per anchor. For them these bounds
+# are only the floor: each build sizes both memos to its own key count (see
+# _MEMO_HEADROOM below). tests/test_eid_resolver_memoization.py measures the
+# per-device key counts of the sizing case and fails if a new variant or
+# derivation outgrows these floors.
+_EID_MEMO_MAXSIZE = 2048
+_EID_MASK_MEMO_MAXSIZE = 1024
+
+# Per-build sizing. The key count grows with device age and anchors: one device
+# with pair_date and secrets_creation_date five years back spans 54 windows per
+# build (378 EID keys, 216 mask keys), ten years back 86 (602 and 344). For the
+# relative bases the window count is only capped by max_window (85 per side and
+# basis), reached after decades; the absolute Unix basis, off by default, spans
+# at least MIN_UNIX_WINDOW_SIZE windows per side without that cap. Fixed bounds
+# for the cap would size the memos for devices decades old, so
+# _build_lookup_sync counts the exact keys of the build and sets each memo to
+# _MEMO_HEADROOM times that count, never below the bounds above and never above
+# the hard caps below. It grows a memo before generating and shrinks it only
+# afterwards, when the least recently used entries are the ones this build did
+# not touch; shrinking first would evict by the order of the previous build and
+# drop keys a smaller build still needs. The headroom leaves room for the keys
+# of the previous build next to those of the current one. For windows moving on
+# by one an exact bound would do as well (measured for 13 such devices: 182 new
+# EID and 104 new mask keys, exactly those recomputed). Measured with
+# tracemalloc, the two memos of a build of 13 such devices (4914 EID and 2808
+# mask entries) hold about 1.5 MB; the lookup table comes on top. Extrapolated,
+# the hard caps bound both memos together to about 10 MB. A build that needs
+# more than a cap recomputes all of its entries on every build (no entry of one
+# build survives to the next); the values stay correct.
+_MEMO_HEADROOM = 2
+_EID_MEMO_HARD_CAP = 32768
+_EID_MASK_MEMO_HARD_CAP = 16384
+
+
+def _memo_capacity(needed: int, *, floor: int, cap: int) -> int:
+    """Return the memo bound for a build that uses ``needed`` distinct keys."""
+
+    return min(cap, max(floor, _MEMO_HEADROOM * needed))
+
 
 # Heuristic phone-discovery memoization (AP-SWEEP).
 # ``generate_heuristic_eid`` is the on-loop sibling of the build-side crypto: it
@@ -183,6 +226,20 @@ class _BoundedLRUCache:
         with self._lock:
             self._store[key] = value
             self._store.move_to_end(key)
+            while len(self._store) > self._maxsize:
+                self._store.popitem(last=False)
+
+    @property
+    def maxsize(self) -> int:
+        """Return the current bound."""
+
+        return self._maxsize
+
+    def resize(self, maxsize: int) -> None:
+        """Set a new bound, evicting least-recently-used entries past it."""
+
+        with self._lock:
+            self._maxsize = maxsize
             while len(self._store) > self._maxsize:
                 self._store.popitem(last=False)
 
@@ -500,7 +557,8 @@ def _framed_eid_lengths(
 
     * The 32-byte reading is probed first wherever it fits, including in
       ``0x40`` frames. The first 20 bytes of a 32-byte EID are a precomputed
-      lookup entry in their own right (``MODERN_P256_X20_TRUNC_*``), so the
+      lookup entry in their own right (``SPEC_P256_X20_TRUNC_BE``,
+      ``MODERN_P256_X20_TRUNC_*``), so the
       shorter reading would otherwise match first and put the hashed-flags
       byte at octet 28 instead of 40 -- on EID material, which decodes into a
       stable but fabricated battery level and UWT bit.
@@ -935,6 +993,21 @@ def _normalize_encrypted_blob(value: object) -> bytes | None:
     return None
 
 
+@dataclass(slots=True, frozen=True)
+class ConfirmedSighting:
+    """The last sighting of a device the resolver confirmed by a lookup match.
+
+    It is an observation, not a prediction: ``variant`` and ``window_counter``
+    are those of the EID the device advertised, ``window_counter`` aligned to
+    the rotation window, and ``observed_at`` is the wall-clock second of the
+    sighting. Callers judge its age themselves.
+    """
+
+    variant: EidVariant
+    window_counter: int
+    observed_at: int
+
+
 @dataclass(slots=True)
 class EIDGenerationLock:
     """Persisted per-device generation profile."""
@@ -1064,6 +1137,12 @@ class GoogleFindMyEIDResolver:
     _lock_last_seen_monotonic: dict[str, float] = field(
         init=False, default_factory=dict
     )
+    # Last confirmed sighting per device, in memory only: the variant and
+    # window counter of the EID the device advertised and when it was seen.
+    # The finder reports this observation; see last_confirmed_sighting().
+    _confirmed_sightings: dict[str, ConfirmedSighting] = field(
+        init=False, default_factory=dict
+    )
     _known_advertisement_reversed: dict[str, bool] = field(
         init=False, default_factory=dict
     )
@@ -1157,6 +1236,8 @@ class GoogleFindMyEIDResolver:
             self._last_lock_confirmation = {}
         if not hasattr(self, "_lock_last_seen_monotonic"):
             self._lock_last_seen_monotonic = {}
+        if not hasattr(self, "_confirmed_sightings"):
+            self._confirmed_sightings = {}
         if not hasattr(self, "_provisioning_warn_at"):
             self._provisioning_warn_at = {}
         if not hasattr(self, "_locks"):
@@ -1209,6 +1290,7 @@ class GoogleFindMyEIDResolver:
             "_known_timebases",
             "_last_lock_confirmation",
             "_lock_last_seen_monotonic",
+            "_confirmed_sightings",
         ):
             mapping = getattr(self, attr, None)
             if isinstance(mapping, dict) and device_id in mapping:
@@ -1876,8 +1958,11 @@ class GoogleFindMyEIDResolver:
                 variant=variant,
                 window=window_candidate,
             )
+            # Specification variants before the heuristic MODERN_P256_* ones.
             for variant in (
                 EidVariant.LEGACY_SECP160R1_X20_BE,
+                EidVariant.SPEC_P256_X32_BE,
+                EidVariant.SPEC_P256_X20_TRUNC_BE,
                 EidVariant.MODERN_P256_X32_BE,
                 EidVariant.MODERN_P256_X20_TRUNC_BE,
                 EidVariant.MODERN_P256_X32_LE_SCALAR,
@@ -2124,6 +2209,12 @@ class GoogleFindMyEIDResolver:
         builder = CacheBuilder()
         invalid_hint_ids: list[str] = []
 
+        # Pass one: the variant specs of the whole build, and the exact memo
+        # keys they will use (same tuples as _generate_variant and
+        # _compute_flags_xor_mask build), so both memos can be sized first.
+        planned: list[tuple[WorkItem, list[VariantSpec]]] = []
+        eid_keys: set[tuple[bytes, int, EidVariant]] = set()
+        mask_keys: set[tuple[bytes, int, int, int, ScalarDerivation]] = set()
         for work_item in work_items:
             windows, invalid_hint = self._compute_time_windows(
                 work_item, now_unix=now_unix, params=rotation_params
@@ -2135,19 +2226,44 @@ class GoogleFindMyEIDResolver:
                 work_item.registry_id,
                 len(windows),
             )
-            for window in windows:
-                variants = self._compute_variants(work_item, window)
-                for variant_spec in variants:
+            specs = [
+                spec
+                for window in windows
+                for spec in self._compute_variants(work_item, window)
+            ]
+            for spec in specs:
+                timestamp = spec.window.timestamp
+                eid_keys.add((spec.key_bytes, timestamp, spec.variant))
+                curve_params = _VARIANT_CURVE_PARAMS.get(spec.variant)
+                if curve_params is not None:
+                    mask_keys.add((spec.key_bytes, timestamp, *curve_params))
+            planned.append((work_item, specs))
+
+        eid_bound = _memo_capacity(
+            len(eid_keys), floor=_EID_MEMO_MAXSIZE, cap=_EID_MEMO_HARD_CAP
+        )
+        mask_bound = _memo_capacity(
+            len(mask_keys), floor=_EID_MASK_MEMO_MAXSIZE, cap=_EID_MASK_MEMO_HARD_CAP
+        )
+        # Grow now, shrink after pass two (see _MEMO_HEADROOM).
+        self._eid_memo.resize(max(eid_bound, self._eid_memo.maxsize))
+        self._flags_mask_memo.resize(max(mask_bound, self._flags_mask_memo.maxsize))
+
+        try:
+            # Pass two: generate and register.
+            for work_item, specs in planned:
+                for variant_spec in specs:
                     xor_mask: int | None = None
-                    curve_len, curve_ord = _VARIANT_CURVE_PARAMS.get(
-                        variant_spec.variant, (LEGACY_EID_LENGTH, None)
-                    )
                     try:
+                        curve_len, curve_ord, derivation = _VARIANT_CURVE_PARAMS[
+                            variant_spec.variant
+                        ]
                         xor_mask = self._compute_flags_xor_mask(
                             variant_spec.key_bytes,
                             variant_spec.window.timestamp,
                             curve_byte_len=curve_len,
                             curve_order=curve_ord,
+                            derivation=derivation,
                         )
                     except Exception:  # noqa: BLE001
                         pass
@@ -2167,6 +2283,11 @@ class GoogleFindMyEIDResolver:
                             advertisement_reversed=generated.is_reversed,
                             flags_xor_mask=xor_mask,
                         )
+        finally:
+            # Shrink even when pass two raised, so a failed build does not
+            # leave the grown bound in place until the next one.
+            self._eid_memo.resize(eid_bound)
+            self._flags_mask_memo.resize(mask_bound)
 
         lookup, lookup_metadata = builder.finalize()
         return lookup, lookup_metadata, invalid_hint_ids
@@ -2251,17 +2372,20 @@ class GoogleFindMyEIDResolver:
         *,
         curve_byte_len: int,
         curve_order: int | None,
+        derivation: ScalarDerivation,
     ) -> int:
         """Memoized wrapper around ``compute_flags_xor_mask``.
 
         Keyed per resolver instance on ``(key_bytes, time_counter,
-        curve_byte_len, curve_order)``. The mask is a pure function of these
-        inputs, so a hit returns the identical integer without recomputation.
+        curve_byte_len, curve_order, derivation)``. The mask is a pure function
+        of these inputs, so a hit returns the identical integer without
+        recomputation. ``derivation`` belongs in the key: two variants on the
+        same curve with different derivations have different masks.
         Invalidation is implicit via key rotation, identical to
         ``_generate_variant``.
         """
 
-        cache_key = (key_bytes, time_counter, curve_byte_len, curve_order)
+        cache_key = (key_bytes, time_counter, curve_byte_len, curve_order, derivation)
         cached = self._flags_mask_memo.get(cache_key)
         if cached is not None:
             return cast(int, cached)
@@ -2273,6 +2397,7 @@ class GoogleFindMyEIDResolver:
             time_counter,
             curve_byte_len=curve_byte_len,
             curve_order=curve_order,
+            derivation=derivation,
         )
         self._flags_mask_memo.put(cache_key, mask)
         return mask
@@ -2883,6 +3008,63 @@ class GoogleFindMyEIDResolver:
         if previous is None or now > previous:
             self._last_lock_confirmation[device_id] = now
 
+    def _note_confirmed_sighting(
+        self,
+        device_id: str,
+        metadata: Mapping[str, Any],
+        *,
+        observed_at: int,
+    ) -> None:
+        """Record the sighting of a lookup match for the finder.
+
+        The caller passes only sightings that are not older than the newest
+        one on the monotonic clock. What is left are advertisements that
+        Bermuda delivers late without a scanner timestamp and that are
+        therefore dated "now": such a sighting carries an older window, and it
+        must not replace a newer window seen at most one rotation period
+        earlier. A smaller counter seen more than one period later on the wall
+        clock is taken as a device that restarted its counter and replaces; a
+        wall clock stepped forward by more than one period looks the same.
+        After a wall clock stepped backwards by more than one period, a smaller
+        counter is either such a late window or a restarted device, and the
+        two cannot be told apart: the entry is dropped, so nothing is reported
+        until the next sighting records the window the device shows. The same
+        counter replaces: the sighting is newer on the monotonic clock, also
+        after such a step.
+
+        Never raises: a variant this version does not know, or a window
+        timestamp that is not an int in ``[0, FHNA_COUNTER_MASK]``, records
+        nothing.
+        """
+        window_ts = metadata.get("rotation_timestamp")
+        if (
+            not isinstance(window_ts, int)
+            or isinstance(window_ts, bool)
+            or not 0 <= window_ts <= FHNA_COUNTER_MASK
+        ):
+            return
+        raw_variant = metadata.get("variant")
+        if not isinstance(raw_variant, str):
+            return
+        try:
+            variant = EidVariant(raw_variant)
+        except ValueError:
+            return
+        window_counter = window_ts - window_ts % ROTATION_PERIOD
+        previous = self._confirmed_sightings.get(device_id)
+        if previous is not None and window_counter < previous.window_counter:
+            wall_gap = observed_at - previous.observed_at
+            if wall_gap < -ROTATION_PERIOD:
+                del self._confirmed_sightings[device_id]
+                return
+            if wall_gap <= ROTATION_PERIOD:
+                return
+        self._confirmed_sightings[device_id] = ConfirmedSighting(
+            variant=variant,
+            window_counter=window_counter,
+            observed_at=observed_at,
+        )
+
     def _sighting_is_older_than_the_lock(
         self,
         device_id: str,
@@ -2995,6 +3177,12 @@ class GoogleFindMyEIDResolver:
 
         if not stale and now_monotonic is not None:
             self._lock_last_seen_monotonic[match.device_id] = now_monotonic
+
+        # Same ordering rule as drift_offset and last_seen_at: an older,
+        # replayed sighting is ``stale`` (monotonic clock within this process)
+        # and must not replace a newer one.
+        if not stale:
+            self._note_confirmed_sighting(match.device_id, metadata, observed_at=now)
 
         self._known_advertisement_reversed[match.device_id] = match.is_reversed
 
@@ -3836,6 +4024,26 @@ class GoogleFindMyEIDResolver:
             curves.add(SECP256R1.name if order == P256_ORDER else SECP160R1.name)
         return curves.pop() if len(curves) == 1 else None
 
+    def last_confirmed_sighting(self, registry_id: str) -> ConfirmedSighting | None:
+        """Return the last sighting of a device that a lookup match confirmed.
+
+        The finder encrypts a report to the EID of this sighting. It is an
+        observation, not a prediction of the EID the device advertises now:
+        the owner resolves a report against the recent past and near future,
+        and the report carries the time of the sighting. The caller judges
+        the age. Matches of the heuristic phone path record no sighting, and
+        the value lives in memory only, so it is gone after a restart until
+        the device is seen again.
+
+        Args:
+            registry_id: Home Assistant device registry ID of the device.
+
+        Returns:
+            The sighting, or ``None`` if the device was not matched since
+            start or its lock state was cleared.
+        """
+        return self._confirmed_sightings.get(registry_id)
+
     def stop(self) -> None:
         """Cancel background timers and clear cached state."""
 
@@ -3856,3 +4064,7 @@ class GoogleFindMyEIDResolver:
         self._lookup_metadata.clear()
         self._locks.clear()
         self._persisted_locks.clear()
+        # Stubs that bypass __init__ may lack the field.
+        confirmed_sightings = getattr(self, "_confirmed_sightings", None)
+        if isinstance(confirmed_sightings, dict):
+            confirmed_sightings.clear()

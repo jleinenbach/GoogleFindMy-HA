@@ -70,7 +70,6 @@ from custom_components.googlefindmy.FMDNCrypto.curve_profile import (
     SECP256R1,
     FmdnCurve,
     ScalarDerivation,
-    ScalarRule,
     reduce_scalar,
 )
 from custom_components.googlefindmy.FMDNCrypto.curve_profile import (
@@ -123,6 +122,8 @@ class EidVariant(StrEnum):
     MODERN_P256_X20_TRUNC_BE = "modern_p256_x20_trunc_be"
     MODERN_P256_X32_LE_SCALAR = "modern_p256_x32_le_scalar"
     MODERN_P256_X20_TRUNC_LE = "modern_p256_x20_trunc_le"
+    SPEC_P256_X32_BE = "spec_p256_x32_be"
+    SPEC_P256_X20_TRUNC_BE = "spec_p256_x20_trunc_be"
 
 
 # Curve and scalar derivation per variant; the only place that states them.
@@ -134,7 +135,9 @@ class EidVariant(StrEnum):
 # little-endian comes from ``f9bd9ece``, also without a source. Entries are
 # kept unchanged because resolver locks persist these variants by name; the
 # ``*_X20_TRUNC_*`` variants share the derivation of their 32-byte variant and
-# keep the first 20 bytes of the x-coordinate.
+# keep the first 20 bytes of the x-coordinate. ``SPEC_P256_*`` apply the
+# specification rule (``r' mod n``, ``r'`` big-endian) on P-256; it is the
+# derivation of the reading ``p256/mod_n/*`` used to decrypt reports.
 VARIANT_DERIVATIONS: Final[Mapping[EidVariant, tuple[FmdnCurve, ScalarDerivation]]] = (
     MappingProxyType(
         {
@@ -143,6 +146,8 @@ VARIANT_DERIVATIONS: Final[Mapping[EidVariant, tuple[FmdnCurve, ScalarDerivation
             EidVariant.MODERN_P256_X20_TRUNC_BE: (SECP256R1, BE_PLUS_ONE),
             EidVariant.MODERN_P256_X32_LE_SCALAR: (SECP256R1, LE_PLUS_ONE),
             EidVariant.MODERN_P256_X20_TRUNC_LE: (SECP256R1, LE_PLUS_ONE),
+            EidVariant.SPEC_P256_X32_BE: (SECP256R1, BE_MOD_N),
+            EidVariant.SPEC_P256_X20_TRUNC_BE: (SECP256R1, BE_MOD_N),
         }
     )
 )
@@ -298,6 +303,7 @@ def compute_flags_xor_mask(
     *,
     curve_byte_len: int = LEGACY_EID_LENGTH,
     curve_order: int | None = None,
+    derivation: ScalarDerivation = BE_MOD_N,
 ) -> int:
     """Return the single-byte XOR mask for decoding FMDN Hashed Flags.
 
@@ -308,12 +314,16 @@ def compute_flags_xor_mask(
 
     For P-256 variants pass ``curve_byte_len=32`` and
     ``curve_order=P256_ORDER``; the default uses the legacy secp160r1 curve.
+    ``derivation`` is the byte order of ``r'`` and the rule that turn it
+    into *r*; pass the derivation of the EID variant (``VARIANT_DERIVATIONS``)
+    so mask and EID use the same scalar. The default is the specification's
+    ``r' mod n`` with ``r'`` read big-endian.
     """
     r_dash: bytes = _prf_table10(eik, time_counter_u32, strict=False)
-    r_dash_int: int = int.from_bytes(r_dash, byteorder="big", signed=False)
+    r_dash_int: int = derivation.read_prf_output(r_dash)
     if curve_order is None:
         curve_order = int(_get_curve().order)
-    r_scalar: int = reduce_scalar(r_dash_int, curve_order, ScalarRule.MOD_N)
+    r_scalar: int = reduce_scalar(r_dash_int, curve_order, derivation.rule)
     r_bytes: bytes = r_scalar.to_bytes(curve_byte_len, byteorder="big")
     sha256_r: bytes = hashlib.sha256(r_bytes).digest()
     return sha256_r[-1]
@@ -379,10 +389,18 @@ def _serialize_variant(r_dash: bytes, variant: EidVariant) -> bytes:
         case EidVariant.LEGACY_SECP160R1_X20_BE:
             return _serialize_legacy_x(_variant_scalar(r_dash, variant))
 
-        case EidVariant.MODERN_P256_X32_BE | EidVariant.MODERN_P256_X32_LE_SCALAR:
+        case (
+            EidVariant.MODERN_P256_X32_BE
+            | EidVariant.MODERN_P256_X32_LE_SCALAR
+            | EidVariant.SPEC_P256_X32_BE
+        ):
             return _serialize_p256_x(_variant_scalar(r_dash, variant))
 
-        case EidVariant.MODERN_P256_X20_TRUNC_BE | EidVariant.MODERN_P256_X20_TRUNC_LE:
+        case (
+            EidVariant.MODERN_P256_X20_TRUNC_BE
+            | EidVariant.MODERN_P256_X20_TRUNC_LE
+            | EidVariant.SPEC_P256_X20_TRUNC_BE
+        ):
             full = _serialize_p256_x(_variant_scalar(r_dash, variant))
             return full[:LEGACY_EID_LENGTH]
 

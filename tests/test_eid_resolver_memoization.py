@@ -33,6 +33,11 @@ from custom_components.googlefindmy.eid_resolver import (
     GoogleFindMyEIDResolver,
     LearnedHeuristicParams,
 )
+from custom_components.googlefindmy.FMDNCrypto.curve_profile import (
+    BE_MOD_N,
+    BE_PLUS_ONE,
+    LE_PLUS_ONE,
+)
 from custom_components.googlefindmy.FMDNCrypto.eid_generator import (
     LEGACY_EID_LENGTH,
     MODERN_EID_LENGTH,
@@ -185,6 +190,7 @@ def test_compute_flags_xor_mask_memoizes_repeated_calls(
         SAMPLE_COUNTER,
         curve_byte_len=MODERN_EID_LENGTH,
         curve_order=P256_ORDER,
+        derivation=BE_MOD_N,
     )
     assert calls["count"] == 1
 
@@ -194,6 +200,7 @@ def test_compute_flags_xor_mask_memoizes_repeated_calls(
             SAMPLE_COUNTER,
             curve_byte_len=MODERN_EID_LENGTH,
             curve_order=P256_ORDER,
+            derivation=BE_MOD_N,
         )
         assert again == first
 
@@ -237,11 +244,15 @@ def test_both_seams_recompute_zero_times_on_second_pass(
                 time_counter=SAMPLE_COUNTER,
                 variant=variant,
             )
+            curve_len, curve_order, derivation = resolver_mod._VARIANT_CURVE_PARAMS[
+                variant
+            ]
             resolver._compute_flags_xor_mask(
                 SAMPLE_EIK,
                 SAMPLE_COUNTER,
-                curve_byte_len=MODERN_EID_LENGTH,
-                curve_order=P256_ORDER,
+                curve_byte_len=curve_len,
+                curve_order=curve_order,
+                derivation=derivation,
             )
 
     # Pass one warms the caches.
@@ -306,12 +317,9 @@ async def test_second_refresh_cache_recomputes_no_crypto(
         "custom_components.googlefindmy.eid_resolver.ENABLE_ABSOLUTE_UNIX_BASIS",
         True,
     )
-    # Bound the deep-scan window fan-out so the unique-key count for this single
-    # synthetic device stays well under _EID_MEMO_MAXSIZE. Without this the
-    # absolute-basis deep scan emits > maxsize unique EID keys for one device,
-    # which (correctly) evicts early entries and would make pass two re-derive
-    # the evicted keys -- a property of the deliberately oversized deep-scan
-    # test path, not of the memoization itself.
+    # Bound the deep-scan window fan-out of this single synthetic device. Before
+    # the memos were sized per build, this kept its unique-key count under the
+    # fixed _EID_MEMO_MAXSIZE; since then it only keeps the test small.
     monkeypatch.setattr(
         "custom_components.googlefindmy.eid_resolver.MIN_UNIX_WINDOW_SIZE",
         8,
@@ -374,9 +382,107 @@ def test_flags_mask_memo_is_bounded_at_maxsize() -> None:
             SAMPLE_COUNTER + counter,
             curve_byte_len=LEGACY_EID_LENGTH,
             curve_order=None,
+            derivation=BE_MOD_N,
         )
 
     assert len(resolver._flags_mask_memo) == _EID_MASK_MEMO_MAXSIZE
+
+
+# The device count the memo bounds are sized for (see the comment above
+# ``_EID_MEMO_MAXSIZE`` in eid_resolver.py).
+_MEMO_SIZED_FOR_DEVICES = 13
+
+
+def test_memo_bounds_hold_one_build_of_the_sized_device_count() -> None:
+    """Both memos hold the keys of one build for the sized device count.
+
+    Measures the keys a single unlocked device of the sizing case (one time
+    anchor, younger than about 237 days) adds in one lookup build and requires
+    room for ``_MEMO_SIZED_FOR_DEVICES`` of them. A new variant or a new scalar
+    derivation raises the per-device count; this test then fails instead of
+    the memo silently evicting its own entries on every build. Older devices
+    and devices with two anchors span more windows; the memos are sized per
+    build for them (tests further down).
+    """
+
+    resolver = _build_resolver()
+    resolver.hass = SimpleNamespace(data={})
+    for attr in (
+        "_lookup",
+        "_lookup_metadata",
+        "_locks",
+        "_persisted_locks",
+        "_known_offsets",
+        "_known_advertisement_reversed",
+        "_known_timebases",
+    ):
+        setattr(resolver, attr, {})
+    identity = DeviceIdentity(
+        registry_id="registry-id",
+        canonical_id="canonical-id",
+        identity_key=b"\xaa" * 32,
+        encrypted_identity_key=None,
+        owner_key_version=None,
+        device_type=None,
+        config_entry_id="entry-id",
+        fast_pair_model_id=None,
+        pair_date=1_699_000_000,
+    )
+    now = 1_700_000_000
+    work_items = resolver._collect_work_items([identity], now_unix=now)
+    resolver._build_lookup_sync(work_items, now, resolver._build_rotation_params())
+
+    eid_keys = len(resolver._eid_memo)
+    mask_keys = len(resolver._flags_mask_memo)
+    assert eid_keys > 0
+    assert mask_keys > 0
+    assert _EID_MEMO_MAXSIZE >= _MEMO_SIZED_FOR_DEVICES * eid_keys
+    assert _EID_MASK_MEMO_MAXSIZE >= _MEMO_SIZED_FOR_DEVICES * mask_keys
+
+
+def test_flags_mask_memo_keys_on_derivation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Same key, counter and curve with three derivations: three entries.
+
+    Without ``derivation`` in the memo key, the second and third call would
+    return the first mask; the three masks differ for the sample inputs.
+    """
+
+    resolver = _build_resolver()
+    calls = {"count": 0}
+    real_mask = resolver_mod.compute_flags_xor_mask
+
+    def _counting_mask(*args: object, **kwargs: object) -> int:
+        calls["count"] += 1
+        return real_mask(*args, **kwargs)
+
+    monkeypatch.setattr(resolver_mod, "compute_flags_xor_mask", _counting_mask)
+
+    masks = [
+        resolver._compute_flags_xor_mask(
+            SAMPLE_EIK,
+            SAMPLE_COUNTER,
+            curve_byte_len=MODERN_EID_LENGTH,
+            curve_order=P256_ORDER,
+            derivation=derivation,
+        )
+        for derivation in (BE_MOD_N, BE_PLUS_ONE, LE_PLUS_ONE)
+    ]
+
+    assert calls["count"] == 3
+    assert len(resolver._flags_mask_memo) == 3
+    assert len(set(masks)) == 3
+    assert masks == [
+        real_mask(
+            SAMPLE_EIK,
+            SAMPLE_COUNTER,
+            curve_byte_len=MODERN_EID_LENGTH,
+            curve_order=P256_ORDER,
+            derivation=derivation,
+        )
+        for derivation in (BE_MOD_N, BE_PLUS_ONE, LE_PLUS_ONE)
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -650,3 +756,258 @@ def test_heuristic_test_hypotheses_routes_through_memo() -> None:
     # The discovery path caches the learned parameters for the fast path.
     assert identity.registry_id in resolver._learned_heuristic_params
     assert len(resolver._heuristic_memo) >= 1
+
+
+# --- Per-build sizing: aged devices with two anchors ----------------------
+
+_FLEET_NOW = 1_760_000_000
+_FIVE_YEARS = 5 * 365 * 86_400
+
+
+def _aged_fleet(count: int) -> list[DeviceIdentity]:
+    """Devices paired five years ago with a second anchor 30 days later."""
+    fleet = []
+    for index in range(count):
+        pair_date = _FLEET_NOW - _FIVE_YEARS - index * 977
+        fleet.append(
+            DeviceIdentity(
+                registry_id=f"registry-{index}",
+                canonical_id=f"canonical-{index}",
+                identity_key=bytes([index + 1]) * 32,
+                encrypted_identity_key=None,
+                owner_key_version=None,
+                device_type=None,
+                config_entry_id="entry-id",
+                fast_pair_model_id=None,
+                pair_date=pair_date,
+                secrets_creation_date=pair_date + 30 * 86_400,
+            )
+        )
+    return fleet
+
+
+def _fleet_resolver() -> GoogleFindMyEIDResolver:
+    resolver = _build_resolver()
+    resolver.hass = SimpleNamespace(data={})
+    for attr in (
+        "_lookup",
+        "_lookup_metadata",
+        "_locks",
+        "_persisted_locks",
+        "_known_offsets",
+        "_known_advertisement_reversed",
+        "_known_timebases",
+    ):
+        setattr(resolver, attr, {})
+    return resolver
+
+
+def _build(resolver: GoogleFindMyEIDResolver, fleet: list[DeviceIdentity], now: int):
+    work_items = resolver._collect_work_items(fleet, now_unix=now)
+    return resolver._build_lookup_sync(
+        work_items, now, resolver._build_rotation_params()
+    )
+
+
+def _counting_crypto(monkeypatch: pytest.MonkeyPatch) -> dict[str, int]:
+    calls = {"eid": 0, "mask": 0}
+    real_eid = resolver_mod.generate_eid_variant
+    real_mask = resolver_mod.compute_flags_xor_mask
+
+    def _eid(*args: object, **kwargs: object) -> bytes:
+        calls["eid"] += 1
+        return real_eid(*args, **kwargs)  # type: ignore[arg-type]
+
+    def _mask(*args: object, **kwargs: object) -> int:
+        calls["mask"] += 1
+        return real_mask(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(resolver_mod, "generate_eid_variant", _eid)
+    monkeypatch.setattr(resolver_mod, "compute_flags_xor_mask", _mask)
+    return calls
+
+
+# Two aged devices need 756 EID and 432 mask keys per build. Lowered floors
+# keep that above the bound the memos start with, as 13 such devices (4914 and
+# 2808) are above the production floors, at a fraction of the run time.
+_FLEET_SIZE = 2
+_LOW_EID_FLOOR = 64
+_LOW_MASK_FLOOR = 32
+
+
+@pytest.fixture
+def low_floors(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(resolver_mod, "_EID_MEMO_MAXSIZE", _LOW_EID_FLOOR)
+    monkeypatch.setattr(resolver_mod, "_EID_MASK_MEMO_MAXSIZE", _LOW_MASK_FLOOR)
+
+
+def _unbounded_key_counts(
+    fleet: list[DeviceIdentity], *nows: int
+) -> list[tuple[int, int]]:
+    """Distinct EID and mask keys after each build at ``nows``, nothing evicted.
+
+    The comparison values come from what unbounded memos actually store, not
+    from the counting code under test.
+    """
+    resolver = _fleet_resolver()
+    resolver._eid_memo = resolver_mod._BoundedLRUCache(10**7)
+    resolver._flags_mask_memo = resolver_mod._BoundedLRUCache(10**7)
+    resolver._eid_memo.resize = lambda maxsize: None  # type: ignore[method-assign]
+    resolver._flags_mask_memo.resize = lambda maxsize: None  # type: ignore[method-assign]
+    counts = []
+    for now in nows:
+        _build(resolver, fleet, now)
+        counts.append((len(resolver._eid_memo), len(resolver._flags_mask_memo)))
+    return counts
+
+
+@pytest.mark.usefixtures("low_floors")
+def test_aged_two_anchor_devices_need_more_than_the_floor() -> None:
+    """Positive control: one build needs more keys than the memos start with."""
+    [(eid_keys, mask_keys)] = _unbounded_key_counts(
+        _aged_fleet(_FLEET_SIZE), _FLEET_NOW
+    )
+
+    assert eid_keys == _FLEET_SIZE * 378
+    assert mask_keys == _FLEET_SIZE * 216
+    assert eid_keys > _LOW_EID_FLOOR
+    assert mask_keys > _LOW_MASK_FLOOR
+
+
+@pytest.mark.usefixtures("low_floors")
+def test_second_build_of_aged_devices_recomputes_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The memos hold a whole build of aged devices with two anchors.
+
+    Each bound is twice the keys the build stores in unbounded memos; a count
+    that missed part of the key (such as the scalar derivation of the mask)
+    would set a smaller bound.
+    """
+    fleet = _aged_fleet(_FLEET_SIZE)
+    [(eid_keys, mask_keys)] = _unbounded_key_counts(fleet, _FLEET_NOW)
+    resolver = _fleet_resolver()
+    calls = _counting_crypto(monkeypatch)
+
+    first = _build(resolver, fleet, _FLEET_NOW)
+    after_first = dict(calls)
+    second = _build(resolver, fleet, _FLEET_NOW)
+
+    assert resolver._eid_memo._maxsize == 2 * eid_keys
+    assert resolver._flags_mask_memo._maxsize == 2 * mask_keys
+    assert after_first["eid"] > 0
+    assert calls == after_first
+    assert second[0] == first[0]
+
+
+@pytest.mark.usefixtures("low_floors")
+def test_build_one_window_later_recomputes_only_the_new_keys(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No cascade when the windows move on: only keys new to the build.
+
+    Expected counts come from unbounded memos over the same two builds.
+    """
+    fleet = _aged_fleet(_FLEET_SIZE)
+    later = _FLEET_NOW + 1024
+    (eid_one, mask_one), (eid_both, mask_both) = _unbounded_key_counts(
+        fleet, _FLEET_NOW, later
+    )
+    resolver = _fleet_resolver()
+    calls = _counting_crypto(monkeypatch)
+
+    _build(resolver, fleet, _FLEET_NOW)
+    after_first = dict(calls)
+    _build(resolver, fleet, later)
+
+    assert eid_both > eid_one
+    assert calls["eid"] - after_first["eid"] == eid_both - eid_one
+    assert calls["mask"] - after_first["mask"] == mask_both - mask_one
+
+
+@pytest.mark.usefixtures("low_floors")
+def test_smaller_build_keeps_the_keys_it_still_needs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """After a larger build, a smaller one recomputes nothing it had before.
+
+    Shrinking the memo before generating would evict by the order of the
+    larger build and drop the remaining device's keys. Three devices leave
+    more entries (1134 EID keys) than the bound of one device (756), so the
+    shrink has to evict.
+    """
+    fleet = _aged_fleet(3)
+    [(eid_keys, mask_keys)] = _unbounded_key_counts(fleet[:1], _FLEET_NOW)
+    resolver = _fleet_resolver()
+    calls = _counting_crypto(monkeypatch)
+
+    _build(resolver, fleet, _FLEET_NOW)
+    after_large = dict(calls)
+    _build(resolver, fleet[:1], _FLEET_NOW)
+
+    assert calls == after_large
+    assert resolver._eid_memo.maxsize == 2 * eid_keys
+    assert resolver._flags_mask_memo.maxsize == 2 * mask_keys
+
+
+@pytest.mark.usefixtures("low_floors")
+def test_failed_build_still_shrinks_the_memos(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An error in pass two does not leave the grown bound in place."""
+    fleet = _aged_fleet(3)
+    [(eid_keys, mask_keys)] = _unbounded_key_counts(fleet[:1], _FLEET_NOW)
+    resolver = _fleet_resolver()
+    _build(resolver, fleet, _FLEET_NOW)
+
+    def _fail(*args: object, **kwargs: object) -> None:
+        raise RuntimeError("register failed")
+
+    monkeypatch.setattr(resolver_mod.CacheBuilder, "register_eid", _fail)
+    with pytest.raises(RuntimeError):
+        _build(resolver, fleet[:1], _FLEET_NOW)
+
+    assert resolver._eid_memo.maxsize == 2 * eid_keys
+    assert resolver._flags_mask_memo.maxsize == 2 * mask_keys
+
+
+def test_hard_cap_bounds_the_memos_and_keeps_the_values(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Above the cap entries are recomputed; the lookup stays identical."""
+    fleet = _aged_fleet(1)
+    reference = _build(_fleet_resolver(), fleet, _FLEET_NOW)
+    monkeypatch.setattr(resolver_mod, "_EID_MEMO_MAXSIZE", 10)
+    monkeypatch.setattr(resolver_mod, "_EID_MASK_MEMO_MAXSIZE", 10)
+    monkeypatch.setattr(resolver_mod, "_EID_MEMO_HARD_CAP", 100)
+    monkeypatch.setattr(resolver_mod, "_EID_MASK_MEMO_HARD_CAP", 50)
+    resolver = _fleet_resolver()
+
+    capped = _build(resolver, fleet, _FLEET_NOW)
+
+    assert len(resolver._eid_memo) == 100
+    assert len(resolver._flags_mask_memo) == 50
+    assert capped[0] == reference[0]
+    assert capped[1] == reference[1]
+
+
+def test_memo_capacity_uses_floor_headroom_and_cap() -> None:
+    """Small builds keep the floor, large ones get headroom up to the cap."""
+    assert resolver_mod._memo_capacity(10, floor=2048, cap=32768) == 2048
+    assert resolver_mod._memo_capacity(4914, floor=2048, cap=32768) == 9828
+    assert resolver_mod._memo_capacity(20_000, floor=2048, cap=32768) == 32768
+
+
+def test_resize_evicts_least_recently_used_entries() -> None:
+    """Shrinking keeps the most recently used entries."""
+    cache = resolver_mod._BoundedLRUCache(4)
+    for key in "abcd":
+        cache.put(key, key.upper())
+    assert cache.get("a") == "A"  # "a" becomes most recently used
+
+    cache.resize(2)
+
+    assert len(cache) == 2
+    assert cache.get("a") == "A"
+    assert cache.get("d") == "D"
+    assert cache.get("b") is None
