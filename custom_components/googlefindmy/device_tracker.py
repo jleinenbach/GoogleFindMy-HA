@@ -85,6 +85,15 @@ _LOGGER = logging.getLogger(__name__)
 # source of truth for the published age/status (Codex #202).
 _ROW_UNSET: Any = object()
 
+# Key HA core's customize.yaml overlay lives under in hass.data. Core applies
+# it AFTER _async_calculate_state(); the fix-time restamp path below calls
+# that helper directly, so _write_at() re-applies the overlay itself.
+# Imported defensively: this repo's fast test stubs don't define core_config.
+try:
+    from homeassistant.core_config import DATA_CUSTOMIZE as _DATA_CUSTOMIZE
+except ImportError:  # pragma: no cover - fast test stubs without core_config
+    _DATA_CUSTOMIZE = None
+
 # Read-only mirror of coordinator state; no I/O performed per-entity.
 PARALLEL_UPDATES = 0
 
@@ -1095,23 +1104,35 @@ class GoogleFindMyDeviceTracker(GoogleFindMyDeviceEntity, TrackerEntity, Restore
         # Persist a "last good" fix to keep map position usable when current accuracy is filtered
         self._last_good_accuracy_data: dict[str, Any] | None = None
         self._logged_visibility_block = False
+        # Signature of the last *written* state; suppresses redundant writes
+        # that would otherwise bump last_updated on every coordinator tick.
+        self._last_write_sig: tuple[Any, ...] | None = None
+        # Last *published* location_age, tracked outside the signature (which
+        # excludes it) so it can still tick without reopening the no-op guard.
+        self._last_write_location_age: int | None = None
 
     async def async_added_to_hass(self) -> None:
-        """Restore last known location and seed the coordinator cache.
+        """Restore the last known location, then seed the coordinator cache.
 
-        On cold boots where the coordinator hasn't polled yet, we restore the last
-        coordinates from the state machine to provide a better initial UX. We also
-        prime the coordinator's cache via its public priming API (no private access).
+        On cold boots where the coordinator hasn't polled yet, this restores the
+        last coordinates to give a better initial UX and primes the coordinator's
+        cache via its public priming API. It runs *before*
+        ``super().async_added_to_hass()`` so the single state publish that call
+        triggers already reflects the restored fix.
+
+        Core still force-writes "now" right after this method returns (same as
+        any restored HA sensor); that's left uncorrected since
+        ``_write_state_if_changed()`` only restamps to a fix time strictly newer
+        than the current state, and a just-restored fix never is.
         """
-        await super().async_added_to_hass()
-
         try:
             last_state = await self.async_get_last_state()
         except (RuntimeError, AttributeError) as err:
             _LOGGER.debug("Failed to get last state for %s: %s", self.entity_id, err)
-            return
+            last_state = None
 
         if not last_state:
+            await super().async_added_to_hass()
             return
 
         # Standard device_tracker attributes. Fresh states expose the position via
@@ -1166,41 +1187,41 @@ class GoogleFindMyDeviceTracker(GoogleFindMyDeviceEntity, TrackerEntity, Restore
             _LOGGER.debug("Invalid restored coordinates for %s: %s", self.entity_id, ex)
             restored = {}
 
-        if restored:
-            # Restore last_seen so the recovered fix carries its true age.
-            # _get_location_age() reads ``last_seen`` as an epoch float; without
-            # it the age is unknown and _is_location_stale() assumes "not stale",
-            # so a position that predates the restart would look fresh until the
-            # next poll. The recorded value is an ISO string (or last_seen_utc);
-            # parse_last_seen_timestamp() normalizes both back to epoch seconds.
+        if not restored:
+            await super().async_added_to_hass()
+            return
+
+        # Restore last_seen so the recovered fix carries its true age; without
+        # it _is_location_stale() assumes "not stale" and a stale restored
+        # position would look fresh until the next poll.
+        last_seen = parse_last_seen_timestamp(last_state.attributes.get("last_seen"))
+        if last_seen is None:
             last_seen = parse_last_seen_timestamp(
-                last_state.attributes.get("last_seen")
+                last_state.attributes.get("last_seen_utc")
             )
-            if last_seen is None:
-                last_seen = parse_last_seen_timestamp(
-                    last_state.attributes.get("last_seen_utc")
-                )
-            if last_seen is not None:
-                restored["last_seen"] = last_seen
+        if last_seen is not None:
+            restored["last_seen"] = last_seen
 
-            # Same retention gate as the operational path and the coordinator
-            # prime below (is_reliable_fix + bootstrap): a restored estimated
-            # fix seeds the still-empty cache (``is None``) but must not overwrite
-            # a reliable fix once one exists, so the tracker's private last-good
-            # and the coordinator's stay in sync by construction (#1179).
-            if is_reliable_fix(restored) or self._last_good_accuracy_data is None:
-                self._last_good_accuracy_data = {**restored}
-            # Prime coordinator cache using its public API (no private access).
-            dev_id = self.device_id
-            try:
-                self.coordinator.prime_device_location_cache(dev_id, restored)
-            except (AttributeError, TypeError) as err:
-                _LOGGER.debug(
-                    "Failed to seed coordinator cache for %s: %s", self.entity_id, err
-                )
+        # Same retention gate as the operational path and the coordinator
+        # prime below (is_reliable_fix + bootstrap): a restored estimated
+        # fix seeds the still-empty cache (``is None``) but must not overwrite
+        # a reliable fix once one exists, so the tracker's private last-good
+        # and the coordinator's stay in sync by construction.
+        if is_reliable_fix(restored) or self._last_good_accuracy_data is None:
+            self._last_good_accuracy_data = {**restored}
+        # Prime coordinator cache using its public API (no private access).
+        dev_id = self.device_id
+        try:
+            self.coordinator.prime_device_location_cache(dev_id, restored)
+        except (AttributeError, TypeError) as err:
+            _LOGGER.debug(
+                "Failed to seed coordinator cache for %s: %s", self.entity_id, err
+            )
 
-            self._sync_location_attrs()
-            self.async_write_ha_state()
+        # Delegate to super() now that the cache is primed: its one state
+        # publish (and core's forced write right after, see docstring above)
+        # reflect the restored fix but not its timestamp -- by design.
+        await super().async_added_to_hass()
 
     # ---------------- Device Info + Map Link ----------------
     @property
@@ -1541,6 +1562,240 @@ class GoogleFindMyDeviceTracker(GoogleFindMyDeviceEntity, TrackerEntity, Restore
 
         self._attr_extra_state_attributes = attributes
 
+    def _state_signature(self) -> tuple[Any, ...]:
+        """Return the values that determine the *written* state.
+
+        Derived from ``_attr_extra_state_attributes`` (the exact dict
+        ``_sync_location_attrs()`` publishes) rather than a hand-maintained
+        attribute list, so a future attribute is automatically covered.
+
+        ``location_age`` is excluded on purpose: it's a ticking timer, not a
+        new fix, and including it would bump ``last_updated`` on every tick.
+        HA's ``person`` integration picks the device_tracker with the newest
+        ``last_updated`` (not ``last_seen``), so that would let a stale
+        tracker masquerade as freshest. ``_write_state_if_changed()`` tracks
+        ``location_age`` separately so it can still tick on its own.
+        """
+        # No class-level default for this attr in HA core, so a bare read can
+        # raise AttributeError before the first _sync_location_attrs() write;
+        # mirror core's own hasattr() guard.
+        attrs = getattr(self, "_attr_extra_state_attributes", None) or {}
+        extra_items = tuple(
+            sorted((key, value) for key, value in attrs.items() if key != "location_age")
+        )
+        return (
+            self._attr_latitude,
+            self._attr_longitude,
+            self._attr_location_accuracy,
+            self._attr_location_name,
+            self.available,
+            self._device.get("name"),
+            extra_items,
+        )
+
+    def _calculated_state_str(self) -> str | None:
+        """Return the state STRING this entity would currently publish.
+
+        Uses Entity's own ``_async_calculate_state()`` (same helper
+        ``_write_at()`` uses) rather than re-deriving the
+        home/not_home/zone/unknown logic by hand. Returns ``None`` if that
+        helper is unavailable or raises, so the caller treats it as
+        "changed" and falls back to a plain write.
+        """
+        calculate_state = getattr(self, "_async_calculate_state", None)
+        if not callable(calculate_state):
+            return None
+        try:
+            return str(calculate_state().state)
+        except (AttributeError, TypeError):
+            return None
+
+    def _fix_time_epoch(self) -> float | None:
+        """Return the epoch (UTC seconds) of the actual location fix (last_seen).
+
+        Clamped to "now" so a future/corrupt ``last_seen`` can never push
+        ``last_updated`` into the future and make this tracker artificially
+        "freshest" forever -- the exact hijack this feature prevents.
+        """
+        # Read from the displayed row (_select_display_row()) so the restamp
+        # matches the fix actually shown, not a newer current row lacking
+        # usable accuracy.
+        data = self._select_display_row() or {}
+        last_seen = data.get("last_seen")
+        if last_seen is None:
+            return None
+        try:
+            fix_epoch = float(last_seen)
+        except (TypeError, ValueError):
+            return None
+        return min(fix_epoch, time.time())
+
+    def _write_state_if_changed(self) -> None:
+        """Write HA state only when something state-determining actually changed.
+
+        Suppresses true no-op writes (same signature, same location_age) so a
+        frequently-polled-but-unchanged tracker can't keep bumping its own
+        ``last_updated`` and outrank a genuinely fresher one in HA's
+        ``person`` integration (which picks by newest ``last_updated``, not
+        ``last_seen``).
+
+        When something did change, the write restamps to the real GPS fix
+        time (``_fix_time_epoch()``) only if that's strictly newer than the
+        entity's current ``last_updated``. If it isn't newer but the
+        published state STRING is unchanged (only ``location_age`` ticked, or
+        an attribute like ``location_status`` aged with no new fix), the
+        previous ``last_updated`` is kept instead of bumping to "now" --
+        otherwise an aging-but-still-located tracker could outrank a
+        genuinely fresher one, same hijack as above. Only when the fix isn't
+        newer AND the state string itself changed (restart, recovery from
+        "unavailable", genuine stale/unknown transition) does this fall
+        through to a normal "now"-stamped ``async_write_ha_state()`` write,
+        since that's a real new observation.
+        """
+        try:
+            signature = self._state_signature()
+        except (AttributeError, TypeError) as err:
+            # Can repeat on every tick; keep entity_id out of WARNING
+            # (AGENTS.md 5b), name it in the DEBUG sibling below.
+            _LOGGER.warning(
+                "State signature computation failed (%s); writing "
+                "unconditionally without a fix-time restamp",
+                err,
+            )
+            _LOGGER.debug(
+                "State signature computation failed for %s (%s)",
+                getattr(self, "entity_id", None),
+                err,
+            )
+            self.async_write_ha_state()
+            return
+
+        attrs = getattr(self, "_attr_extra_state_attributes", None) or {}
+        location_age_value = attrs.get("location_age")
+        signature_unchanged = signature == self._last_write_sig
+        location_age_changed = location_age_value != self._last_write_location_age
+
+        if signature_unchanged and not location_age_changed:
+            return  # true no-op; suppress entirely
+
+        self._last_write_sig = signature
+        self._last_write_location_age = location_age_value
+
+        states = getattr(self.hass, "states", None) if self.hass else None
+        previous_state = states.get(self.entity_id) if states is not None else None
+        fix_epoch = self._fix_time_epoch()
+
+        if (
+            previous_state is None
+            or self._context is not None
+            or not self.available
+            or fix_epoch is None
+        ):
+            self.async_write_ha_state()
+            return
+
+        try:
+            previous_epoch = previous_state.last_updated.timestamp()
+        except (AttributeError, TypeError, ValueError, OSError):
+            self.async_write_ha_state()
+            return
+
+        if fix_epoch > previous_epoch:
+            timestamp = fix_epoch
+        elif signature_unchanged:
+            # Only location_age ticked: not a new observation, keep the stamp.
+            timestamp = previous_epoch
+        elif self._calculated_state_str() == previous_state.state:
+            # Fix isn't newer and other attrs changed, but the published
+            # state string is unchanged -- same real position, keep the stamp.
+            timestamp = previous_epoch
+        else:
+            # Not newer AND the state string changed (restart, recovery,
+            # stale/unknown transition): fall through to a plain "now" write.
+            self.async_write_ha_state()
+            return
+
+        if not self._write_at(timestamp):
+            self.async_write_ha_state()
+
+    def _write_at(self, timestamp: float) -> bool:
+        """Write state once, stamped with ``timestamp``. Return success.
+
+        State string and attributes come from Entity's own
+        ``_async_calculate_state()`` (the same helper core's own write path
+        uses) rather than being reconstructed by hand, so this write matches
+        a plain write byte-for-byte -- including entity-registry name/icon
+        overrides. ``state_info`` is threaded through so recorder's
+        ``_unrecorded_attributes`` handling still applies.
+
+        ``force_update=False`` is always correct here: this is only called
+        when the signature (or location_age) actually changed, so a new
+        ``last_updated`` is already guaranteed, and forcing the event would
+        corrupt `for:` trigger timing when the state STRING itself didn't
+        change.
+        """
+        hass = self.hass
+        states = getattr(hass, "states", None) if hass else None
+        if states is None:
+            return False
+
+        calculate_state = getattr(self, "_async_calculate_state", None)
+        if not callable(calculate_state):
+            return False
+        try:
+            calculated = calculate_state()
+            state_str = calculated.state
+            attributes: dict[str, Any] = dict(calculated.attributes)
+        except (AttributeError, TypeError) as err:
+            # Private _async_calculate_state() surface changed in a future
+            # core release -- a real API break, warn loudly and fall back.
+            _LOGGER.warning(
+                "Fix-time restamp path incompatible with this Home Assistant "
+                "core version (%s); falling back to a normal write",
+                err,
+            )
+            return False
+
+        # Replicate core's customize.yaml overlay, applied after
+        # _async_calculate_state() and so not already in `attributes` above.
+        # Looked up defensively: fast test stubs don't define DATA_CUSTOMIZE.
+        try:
+            custom = (
+                hass.data[_DATA_CUSTOMIZE].get(self.entity_id)
+                if _DATA_CUSTOMIZE is not None
+                else None
+            )
+        except (KeyError, AttributeError, TypeError):
+            custom = None
+        if custom:
+            attributes |= custom
+
+        try:
+            states.async_set(
+                self.entity_id,
+                state_str,
+                attributes,
+                force_update=False,
+                context=self._context,
+                state_info=self._state_info,
+                timestamp=timestamp,
+            )
+        except (TypeError, ValueError) as err:
+            # Can repeat on every tick; keep entity_id out of WARNING
+            # (AGENTS.md 5b), name it in the DEBUG sibling below.
+            _LOGGER.warning(
+                "Fix-time restamped write failed (%s); the caller is falling "
+                "back to a normal write immediately",
+                err,
+            )
+            _LOGGER.debug(
+                "Fix-time restamped write failed for %s (%s)",
+                self.entity_id,
+                err,
+            )
+            return False
+        return True
+
     @callback
     def _handle_coordinator_update(self) -> None:
         """React to coordinator updates.
@@ -1553,7 +1808,7 @@ class GoogleFindMyDeviceTracker(GoogleFindMyDeviceEntity, TrackerEntity, Restore
         if not self.coordinator_has_device():
             self._last_good_accuracy_data = None
             self._sync_location_attrs()
-            self.async_write_ha_state()
+            self._write_state_if_changed()
             return
 
         self.refresh_device_label_from_coordinator(log_prefix="DeviceTracker")
@@ -1563,7 +1818,7 @@ class GoogleFindMyDeviceTracker(GoogleFindMyDeviceEntity, TrackerEntity, Restore
         device_data = self._current_row()
         if not device_data:
             self._sync_location_attrs()
-            self.async_write_ha_state()
+            self._write_state_if_changed()
             return
 
         lat = device_data.get("latitude")
@@ -1585,7 +1840,7 @@ class GoogleFindMyDeviceTracker(GoogleFindMyDeviceEntity, TrackerEntity, Restore
             self._last_good_accuracy_data = device_data.copy()
 
         self._sync_location_attrs()
-        self.async_write_ha_state()
+        self._write_state_if_changed()
 
 
 class GoogleFindMyLastLocationTracker(GoogleFindMyDeviceTracker):
