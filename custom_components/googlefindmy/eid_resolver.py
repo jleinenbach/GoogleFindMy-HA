@@ -3025,12 +3025,13 @@ class GoogleFindMyEIDResolver:
         earlier. A smaller counter seen more than one period later on the wall
         clock is taken as a device that restarted its counter and replaces; a
         wall clock stepped forward by more than one period looks the same.
-        After a wall clock stepped backwards by more than one period, a smaller
-        counter is either such a late window or a restarted device, and the
-        two cannot be told apart: the entry is dropped, so nothing is reported
-        until the next sighting records the window the device shows. The same
-        counter replaces: the sighting is newer on the monotonic clock, also
-        after such a step.
+        After any step back of the wall clock, a smaller counter is either such
+        a late window or a restarted device, and the two cannot be told apart:
+        the entry is dropped, so nothing is reported until the next sighting
+        records the window the device shows. A step back smaller than the time
+        since the previous sighting leaves a positive gap and is not detected.
+        The same counter replaces: the sighting is newer on the monotonic
+        clock, also after such a step.
 
         Never raises: a variant this version does not know, or a window
         timestamp that is not an int in ``[0, FHNA_COUNTER_MASK]``, records
@@ -3054,7 +3055,7 @@ class GoogleFindMyEIDResolver:
         previous = self._confirmed_sightings.get(device_id)
         if previous is not None and window_counter < previous.window_counter:
             wall_gap = observed_at - previous.observed_at
-            if wall_gap < -ROTATION_PERIOD:
+            if wall_gap < 0:
                 del self._confirmed_sightings[device_id]
                 return
             if wall_gap <= ROTATION_PERIOD:

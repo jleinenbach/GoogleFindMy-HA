@@ -996,6 +996,34 @@ async def test_finder_keeps_the_newer_window_when_an_older_one_arrives_late() ->
 
 
 @pytest.mark.asyncio
+async def test_finder_reports_nothing_after_a_backward_step_and_a_smaller_window() -> (
+    None
+):
+    """A smaller window with an earlier wall time drops the sighting.
+
+    Without the drop the finder would report the newer window with the wall
+    time of the earlier sighting, so the report would claim a smaller age.
+    The next sighting records the window the device shows.
+    """
+    resolver = _built_resolver(_LOCK_NOW)
+    counter = _LOCK_NOW - _SECRETS_DATE
+    variant = "legacy_secp160r1_x20_be"
+    newer = _device_eid(counter + 1024, variant)
+    older = _device_eid(counter, variant)
+    _observe(resolver, newer, _LOCK_NOW, monotonic=50_000.0)
+    _observe(resolver, older, _LOCK_NOW - 500, monotonic=50_005.0)
+
+    assert resolver.last_confirmed_sighting("reg-1") is None
+    assert await _finder_upload_at(resolver, _LOCK_NOW + 100) is None
+
+    _observe(resolver, older, _LOCK_NOW - 470, monotonic=50_035.0)
+    upload = await _finder_upload_at(resolver, _LOCK_NOW - 400)
+    assert upload is not None
+    assert upload.eid == older
+    assert upload.observed_at == _LOCK_NOW - 470
+
+
+@pytest.mark.asyncio
 async def test_finder_reports_the_canonical_eid_of_a_reversed_advertisement() -> None:
     """A byte-reversed advertisement is reported in canonical byte order."""
     variant = "legacy_secp160r1_x20_be"
